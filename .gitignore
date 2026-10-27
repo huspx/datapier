@@ -1,0 +1,55 @@
+# Rust 构建与覆盖率产物；应用程序的 Cargo.lock 保留提交
+**/target/
+*.rs.bk
+*.profraw
+*.profdata
+/coverage/
+
+# 原生发布包与下载产物
+/dist/
+/artifacts/
+
+# Tern 按安装版本生成的类型声明
+**/tern.d.luau
+
+# 本地运行数据与 CodeGraph 索引
+/.datapier/
+/.cache/
+/.codegraph/
+/logs/
+/run/
+/cache.sqlite3
+
+# SQLite 临时文件；数据库测试样本本身仍可提交
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.db-wal
+*.db-shm
+*.db-journal
+
+# 本地凭据与环境配置；保留可公开的配置模板
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+/secrets/
+/credentials/
+
+# 编辑器本地状态；保留可共享的 VS Code 配置
+.idea/
+.vs/
+.vscode/*.local.json
+*.swp
+*.swo
+*~
+
+# 操作系统生成文件
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
