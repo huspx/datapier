@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, RwLock},
 };
 use uuid::Uuid;
@@ -31,6 +31,7 @@ pub struct Store {
     pub root: Arc<PathBuf>,
     secrets: Arc<RwLock<HashMap<Uuid, String>>>,
     result_gates: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
+    profile_gate: Arc<Mutex<()>>,
 }
 
 impl Store {
@@ -41,14 +42,25 @@ impl Store {
         let root = tokio::fs::canonicalize(root).await?;
         let pool = open_database(&root.join("datapier.sqlite3")).await?;
         let cache = open_database(&root.join("cache.sqlite3")).await?;
-        migrate(&pool, include_str!("../../migrations/0001_config.sql")).await?;
-        migrate(&cache, include_str!("../../migrations/0001_cache.sql")).await?;
+        migrate(
+            &pool,
+            include_str!("../../migrations/0001_config.sql"),
+            false,
+        )
+        .await?;
+        migrate(
+            &cache,
+            include_str!("../../migrations/0001_cache.sql"),
+            true,
+        )
+        .await?;
         Ok(Self {
             pool,
             cache,
             root: Arc::new(root),
             secrets: Arc::new(RwLock::new(HashMap::new())),
             result_gates: Arc::new(Mutex::new(HashMap::new())),
+            profile_gate: Arc::new(Mutex::new(())),
         })
     }
 
@@ -63,7 +75,7 @@ impl Store {
     }
 
     /// 保存连接配置和可选凭据；返回是否已标记为保存到系统凭据库。
-    /// 系统凭据写入失败时新凭据仍保留在当前 Store 的共享内存中。
+    /// 旧凭据无法删除时拒绝降级，保留原有追踪状态。
     pub async fn save_profile(
         &self,
         profile: &Profile,
@@ -71,22 +83,40 @@ impl Store {
         persist: bool,
     ) -> Result<bool> {
         profile.validate()?;
+        // 调用方取消等待不能中断 keyring 与 SQLite 间的所有权交接。
+        let store = self.clone();
+        let profile = profile.clone();
+        tokio::spawn(async move { store.save_profile_inner(&profile, secret, persist).await })
+            .await
+            .map_err(|e| AppError::new("credentials", e.to_string()))?
+    }
+
+    async fn save_profile_inner(
+        &self,
+        profile: &Profile,
+        secret: Option<String>,
+        persist: bool,
+    ) -> Result<bool> {
+        let _guard = self.profile_gate.lock().await;
         let old: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(profile.id.to_string())
                 .fetch_optional(&self.pool)
                 .await?;
         let mut saved = old == Some(1);
+        let mut tracked = saved;
         if let Some(secret) = secret {
-            self.secrets
-                .write()
-                .await
-                .insert(profile.id, secret.clone());
             if persist {
+                // 在写 keyring 之前登记可能存在的条目，避免后续 SQLite 错误丢失清理依据。
+                sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved) VALUES(?,?,?,1) ON CONFLICT(id) DO UPDATE SET credential_saved=1")
+                    .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(profile)?)
+                    .execute(&self.pool).await?;
+                tracked = true;
                 let account = self.credential_account(profile.id);
+                let to_save = secret.clone();
                 saved = tokio::task::spawn_blocking(move || {
-                    let entry = keyring::v1::Entry::new("io.datapier.credentials", &account)?;
-                    entry.set_secret(secret.as_bytes())
+                    keyring::v1::Entry::new("io.datapier.credentials", &account)?
+                        .set_secret(to_save.as_bytes())
                 })
                 .await
                 .map_err(|e| AppError::new("credentials", e.to_string()))?
@@ -94,10 +124,15 @@ impl Store {
             } else {
                 saved = false;
             }
+            if !saved && old == Some(1) {
+                self.delete_credential(profile.id).await?;
+                tracked = false;
+            }
+            self.secrets.write().await.insert(profile.id, secret);
         }
         sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,payload=excluded.payload,credential_saved=excluded.credential_saved")
             .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(profile)?)
-            .bind(i64::from(saved)).execute(&self.pool).await?;
+            .bind(i64::from(tracked || saved)).execute(&self.pool).await?;
         Ok(saved)
     }
 
@@ -135,21 +170,21 @@ impl Store {
 
     /// 删除配置和会话内凭据；标记为持久化的凭据删除失败时保留配置。
     pub async fn delete_profile(&self, id: Uuid) -> Result<()> {
+        let store = self.clone();
+        tokio::spawn(async move { store.delete_profile_inner(id).await })
+            .await
+            .map_err(|e| AppError::new("credentials", e.to_string()))?
+    }
+
+    async fn delete_profile_inner(&self, id: Uuid) -> Result<()> {
+        let _guard = self.profile_gate.lock().await;
         let saved: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(id.to_string())
                 .fetch_optional(&self.pool)
                 .await?;
         if saved == Some(1) {
-            let account = self.credential_account(id);
-            tokio::task::spawn_blocking(move || {
-                keyring::v1::Entry::new("io.datapier.credentials", &account)?.delete_credential()
-            })
-            .await
-            .map_err(|e| AppError::new("credentials", e.to_string()))?
-            .map_err(|e| {
-                AppError::new("credentials", format!("凭据删除失败，连接配置保留：{e}"))
-            })?;
+            self.delete_credential(id).await?;
         }
         sqlx::query("DELETE FROM profiles WHERE id=?")
             .bind(id.to_string())
@@ -157,6 +192,22 @@ impl Store {
             .await?;
         self.secrets.write().await.remove(&id);
         Ok(())
+    }
+
+    async fn delete_credential(&self, id: Uuid) -> Result<()> {
+        let account = self.credential_account(id);
+        let result = tokio::task::spawn_blocking(move || {
+            keyring::v1::Entry::new("io.datapier.credentials", &account)?.delete_credential()
+        })
+        .await
+        .map_err(|e| AppError::new("credentials", e.to_string()))?;
+        match result {
+            Ok(()) | Err(keyring::v1::Error::NoEntry) => Ok(()),
+            Err(e) => Err(AppError::new(
+                "credentials",
+                format!("凭据删除失败，连接配置保留：{e}"),
+            )),
+        }
     }
 
     fn credential_account(&self, id: Uuid) -> String {
@@ -328,10 +379,19 @@ impl Store {
     }
     /// 追加一批行；大值可能先写入外置文件，再将行写入缓存数据库。
     pub async fn append_rows(&self, id: Uuid, rows: Vec<Vec<Value>>) -> Result<()> {
+        // 脱离调用方的等待后仍持有结果锁，直到文件写入和行提交结束。
+        let store = self.clone();
+        tokio::spawn(async move { store.append_rows_inner(id, rows).await })
+            .await
+            .map_err(|e| AppError::new("storage", e.to_string()))?
+    }
+
+    async fn append_rows_inner(&self, id: Uuid, rows: Vec<Vec<Value>>) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
         let _guard = self.result_guard(id).await;
+        self.result_meta(id).await?;
         let mut payloads = Vec::with_capacity(rows.len());
         for mut row in rows {
             let mut payload = serde_json::to_vec(&row)?;
@@ -340,7 +400,7 @@ impl Store {
                 for value in &mut row {
                     let raw = serde_json::to_vec(value)?;
                     if raw.len() > 64 * 1024 {
-                        *value = self.externalize(value, raw, 4096).await?;
+                        *value = self.externalize(id, value, raw, 4096).await?;
                     }
                 }
                 payload = serde_json::to_vec(&row)?;
@@ -370,11 +430,38 @@ impl Store {
         Ok(())
     }
     // 保存类型化值的 JSON 字节，而非展示文本，供后续按需完整还原。
-    async fn externalize(&self, value: &Value, raw: Vec<u8>, preview_size: usize) -> Result<Value> {
-        let id = Uuid::new_v4();
+    async fn externalize(
+        &self,
+        result_id: Uuid,
+        value: &Value,
+        raw: Vec<u8>,
+        preview_size: usize,
+    ) -> Result<Value> {
+        self.externalize_file(result_id, Uuid::new_v4(), value, raw, preview_size)
+            .await
+    }
+
+    async fn externalize_file(
+        &self,
+        result_id: Uuid,
+        id: Uuid,
+        value: &Value,
+        raw: Vec<u8>,
+        preview_size: usize,
+    ) -> Result<Value> {
         let original_type = value_type(value);
         let preview = String::from_utf8_lossy(&raw[..raw.len().min(preview_size)]).into_owned();
-        tokio::fs::write(self.root.join("values").join(id.to_string()), &raw).await?;
+        // 先持久化归属：写入失败或 future 被取消时仍可由 release_result 重试清理。
+        sqlx::query("INSERT INTO value_files(id,result_id) VALUES(?,?)")
+            .bind(id.to_string())
+            .bind(result_id.to_string())
+            .execute(&self.cache)
+            .await?;
+        // 文件异步操作由持锁任务等待 flush，取消外层调用不会提前释放结果锁。
+        let mut file =
+            tokio::fs::File::create(self.root.join("values").join(id.to_string())).await?;
+        file.write_all(&raw).await?;
+        file.flush().await?;
         Ok(Value::Large {
             id,
             original_type: original_type.into(),
@@ -429,6 +516,23 @@ impl Store {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<ResultPage> {
+        let store = self.clone();
+        tokio::spawn(async move {
+            store
+                .result_page_inner(id, start, max_rows, max_bytes)
+                .await
+        })
+        .await
+        .map_err(|e| AppError::new("storage", e.to_string()))?
+    }
+
+    async fn result_page_inner(
+        &self,
+        id: Uuid,
+        start: u64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<ResultPage> {
         let _guard = self.result_guard(id).await;
         let result = self.result_meta(id).await?;
         let max_rows = max_rows.clamp(1, 1000);
@@ -441,71 +545,81 @@ impl Store {
                 "列定义超过页大小，请增加页预算或减少查询列数",
             ));
         }
-        let mut projected_payload = None;
-        let mut too_wide = false;
+        let mut first_over_budget = None;
         let mut stream = sqlx::query("SELECT payload FROM result_rows WHERE result_id=? AND row_no>=? ORDER BY row_no LIMIT ?")
             .bind(id.to_string()).bind(start as i64).bind(max_rows as i64).fetch(&self.cache);
         while let Some(row) = stream.try_next().await? {
             let payload: Vec<u8> = row.get(0);
-            if bytes + payload.len() > max_bytes && !rows.is_empty() {
+            if bytes + payload.len() > max_bytes {
+                if rows.is_empty() {
+                    first_over_budget = Some(payload);
+                }
                 break;
             }
+            bytes += payload.len();
+            rows.push(serde_json::from_slice(&payload)?);
+        }
+        // 外置文件登记需要另一条连接，必须先释放读取连接，避免并发分页耗尽连接池。
+        drop(stream);
+        if let Some(payload) = first_over_budget {
             let mut values: Vec<Value> = serde_json::from_slice(&payload)?;
-            let mut size = payload.len();
             // 单行超过预算时先去掉预览，再将能缩小编码尺寸的值转为引用。
-            if bytes + size > max_bytes {
-                for value in &mut values {
-                    if let Value::Large { preview, .. } = value {
-                        preview.clear();
-                    }
-                }
-                size = serde_json::to_vec(&values)?.len();
-                if bytes + size > max_bytes {
-                    for value in &mut values {
-                        if matches!(value, Value::Large { .. }) {
-                            continue;
-                        }
-                        let raw = serde_json::to_vec(value)?;
-                        let reference = Value::Large {
-                            id: Uuid::nil(),
-                            original_type: value_type(value).into(),
-                            bytes: raw.len() as u64,
-                            preview: String::new(),
-                        };
-                        let reference_size = serde_json::to_vec(&reference)?.len();
-                        if reference_size >= raw.len() {
-                            continue;
-                        }
-                        size = size - raw.len() + reference_size;
-                        *value = self.externalize(value, raw, 0).await?;
-                        if bytes + size <= max_bytes {
-                            break;
-                        }
-                    }
-                }
-                projected_payload = Some(serde_json::to_vec(&values)?);
-                if bytes + size > max_bytes {
-                    too_wide = true;
-                    break;
+            for value in &mut values {
+                if let Value::Large { preview, .. } = value {
+                    preview.clear();
                 }
             }
-            bytes += size;
-            rows.push(values);
-        }
-        drop(stream);
-        if let Some(payload) = projected_payload {
+            let mut size = serde_json::to_vec(&values)?.len();
+            if bytes + size > max_bytes {
+                for value in &mut values {
+                    if matches!(value, Value::Large { .. }) {
+                        continue;
+                    }
+                    let raw = serde_json::to_vec(value)?;
+                    let reference = Value::Large {
+                        id: Uuid::nil(),
+                        original_type: value_type(value).into(),
+                        bytes: raw.len() as u64,
+                        preview: String::new(),
+                    };
+                    let reference_size = serde_json::to_vec(&reference)?.len();
+                    if reference_size >= raw.len() {
+                        continue;
+                    }
+                    size = size - raw.len() + reference_size;
+                    *value = self.externalize(id, value, raw, 0).await?;
+                    if bytes + size <= max_bytes {
+                        break;
+                    }
+                }
+            }
             sqlx::query("UPDATE result_rows SET payload=? WHERE result_id=? AND row_no=?")
-                .bind(payload)
+                .bind(serde_json::to_vec(&values)?)
                 .bind(id.to_string())
                 .bind(start as i64)
                 .execute(&self.cache)
                 .await?;
-        }
-        if too_wide {
-            return Err(AppError::new(
-                "result_too_wide",
-                "单行引用和列定义超过页大小，请减少查询列数",
-            ));
+            if bytes + size > max_bytes {
+                return Err(AppError::new(
+                    "result_too_wide",
+                    "单行引用和列定义超过页大小，请减少查询列数",
+                ));
+            }
+            bytes += size;
+            rows.push(values);
+            // 投影首行后重新读取其余行，保持原有的行数和字节预算。
+            if max_rows > 1 {
+                let mut stream = sqlx::query("SELECT payload FROM result_rows WHERE result_id=? AND row_no>=? ORDER BY row_no LIMIT ?")
+                    .bind(id.to_string()).bind((start + 1) as i64).bind((max_rows - 1) as i64).fetch(&self.cache);
+                while let Some(row) = stream.try_next().await? {
+                    let payload: Vec<u8> = row.get(0);
+                    if bytes + payload.len() > max_bytes {
+                        break;
+                    }
+                    bytes += payload.len();
+                    rows.push(serde_json::from_slice(&payload)?);
+                }
+            }
         }
         let end = start + rows.len() as u64;
         let next = if end < result.row_count {
@@ -524,6 +638,7 @@ impl Store {
     ///
     /// 调用方需保证所属结果尚未释放；字段 ID 不是独立于结果生命周期的持久标识。
     pub async fn read_value(&self, id: Uuid) -> Result<Value> {
+        self.ensure_value_available(id).await?;
         let raw = tokio::fs::read(self.root.join("values").join(id.to_string())).await?;
         Ok(serde_json::from_slice(&raw)?)
     }
@@ -532,6 +647,7 @@ impl Store {
     ///
     /// 引用不阻止结果释放，读取与释放并发时可能返回文件已不存在的 I/O 错误。
     pub async fn large_value(&self, id: Uuid, offset: u64, max_bytes: usize) -> Result<Json> {
+        self.ensure_value_available(id).await?;
         let mut file = tokio::fs::File::open(self.root.join("values").join(id.to_string())).await?;
         let total = file.metadata().await?.len();
         if offset > total {
@@ -546,30 +662,32 @@ impl Store {
             json!({"bytes_b64":STANDARD.encode(buffer),"offset":offset,"next":if end<total {Some(end)} else {None},"total":total}),
         )
     }
-    /// 删除结果关联的外置文件及缓存行；文件删除失败时返回错误。
-    ///
-    /// 文件系统与 SQLite 不构成同一事务；失败时可能已删除部分文件，不能承诺回滚释放。
+    /// 逻辑释放结果后删除外置文件；失败时保留文件清理记录，可用同一 ID 重试。
     pub async fn release_result(&self, id: Uuid) -> Result<()> {
         let _guard = self.result_guard(id).await;
-        let mut stream = sqlx::query("SELECT payload FROM result_rows WHERE result_id=?")
-            .bind(id.to_string())
-            .fetch(&self.cache);
-        while let Some(row) = stream.try_next().await? {
-            let values: Vec<Value> = serde_json::from_slice(row.get::<&[u8], _>(0))?;
-            for value in values {
-                if let Value::Large { id, .. } = value {
-                    match tokio::fs::remove_file(self.root.join("values").join(id.to_string()))
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(e.into()),
+        let mut tx = self.cache.begin().await?;
+        // schema 1 的文件没有登记；在删除行之前将其纳入同一事务。
+        let mut after = -1_i64;
+        loop {
+            let rows = sqlx::query("SELECT row_no,payload FROM result_rows WHERE result_id=? AND row_no>? ORDER BY row_no LIMIT 128")
+                .bind(id.to_string()).bind(after).fetch_all(&mut *tx).await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                after = row.get(0);
+                let values: Vec<Value> = serde_json::from_slice(row.get::<&[u8], _>(1))?;
+                for value in values {
+                    if let Value::Large { id: value_id, .. } = value {
+                        sqlx::query("INSERT OR IGNORE INTO value_files(id,result_id) VALUES(?,?)")
+                            .bind(value_id.to_string())
+                            .bind(id.to_string())
+                            .execute(&mut *tx)
+                            .await?;
                     }
                 }
             }
         }
-        drop(stream);
-        let mut tx = self.cache.begin().await?;
         sqlx::query("DELETE FROM result_rows WHERE result_id=?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -579,6 +697,26 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        loop {
+            let file: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM value_files WHERE result_id=? ORDER BY id LIMIT 1",
+            )
+            .bind(id.to_string())
+            .fetch_optional(&self.cache)
+            .await?;
+            let Some(file) = file else {
+                break;
+            };
+            match tokio::fs::remove_file(self.root.join("values").join(&file)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            sqlx::query("DELETE FROM value_files WHERE id=?")
+                .bind(file)
+                .execute(&self.cache)
+                .await?;
+        }
         // 仅在没有等待者持有锁引用时移除门，避免并发操作取得不同的锁。
         let mut gates = self.result_gates.lock().await;
         if gates
@@ -586,6 +724,14 @@ impl Store {
             .is_some_and(|gate| Arc::strong_count(gate) == 2)
         {
             gates.remove(&id);
+        }
+        Ok(())
+    }
+    async fn ensure_value_available(&self, id: Uuid) -> Result<()> {
+        let released: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM value_files v WHERE v.id=? AND NOT EXISTS (SELECT 1 FROM results r WHERE r.id=v.result_id))")
+            .bind(id.to_string()).fetch_one(&self.cache).await?;
+        if released {
+            return Err(AppError::new("not_found", "结果已释放或不存在"));
         }
         Ok(())
     }
@@ -627,11 +773,11 @@ async fn open_database(path: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await?)
 }
-async fn migrate(pool: &SqlitePool, schema: &'static str) -> Result<()> {
+async fn migrate(pool: &SqlitePool, schema: &'static str, cache: bool) -> Result<()> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
         .await?;
-    if version > 1 {
+    if version > if cache { 2 } else { 1 } {
         return Err(AppError::new(
             "storage_version",
             "数据目录来自较新版本，拒绝降级打开",
@@ -641,6 +787,16 @@ async fn migrate(pool: &SqlitePool, schema: &'static str) -> Result<()> {
         let mut tx = pool.begin().await?;
         sqlx::raw_sql(schema).execute(&mut *tx).await?;
         sqlx::query("PRAGMA user_version=1")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+    if cache && version < 2 {
+        let mut tx = pool.begin().await?;
+        sqlx::raw_sql(include_str!("../../migrations/0002_cache.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version=2")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

@@ -20,14 +20,48 @@ struct Edit {
     expires_at_ms: Option<i64>,
 }
 // 导入先写入有期限的临时 key，完成后才尝试发布到目标 key。
+// 同一脚本先检查对象内的随机标记，再操作该对象；单独的标记 key 无法证明数据未被替换。
+const IMPORT_OWNED: &str = r#"
+local function owned(m)
+    local k = ARGV[1]
+    if redis.call('TYPE', KEYS[1]).ok ~= k then return false end
+    if k == 'string' then
+        return string.sub(redis.call('GET', KEYS[1]), 1, string.len(m)) == m
+    elseif k == 'hash' then
+        return redis.call('HGET', KEYS[1], m) == m
+    elseif k == 'list' then
+        return redis.call('LINDEX', KEYS[1], 0) == m
+    elseif k == 'set' then
+        return redis.call('SISMEMBER', KEYS[1], m) == 1
+    else
+        return redis.call('ZSCORE', KEYS[1], m) == '0'
+    end
+end
+"#;
 struct Import {
     key: Vec<u8>,
     temp: Vec<u8>,
+    marker: Vec<u8>,
+    pending_marker: Option<Vec<u8>>,
     kind: String,
     expires: Option<i64>,
     wrote: bool,
     valid: bool,
     count: u64,
+}
+fn import_cleanup_args(import: &Import) -> Vec<Vec<u8>> {
+    let script = format!(
+        "{IMPORT_OWNED}\nif owned(ARGV[2]) or (ARGV[3] ~= '' and owned(ARGV[3])) then return redis.call('DEL', KEYS[1]) end\nreturn 0"
+    );
+    vec![
+        b"EVAL".to_vec(),
+        script.into_bytes(),
+        b"1".to_vec(),
+        import.temp.clone(),
+        import.kind.as_bytes().to_vec(),
+        import.marker.clone(),
+        import.pending_marker.clone().unwrap_or_default(),
+    ]
 }
 // SQLite 缓存跨页保存去重结果及已输出位置，避免把全量 key 留在内存。
 struct KeyScan {
@@ -229,7 +263,7 @@ impl RedisSession {
         }
         let imports = std::mem::take(&mut self.imports);
         for (_, i) in imports {
-            if let Err(e) = query::<i64>(&mut self.conn, &[b"DEL".to_vec(), i.temp]).await
+            if let Err(e) = query::<i64>(&mut self.conn, &import_cleanup_args(&i)).await
                 && failure.is_none()
             {
                 failure = Some(e);
@@ -284,7 +318,7 @@ impl RedisSession {
             "change.submit" => self.submit(&p, sink, cancel).await,
             "execution.run" => self.run(&p, sink, cancel).await,
             "export.meta" => self.export_meta(&p).await,
-            "import.begin" => self.import_begin(&p).await,
+            "import.begin" => self.import_begin(&p, sink).await,
             "import.append" => self.import_append(&p, sink).await,
             "import.finish" => self.import_finish(&p, sink).await,
             "import.discard" => self.import_discard(&p, sink).await,
@@ -844,7 +878,7 @@ impl RedisSession {
         }
         Ok(json!({"type":kind,"expires_at_ms":expires}))
     }
-    async fn import_begin(&mut self, p: &Json) -> Result<Json> {
+    async fn import_begin(&mut self, p: &Json, sink: &ExecutionSink) -> Result<Json> {
         self.profile.ensure_write()?;
         let t = target(p, &self.profile)?;
         let k = key(&t)?;
@@ -869,22 +903,52 @@ impl RedisSession {
         }
         let id = Uuid::new_v4();
         let temp = format!("__datapier_import_{id}").into_bytes();
-        let exists: i64 = query(&mut self.conn, &[b"EXISTS".to_vec(), temp.clone()]).await?;
-        if exists != 0 {
-            return Err(AppError::conflict("临时 key 已存在"));
-        }
+        // 标记保存在临时对象本身，避免单独的所有权 key 在对象被替换后仍然有效。
+        let marker = Uuid::new_v4().to_string().into_bytes();
+        // 在发送创建请求前记账：响应丢失时 close 仍可按标记清理。
         self.imports.insert(
             id,
             Import {
                 key: k,
-                temp,
-                kind,
+                temp: temp.clone(),
+                marker: marker.clone(),
+                pending_marker: None,
+                kind: kind.clone(),
                 expires,
                 wrote: false,
-                valid: true,
+                valid: false,
                 count: 0,
             },
         );
+        let script = r#"
+if redis.call('EXISTS', KEYS[1]) ~= 0 then return 0 end
+local k, m = ARGV[1], ARGV[2]
+if k == 'string' then redis.call('SET', KEYS[1], m)
+elseif k == 'hash' then redis.call('HSET', KEYS[1], m, m)
+elseif k == 'list' then redis.call('RPUSH', KEYS[1], m)
+elseif k == 'set' then redis.call('SADD', KEYS[1], m)
+else redis.call('ZADD', KEYS[1], 0, m) end
+redis.call('PEXPIRE', KEYS[1], 86400000)
+return 1
+"#;
+        let created: i64 = send_write(
+            &mut self.conn,
+            &[
+                b"EVAL".to_vec(),
+                script.as_bytes().to_vec(),
+                b"1".to_vec(),
+                temp,
+                kind.into_bytes(),
+                marker,
+            ],
+            sink,
+        )
+        .await?;
+        if created == 0 {
+            self.imports.remove(&id);
+            return Err(AppError::conflict("临时 key 已存在"));
+        }
+        self.imports.get_mut(&id).unwrap().valid = true;
         Ok(json!({"token":id}))
     }
     async fn import_append(&mut self, p: &Json, sink: &ExecutionSink) -> Result<Json> {
@@ -909,14 +973,7 @@ impl RedisSession {
                     if import.wrote || !commands.is_empty() {
                         return Err(AppError::invalid("String 只能有一行"));
                     }
-                    vec![
-                        b"SET".to_vec(),
-                        k,
-                        bytes(v)?,
-                        b"PX".to_vec(),
-                        b"86400000".to_vec(),
-                        b"NX".to_vec(),
-                    ]
+                    vec![b"SET".to_vec(), k, bytes(v)?]
                 }
                 ("hash", [f, v]) => vec![b"HSET".to_vec(), k, bytes(f)?, bytes(v)?],
                 ("list", [Value::Integer(i) | Value::Unsigned(i), v]) => {
@@ -933,28 +990,71 @@ impl RedisSession {
             };
             commands.push(cmd);
         }
+        let script = format!(
+            r#"{IMPORT_OWNED}
+if not owned(ARGV[2]) then return redis.error_reply('temporary key invalid') end
+local k, m, n = ARGV[1], ARGV[2], ARGV[3]
+local member = ARGV[6]
+if k == 'zset' then member = ARGV[7] end
+local rotate = (k == 'hash' or k == 'set' or k == 'zset') and member == m
+if rotate then
+    if (k == 'hash' and redis.call('HEXISTS', KEYS[1], n) == 1)
+        or (k == 'set' and redis.call('SISMEMBER', KEYS[1], n) == 1)
+        or (k == 'zset' and redis.call('ZSCORE', KEYS[1], n)) then
+        return redis.error_reply('temporary marker collision')
+    end
+    if k == 'hash' then redis.call('HSET', KEYS[1], n, n); redis.call('HDEL', KEYS[1], m)
+    elseif k == 'set' then redis.call('SADD', KEYS[1], n); redis.call('SREM', KEYS[1], m)
+    else redis.call('ZADD', KEYS[1], 0, n); redis.call('ZREM', KEYS[1], m) end
+end
+local r
+if k == 'string' then r = redis.pcall('SET', KEYS[1], m .. ARGV[6], 'KEEPTTL')
+else r = redis.pcall(unpack(ARGV, 4)) end
+if type(r) == 'table' and r.err then
+    if rotate then
+        if k == 'hash' then redis.call('HSET', KEYS[1], m, m); redis.call('HDEL', KEYS[1], n)
+        elseif k == 'set' then redis.call('SADD', KEYS[1], m); redis.call('SREM', KEYS[1], n)
+        else redis.call('ZADD', KEYS[1], 0, m); redis.call('ZREM', KEYS[1], n) end
+    end
+    return r
+end
+redis.call('PEXPIRE', KEYS[1], 86400000)
+return rotate and 2 or 1
+"#
+        );
         for (index, cmd) in commands.iter().enumerate() {
-            // 检查临时 key 状态与写入同处脚本，并续期以限制中断后残留时间。
-            let script = "local present=redis.call('EXISTS',KEYS[1]); if (ARGV[1]=='new' and present~=0) or (ARGV[1]=='existing' and present~=1) then return redis.error_reply('temporary key invalid') end; local r=redis.call(unpack(ARGV,2)); redis.call('PEXPIRE',KEYS[1],86400000); return r";
+            // 用户数据可能恰好等于标记；原子更换标记后再写入，不能丢弃该数据。
+            let collides = match import.kind.as_str() {
+                "hash" | "set" => cmd[2] == import.marker,
+                "zset" => cmd[3] == import.marker,
+                _ => false,
+            };
+            let next_marker = if collides {
+                Uuid::new_v4().to_string().into_bytes()
+            } else {
+                Vec::new()
+            };
             let mut wrapped = vec![
                 b"EVAL".to_vec(),
                 script.as_bytes().to_vec(),
                 b"1".to_vec(),
                 import.temp.clone(),
-                if import.wrote {
-                    b"existing".to_vec()
-                } else {
-                    b"new".to_vec()
-                },
+                import.kind.as_bytes().to_vec(),
+                import.marker.clone(),
+                next_marker.clone(),
             ];
             wrapped.extend(cmd.iter().cloned());
-            let res: Result<redis::Value> = send_write(&mut self.conn, &wrapped, sink).await;
+            // 丢响应时旧标记或新标记均可能有效，清理须保留两者。
+            if collides {
+                import.pending_marker = Some(next_marker.clone());
+            }
+            let res: Result<i64> = send_write(&mut self.conn, &wrapped, sink).await;
             match res {
-                Ok(redis::Value::Nil) => {
-                    import.valid = false;
-                    return Err(AppError::conflict("临时 key 已存在"));
-                }
-                Ok(_) => {
+                Ok(code) => {
+                    if code == 2 {
+                        import.marker = next_marker;
+                    }
+                    import.pending_marker = None;
                     import.wrote = true;
                     import.count += 1;
                 }
@@ -979,8 +1079,28 @@ impl RedisSession {
         if !import.wrote {
             return Err(AppError::invalid("不能导入空集合"));
         }
-        // 在同一脚本检查到期与目标冲突、设置期限并 RENAMENX，避免暴露部分导入。
-        let script = "local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000); local expiry=tonumber(ARGV[1]); if expiry and expiry<=now then redis.call('DEL',KEYS[1]); return -1 end; if redis.call('EXISTS',KEYS[2])~=0 then return 0 end; if redis.call('EXISTS',KEYS[1])==0 then return -2 end; if expiry then redis.call('PEXPIREAT',KEYS[1],ARGV[1]) else redis.call('PERSIST',KEYS[1]) end; return redis.call('RENAMENX',KEYS[1],KEYS[2])";
+        // 验证标记、移除标记及发布处于同一脚本，替换对象不能被提交或到期清理。
+        let script = format!(
+            r#"{IMPORT_OWNED}
+if not owned(ARGV[2]) then return -2 end
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local expiry = tonumber(ARGV[3])
+if expiry and expiry <= now then redis.call('DEL', KEYS[1]); return -1 end
+if redis.call('EXISTS', KEYS[2]) ~= 0 then return 0 end
+local k, m = ARGV[1], ARGV[2]
+if k == 'string' then
+    local v = redis.call('GET', KEYS[1])
+    redis.call('SET', KEYS[1], string.sub(v, string.len(m) + 1), 'KEEPTTL')
+elseif k == 'hash' then redis.call('HDEL', KEYS[1], m)
+elseif k == 'list' then redis.call('LPOP', KEYS[1])
+elseif k == 'set' then redis.call('SREM', KEYS[1], m)
+else redis.call('ZREM', KEYS[1], m) end
+if expiry then redis.call('PEXPIREAT', KEYS[1], ARGV[3])
+else redis.call('PERSIST', KEYS[1]) end
+return redis.call('RENAMENX', KEYS[1], KEYS[2])
+"#
+        );
         let expiry = import.expires.map(|n| n.to_string()).unwrap_or_default();
         let a = vec![
             b"EVAL".to_vec(),
@@ -988,6 +1108,8 @@ impl RedisSession {
             b"2".to_vec(),
             import.temp.clone(),
             import.key.clone(),
+            import.kind.as_bytes().to_vec(),
+            import.marker.clone(),
             expiry.into_bytes(),
         ];
         let code: i64 = match send_write(&mut self.conn, &a, sink).await {
@@ -1021,9 +1143,10 @@ impl RedisSession {
         let id = uuid(p)?;
         let import = self
             .imports
-            .remove(&id)
+            .get(&id)
             .ok_or_else(|| AppError::invalid("导入令牌已失效"))?;
-        let _: i64 = send_write(&mut self.conn, &[b"DEL".to_vec(), import.temp], sink).await?;
+        let _: i64 = send_write(&mut self.conn, &import_cleanup_args(import), sink).await?;
+        self.imports.remove(&id);
         Ok(json!({"discarded":true}))
     }
 }

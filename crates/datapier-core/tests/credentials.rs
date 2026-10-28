@@ -2,6 +2,7 @@
 use datapier_core::{Store, model::*};
 use futures_util::FutureExt;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -23,6 +24,12 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         tls: TlsConfig::default(),
     };
     let secret = Uuid::new_v4().to_string();
+    let account = format!(
+        "{:x}:{}",
+        Sha256::digest(store.root.to_string_lossy().as_bytes()),
+        profile.id
+    );
+    let entry = keyring::v1::Entry::new("io.datapier.credentials", &account).unwrap();
     let outcome = std::panic::AssertUnwindSafe(async {
         assert!(
             store
@@ -46,6 +53,23 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
             reopened.secret(profile.id).await.unwrap(),
             Some(secret.clone())
         );
+        // 未提供新密码时只更新配置，省略 save_secret 不应清除既有凭据。
+        assert!(reopened.save_profile(&profile, None, false).await.unwrap());
+        assert_eq!(entry.get_secret().unwrap(), secret.as_bytes());
+        assert!(
+            !reopened
+                .save_profile(&profile, Some("session-only".into()), false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            reopened.secret(profile.id).await.unwrap().as_deref(),
+            Some("session-only")
+        );
+        assert!(matches!(
+            entry.get_secret(),
+            Err(keyring::v1::Error::NoEntry)
+        ));
         reopened.delete_profile(profile.id).await.unwrap();
         assert_eq!(reopened.secret(profile.id).await.unwrap(), None);
         reopened.pool.close().await;
@@ -54,6 +78,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
     .catch_unwind()
     .await;
     let cleanup = store.delete_profile(profile.id).await;
+    let native_cleanup = entry.delete_credential();
     store.pool.close().await;
     store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
@@ -61,4 +86,8 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         std::panic::resume_unwind(panic);
     }
     cleanup.unwrap();
+    assert!(matches!(
+        native_cleanup,
+        Ok(()) | Err(keyring::v1::Error::NoEntry)
+    ));
 }

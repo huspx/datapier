@@ -14,6 +14,159 @@ async fn cleanup(store: Store) {
 }
 
 #[tokio::test]
+async fn failed_release_keeps_cleanup_retryable_and_hides_result() {
+    let store = fixture().await;
+    let id = store
+        .start_result(
+            Uuid::new_v4(),
+            vec![Column::new("a", "TEXT"), Column::new("b", "TEXT")],
+            "rows",
+        )
+        .await
+        .unwrap();
+    store
+        .append_rows(
+            id,
+            vec![vec![
+                Value::Text("a".repeat(70000)),
+                Value::Text("b".repeat(70000)),
+            ]],
+        )
+        .await
+        .unwrap();
+    let page = store.result_page(id, 0, 1, 16384).await.unwrap();
+    let mut values: Vec<Uuid> = page.rows[0]
+        .iter()
+        .map(|v| match v {
+            Value::Large { id, .. } => *id,
+            _ => panic!("字段应当外置"),
+        })
+        .collect();
+    values.sort();
+    let blocked = store.root.join("values").join(values[1].to_string());
+    tokio::fs::remove_file(&blocked).await.unwrap();
+    tokio::fs::create_dir(&blocked).await.unwrap();
+    assert!(store.release_result(id).await.is_err());
+    assert_eq!(store.result_meta(id).await.unwrap_err().code, "not_found");
+    assert_eq!(
+        store.result_page(id, 0, 1, 16384).await.unwrap_err().code,
+        "not_found"
+    );
+    assert_eq!(
+        store.read_value(values[1]).await.unwrap_err().code,
+        "not_found"
+    );
+    assert!(
+        !store
+            .root
+            .join("values")
+            .join(values[0].to_string())
+            .exists()
+    );
+    tokio::fs::remove_dir(&blocked).await.unwrap();
+    tokio::fs::write(&blocked, b"remaining").await.unwrap();
+    store.release_result(id).await.unwrap();
+    assert!(!blocked.exists());
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn external_file_creation_failure_can_be_released_after_directory_is_restored() {
+    let store = fixture().await;
+    let id = store
+        .start_result(Uuid::new_v4(), vec![Column::new("v", "TEXT")], "rows")
+        .await
+        .unwrap();
+    let values = store.root.join("values");
+    tokio::fs::remove_dir(&values).await.unwrap();
+    tokio::fs::write(&values, b"blocks directory access")
+        .await
+        .unwrap();
+    let error = store
+        .append_rows(id, vec![vec![Value::Text("x".repeat(70000))]])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "io");
+    assert_eq!(store.result_meta(id).await.unwrap().row_count, 0);
+    assert!(store.release_result(id).await.is_err());
+    assert_eq!(store.result_meta(id).await.unwrap_err().code, "not_found");
+    tokio::fs::remove_file(&values).await.unwrap();
+    tokio::fs::create_dir(&values).await.unwrap();
+    store.release_result(id).await.unwrap();
+    assert!(
+        tokio::fs::read_dir(&values)
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    cleanup(store).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_external_write_keeps_cleanup_owner() {
+    use std::os::unix::fs::symlink;
+    let store = fixture().await;
+    let id = store
+        .start_result(Uuid::new_v4(), vec![], "rows")
+        .await
+        .unwrap();
+    let file_id = Uuid::new_v4();
+    let path = store.root.join("values").join(file_id.to_string());
+    symlink("/dev/full", &path).unwrap();
+    let value = Value::Text("failure".into());
+    assert!(
+        store
+            .externalize_file(id, file_id, &value, serde_json::to_vec(&value).unwrap(), 0)
+            .await
+            .is_err()
+    );
+    assert!(path.exists());
+    store.release_result(id).await.unwrap();
+    assert!(!path.exists());
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn schema_one_cache_retains_existing_result_and_cleans_its_files() {
+    let store = fixture().await;
+    let id = store
+        .start_result(Uuid::new_v4(), vec![Column::new("v", "TEXT")], "rows")
+        .await
+        .unwrap();
+    store
+        .append_rows(id, vec![vec![Value::Text("x".repeat(70000))]])
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE value_files")
+        .execute(&store.cache)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA user_version=1")
+        .execute(&store.cache)
+        .await
+        .unwrap();
+    let root = (*store.root).clone();
+    store.pool.close().await;
+    store.cache.close().await;
+    let reopened = Store::open(&root).await.unwrap();
+    let page = reopened.result_page(id, 0, 1, 16384).await.unwrap();
+    let Value::Large { id: value_id, .. } = &page.rows[0][0] else {
+        panic!("字段应当外置")
+    };
+    assert_eq!(
+        reopened.read_value(*value_id).await.unwrap(),
+        Value::Text("x".repeat(70000))
+    );
+    reopened.release_result(id).await.unwrap();
+    assert!(!root.join("values").join(value_id.to_string()).exists());
+    cleanup(reopened).await;
+}
+
+#[tokio::test]
 async fn stale_workspace_save_cannot_overwrite_other_window() {
     let store = fixture().await;
     assert_eq!(

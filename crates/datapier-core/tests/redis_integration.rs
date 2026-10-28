@@ -567,3 +567,332 @@ async fn export_does_not_publish_when_key_type_changes_during_browse() {
     drop(monitor);
     f.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
+async fn import_replacement_never_mutates_or_deletes_external_key() {
+    let mut f = Fixture::new().await;
+    for kind in ["string", "hash", "list", "set", "zset"] {
+        for action in ["append", "finish", "discard", "expired"] {
+            let target = f.target(format!("{kind}-{action}").as_bytes(), kind);
+            let expiry = if action == "expired" {
+                json!("1")
+            } else {
+                Json::Null
+            };
+            let begin = f
+                .call(
+                    "import.begin",
+                    json!({"target":target,"type":kind,"expires_at_ms":expiry}),
+                )
+                .await
+                .unwrap();
+            let token = begin["token"].clone();
+            let temp = format!("__datapier_import_{}", token.as_str().unwrap()).into_bytes();
+            f.keys.push(temp.clone());
+            let row = match kind {
+                "string" | "set" => json!([binary(b"first\0value")]),
+                "hash" => json!([binary(b"field"), binary(b"first\0value")]),
+                "list" => json!([Value::Unsigned("0".into()), binary(b"first\0value")]),
+                _ => json!([binary(b"member"), Value::Float("1.5".into())]),
+            };
+            if action != "append" {
+                f.call("import.append", json!({"token":token,"rows":[row.clone()]}))
+                    .await
+                    .unwrap();
+            }
+            let mut replacement = redis::pipe();
+            replacement.atomic().cmd("DEL").arg(&temp).ignore();
+            match kind {
+                "string" => {
+                    replacement
+                        .cmd("SET")
+                        .arg(&temp)
+                        .arg(b"external\0value")
+                        .ignore();
+                }
+                "hash" => {
+                    replacement
+                        .cmd("HSET")
+                        .arg(&temp)
+                        .arg(b"external")
+                        .arg(b"value")
+                        .ignore();
+                }
+                "list" => {
+                    replacement
+                        .cmd("RPUSH")
+                        .arg(&temp)
+                        .arg(b"external\0value")
+                        .ignore();
+                }
+                "set" => {
+                    replacement
+                        .cmd("SADD")
+                        .arg(&temp)
+                        .arg(b"external\0value")
+                        .ignore();
+                }
+                _ => {
+                    replacement
+                        .cmd("ZADD")
+                        .arg(&temp)
+                        .arg("2")
+                        .arg(b"external\0value")
+                        .ignore();
+                }
+            }
+            let _: () = replacement.query_async(&mut f.raw).await.unwrap();
+            let before: Vec<u8> = redis::cmd("DUMP")
+                .arg(&temp)
+                .query_async(&mut f.raw)
+                .await
+                .unwrap();
+            match action {
+                "append" => assert!(
+                    f.call("import.append", json!({"token":token,"rows":[row]}))
+                        .await
+                        .is_err()
+                ),
+                "finish" | "expired" => assert!(
+                    f.call("import.finish", json!({"token":token}))
+                        .await
+                        .is_err()
+                ),
+                _ => {
+                    f.call("import.discard", json!({"token":token}))
+                        .await
+                        .unwrap();
+                }
+            }
+            if action != "discard" {
+                f.call("import.discard", json!({"token":token}))
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                f.call("import.discard", json!({"token":token}))
+                    .await
+                    .is_err()
+            );
+            let after: Vec<u8> = redis::cmd("DUMP")
+                .arg(&temp)
+                .query_async(&mut f.raw)
+                .await
+                .unwrap();
+            assert_eq!(after, before, "{kind} {action}");
+            let exists: i64 = redis::cmd("EXISTS")
+                .arg(raw_key(&target))
+                .query_async(&mut f.raw)
+                .await
+                .unwrap();
+            assert_eq!(exists, 0);
+        }
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
+async fn import_preserves_values_and_removes_owned_staging_keys() {
+    let mut f = Fixture::new().await;
+    for kind in ["string", "hash", "list", "set", "zset"] {
+        let target = f.target(format!("normal-{kind}").as_bytes(), kind);
+        let begin = f
+            .call("import.begin", json!({"target":target,"type":kind}))
+            .await
+            .unwrap();
+        let token = begin["token"].clone();
+        let temp = format!("__datapier_import_{}", token.as_str().unwrap()).into_bytes();
+        f.keys.push(temp.clone());
+        // 取得真实标记作为输入，验证集合元素与标记碰撞时仍完整保留。
+        let marker: Vec<u8> = match kind {
+            "hash" => redis::cmd("HKEYS")
+                .arg(&temp)
+                .query_async::<Vec<Vec<u8>>>(&mut f.raw)
+                .await
+                .unwrap()
+                .remove(0),
+            "set" => redis::cmd("SMEMBERS")
+                .arg(&temp)
+                .query_async::<Vec<Vec<u8>>>(&mut f.raw)
+                .await
+                .unwrap()
+                .remove(0),
+            "zset" => redis::cmd("ZRANGE")
+                .arg(&temp)
+                .arg(0)
+                .arg(-1)
+                .query_async::<Vec<Vec<u8>>>(&mut f.raw)
+                .await
+                .unwrap()
+                .remove(0),
+            _ => Vec::new(),
+        };
+        let row = match kind {
+            "string" => json!([binary(b"binary\0value")]),
+            "hash" => json!([binary(&marker), binary(b"binary\0value")]),
+            "list" => json!([Value::Unsigned("0".into()), binary(b"binary\0value")]),
+            "set" => json!([binary(&marker)]),
+            _ => json!([binary(&marker), Value::Float("1.5".into())]),
+        };
+        f.call("import.append", json!({"token":token,"rows":[row.clone()]}))
+            .await
+            .unwrap();
+        f.call("import.finish", json!({"token":token}))
+            .await
+            .unwrap();
+        let key = raw_key(&target);
+        let actual: Vec<u8> = match kind {
+            "string" => redis::cmd("GET")
+                .arg(&key)
+                .query_async(&mut f.raw)
+                .await
+                .unwrap(),
+            "hash" => redis::cmd("HGET")
+                .arg(&key)
+                .arg(&marker)
+                .query_async(&mut f.raw)
+                .await
+                .unwrap(),
+            "list" => redis::cmd("LINDEX")
+                .arg(&key)
+                .arg(0)
+                .query_async(&mut f.raw)
+                .await
+                .unwrap(),
+            "set" => redis::cmd("SMEMBERS")
+                .arg(&key)
+                .query_async::<Vec<Vec<u8>>>(&mut f.raw)
+                .await
+                .unwrap()
+                .remove(0),
+            _ => redis::cmd("ZRANGE")
+                .arg(&key)
+                .arg(0)
+                .arg(-1)
+                .query_async::<Vec<Vec<u8>>>(&mut f.raw)
+                .await
+                .unwrap()
+                .remove(0),
+        };
+        assert_eq!(
+            actual,
+            if kind == "set" || kind == "zset" {
+                marker
+            } else {
+                b"binary\0value".to_vec()
+            }
+        );
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(&temp)
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+        let cancel_target = f.target(format!("cancel-{kind}").as_bytes(), kind);
+        let cancel = f
+            .call("import.begin", json!({"target":cancel_target,"type":kind}))
+            .await
+            .unwrap();
+        let cancel_temp =
+            format!("__datapier_import_{}", cancel["token"].as_str().unwrap()).into_bytes();
+        f.keys.push(cancel_temp.clone());
+        f.call(
+            "import.append",
+            json!({"token":cancel["token"],"rows":[row]}),
+        )
+        .await
+        .unwrap();
+        f.call("import.discard", json!({"token":cancel["token"]}))
+            .await
+            .unwrap();
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(&cancel_temp)
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
+async fn import_close_preserves_replacement_and_cleans_owned_key() {
+    let mut f = Fixture::new().await;
+    let mut session = ProviderSession::connect(f.profile.clone(), None)
+        .await
+        .unwrap();
+    let sink = f.sink().await;
+    let cancel = CancellationToken::new();
+    let mut replaced = Vec::new();
+    let mut owned = Vec::new();
+    for kind in ["string", "hash", "list", "set", "zset"] {
+        for replace in [false, true] {
+            let target = f.target(format!("close-{kind}-{replace}").as_bytes(), kind);
+            let begin = session
+                .call(
+                    "import.begin",
+                    json!({"target":target,"type":kind}),
+                    &sink,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let token = begin["token"].clone();
+            let temp = format!("__datapier_import_{}", token.as_str().unwrap()).into_bytes();
+            f.keys.push(temp.clone());
+            let row = match kind {
+                "string" | "set" => json!([binary(b"initial")]),
+                "hash" => json!([binary(b"field"), binary(b"initial")]),
+                "list" => json!([Value::Unsigned("0".into()), binary(b"initial")]),
+                _ => json!([binary(b"member"), Value::Float("1".into())]),
+            };
+            session
+                .call(
+                    "import.append",
+                    json!({"token":token,"rows":[row]}),
+                    &sink,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            if replace {
+                let _: () = redis::pipe()
+                    .atomic()
+                    .cmd("DEL")
+                    .arg(&temp)
+                    .ignore()
+                    .cmd("SET")
+                    .arg(&temp)
+                    .arg(b"external")
+                    .ignore()
+                    .query_async(&mut f.raw)
+                    .await
+                    .unwrap();
+                replaced.push(temp);
+            } else {
+                owned.push(temp);
+            }
+        }
+    }
+    session.close().await.unwrap();
+    for key in replaced {
+        let value: Vec<u8> = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(value, b"external");
+    }
+    for key in owned {
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(key)
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+    }
+    f.close().await;
+}
