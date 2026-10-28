@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Datapier · UI 设计稿</title>
+<style>
+:root{color-scheme:dark;--bg:#15171a;--panel:#1c1e22;--card:#24272c;--hover:#2b2e35;--text:#e6e8ed;--muted:#989eaa;--faint:#737b88;--line:#31353c;--accent:#75aece;--selected:#233744;--good:#7bbf9c;--warn:#d8b674;--danger:#e18c94;--mono:ui-monospace,"SFMono-Regular",Consolas,monospace;--shadow:0 18px 80px #0005}
+[data-theme=light]{color-scheme:light;--bg:#fbfbfc;--panel:#f3f4f6;--card:#fff;--hover:#e9ecf0;--text:#292e35;--muted:#69727f;--faint:#929aa5;--line:#dfe3e8;--accent:#347c9e;--selected:#e4f0f6;--good:#35815c;--warn:#946815;--danger:#b54755;--shadow:0 18px 80px #0002}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer;border:1px solid transparent;background:none;border-radius:6px;padding:5px 9px;white-space:nowrap}button:hover{background:var(--hover)}button:disabled{opacity:.35;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}input,select,textarea{border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:6px 9px;min-width:0}input::placeholder,textarea::placeholder{color:var(--faint)}input[type=search]{width:100%}textarea{resize:vertical;line-height:1.8}.muted{color:var(--muted)}.small{font-size:12px}.mono,code,pre{font-family:var(--mono)}.spacer{flex:1}.row{display:flex;align-items:center;gap:8px}.rule{height:17px;border-left:1px solid var(--line);margin:0 4px}.btn{border-color:var(--line);background:var(--card)}.primary{background:var(--accent);color:var(--bg);font-weight:600}.primary:hover{filter:brightness(1.08);background:var(--accent)}.danger{color:var(--danger)}.tag{display:inline-flex;align-items:center;gap:5px;padding:1px 6px;border-radius:4px;background:var(--hover);color:var(--muted);font-size:11px;white-space:nowrap}.tag.good{color:var(--good)}.tag.warn{color:var(--warn)}.key-type{font:10px var(--mono);font-weight:700;letter-spacing:.2px;border-radius:4px;min-width:42px;text-align:center;padding:3px 5px;background:var(--hover)}.key-type.hash{color:#a7a1df}.key-type.string{color:#7bbfa7}.key-type.list{color:#7eb3d3}.key-type.set{color:#d5b475}.key-type.zset{color:#dc9aaf}
+.preview-bar{min-height:52px;display:flex;align-items:center;padding:8px 22px;gap:16px;border-bottom:1px solid var(--line);background:var(--panel)}.preview-label{font-weight:600}.switch{display:flex;padding:3px;border:1px solid var(--line);border-radius:8px;gap:2px}.switch button{min-width:78px;padding:4px 12px;color:var(--muted)}.switch button.active{background:var(--card);color:var(--text);box-shadow:0 1px 4px #0002}.preview-note{color:var(--muted);font-size:12px}.app{display:flex;height:calc(100vh - 52px);min-height:640px}.sidebar{width:224px;flex:none;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px 8px}.brand{padding:2px 9px 16px;font-weight:650;font-size:15px;letter-spacing:-.3px}.brand-mark{width:22px;height:22px;display:grid;place-items:center;border:1px solid var(--line);border-radius:6px;color:var(--accent);font:600 13px var(--mono)}.section-label{color:var(--faint);font-size:11px;letter-spacing:.6px;padding:13px 10px 7px;display:flex;align-items:center}.connection{display:flex;align-items:center;gap:9px;text-align:left;width:100%;padding:9px;border:1px solid transparent;margin-bottom:4px}.connection.active{background:var(--selected);border-color:color-mix(in srgb,var(--accent) 20%,transparent)}.connection-name{font-weight:550}.connection-sub{font:10px var(--mono);color:var(--muted);margin-top:2px}.db-icon{height:28px;width:28px;display:grid;place-items:center;background:var(--card);border-radius:7px;font:600 10px var(--mono);color:var(--accent)}.db-icon.redis{color:#d88e94}.nav-item{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 10px;border-radius:5px;color:var(--muted)}.nav-item.active{background:var(--selected);color:var(--text)}.nav-item .count{margin-left:auto;font-size:10px;color:var(--faint)}.indent{padding-left:29px}.nav-icon{width:14px;text-align:center;color:var(--faint);font-size:13px}.sidebar-footer{margin-top:auto;padding:10px 9px 2px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.workbench{min-width:0;flex:1;display:flex;flex-direction:column}.context{height:54px;flex:none;padding:0 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.context-title{font-weight:600}.breadcrumb{color:var(--muted)}.dot{width:6px;height:6px;background:var(--good);border-radius:50%;display:inline-block}.tabs{height:39px;display:flex;align-items:stretch;background:var(--panel);border-bottom:1px solid var(--line);padding:0 12px;gap:4px}.tab{border-radius:0;display:flex;align-items:center;gap:16px;position:relative;color:var(--muted);padding:0 13px}.tab.active{background:var(--bg);color:var(--text)}.tab.active:after{content:"";position:absolute;bottom:-1px;left:10px;right:10px;height:2px;background:var(--accent)}.tab .x{font-size:12px;color:var(--faint)}.body{flex:1;min-height:0;display:flex;flex-direction:column}.subnav{height:43px;display:flex;align-items:center;gap:14px;padding:0 19px;border-bottom:1px solid var(--line)}.subnav button{border-radius:0;padding:11px 3px;color:var(--muted)}.subnav button.active{color:var(--text);border-bottom:2px solid var(--accent)}.toolbar{min-height:48px;display:flex;align-items:center;gap:7px;padding:8px 18px;border-bottom:1px solid var(--line);flex-wrap:wrap}.toolbar input{max-width:230px}.filter-chip{border:1px solid var(--line);border-radius:5px;padding:4px 8px;background:var(--panel);font-size:12px}.table-wrap{flex:1;overflow:auto;min-height:180px}table{border-collapse:separate;border-spacing:0;width:100%;white-space:nowrap;font-size:12px}thead{position:sticky;top:0;z-index:1}th{font-weight:500;color:var(--muted);text-align:left;background:var(--panel);padding:8px 12px;border-bottom:1px solid var(--line);border-right:1px solid color-mix(in srgb,var(--line) 50%,transparent)}th .col-type{display:block;font:9px var(--mono);color:var(--faint);margin-top:2px}td{height:35px;padding:5px 12px;border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent);font-family:var(--mono);font-size:11px}tbody tr:hover td{background:color-mix(in srgb,var(--hover) 70%,transparent)}tbody tr.selected td{background:var(--selected)}td.number{text-align:right}td.rown,th.rown{width:38px;text-align:right;color:var(--faint);padding-left:8px;padding-right:9px;font-size:10px}td.changed{box-shadow:inset 2px 0 var(--warn);color:var(--warn)}.status-pill{border:1px solid var(--line);border-radius:4px;font:10px var(--mono);padding:2px 6px}.status-pill.paid{color:var(--good)}.status-pill.pending{color:var(--warn)}.null{color:var(--faint);font-style:italic}.table-footer{display:flex;align-items:center;gap:10px;min-height:38px;padding:5px 18px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}.statusbar{height:29px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;border-top:1px solid var(--line);background:var(--panel);font-size:10px;color:var(--muted)}.draftbar{padding:9px 18px;background:color-mix(in srgb,var(--warn) 9%,var(--bg));border-top:1px solid color-mix(in srgb,var(--warn) 35%,var(--line));display:flex;align-items:center;gap:8px;font-size:12px}.draftbar strong{font-weight:550;color:var(--warn)}.sql-editor{padding:18px 20px 22px;background:var(--bg);border-bottom:1px solid var(--line);min-height:190px;position:relative}.sql-editor pre{font:12px/1.95 var(--mono);margin:0;color:var(--text)}.kw{color:#a8a1d9}.fn{color:#89bbc7}.str{color:#a6bc8b}.line-no{color:var(--faint);width:26px;display:inline-block;user-select:none}.sql-results-head{display:flex;align-items:center;gap:16px;height:39px;padding:0 18px;border-bottom:1px solid var(--line);background:var(--panel);font-size:12px}.sql-results-head .active{color:var(--text)}.sql-results-head span{color:var(--muted)}.empty-space{flex:1;background:var(--bg)}
+.redis-layout{display:flex;flex:1;min-height:0}.key-browser{width:310px;flex:none;border-right:1px solid var(--line);display:flex;flex-direction:column}.key-tools{padding:14px 12px 11px;border-bottom:1px solid var(--line)}.key-tools input{font-family:var(--mono);font-size:11px;height:31px}.key-tools .row{margin-top:8px}.key-tools select{padding:4px 6px;font-size:11px;flex:1}.key-list-title{padding:9px 13px;display:flex;gap:8px;align-items:center;color:var(--faint);font-size:10px}.key-list{flex:1;overflow:auto;padding:0 5px}.key-row{width:100%;display:flex;align-items:flex-start;gap:8px;text-align:left;border-radius:5px;padding:11px 8px;margin:1px 0}.key-row.active{background:var(--selected)}.key-row .key-name{font:11px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:211px}.key-row .key-meta{color:var(--faint);font-size:10px;margin-top:5px}.namespace{padding:8px 9px;color:var(--muted);font:11px var(--mono)}.scan-note{border-top:1px solid var(--line);padding:10px 12px;color:var(--muted);font-size:10px;line-height:1.7}.key-details{flex:1;min-width:0;display:flex;flex-direction:column}.key-title{padding:18px 20px 14px;border-bottom:1px solid var(--line)}.key-title h2{font:500 15px var(--mono);margin:0;overflow-wrap:anywhere}.key-title .meta{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:11px;margin-top:10px;flex-wrap:wrap}.key-title .row{gap:10px}.key-actions{height:45px;display:flex;align-items:center;padding:0 17px;border-bottom:1px solid var(--line);gap:5px}.key-value{flex:1;min-height:100px;overflow:auto}.value-code{margin:0;padding:22px;font:12px/1.95 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}.value-hint{padding:10px 20px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}.cli{height:184px;flex:none;border-top:1px solid var(--line);background:var(--panel)}.cli-head{height:33px;border-bottom:1px solid var(--line);padding:0 15px;display:flex;align-items:center;gap:10px;font-size:11px}.cli-body{padding:10px 18px;font:11px/1.8 var(--mono)}.cli-prompt{display:flex;align-items:center;gap:10px;margin-top:9px;color:var(--good)}.cli-prompt input{flex:1;background:transparent;border:0;border-bottom:1px solid var(--line);border-radius:0;font:11px var(--mono);padding:4px}.drawer{width:282px;flex:none;border-left:1px solid var(--line);background:var(--panel);padding:15px;overflow:auto}.drawer h3{font-size:12px;font-weight:600;margin:0 0 18px}.drawer label{display:block;color:var(--muted);font-size:11px;margin:12px 0 5px}.drawer input,.drawer textarea{width:100%;background:var(--bg);font-family:var(--mono);font-size:11px}.drawer .row{margin-top:15px}.notice{font-size:11px;color:var(--muted);line-height:1.8;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:6px}.hidden{display:none!important}.overlay{position:fixed;inset:0;background:#0006;display:grid;place-items:center;z-index:10;backdrop-filter:blur(3px);padding:20px}.modal{width:min(560px,100%);background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}.modal-header{display:flex;align-items:center;padding:18px 22px;border-bottom:1px solid var(--line);font-weight:600}.modal-body{padding:18px 22px 24px}.form-grid{display:grid;grid-template-columns:1fr 110px;gap:14px}.form-grid .wide{grid-column:1/-1}.form-grid label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.form-grid input,.form-grid select{width:100%;height:35px}.form-grid .checks{font-size:12px;display:flex;align-items:center;gap:8px}.checks input{width:auto;height:auto}.modal-footer{display:flex;gap:8px;align-items:center;padding:12px 22px;border-top:1px solid var(--line)}.notes{position:fixed;inset:65px 20px 20px auto;width:min(410px,calc(100vw - 40px));z-index:8;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:22px;overflow:auto}.notes h2{font-size:16px;margin:0 0 18px}.notes h3{font-size:12px;color:var(--text);margin:21px 0 7px}.notes p,.notes li{color:var(--muted);font-size:12px;line-height:1.9}.notes ul{padding-left:18px}.notes a{color:var(--accent)}.toast{position:fixed;left:50%;bottom:42px;transform:translateX(-50%);background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:7px;padding:10px 17px;z-index:20;font-size:12px;max-width:90vw}
+@media(max-width:1120px){.sidebar{width:190px}.key-browser{width:255px}.key-row .key-name{max-width:160px}.drawer{width:230px}.context{padding:0 14px}.preview-note{display:none}}
+@media(max-width:900px){.sidebar{width:170px}.key-browser{width:230px}.context .breadcrumb{display:none}.drawer{position:absolute;right:0;top:106px;bottom:29px;width:280px;z-index:4;box-shadow:var(--shadow)}.preview-bar{padding:8px 12px;gap:8px}.brand{font-size:14px}}
+@media(max-width:760px){.sidebar{display:none}.key-browser{width:210px}.preview-label{font-size:12px}.switch button{min-width:58px;padding:4px 8px}.context{height:48px}.context .tag{display:none}.toolbar{padding:8px}.key-title{padding:14px 13px}.key-title h2{font-size:12px}.key-title .meta{gap:8px}.key-type{min-width:36px}.key-row .key-name{max-width:125px}}
+.modal{max-height:calc(100vh - 40px);display:flex;flex-direction:column}.modal-body{overflow:auto;min-height:0}.modal-header,.modal-footer{flex:none}
+.table-search{height:32px;display:flex;align-items:center;gap:6px;padding:0 6px 0 9px;margin:0 0 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}.table-search:focus-within{border-color:var(--accent)}.table-search svg{flex:none;color:var(--muted)}.table-search input{flex:1;min-width:0;width:0;height:30px;padding:0;border:0;border-radius:0;outline:none;background:transparent;font-size:12px}.table-search input::-webkit-search-cancel-button{display:none}.table-search button{flex:none;width:22px;height:22px;display:grid;place-items:center;padding:0;border:0;border-radius:4px;color:var(--muted)}.table-search button:disabled{opacity:0;pointer-events:none}.database-tree{border-top:1px solid var(--line);padding-top:4px}.table-empty{padding:8px 10px;color:var(--muted);font-size:11px}
+td[data-column]{position:relative;cursor:cell}td[data-column]:focus{outline:2px solid var(--accent);outline-offset:-2px}.cell-editor{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:2px;padding:3px 10px;font:11px var(--mono);z-index:2}.key-row{height:32px;align-items:center;padding:2px 6px;margin:0;gap:6px}.key-row .key-name{flex:1;min-width:0;max-width:none}.key-row .key-meta{margin:0;white-space:nowrap}.scan-note{padding:6px 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.history-layout{display:flex;flex:1;min-height:0}.history-list{width:48%;min-width:250px;overflow:auto;border-right:1px solid var(--line)}.history-item{width:100%;display:flex;gap:12px;align-items:center;text-align:left;border-radius:0;border-bottom:1px solid var(--line);padding:9px 16px}.history-item.active{background:var(--selected)}.history-item .history-summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-preview{flex:1;min-width:0;padding:20px;overflow:auto}.history-preview pre{white-space:pre-wrap;overflow-wrap:anywhere}.history-empty{padding:18px;color:var(--muted)}
+.navigation-compact .sidebar{width:58px;padding-left:6px;padding-right:6px}.navigation-compact .brand{justify-content:center;font-size:0;padding-left:0;padding-right:0}.navigation-compact .brand-mark{font-size:13px}.navigation-compact .sidebar>.row{justify-content:center;padding-left:0!important;padding-right:0!important}.navigation-compact .sidebar>.row>.muted,.navigation-compact .sidebar>.row>.spacer{display:none}.navigation-compact .connection{justify-content:center;padding:8px 4px;gap:0}.navigation-compact .connection>span:last-child{display:none}.navigation-compact #mysql-nav,.navigation-compact #redis-nav{display:none!important}.navigation-compact .sidebar-footer{font-size:0;text-align:center;padding-left:0;padding-right:0}
+</style>
+</head>
+<body data-theme="dark">
+<header class="preview-bar"><div class="preview-label">Datapier <span class="muted">/ UI 设计稿</span></div><div class="switch" aria-label="工作区类型"><button id="choose-mysql" class="active" data-provider="mysql">RDBMS</button><button id="choose-redis" data-provider="redis">Redis</button></div><span class="preview-note">示例数据 · 可切换视图与类型 · 未连接数据库</span><span class="spacer"></span><button id="theme-toggle" class="btn">浅色</button><button id="notes-toggle">设计说明</button></header>
+<div class="app"><aside class="sidebar"><div class="brand row"><span class="brand-mark">D</span> Datapier</div><div class="row" style="padding:0 7px 7px"><span class="muted small">连接</span><span class="spacer"></span><button id="new-connection" title="新增连接">＋</button></div><button class="connection active" data-provider="mysql"><span class="db-icon">SQL</span><span><span class="connection-name">Commerce</span><span class="connection-sub" style="display:block">MySQL · localhost:3306</span></span></button><button class="connection" data-provider="redis"><span class="db-icon redis">RED</span><span><span class="connection-name">Cache</span><span class="connection-sub" style="display:block">Redis · localhost:6379</span></span></button><div id="mysql-nav"><div class="section-label">当前数据库 <span class="spacer"></span><span class="mono">commerce</span></div><div class="nav-item"><span class="nav-icon">⌄</span> commerce</div><div class="nav-item indent"><span class="nav-icon">⌄</span> 表 <span class="count">3</span></div><button class="nav-item indent active" data-table="orders"><span class="nav-icon">▦</span> orders</button><button class="nav-item indent" data-table="customers"><span class="nav-icon">▦</span> customers</button><button class="nav-item indent" data-table="order_items"><span class="nav-icon">▦</span> order_items</button><div class="nav-item indent"><span class="nav-icon">›</span> 视图 <span class="count">0</span></div><div class="section-label">工作区</div><button class="nav-item" id="nav-query"><span class="nav-icon">›_</span> SQL 查询</button><button class="nav-item" id="nav-history"><span class="nav-icon">◷</span> 查询历史</button></div><div id="redis-nav" class="hidden"><div class="section-label">当前数据库</div><div class="nav-item"><span class="nav-icon">▤</span> DB 0 <span class="count">当前</span></div><div class="section-label">工作区</div><button class="nav-item active" id="nav-key-browser"><span class="nav-icon">⌕</span> Key 浏览器</button><button class="nav-item" id="nav-cli"><span class="nav-icon">›_</span> 命令面板</button><div class="notice" style="margin:16px 8px">根据 Redis 数据类型展示内容与操作。String 中的 JSON 是查看格式，不是 RedisJSON 类型。</div></div><div class="sidebar-footer"><span class="dot"></span> 本地工作区 <span style="float:right">示例</span></div></aside>
+<main class="workbench"><header class="context"><span class="context-title" id="context-title">Commerce</span><span class="breadcrumb" id="breadcrumb">/ commerce</span><span class="tag" id="provider-badge">MySQL 8.4</span><span class="tag good">读写</span><span class="spacer"></span><span class="muted small" id="context-hint">表数据与 SQL 结果区分编辑能力</span><button class="btn" id="connection-settings">连接设置</button></header><div id="workspace" class="body"></div><footer class="statusbar"><span id="status-context">MySQL · commerce</span><span class="rule"></span><span id="status-detail">基表 · 主键定位</span><span class="spacer"></span><span>设计预览 · 所有数据均为示例</span><button id="status-cli" class="hidden" style="padding:0 4px;font-size:10px">›_ CLI</button></footer></main></div>
+<section id="design-notes" class="notes hidden"><div class="row"><h2 style="margin:0">设计依据与边界</h2><span class="spacer"></span><button id="close-notes">×</button></div><h3>RDBMS：参考 Tern Database</h3><p>同一数据库工作区区分结构、数据与 SQL；采用紧凑工具栏、细分隔线、列级筛选和结果页脚。连接／数据库／表导航常驻左侧，长值编辑进入侧栏。</p><h3>Redis：参考 RDM 与 RedisInsight</h3><p>共享连接导航；key 列表与详情并排，类型、TTL 与当前 DB 始终可见。五种基础类型有各自的内容布局，CLI 在底部展开。</p><h3>本轮保留的行为约束</h3><ul><li>RDBMS 首先落地 MySQL；Redis 保持单节点、五种基础类型。</li><li>编辑形成草稿，显式提交；只读结果不呈现写入入口。</li><li>keyspace 树只组织已加载 key，不代表服务端目录或全库计数。</li><li>Redis 的字节、重复 List 值、无序 Set、ZSet score 与 TTL 不被通用表格语义覆盖。</li><li>这是一份交互设计稿，没有数据库连接、SQL 或 Redis 命令执行。</li></ul><h3>参考来源</h3><p><a href="https://docs.stencil.so/tern/scripts/sqlite.md" target="_blank" rel="noopener">Tern Database / SQLite</a><br><a href="https://docs.stencil.so/tern/styles/variables.html" target="_blank" rel="noopener">Tern 主题与控件规范</a><br><a href="https://redis.io/docs/latest/develop/tools/insight/" target="_blank" rel="noopener">RedisInsight 官方界面</a><br><a href="https://github.com/redis/RedisDesktopManager/blob/2019/docs/quick-start.md" target="_blank" rel="noopener">RDM 连接与命名空间导航</a></p></section>
+<div id="overlay" class="overlay hidden"></div><div id="toast" class="toast hidden" role="status"></div>
+<script>
+'use strict';
+const $ = (s) => document.querySelector(s);
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sampleOrders = [{id:'10421',order_no:'ORD-10421',customer_id:'1',status:'paid',total:'268.50',created_at:'2026-10-28 09:41:12'},{id:'10422',order_no:'ORD-10422',customer_id:'2',status:'pending',total:'128.00',created_at:'2026-10-28 09:43:20'},{id:'10423',order_no:'ORD-10423',customer_id:'3',status:'paid',total:'499.00',created_at:'2026-10-28 09:44:01'},{id:'10424',order_no:'ORD-10424',customer_id:'1',status:'refunded',total:'89.90',created_at:'2026-10-28 09:45:55'}];
+const records = {orders:sampleOrders,customers:[{id:'1',name:'林辰',email:'lin@example.com',tier:'pro'},{id:'2',name:'许宁',email:'xu@example.com',tier:'standard'},{id:'3',name:'周禾',email:null,tier:'pro'}],order_items:[{id:'5101',order_id:'10421',sku:'SKU-104',quantity:'2',price:'134.25'},{id:'5102',order_id:'10422',sku:'SKU-208',quantity:'1',price:'128.00'}]};
+const keySamples = [
+  { id:'user', name:'user:1042', type:'hash', ttl:'永久', size:'5 fields', rows:[['name','林辰'],['email','lin@example.com'],['plan','pro'],['region','ap-southeast-1'],['updated_at','2026-10-28T09:41:12Z']] },
+  { id:'session', name:'session:usr:1042', type:'string', ttl:'约 59 分钟', size:'字符串', value:'{"user_id":1042,"name":"林辰","roles":["admin","editor"],"active":true}' },
+  { id:'queue', name:'queue:email', type:'list', ttl:'永久', size:'4 elements', rows:[['0','{"to":"lin@example.com","event":"welcome"}'],['1','{"to":"xu@example.com","event":"receipt"}'],['2','{"to":"xu@example.com","event":"receipt"}'],['3','{"to":"zhou@example.com","event":"verify"}']] },
+  { id:'flags', name:'flags:enabled', type:'set', ttl:'永久', size:'4 members', rows:[['billing_v2'],['checkout_v3'],['email_digest'],['new_dashboard']] },
+  { id:'ranking', name:'ranking:weekly', type:'zset', ttl:'约 6 天', size:'4 members', rows:[['alice','1250.5'],['lin','1180'],['bob','1100'],['zhou','950.25']] },
+  { id:'feature', name:'config:features', type:'string', ttl:'永久', size:'字符串', value:'{"checkout":true,"version":3}' },
+  { id:'cart', name:'cart:1042', type:'hash', ttl:'约 2 小时', size:'2 fields', rows:[['SKU-104','2'],['SKU-208','1']] },
+  { id:'binary', name:'cache:\\xFF', type:'string', ttl:'约 15 分钟', size:'字节展示示例', value:'\\x00\\xFFbinary', bytes:new Uint8Array([0,255,98,105,110,97,114,121]) }
+];
+const state={provider:'mysql',table:'orders',mode:'table',section:'data',selected:null,inspector:false,drafts:[],key:'user',keyFilter:'',typeFilter:'all',tree:false,format:'text',cli:false,rowFilter:'',historyFilter:'',historySelected:0,sqlText:"SELECT id, order_no, status, total\nFROM orders\nWHERE status = 'paid'\nORDER BY id DESC;",sqlResultAvailable:true};
+const historySamples=[{sql:state.sqlText,time:'2026-10-28 09:46:12',status:'成功'}, {sql:'SELECT id, name, email FROM customers WHERE tier = \'pro\';',time:'2026-10-28 09:32:08',status:'成功'}, {sql:'SELECT order_id, SUM(quantity) FROM order_items GROUP BY order_id;',time:'2026-10-27 17:18:45',status:'成功'}, {sql:'SELECT * FROM missing_table;',time:'2026-10-27 16:05:31',status:'错误'}];
+const currentDrafts=()=>state.drafts.filter(d=>d.provider===state.provider && (d.provider==='mysql'?d.table===state.table:d.key===state.key));
+const rowValue=(row,column)=>{const draft=state.drafts.find(d=>d.provider==='mysql'&&d.table===state.table&&d.rowId===row.id&&d.column===column);return draft?draft.after:row[column]};
+function stageCell(rowId,column,after){const row=records[state.table].find(r=>r.id===rowId);if(!row||column==='id')return;state.drafts=state.drafts.filter(d=>!(d.provider==='mysql'&&d.table===state.table&&d.rowId===rowId&&d.column===column));if(after!==row[column])state.drafts.push({provider:'mysql',table:state.table,rowId,column,label:`${state.table}[id=${rowId}].${column}`,before:row[column],after})}
+function visibleRows(){const needle=state.rowFilter.toLowerCase();return records[state.table].filter(row=>Object.keys(row).some(column=>String(rowValue(row,column)).toLowerCase().includes(needle)))}
+function finishEditor(commit=true){const input=$('.cell-editor');if(!input)return;const cell=input.parentElement;if(commit&&input.value!==input.dataset.initial)stageCell(input.dataset.rowId,input.dataset.column,input.value);input.remove();const row=records[state.table].find(r=>r.id===cell.dataset.rowId);cell.textContent=rowValue(row,cell.dataset.column)??'NULL';cell.classList.toggle('changed',currentDrafts().some(d=>d.rowId===row.id&&d.column===cell.dataset.column));const old=$('#workspace .draftbar'),html=draftHTML();if(old)old.outerHTML=html;else if(html)$('#row-count').closest('.table-footer').insertAdjacentHTML('afterend',html)}
+function beginEditor(cell){if(!cell||!cell.dataset.column)return;finishEditor();const row=records[state.table].find(r=>r.id===cell.dataset.rowId);if(!row)return;state.selected=row.id;const input=document.createElement('input');input.className='cell-editor';input.dataset.rowId=row.id;input.dataset.column=cell.dataset.column;input.value=rowValue(row,cell.dataset.column)??'';input.dataset.initial=input.value;cell.append(input);input.focus();input.select()}
+function historyList(){const q=state.historyFilter.toLowerCase();const matches=historySamples.map((h,i)=>({...h,i})).filter(h=>`${h.sql} ${h.time} ${h.status}`.toLowerCase().includes(q));return matches.map(h=>`<button class="history-item ${h.i===state.historySelected?'active':''}" data-history="${h.i}"><span class="history-summary mono">${escapeHtml(h.sql)}</span><span class="small muted">${h.time}</span><span class="tag ${h.status==='成功'?'good':'warn'}">${h.status}</span></button>`).join('')||'<div class="history-empty">没有匹配的示例历史</div>'}
+function historyPanel(){const h=historySamples[state.historySelected];return `<div class="toolbar"><input id="history-filter" type="search" placeholder="搜索 SQL、时间或状态" value="${escapeHtml(state.historyFilter)}" aria-label="搜索查询历史"><span class="muted small">示例历史 · 未连接数据库</span></div><div class="history-layout"><div id="history-list" class="history-list">${historyList()}</div><div class="history-preview"><div class="row"><strong>SQL 预览</strong><span class="spacer"></span><button class="btn" data-action="open-history-sql">打开到查询</button></div><p class="muted small">${h.time} · ${h.status} · Commerce / commerce · 示例</p><pre>${escapeHtml(h.sql)}</pre></div></div>`}
+let toastTimer;
+function toast(text){$('#toast').textContent=text;$('#toast').classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4000)}
+const navigationToggle = document.createElement('button');
+navigationToggle.id = 'navigation-toggle';
+navigationToggle.className = 'btn';
+document.querySelector('.context').prepend(navigationToggle);
+function setNavigationCompact(compact) {
+  document.querySelector('.app').classList.toggle('navigation-compact', compact);
+  navigationToggle.textContent = compact ? '›' : '‹';
+  navigationToggle.title = compact ? '展开连接导航' : '收起连接导航';
+  navigationToggle.setAttribute('aria-label', navigationToggle.title);
+  navigationToggle.setAttribute('aria-expanded', String(!compact));
+}
+navigationToggle.addEventListener('click', () => {
+  setNavigationCompact(!document.querySelector('.app').classList.contains('navigation-compact'));
+});
+setNavigationCompact(false);
+function setProvider(provider) {
+  finishEditor();
+  state.provider = provider;
+  state.inspector = false;
+  state.selected = null;
+  document.querySelectorAll('[data-provider]').forEach(button => {
+    button.classList.toggle('active', button.dataset.provider === provider);
+  });
+  $('#mysql-nav').classList.toggle('hidden', provider !== 'mysql');
+  $('#redis-nav').classList.toggle('hidden', provider !== 'redis');
+  $('#context-title').textContent = provider === 'mysql' ? 'Commerce' : 'Cache';
+  $('#breadcrumb').textContent = provider === 'mysql' ? '/ commerce' : '/ DB 0';
+  $('#provider-badge').textContent = provider === 'mysql' ? 'MySQL 8.4' : 'Redis 7.2';
+  $('#context-hint').textContent = provider === 'mysql'
+    ? '表数据与 SQL 结果区分编辑能力' : 'Key、类型与过期策略保持可见';
+  $('#status-context').textContent = provider === 'mysql' ? 'MySQL · commerce' : 'Redis · DB 0';
+  $('#status-detail').textContent = provider === 'mysql' ? '基表 · 主键定位' : 'SCAN 增量浏览';
+  $('#status-cli').classList.toggle('hidden', provider !== 'redis');
+  setNavigationCompact(provider === 'redis');
+  render();
+}
+function tableHTML(rows, cols, selectable = false) {
+  const showTypes = state.provider === 'mysql' && !Array.isArray(rows[0]);
+  const columnType = (column) => column === 'id' || column.endsWith('_id')
+    ? 'BIGINT' : column === 'total' || column === 'price'
+    ? 'DECIMAL(12,2)' : column === 'created_at' ? 'DATETIME' : 'VARCHAR';
+  return `<table><thead><tr><th class="rown">#</th>${cols.map(column =>
+    `<th>${escapeHtml(column)}${showTypes ? `<span class="col-type">${columnType(column)}</span>` : ''}</th>`
+  ).join('')}</tr></thead><tbody>${rows.map((row, index) => {
+    const cells = cols.map((column, columnIndex) => {
+      const draft = selectable && state.provider === 'mysql' && !Array.isArray(row)
+        ? state.drafts.find(change => change.provider==='mysql' && change.table===state.table && change.rowId===row.id && change.column===column)
+        : undefined;
+      const value = draft ? draft.after : Array.isArray(row) ? row[columnIndex] : row[column];
+      const numeric = column === 'id' || column.endsWith('_id') || ['total','price','score'].includes(column);
+      const text = value === null ? '<span class="null">NULL</span>'
+        : column === 'status' ? `<span class="status-pill ${escapeHtml(value)}">${escapeHtml(value)}</span>`
+        : escapeHtml(value);
+      return `<td class="${draft ? 'changed ' : ''}${numeric ? 'number' : ''}" ${selectable && state.provider==='mysql' && column!=='id' ? `data-row-id="${escapeHtml(row.id)}" data-column="${escapeHtml(column)}" tabindex="0" title="双击或按 Enter / F2 编辑"` : ''}>${text}</td>`;
+    }).join('');
+    const identity=Array.isArray(row)?String(index):row.id;
+    return `<tr ${selectable ? `data-row="${escapeHtml(identity)}" tabindex="0"` : ''} class="${state.selected !== null && String(state.selected) === identity && selectable ? 'selected' : ''}"><td class="rown">${index + 1}</td>${cells}</tr>`;
+  }).join('')}</tbody></table>`;
+}
+function draftHTML(){const drafts=currentDrafts();return drafts.length?`<div class="draftbar"><strong>待提交 ${drafts.length} 项</strong><span class="muted">修改保留在草稿中</span><span class="spacer"></span><button data-action="discard">丢弃</button><button class="btn" data-action="preview">预览变更</button><button class="primary" data-action="commit">提交 ${drafts.length} 项</button></div>`:''}
+function renderMysql(){const rows=records[state.table],cols=Object.keys(rows[0]);let content='';
+if(state.mode==='history'){content=historyPanel()}
+else if(state.mode==='sql'){content=`<div class="toolbar"><button class="primary" data-action="run-sample">▷ 执行</button><button data-action="run-sample">执行当前语句</button><span class="rule"></span><button data-action="history">历史</button><span class="spacer"></span><span class="tag">commerce</span><span class="tag">SQL 结果只读</span></div><div class="sql-editor"><textarea id="sql-text" aria-label="SQL 查询" style="width:100%;min-height:145px;font:12px/1.95 var(--mono)">${escapeHtml(state.sqlText)}</textarea></div><div id="sql-result-area" style="display:flex;flex-direction:column;flex:1;min-height:0">${sqlResultHTML()}</div>`}
+else if(state.section==='structure'){content=`<div class="toolbar"><span class="muted small">${state.table} · 字段</span><span class="spacer"></span><span class="tag">查看结构</span></div><div class="table-wrap">${tableHTML(cols.map((c,i)=>[c,c==='id'?'BIGINT':c==='total'||c==='price'?'DECIMAL(12,2)':'VARCHAR',c==='email'?'YES':'NO',i===0?'PRIMARY KEY':'—']),['字段','类型','允许 NULL','约束'])}</div><div class="table-footer">字段与索引分区展示，首版结构查看只读</div>`}
+else if(state.section==='ddl'){content=`<div class="toolbar"><span class="muted small">CREATE TABLE · ${state.table}</span><span class="spacer"></span><button class="btn" data-action="copy-ddl">复制 DDL</button></div><pre id="ddl-text" class="value-code">CREATE TABLE \`${state.table}\` (
+${cols.map((c,i)=>'  `'+c+'` '+(i===0?'BIGINT NOT NULL PRIMARY KEY':c==='total'?'DECIMAL(12,2)':'VARCHAR(255)')).join(',\n')}
+);</pre><div class="empty-space"></div>`}
+else{const visible=visibleRows();content=`<div class="toolbar"><span class="tag">基表</span><span class="tag">主键 id</span><span class="rule"></span><input id="row-filter" type="search" value="${escapeHtml(state.rowFilter)}" placeholder="筛选当前示例记录…" aria-label="筛选表数据"><button class="btn" data-action="filter-help">＋ 筛选</button><span class="spacer"></span><button class="btn" data-action="new-row">＋ 新增行</button><button data-action="export">导出</button><button data-action="refresh">↻ 刷新</button></div><div class="row" style="flex:1;align-items:stretch;gap:0;min-height:0"><div style="display:flex;flex-direction:column;min-width:0;flex:1"><div id="mysql-grid" class="table-wrap">${tableHTML(visible,cols,true)}</div><div class="table-footer"><span id="row-count">${visible.length} / ${rows.length} 行</span><span class="spacer"></span><span>双击 / Enter / F2 编辑 · Tab 下一格</span><button data-action="open-inspector">单元格详情</button></div>${draftHTML()}</div>${state.inspector?mysqlInspector():''}</div>`}
+return `<nav class="tabs"><button class="tab ${state.mode==='table'?'active':''}" data-action="table-mode">▦ ${state.table}</button><button class="tab ${state.mode==='sql'?'active':''}" data-action="sql-mode">›_ 订单查询.sql</button><button class="tab ${state.mode==='history'?'active':''}" data-action="history">◷ 查询历史</button><button data-action="sql-mode">＋</button></nav><div class="body">${state.mode==='table'?`<nav class="subnav">${[['data','数据'],['structure','结构'],['ddl','DDL']].map(([v,t])=>`<button class="${state.section===v?'active':''}" data-section="${v}">${t}</button>`).join('')}<span class="spacer"></span><span class="muted small">commerce.${state.table}</span></nav>`:''}${content}</div>`}
+function mysqlInspector(){const row=records[state.table].find(r=>r.id===state.selected)||records[state.table][0],column=Object.keys(row).find(k=>k!=='id');return `<aside class="drawer"><div class="row"><h3 style="margin:0">单元格编辑</h3><span class="spacer"></span><button data-action="close-inspector">×</button></div><label>当前行</label><div class="mono small">id = ${row.id}</div><label>字段</label><select id="cell-column" style="width:100%">${Object.keys(row).filter(k=>k!=='id').map(k=>`<option>${k}</option>`).join('')}</select><label>值</label><textarea id="cell-value" rows="5">${escapeHtml(rowValue(row,column)??'')}</textarea><div class="row"><button class="primary" data-action="stage-cell">加入草稿</button><button data-action="set-null">设为 NULL</button></div><div class="notice" style="margin-top:18px">长值可在侧栏展开，变更先进入草稿。</div></aside>`}
+function redisKeyList(){const matches=keySamples.filter(k=>(state.typeFilter==='all'||k.type===state.typeFilter)&&k.name.toLowerCase().includes(state.keyFilter.toLowerCase().replaceAll('*','')));let last='';return `<div class="key-list-title"><span>${matches.length} 个已加载 key</span><span class="spacer"></span><button style="font-size:10px;padding:1px 4px" data-action="tree-toggle">${state.tree?'树视图':'列表视图'} ▾</button></div><div class="key-list">${matches.map(k=>{const group=k.name.split(':')[0],heading=state.tree&&group!==last?`<div class="namespace">⌄ ${escapeHtml(group)}:</div>`:'';last=group;return `${heading}<button class="key-row ${state.key===k.id?'active':''}" data-key="${k.id}" title="${escapeHtml(k.name)} · TTL ${k.ttl}"><span class="key-type ${k.type}">${k.type.toUpperCase()}</span><span class="key-name">${escapeHtml(k.name)}</span><span class="key-meta">${k.ttl}</span></button>`}).join('')||'<div class="history-empty">没有匹配的示例 key</div>'}</div><div class="scan-note" title="真实浏览按 SCAN 增量加载，不保证快照；命名空间只统计已加载项。">已加载 ${keySamples.length} 个示例 key · 扫描完成 ⓘ</div>`}
+function redisValue(key) {
+  if (key.type === 'string') {
+    let value = key.value;
+    if (state.format === 'json') {
+      try { value = JSON.stringify(JSON.parse(value), null, 2); }
+      catch { value = '当前字符串不是有效 JSON；原始字节不变。\n\n' + value; }
+    }
+    if (state.format === 'hex') {
+      const bytes = key.bytes ?? new TextEncoder().encode(key.value);
+      value = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(' ');
+    }
+    return `<pre class="value-code">${escapeHtml(value)}</pre>`;
+  }
+  const columns = key.type === 'hash' ? ['field','value']
+    : key.type === 'list' ? ['index','value']
+    : key.type === 'set' ? ['member'] : ['member','score'];
+  return tableHTML(key.rows, columns, true);
+}
+function renderRedis(){const key=keySamples.find(k=>k.id===state.key);const hints={string:'文本、JSON、HEX 为同一份内容的展示方式；切换展示不改写字节。',hash:'field 唯一，value 可独立编辑；新增与删除进入变更草稿。',list:'索引从 0 开始，重复值分别展示；提交校验编辑基线，避免索引漂移。',set:'member 唯一且无序；列表排列仅用于浏览，不代表集合顺序。',zset:'member 唯一，score 可重复；修改 score 后成员位置可能改变。'};return `<div class="body"><div class="redis-layout"><section class="key-browser"><div class="key-tools"><input id="key-filter" type="search" value="${escapeHtml(state.keyFilter)}" placeholder="Key pattern，例如 user:*" aria-label="Key pattern"><div class="row"><select id="key-type-filter" aria-label="Key 类型筛选">${['all','string','hash','list','set','zset'].map(t=>`<option value="${t}" ${state.typeFilter===t?'selected':''}>${t==='all'?'全部类型':t.toUpperCase()}</option>`).join('')}</select><button class="btn" data-action="refresh">↻</button></div></div><div id="key-list-content" style="display:flex;flex-direction:column;min-height:0;flex:1">${redisKeyList()}</div></section><section class="key-details"><header class="key-title"><div class="row"><span class="key-type ${key.type}">${key.type.toUpperCase()}</span><h2>${escapeHtml(key.name)}</h2><span class="spacer"></span><button title="重命名" data-action="rename-key">⋯</button></div><div class="meta"><span>${key.size}</span><span>TTL <strong style="color:var(--text);font-weight:500">${key.ttl}</strong></span><button class="btn" style="font-size:10px;padding:2px 6px" data-action="ttl">修改 TTL</button><span class="spacer"></span><span>读取时间 · 示例</span></div></header><div class="key-actions">${key.type==='string'?`<div class="switch" style="padding:2px">${[['text','文本'],['json','JSON'],['hex','HEX']].map(([v,t])=>`<button style="min-width:45px;font-size:11px;padding:2px 6px" class="${state.format===v?'active':''}" data-format="${v}">${t}</button>`).join('')}</div>`:`<span class="muted small">${key.type==='hash'?'Fields':key.type==='list'?'Elements':key.type==='set'?'Members':'Members / Scores'}</span>`}<span class="spacer"></span><button class="btn" data-action="edit-key">${key.type==='string'?'编辑值':'编辑选中项'}</button><button class="danger" data-action="delete-key">删除 key</button></div><div class="key-value">${redisValue(key)}</div><div class="value-hint">${hints[key.type]}</div>${draftHTML()}</section></div>${state.cli?`<section class="cli"><div class="cli-head"><strong>›_ CLI</strong><span class="muted">Cache · DB 0</span><span class="spacer"></span><button data-action="cli-toggle">收起 ⌄</button></div><div class="cli-body"><span class="muted">命令区保留 key 浏览上下文，执行历史与错误在此呈现。</span><br><span class="muted">设计稿不发送 Redis 命令。</span><div class="cli-prompt"><span>localhost:6379[0] ›</span><input id="cli-command" aria-label="命令预览" placeholder="输入命令，Enter 查看交互提示"></div></div></section>`:''}</div>`}
+function render(){document.querySelectorAll('[data-table]').forEach(b=>b.classList.toggle('active',b.dataset.table===state.table));$('#workspace').innerHTML=state.provider==='mysql'?renderMysql():renderRedis()}
+function closeModal(){$('#overlay').classList.add('hidden');$('#overlay').innerHTML=''}
+function modal(title,body,footer=''){const overlay=$('#overlay');overlay.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><header class="modal-header">${title}<span class="spacer"></span><button data-action="close-modal">×</button></header><div class="modal-body">${body}</div><footer class="modal-footer">${footer||'<span class="spacer"></span><button class="btn" data-action="close-modal">关闭</button>'}</footer></section>`;overlay.classList.remove('hidden')}
+function connectionModal(){modal('新建连接',`<div class="form-grid"><div class="wide"><label>数据库类型</label><select id="connection-provider"><option value="mysql" ${state.provider==='mysql'?'selected':''}>MySQL</option><option value="redis" ${state.provider==='redis'?'selected':''}>Redis</option></select></div><div class="wide"><label>连接名称</label><input placeholder="例如：开发环境 · Commerce"></div><div><label>主机</label><input value="localhost"></div><div><label>端口</label><input id="connection-port" value="${state.provider==='mysql'?'3306':'6379'}"></div><div class="wide"><label>用户名</label><input placeholder="${state.provider==='mysql'?'数据库用户名':'ACL 用户名，可选'}"></div><div class="wide"><label>密码</label><input type="password" placeholder="输入密码"><div class="muted small" style="margin-top:5px">保存到系统凭据库；不可用时仅用于当前会话。</div></div><div class="wide"><label id="connection-db-label">${state.provider==='mysql'?'默认数据库':'默认 DB'}</label><input id="connection-db" placeholder="${state.provider==='mysql'?'可选，例如 commerce':'0'}"></div><div class="wide checks"><input type="checkbox" id="readonly"><label for="readonly" style="margin:0;color:var(--text)">以只读模式连接</label></div><details class="wide"><summary class="muted small">TLS 与证书</summary><div style="margin-top:12px"><label>TLS</label><select><option>关闭</option><option>校验证书与服务端身份</option></select><label style="margin-top:10px">CA 证书路径</label><input placeholder="选择证书文件…"></div></details></div>`,`<span class="muted small">交互设计示例，不建立连接</span><span class="spacer"></span><button class="btn" data-action="close-modal">取消</button><button class="primary" data-action="demo-connection">保存连接</button>`)}
+function redisEntry(key, rowIndex) {
+  if (key.type === 'string') return key.value;
+  const row = key.rows[rowIndex];
+  if (key.type === 'hash') return {field:row[0], value:row[1]};
+  if (key.type === 'list') return {index:row[0], value:row[1]};
+  if (key.type === 'zset') return {member:row[0], score:row[1]};
+  return row[0];
+}
+function openRedisEditor() {
+  const key = keySamples.find(key => key.id === state.key);
+  const rowIndex = Math.max(0, state.selected ?? 0);
+  const pending = currentDrafts().find(draft => draft.rowIndex === rowIndex);
+  const entry = pending ? pending.after : redisEntry(key, rowIndex);
+  const textInput = (id, label, value, readonly = false, wide = true) =>
+    `<div${wide ? ' class="wide"' : ''}><label for="${id}">${label}</label><input id="${id}" value="${escapeHtml(value)}" ${readonly ? 'readonly aria-readonly="true"' : ''}></div>`;
+  const valueInput = (id, label, value) =>
+    `<div class="wide"><label for="${id}">${label}</label><textarea id="${id}" rows="5" style="width:100%;font:12px/1.8 var(--mono)">${escapeHtml(value)}</textarea></div>`;
+  let fields;
+  if (key.type === 'hash') {
+    fields = textInput('redis-field', 'Field', entry.field) + valueInput('redis-value', 'Value', entry.value);
+  } else if (key.type === 'list') {
+    fields = textInput('redis-index', 'Index（当前元素位置）', entry.index, true) + valueInput('redis-value', 'Value', entry.value);
+  } else if (key.type === 'zset') {
+    fields = textInput('redis-member', 'Member', entry.member, false, false) + textInput('redis-score', 'Score', entry.score, false, false);
+  } else {
+    fields = valueInput('redis-edit', key.type === 'string' ? 'Value' : 'Member', entry);
+  }
+  modal('编辑 ' + key.type.toUpperCase(),
+    `<form id="redis-editor-form" class="form-grid">${fields}</form><p class="muted small">${key.type === 'list' ? 'Index 用于定位当前元素；修改 Value 不改变元素位置。' : '各项独立编辑并分别保留在变更预览中。'}编辑先加入草稿，默认保留 TTL。</p>`,
+    '<span class="muted small">示例编辑</span><span class="spacer"></span><button class="btn" data-action="close-modal">取消</button><button class="primary" data-action="stage-key">加入草稿</button>');
+  $('#redis-editor-form').addEventListener('submit', event => event.preventDefault());
+  const firstEditable = $('#redis-editor-form').querySelector('input:not([readonly]), textarea');
+  firstEditable.focus();
+}
+function stageRedisEditor() {
+  const key = keySamples.find(key => key.id === state.key);
+  const rowIndex = Math.max(0, state.selected ?? 0);
+  let after;
+  if (key.type === 'hash') {
+    after = {field:$('#redis-field').value, value:$('#redis-value').value};
+  } else if (key.type === 'list') {
+    after = {index:key.rows[rowIndex][0], value:$('#redis-value').value};
+  } else if (key.type === 'zset') {
+    const input = $('#redis-score');
+    const score = input.value.trim();
+    const special = /^[+-]?inf$/i.test(score);
+    const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(score) && Number.isFinite(Number(score));
+    input.setCustomValidity(special || numeric ? '' : '请输入有效的 Score，例如 1.5、-2、1e3 或 +inf。');
+    if (!input.reportValidity()) return;
+    after = {member:$('#redis-member').value, score};
+  } else {
+    after = $('#redis-edit').value;
+  }
+  const before = redisEntry(key, rowIndex);
+  state.drafts = state.drafts.filter(draft => !(draft.provider === 'redis' && draft.key === key.id && draft.rowIndex === rowIndex));
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    state.drafts.push({provider:'redis', key:key.id, rowIndex, label:key.name, before, after});
+  }
+  closeModal();
+  render();
+}
+function draftPreviewValue(value) {
+  return value !== null && typeof value === 'object' ? JSON.stringify(value) : value;
+}
+function previewDrafts() {
+  const drafts = currentDrafts();
+  modal('变更预览',
+    `<p class="muted small">设计示例 · 实际提交由 Engine 校验编辑基线。</p>${tableHTML(drafts.map(draft => [draft.label, draftPreviewValue(draft.before), draftPreviewValue(draft.after)]), ['对象','原值','新值'])}`,
+    `<span class="tag warn">${drafts.length} 项待提交</span><span class="spacer"></span><button class="btn" data-action="close-modal">返回编辑</button><button class="primary" data-action="commit">确认提交</button>`);
+}
+function sqlResultHTML(){return state.sqlResultAvailable?`<div class="sql-results-head"><span class="active">结果示例</span><span class="spacer"></span><span>2 行 · 示例数据</span></div><div class="table-wrap">${tableHTML(sampleOrders.filter(r=>r.status==='paid').slice().reverse(),['id','order_no','status','total'])}</div><div class="table-footer">示例结果 · 查询结果只读 · 编辑请打开基表</div>`:'<div class="sql-results-head"><span class="active">结果</span></div><div class="history-empty">尚未执行 · 设计稿不发送查询</div>'}
+document.addEventListener('dblclick',e=>{const cell=e.target.closest('#mysql-grid td[data-column]');if(cell)beginEditor(cell)});
+document.addEventListener('keydown',e=>{if(e.isComposing)return;const input=e.target.closest('.cell-editor');if(input&&['Enter','Escape','Tab'].includes(e.key)){e.preventDefault();e.stopImmediatePropagation();const cells=Array.from(document.querySelectorAll('#mysql-grid td[data-column]')),index=cells.indexOf(input.parentElement),next=cells[index+(e.shiftKey?-1:1)];finishEditor(e.key!=='Escape');if(e.key==='Tab'&&next)beginEditor(next);return}const cell=e.target.closest('#mysql-grid td[data-column]');if(cell&&(e.key==='Enter'||e.key==='F2')){e.preventDefault();e.stopImmediatePropagation();beginEditor(cell)}},true);
+// 工具区与对象树同级，筛选范围限定为当前连接数据库的树节点。
+const mysqlNav = $('#mysql-nav'), databaseLabel = mysqlNav.querySelector('.section-label');
+const databaseTree = document.createElement('div');
+databaseTree.id = 'database-tree';
+databaseTree.className = 'database-tree';
+databaseTree.dataset.database = databaseLabel.querySelector('.mono').textContent;
+databaseLabel.after(databaseTree);
+while (databaseTree.nextElementSibling && !databaseTree.nextElementSibling.matches('.section-label')) {
+ databaseTree.append(databaseTree.nextElementSibling);
+}
+databaseTree.querySelector('[data-table]').previousElementSibling.dataset.objectGroup = 'table';
+databaseTree.lastElementChild.dataset.objectGroup = 'view';
+const tableSearch = document.createElement('div');
+tableSearch.className = 'table-search';
+tableSearch.setAttribute('role', 'search');
+tableSearch.title = `仅筛选当前连接数据库 ${databaseTree.dataset.database} 中的表和视图`;
+tableSearch.innerHTML = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="table-filter" type="search" placeholder="筛选表和视图" aria-label="筛选当前数据库的表和视图"><button id="table-filter-clear" title="清空对象筛选" aria-label="清空对象筛选">×</button>';
+databaseTree.before(tableSearch);
+const tableEmpty = document.createElement('div');
+tableEmpty.className = 'table-empty hidden';
+tableEmpty.textContent = '没有匹配的表或视图';
+databaseTree.append(tableEmpty);
+function filterDatabaseObjects() {
+ const query = $('#table-filter').value.toLowerCase();
+ let totalMatches = 0;
+ for (const kind of ['table', 'view']) {
+  const group = databaseTree.querySelector(`[data-object-group="${kind}"]`);
+  const objects = [...databaseTree.querySelectorAll(`[data-${kind}]`)];
+  let matches = 0;
+  objects.forEach(object => {
+   const match = object.dataset[kind].toLowerCase().includes(query);
+   object.classList.toggle('hidden', !match);
+   if (match) matches++;
+  });
+  group.classList.toggle('hidden', query !== '' && matches === 0);
+  group.querySelector('.count').textContent = query ? `${matches} / ${objects.length}` : objects.length;
+  totalMatches += matches;
+ }
+ tableEmpty.classList.toggle('hidden', totalMatches !== 0);
+ $('#table-filter-clear').disabled = query === '';
+}
+$('#table-filter').addEventListener('input', filterDatabaseObjects);
+$('#table-filter-clear').addEventListener('click', () => {
+ $('#table-filter').value = '';
+ filterDatabaseObjects();
+ $('#table-filter').focus();
+});
+filterDatabaseObjects();
+$('#redis-nav .notice').remove();
+// 草稿按表与主键定位，切换上下文前先收下原位编辑器的内容。
+document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b){if(!e.target.closest('.cell-editor'))finishEditor();const row=e.target.closest('tr[data-row]');if(row&&!e.target.closest('.cell-editor')){state.selected=state.provider==='mysql'?row.dataset.row:Number(row.dataset.row);row.parentElement.querySelectorAll('tr.selected').forEach(r=>r.classList.remove('selected'));row.classList.add('selected')}return}finishEditor();
+  if(b.dataset.table){state.table=b.dataset.table;state.mode='table';state.section='data';state.inspector=false;state.selected=null;state.rowFilter='';render();return}
+  if(b.dataset.key){state.key=b.dataset.key;state.format='text';state.selected=null;render();return}
+  if(b.id==='nav-history'||b.dataset.action==='history'){state.mode='history';state.inspector=false;render();return}
+  if(b.dataset.history!==undefined){state.historySelected=Number(b.dataset.history);render();return}
+  if(b.dataset.action==='open-history-sql'){state.sqlText=historySamples[state.historySelected].sql;state.sqlResultAvailable=false;state.mode='sql';render();return}
+  if(b.dataset.action==='stage-cell'||b.dataset.action==='set-null'){const row=records[state.table].find(r=>r.id===state.selected)||records[state.table][0];stageCell(row.id,$('#cell-column').value,b.dataset.action==='set-null'?null:$('#cell-value').value);render();return}
+  if(b.dataset.action==='stage-key'){stageRedisEditor();return}
+  if(b.dataset.action==='discard'||b.dataset.action==='commit'){const drafts=currentDrafts();state.drafts=state.drafts.filter(d=>!drafts.includes(d));closeModal();render();if(b.dataset.action==='commit')toast('变更提交交互演示完成；没有写入任何数据库。');return}
+  if(b.dataset.action==='preview'){previewDrafts();return}
+  if(b.dataset.provider){setProvider(b.dataset.provider);return}
+  if(b.dataset.section){state.section=b.dataset.section;state.inspector=false;render();return}
+  if(b.dataset.format){state.format=b.dataset.format;render();return}
+  if(b.id==='theme-toggle'){document.body.dataset.theme=document.body.dataset.theme==='dark'?'light':'dark';b.textContent=document.body.dataset.theme==='dark'?'浅色':'深色';return}
+  if(b.id==='notes-toggle'||b.id==='close-notes'){$('#design-notes').classList.toggle('hidden');return}
+  if(b.id==='new-connection'||b.id==='connection-settings'){connectionModal();return}
+  if(b.id==='nav-query'){state.mode='sql';render();return}
+  if(b.id==='nav-cli'||b.id==='status-cli'){state.cli=!state.cli;render();return}
+  if(b.id==='nav-key-browser'){state.cli=false;render();return}
+  switch(b.dataset.action){
+    case 'close-modal':closeModal();break;
+    case 'demo-connection':closeModal();toast('已完成连接表单设计演示；没有保存配置或连接数据库。');break;
+    case 'table-mode':state.mode='table';render();break;
+    case 'sql-mode':state.mode='sql';state.inspector=false;render();break;
+    case 'run-sample':toast('设计稿不执行查询，也不会生成新的查询结果。');break;
+    case 'refresh':toast('设计稿保留当前示例数据；实际刷新会重新读取并校验未提交草稿。');break;
+    case 'open-inspector':state.inspector=true;render();break;
+    case 'close-inspector':state.inspector=false;render();break;
+    case 'filter-help':modal('结构化筛选','<div class="form-grid"><div><label>字段</label><select><option>status</option><option>total</option><option>created_at</option></select></div><div><label>条件</label><select><option>等于</option><option>包含</option><option>为空</option></select></div><div class="wide"><label>值</label><input value="paid"></div></div><p class="muted small">设计稿可通过工具栏搜索框筛选示例记录。</p>');break;
+    case 'new-row':modal('新增行','<div class="form-grid"><div><label>order_no</label><input placeholder="订单编号"></div><div><label>status</label><select><option>pending</option><option>paid</option></select></div><div class="wide"><label>total</label><input placeholder="0.00"></div></div><p class="muted small">此窗口仅展示表单设计。</p>');break;
+    case 'export':modal('导出数据','<div class="form-grid"><div class="wide"><label>数据范围</label><select><option>完整结果</option><option>当前选中行</option></select></div><div class="wide"><label>文件格式</label><select><option>CSV</option><option>JSON</option></select></div></div><p class="muted small">设计稿不生成数据文件。</p>');break;
+    case 'copy-ddl':try{await navigator.clipboard.writeText($('#ddl-text').textContent);toast('已复制示例 DDL')}catch{toast('请选中示例 DDL 复制')}break;
+    case 'tree-toggle':state.tree=!state.tree;$('#key-list-content').innerHTML=redisKeyList();break;
+    case 'cli-toggle':state.cli=!state.cli;render();break;
+    case 'ttl':modal('设置过期时间','<div class="form-grid"><div class="wide"><label>过期策略</label><select><option>保留现有过期时间</option><option>从提交时起计算</option><option>移除过期时间（永久）</option></select></div><div><label>时长</label><input value="3600"></div><div><label>单位</label><select><option>秒</option><option>毫秒</option></select></div></div><p class="muted small">TTL 作为独立变更进入草稿；显示“永久”“已过期／不存在”和有限期限。</p>');break;
+    case 'rename-key':modal('Key 操作',`<div class="form-grid"><div class="wide"><label>当前 key</label><input readonly value="${escapeHtml(keySamples.find(k=>k.id===state.key).name)}"></div><div class="wide"><label>新 key</label><input placeholder="输入完整 key"></div></div><p class="muted small">重命名不覆盖已有 key，操作前保留原始字节身份。</p>`);break;
+    case 'delete-key':modal('删除 key','<p>删除操作先进入变更预览，确认时显示完整 key、类型与 DB。</p><p class="muted small">设计稿不执行删除。</p>');break;
+    case 'edit-key':openRedisEditor();break;
+  }
+});
+document.addEventListener('input',e=>{if(e.target.id==='row-filter'){state.rowFilter=e.target.value;const all=records[state.table],rows=visibleRows();$('#mysql-grid').innerHTML=tableHTML(rows,Object.keys(all[0]),true);$('#row-count').textContent=`${rows.length} / ${all.length} 行 · 当前示例筛选`}if(e.target.id==='key-filter'){state.keyFilter=e.target.value;$('#key-list-content').innerHTML=redisKeyList()}if(e.target.id==='history-filter'){state.historyFilter=e.target.value;$('#history-list').innerHTML=historyList()}if(e.target.id==='sql-text'){state.sqlText=e.target.value;state.sqlResultAvailable=false;$('#sql-result-area').innerHTML=sqlResultHTML()}});
+document.addEventListener('change',e=>{if(e.target.id==='key-type-filter'){state.typeFilter=e.target.value;$('#key-list-content').innerHTML=redisKeyList()}if(e.target.id==='cell-column'){const row=records[state.table].find(r=>r.id===state.selected)||records[state.table][0];$('#cell-value').value=rowValue(row,e.target.value)??''}if(e.target.id==='connection-provider'){const mysql=e.target.value==='mysql';$('#connection-port').value=mysql?'3306':'6379';$('#connection-db-label').textContent=mysql?'默认数据库':'默认 DB';$('#connection-db').placeholder=mysql?'可选，例如 commerce':'0'}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();$('#design-notes').classList.add('hidden')}if(e.target.id==='cli-command'&&e.key==='Enter'){e.preventDefault();toast('命令输入交互预览；设计稿没有发送命令。')}});
+$('#overlay').addEventListener('click',e=>{if(e.target===$('#overlay'))closeModal()});
+render();
+</script>
+</body>
+</html>
