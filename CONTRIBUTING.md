@@ -1,0 +1,169 @@
+# 贡献指南
+
+## 文档职责与阅读顺序
+
+修改代码前，先读 [README](README.md)、[产品规划](docs/product-plan.md)和 [0.1.0 技术方案](docs/technical-design-0.1.0.md)的相关部分。本指南是开发规范入口；[AGENTS](AGENTS.md) 是 agent 的阅读入口、授权与交付说明；[发布指南](RELEASING.md) 负责发布流程。README 是产品和快速入口，产品规划定义范围与版本，技术方案定义设计约束并记录实施与运行结果。以实际文件确认实现状态，规划路径不能当作已存在的模块。
+
+用户的新要求优先于历史方案；范围或架构变化时同步相关文档。功能任务按完整可运行路径交付，不留下空壳、假结果或未接线接口。仅涉及文档的任务不顺带创建 workspace、plugin 或数据库。
+
+## 开发环境
+
+- 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，`rust-version` 为 1.88。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
+- Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
+- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；官方 `tern-sdk` 固定 Git revision `9e9c07463f4958b0c633424c9860aba499487d28`。六种目标使用一致的锁定依赖。
+- 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 和额外格式化工具不是强制开发条件。
+- 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
+
+构建本地程序并直接在 Tern 中启动：
+
+```sh
+cargo build --locked -p datapier
+tern -e "$PWD/target/debug/datapier" ui
+```
+
+也可链接启动 plugin，从带有本地程序路径的环境启动 Tern：
+
+```sh
+tern plugin link "$PWD/plugins/datapier"
+DATAPIER_BINARY="$PWD/target/debug/datapier" tern
+```
+
+已运行的 Tern 进程不会自动获得新环境变量；命令面板入口为 `New Datapier block`。修改 Rust 后重新构建并运行；修改 Luau 后由 Tern 重载启动入口。
+
+发布安装所需的版本校验、下载覆盖和缓存配置见[发布指南的构建与组包](RELEASING.md#构建与组包)。
+
+`--data-dir` 或 `DATAPIER_DATA_DIR` 可指定独立用户数据目录，`ui --workspace NAME` 选择工作区。Unix 数据目录必须属于当前用户且权限为 `0700`；不接受已有共享目录，也不自动修改其权限。密码不写入 SQLite：连接表单尝试保存到系统凭据库，服务不可用时仅保留在当前 Engine 会话内存。
+
+## 编码约定
+
+以下编码与注释要求适用于本次新增或修改的代码，不为补齐规范扩大修改范围。
+
+- 沟通、文档和提交说明使用简体中文；代码标识符和技术名称保留 English，标准许可证保留原文。
+- 修改前阅读相关实现与调用方，遵循项目既有的命名、目录、分层、错误处理和测试约定。
+- 优先简单设计和既有实现；围绕当前需求做最小完整修改，避免无关重构、额外功能及为未来版本预建框架。
+- 优先复用标准库、已有依赖和公共能力；依赖按方案选型并锁定，新增依赖前确认必要性，评估维护状态、许可证、体积与传递依赖成本。调整依赖需考虑六种目标及许可证。
+- 保持模块、类型和函数职责清晰，业务逻辑放在对应职责层；避免入口层堆积业务、万能工具类和职责混杂的长函数。
+- 避免复制业务逻辑；抽象应服务于明确的复用或隔离需求，不为假设中的未来需求增加层次。
+- 使用类型和明确的数据结构表达业务约束；避免含义模糊的布尔参数、魔法值、字符串状态和隐式约定。
+- 在输入边界校验不可信数据，在业务归属层维护权限、状态与一致性约束；不只依赖界面校验。
+- 显式处理失败和边界情况，不吞错误、不将失败伪装成成功，不用静默兜底掩盖缺失实现；错误保留原因和必要上下文。
+- 明确资源、并发任务与共享状态的所有权及释放时机；共享锁不跨慢查询、阻塞操作或不受控的外部调用持有。
+- 避免不必要的分配、复制、重复计算与全量读取；大数据按需、分页或分批处理，不以复杂优化替代清晰设计。
+- 日志沿用项目统一机制，提供必要定位信息，不记录凭据、Token 或其他敏感数据；交付前清理临时调试输出。
+- 修改接口或行为时更新全部受影响的调用方、相关测试、文档与注释，清理被替代的实现；不保留无需求的兼容分支。
+
+## 代码可读性与注释
+
+- 优先通过准确命名、清晰结构和适度拆分表达意图；不用大段注释解释本可整理清楚的混乱代码。
+- 新增或实质修改复杂逻辑时，必须主动补充必要注释，不等待用户另行要求。以下场景必须说明相关背景或约束：
+  - 非显然的业务规则、特殊分支及其业务背景。
+  - 算法或实现方案的关键取舍，以及不能使用直观方案的原因。
+  - 并发时序、锁约束、资源生命周期与状态迁移的不变量。
+  - 协议、平台、第三方库或外部系统的特殊行为与限制。
+  - 精度、编码、边界值及其他容易被误改的数据处理约束。
+- 注释重点解释“为什么”、成立条件与重要后果；不逐行翻译代码，不为简单赋值、直观分支或机械转发添加注释。
+- 保留仍然有效的业务背景和历史原因；workaround 与特殊常量应说明依据、适用范围及已知的移除条件，有对应 issue、协议或上游文档时附引用。
+- 对外暴露的非平凡模块、类型和接口应提供文档注释，说明职责、必要前置条件、返回与错误语义及重要副作用；按需补充并发、资源和性能约束，不机械罗列显然信息。
+- 私有实现中无法仅凭命名和代码理解的约束，也必须就近说明；不以“内部实现”为由省略关键上下文。
+- 整体约束写在模块或类型层面，局部原因写在对应接口、分支或操作附近；避免多处重复维护同一说明。
+- 注释与代码同步更新；行为变化时修正失效描述，删除代码时清理失去对应对象的注释。
+- 注释使用简体中文，标识符和技术术语保留 English；遵循语言生态的文档格式，Rust 接口使用 rustdoc。
+- 涉及 unsafe 时，按 Rust 约定在相邻位置通过 `SAFETY` 注释说明安全依据；对外暴露的 unsafe 接口通过 `# Safety` 文档说明调用方必须满足的条件。
+- 交付前检查本次变更中依赖背景知识才能理解的逻辑，确认关键原因与约束已记录；不以注释数量、行数或覆盖率代替可读性判断。
+
+## 模块边界
+
+各模块遵循以下职责边界；新增模块必须随完整可运行路径交付：
+
+| 模块 | 职责 |
+|---|---|
+| `crates/datapier` | 单一可执行文件和子命令分派；0.1.0 提供 UI 与 Engine，MCP 属于 0.2.0 |
+| `crates/datapier-core` | 类型、资源、数据库会话、provider、执行、变更、持久化与凭据；不依赖 TSP、Luau 或 MCP |
+| `crates/datapier-engine` | 唯一运行状态所有者，IPC server／client、租约、实例锁、平台适配和收尾 |
+| `crates/datapier-tsp` | 编辑器、grid 和 UI 状态；通过 Engine client／IPC 访问数据，不直接连接数据库 |
+| `plugins/datapier` | 薄 Luau 启动包及安装脚本；不复制数据库或 grid 业务 |
+
+MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支持需有类型、交互和真实运行证据，不能仅注册驱动就声明支持。首版不实现动态库加载或外部 provider 进程。
+
+## 不可破坏的行为
+
+### 执行与数据
+
+- 大整数、精确小数、JSON 大数和二进制必须保真；NULL、空字符串及 Redis 不存在值分开表达。显示格式不得参与写回转换。
+- 结果增量落盘，分页同时限制行数和字节数，大字段按需读取。导出完整结果不等于导出当前页，也不能自动重执行原 SQL。
+- 编辑先形成草稿和变更集，显式提交后才写库；冲突不静默覆盖，过期编辑基线不能直接恢复提交。
+- 只读策略在 Engine／Core 统一执行，不仅依赖 UI、字符串前缀或未来的 MCP annotations。
+- 写入／COMMIT 发送后失联，无法确认的结果标记待确认；不自动重试或重放。取消等待、关闭连接与服务端撤销是不同状态。
+
+### MySQL
+
+- 保留 SQLx；普通语句在同一专属连接上 prepare 取得列定义，再执行并消费结果，普通空结果集保留列信息。
+- 动态结果按实际元数据处理；驱动无法提供的空动态结果列定义明确标为未知，不伪造 schema。
+- 当前语句使用 tokenizer、注释／引号和 `sql_mode` 定位，禁止按分号盲切。
+- 基表行编辑要求可靠完整键和原值检查；无键表、视图及任意 SQL 结果按首版范围只读浏览。
+- 查询 tab 的连接与事务隔离；InnoDB 与非事务表分别处理提交语义。KILL QUERY 的取消竞态处理完成前，目标连接不能执行下一条命令或回池。
+
+### Redis
+
+- key／field／member 保留字节，普通连接按 DB 隔离；multiplexed connection 的 clone 不代表独立物理连接。
+- 可编辑 key 先 WATCH 再读取基线；List index 只在有效 edit token 内使用，不能按原值误删重复元素。
+- 修改值默认保留 TTL；区分不存在、永久及有限期限，导入导出保留过期语义。
+- SCAN 允许重复和空批次，cursor 为零才结束；不承诺全库排序或一致性快照。EXEC 冲突不自动换基线重试，单项执行错误不解释为整组回滚。
+
+### TSP 与 Engine
+
+- TSP Session 由 UI 线程独占，同步输入循环不阻塞 Tokio；IPC、心跳独立运行，队列配合 SDK waker 通知 UI，不把唤醒返回的 `None` 直接当 EOF。
+- 使用公开 TSP 元素、稳定 key 和受支持的 CSS；文本状态处理 UTF-16 cursor／anchor，兼容中文、emoji 与 native editing 关闭的路径。
+- Grid 范围按首版设计执行，不依赖未公开的拖拽或 scroll offset 事件，也不假定可直接复用内置 Database widget。
+- 客户端会话、数据库会话、事务和任务的所有权明确；最后有效会话离开后限时收尾，其他有效会话不受单个客户端退出影响。
+- IPC 帧、分页、心跳和收尾参数按技术方案统一定义；实例发现结合真实连接探测和 OS 文件锁，不能只看 PID 或端点文件。
+
+## 平台与安装
+
+- 正式目标是 macOS、Linux、Windows，各自覆盖 x86-64／arm64。Linux 使用 GNU／glibc，Windows 使用 MSVC；平台差异集中在适配层。
+- macOS／Linux 使用 UDS，Windows 使用字节模式 Named Pipe；消息协议一致，权限限定当前用户，Named Pipe 拒绝远程客户端。
+- Windows 使用 Tern 随附 ConPTY，适配 OSC 877；验证路径、进程退出、文件锁和活动 exe 更新，不能套用 Unix 信号与权限行为。
+- 凭据仅存系统凭据库或 Engine 会话内存；日志、配置、导出和运行描述文件不写秘密。
+- Luau 由 Tern 内嵌执行；安装脚本经 `tern.process.run(argv)` 异步启动，不用有 16 MiB 响应限制的 fetch 搬运整包，也不假定 `tern.runtime` 有 arch 字段。
+- Tern Launch 使用 shell 命令字符串，block 的 args 不能当原生程序 argv；固定启动命令与用户输入分离，Rust 启动子进程独立传参。
+- 二进制按版本／OS／架构校验并缓存，Windows 新版本写入新目录；构建、缓存和运行数据放在 plugin 源码目录外。
+
+## 测试与验证
+
+Rust 改动按影响范围运行 `cargo check --locked`／`cargo test --locked`；常规格式、静态检查及 workspace 默认测试命令为：
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+真实数据库回归默认忽略，必须显式提供隔离实例。MySQL 使用 `DATAPIER_TEST_MYSQL_PORT`、`DATAPIER_TEST_MYSQL_SECRET`，账户 `datapier`、库 `datapier_fixture`；Redis 使用 `DATAPIER_TEST_REDIS_PORT` 与 DB 15。测试仅创建 UUID 隔离的表／key，并清理自身资源；存储函数用例要求测试库允许创建函数，开启 binlog 时需由测试实例管理员设置 `log_bin_trust_function_creators=1`。
+
+```sh
+cargo test -p datapier-core --test databases --test mysql_edges --test redis_integration --test transfers -- --ignored --test-threads=1
+STRESS_KEYS=1000000 cargo test -p datapier-core --test redis_scale -- --ignored --nocapture
+DATAPIER_TEST_KEYRING=1 cargo test -p datapier-core --test credentials -- --ignored
+```
+
+TLS 专属回归使用 `DATAPIER_TLS_MYSQL_PORT`、`DATAPIER_TLS_MYSQL_SECRET`、`DATAPIER_TLS_REDIS_PORT`、`DATAPIER_TLS_CA`、`DATAPIER_TLS_WRONG_CA`，可选 `DATAPIER_TLS_BAD_HOST`（默认 `127.1`）。需要与测试 CA、SAN 匹配的隔离 TLS 服务：
+
+```sh
+cargo test -p datapier-core --test tls -- --ignored
+```
+
+普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
+
+按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-实施顺序与验收)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。发布前六目标原生验收见[发布前检查](RELEASING.md#发布前检查)。
+
+只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。历史验收和剩余发布阻塞统一查阅[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)，不将其视为本次重新验证。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
+
+## 分支与 PR
+
+按实际目标分支提交变更，PR 说明变更内容、实际验证及限制；不假定固定分支命名、默认远端或合并方式。现有原生构建工作流在 push、pull request 和手动触发时执行，具体发布检查见[发布指南](RELEASING.md)。
+
+## 文档与交付
+
+功能变更同步 README、设计说明及适用的版本记录；README 的安装命令、平台支持及功能状态必须与实际实现和发布产物一致。最终交付说明具体改动、实际验证和限制。
+
+遵循 [MIT License](LICENSE)，保留第三方分发要求。真实凭据、私有连接、生产数据、生成产物与本地索引不入库；测试样本使用可公开数据。

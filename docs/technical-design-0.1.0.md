@@ -2,7 +2,7 @@
 
 ## 1. 目标与范围
 
-依据 [产品规划](product-plan.md)，交付“连接 → 浏览／查询 → 编辑 → 提交 → 导入导出”的完整工作流。本文是实施设计，所列验收尚未执行。
+依据 [产品规划](product-plan.md)，交付“连接 → 浏览／查询 → 编辑 → 提交 → 导入导出”的完整工作流。本文同时记录实施设计与验收要求；已执行记录及发布阻塞见第 11 节。
 
 | 功能 | 0.1.0 交付 |
 |---|---|
@@ -23,20 +23,18 @@ MCP 属于 0.2.0；结构设计、高级编辑和迁移沿用产品规划的后�
 | 路径 | 实现内容 |
 |---|---|
 | `crates/datapier/src/main.rs` | CLI 分派；提供 `ui`、`engine`、`--version`；不编入 MCP |
-| `crates/datapier-core/src/model/` | ID、资源、列、类型化值、分页、能力和错误 |
-| `crates/datapier-core/src/connection/` | profile、数据库会话、只读策略、凭据引用 |
-| `crates/datapier-core/src/execution/` | 任务、结果集、落盘缓存、取消及导入导出 |
-| `crates/datapier-core/src/changes/` | 编辑基线、变更集、并发检查、提交结果 |
-| `crates/datapier-core/src/providers/{mysql,redis}/` | 内置实现；registry 显式注册，按操作分派，不做逐单元格动态分派 |
+| `crates/datapier-core/src/model/` | Profile、资源、列、类型化值、分页、任务和错误 |
+| `crates/datapier-core/src/execution/` | 结果落盘入口、发送阶段与取消控制、流式导入导出 |
+| `crates/datapier-core/src/providers/{mysql,redis}/` | 内置连接、资源、只读策略、查询、编辑基线、并发检查及提交；按操作分派，不做逐单元格动态分派 |
 | `crates/datapier-core/src/storage/` | SQLite migrations、工作区、草稿、历史与执行记录；keyring 适配 |
-| `crates/datapier-engine/src/{ipc,session,platform}/` | server／client／协议 DTO、客户端租约、实例锁、端点、进程启动及收尾 |
-| `crates/datapier-tsp/src/{app,editor,grid,views}/` | TSP 事件循环、界面状态、编辑与展示；只经 Engine client 访问数据 |
+| `crates/datapier-engine/src/{lib,server,protocol,platform}.rs` | client／server／协议编解码、客户端租约、实例锁、端点、进程启动及收尾 |
+| `crates/datapier-tsp/src/{lib,backend,editor,grid,views}.rs` | TSP 事件循环、后台 IPC、界面状态、编辑与展示；只经 Engine client 访问数据 |
 | `plugins/datapier/{plugin.toml,window.luau,lib/bootstrap.luau}` | 命令入口、异步安装检查、打开本机 TSP pane |
 | `plugins/datapier/install/{unix.sh,windows.ps1}` | 下载、校验、解包及安装原生产物；不编译 Rust |
 
 CLI 组合各模块；TSP 依赖 Engine 的 client／DTO，Engine 调用 Core，Core 不依赖 TSP。所有入口共用同一份 IPC 编解码；平台代码不进入 provider 的业务判断。
 
-使用产品规划的 Tokio、Serde、SQLx 0.9、redis-rs 1.8、keyring 4.2 `v1` 和 sqlparser-rs；TSP 使用已发布的 `tern-sdk 0.1.0`，由 `Cargo.lock` 固定补丁及间接依赖。MySQL 保留 SQLx，采用 prepare 取元数据后单独执行的方式。
+使用产品规划的 Tokio、Serde、SQLx 0.9、redis-rs 1.8、keyring 4.2 `v1` 和 sqlparser-rs。已发布的 `tern-sdk 0.1.0` 缺少本实现所需的唤醒等 API，现固定官方仓库 Git revision `9e9c07463f4958b0c633424c9860aba499487d28`，由 `Cargo.lock` 固定全部依赖，不维护本地 fork。MySQL 保留 SQLx，采用 prepare 取元数据后单独执行的方式。
 
 ### 2.1 UI 与异步任务
 
@@ -64,7 +62,7 @@ UI 消息统一进入状态更新函数，只有状态变化才 render；静态�
 macOS／Linux 使用 Tokio UDS，Windows 使用 Tokio 字节模式 Named Pipe。每帧为 **4 字节大端长度＋UTF-8 JSON**，消息体上限 8 MiB，解码前检查长度。
 
 - 请求：`id`、`method`、`params`；响应：相同 `id` 及 `result` 或 `error`。
-- 事件：`seq`、`kind`、`task_id`、`payload`；事件通知状态变化，结果数据由分页接口拉取。
+- 事件：`seq`、`kind`、`task_id`、`payload`，无请求 `id`。`kind=execution.state`，`payload.state` 通知任务状态；序号在同一 Engine 内单调递增，仅向所属客户端发送，不携带 SQL、凭据或结果行。Client 单独订阅事件，UI 收到当前任务事件后查询状态；保留轮询核对遗漏，结果数据由分页接口拉取。
 - 握手校验 `protocol_version=1`，返回 `engine_id`、`client_session_id` 和租约参数。业务会话 ID 与数据库会话 ID 分开。
 - 错误统一为 `code`、`message`、`details`、可选数据库错误码／SQLSTATE；区分权限、输入、冲突、断连、取消和结果待确认。
 - ID 用 UUID 字符串；请求 ID 仅关联响应，不构成写入重试授权。断连后按任务记录查结果，不自动重发写请求。
@@ -87,6 +85,8 @@ macOS／Linux 使用 Tokio UDS，Windows 使用 Tokio 字节模式 Named Pipe。
 任务状态为 `queued → running → succeeded/failed/cancelled/outcome_unknown`，取消过程中标记 `cancelling`；只有确认取消生效才进入 `cancelled`。每条语句／变更另记已生效、未执行、已回滚或待确认，失败任务可以包含此前已生效的操作。
 
 写入发送前先持久化任务与发送阶段，接收最终结果后再更新记录。Engine 重启时，未开始操作标记未执行；可能已经发送且不能证明结果的写入标记待确认。数据库与本地 SQLite 不构成分布式事务，不以本地记录推断数据库必然提交或回滚。
+
+数据目录满卷等原因使最终记录无法保存时，Engine 在本次进程内保留明确的存储错误及已观察结果：读取任务返回 `failed`，可能已发送的写入保守返回 `outcome_unknown` 并提示人工核对。单条查询、任务列表、历史及取消接口保持相同终态，不把旧的 `running` 当作仍在执行。该内存记录不承诺跨 Engine 重启保留；重启仍按已落盘的发送阶段恢复，不重放操作。
 
 ### 3.3 实例与收尾
 
@@ -120,11 +120,10 @@ Engine 不继承 UI 的 PTY；stdout／stderr 写入独立日志或关闭，不�
 
 | 表／文件 | 主要内容 |
 |---|---|
-| `profiles` | provider、地址、用户名、TLS／DB 配置、access mode、credential reference；无密码 |
-| `workspaces`、`tabs` | revision、布局、连接引用、编辑文本／选区、过滤排序、列配置及最近访问 |
-| `change_drafts` | 未提交变更意图和原值；运行期 edit token 不作为持久有效凭据 |
-| `executions`、`query_history` | 所属工作区、执行文本、状态、发送阶段、结果引用及结构化错误 |
-| `cache.sqlite3`、大字段文件 | 结果元数据、类型化行及字段内容 |
+| `profiles` | provider、地址、用户名、TLS／DB、access mode 与凭据已保存标记；无密码 |
+| `workspaces` | revision 与 JSON 快照：tab、布局、连接引用、文本／选区、过滤排序、列配置及未提交变更意图；运行期 edit token 不作为有效凭据恢复 |
+| `executions` | 所属工作区、执行文本、状态、发送阶段及结构化错误；查询历史直接从执行记录读取 |
+| `cache.sqlite3`、`values/` | 结果元数据、类型化行、结果引用及大字段内容 |
 | keyring | macOS Keychain、Windows Credential Manager、Linux Secret Service；不可用时仅 Engine 内存保存 |
 
 文本修改短暂 debounce 后保存，切 tab／关闭时立即 flush；关闭前等待保存确认。崩溃恢复到最后确认保存的版本，不承诺恢复未落盘按键。恢复文本和变更草稿，但不恢复数据库连接、事务或 WATCH；失效变更必须重新读取并由用户确认新基线后才能提交。
@@ -166,8 +165,8 @@ Redis 使用命令／子命令／参数的只读白名单，`COMMAND INFO` 只�
 - **Grid。** 使用公开 `el`／文本节点组成 CSS grid，共享列宽；单一滚动容器内的表头与冻结单元格使用 `position: sticky`，左偏移由固定列宽累加，不依赖读取 Tern scroll offset。稳定 key 由结果 ID、行序号和列 ID 构成，分页后不把焦点误映射到其他行。
 - **选择。** 浏览模式处理方向键、Tab、Home／End、Shift 扩展和 Shift＋点击；显式行选择入口支持整行复制。列配置、过滤和排序持久化，列宽通过设置表单调整。
 - **编辑。** Enter／F2／双击进入 input／editor，Escape 放弃本次编辑，确认后进入变更集。导航撤销与文本撤销分开；提交前可查看、撤销或丢弃待提交项。基线仍由 Engine 校验。
-- **文本。** Rust 保存文本、UTF-16 cursor／anchor、undo 栈；声明 `edit`／`undo` 并处理事件，同时支持 native editing 关闭时的键盘路径。IME 文本提交后再更新模型，UTF-8 字节偏移与 UTF-16 索引有显式转换。
-- **补全与高亮。** tokenizer 输出高亮与语句范围；补全采用关键词及缓存 catalog，显式刷新结构后更新。对未知语法给出基础诊断，服务端执行结果是最终依据。
+- **文本。** Rust 保存文本、UTF-16 cursor／anchor、undo 栈，声明并处理 `edit`／`undo`。查询编辑器设置 `mode=insert`，由应用处理键盘选区，保证“执行选区”可取得真实文本；其他字段使用 native editing，并保留关闭 native editing 时的键盘路径。公开协议不报告原生拖拽选区的 anchor，查询编辑器不以原生选区或剪贴板冒充应用选区。IME 提交后更新模型，UTF-8 字节偏移与 UTF-16 索引有显式转换。
+- **补全与高亮。** 查询 editor 通过 `lang=sql` 使用 Tern 原生高亮，应用 tokenizer 负责当前语句范围和基础诊断；补全使用关键词及缓存 catalog，显式刷新结构后更新。服务端执行结果是最终依据。
 - **复制粘贴。** 复制选区为 TSV，沿用第 7 节 CSV 的 NULL／二进制／反斜线编码，改用制表符分隔并保留引号规则。普通粘贴先形成类型化编辑预览，验证维度和目标可编辑性，再加入变更集，不直接写库。文本编辑区保留普通文本粘贴行为。
 - **文件。** 查询文件以 UTF-8 保存和打开；文件操作由本机 Engine 完成，失败保留编辑文本。跨 UI 的工作区更新使用 revision 检查，不覆盖另一窗口未确认的布局／草稿。
 
@@ -192,7 +191,7 @@ MySQL 表导出开启新的只读读取任务；查询结果导出使用原结�
 
 六个 Rust target 沿用产品规划第 2.7 节：macOS Darwin、Linux GNU／glibc、Windows MSVC，分别构建 x86-64 和 aarch64。固定最低 OS／glibc、TLS 后端和系统依赖，并在发布说明记录测试版本；原生链接库与可执行文件必须同架构。
 
-启动包固定二进制版本及六目标 SHA-256。开发环境优先使用显式配置的本地二进制；发布安装由 `tern.process.run(argv)` 异步调用包内脚本，Unix 使用 curl／tar 与系统校验工具，Windows 使用系统 PowerShell 的下载／解包／校验接口。脚本检测原生架构、加安装锁、写临时目录，验证后发布版本化缓存，只返回简短机器可读结果。
+启动包固定二进制版本及六目标 SHA-256。开发环境优先使用显式配置的本地二进制；发布安装由 `tern.process.run(argv)` 异步调用包内脚本，Unix 使用 curl／tar 与系统校验工具，Windows 使用系统 PowerShell。打包时从实际 `GITHUB_REPOSITORY` 或 `-Repository` 固化下载地址。脚本检测架构、写独立临时目录并验证摘要和版本；Unix 以内容寻址目录和硬链接原子发布，避免陈旧目录锁，Windows 使用进程文件锁。只返回简短机器可读结果，已有有效缓存无需下载地址。
 
 不通过 Luau fetch 搬运整个可执行包：其响应体上限为 16 MiB，且公开 fs 未提供完整的安装权限／原子发布操作。`tern.runtime` 只提供 OS，不假定有 arch 字段；安装脚本负责硬件架构识别和名称归一化。
 
@@ -224,3 +223,26 @@ MySQL 表导出开启新的只读读取任务；查询结果导出使用原结�
 - [Tern CSS grid／sticky](https://docs.stencil.so/tern/styles/css.md)、[Launch 与 window API](https://docs.stencil.so/tern/reference/api-window.md)、[process／fetch／fs 限制](https://docs.stencil.so/tern/reference/api-shared.md)
 - [SQLx Statement 列元数据](https://docs.rs/sqlx/0.9.0/sqlx/trait.Statement.html)、[SQLx RawSql 多结果](https://docs.rs/sqlx/0.9.0/sqlx/struct.RawSql.html)、[MySQL prepared statements](https://dev.mysql.com/doc/refman/8.4/en/sql-prepared-statements.html)、[MySQL KILL](https://dev.mysql.com/doc/refman/8.4/en/kill.html)
 - [Redis WATCH／事务错误](https://redis.io/docs/latest/develop/using-commands/transactions/)、[SCAN](https://redis.io/docs/latest/commands/scan/)、[SET KEEPTTL](https://redis.io/docs/latest/commands/set/)、[redis-rs MultiplexedConnection](https://docs.rs/redis/1.8.0/redis/aio/struct.MultiplexedConnection.html)
+
+## 11. 实现与运行记录
+
+当前源码包含四个 crate、共享 Engine、两种 provider、TSP 工作台、CSV／JSON 交换、启动 plugin、安装器及六目标 CI 配置，尚未发布。运行环境为 macOS arm64、Tern 0.9.5；数据库服务使用隔离容器。
+
+本机统一检查已通过：`cargo fmt --all`、Clippy `-D warnings`、workspace 默认测试 62 项，以及 debug／macOS arm64 release 构建；默认忽略的 22 项真实服务／系统专项须另行运行，已执行范围见下表。事件与生命周期审查发现的关闭确认竞态、通知背压阻塞租约、Backend 断连后等待不退出均已修复并加入回归。
+
+| 已执行场景 | 结果 |
+|---|---|
+| MySQL 8.0／8.4 边界 | 每版本 6 项通过：只读视图拒绝函数写入、精确小数拒绝舍入、DEFINER／动态空结果、脚本部分失败、MyISAM CAS、可空唯一键 |
+| MySQL 8.0／8.4 查询与编辑 | 高精度数、二进制、NULL、空列、多结果、InnoDB 冲突和迟到取消通过 |
+| MySQL 十万行 CSV／JSON | 双格式完整导出、导回与值核对通过，包含生成列、YEAR 与列投影 |
+| Redis 6.2／7.2／8.0 | 每版本 5 项类型／TTL／WATCH／重命名／导出竞态回归及五类型双格式往返通过 |
+| MySQL 8.4／Redis 8 TLS | 真实查询成功，错误 CA 与服务端身份不匹配均被拒绝 |
+| macOS Keychain | 独立 Store 重开可读回凭据、SQLite 无明文密码、删除后不可再取通过 |
+| Tern 实际界面 | 原生渲染、中文／emoji、Shift 选区执行、多结果与完整大整数、Unicode 文件路径、列宽设置、实际编辑提交后自动读取新值通过 |
+| 安装与单目标包 | 8 进程并发安装、有效缓存复用、坏缓存拒绝；真实 PowerShell 脚本组装最新 macOS arm64 release，归档程序与摘要一致；安装器校验后从缓存运行实际 Tern 查询通过 |
+| 实际磁盘满 | 独立 32 MiB 文件系统耗尽至 0 可用字节；配置库与结果缓存同时无法落盘时，API 及 Tern 显示失败，释放空间后同一界面重新查询成功 |
+| 协议事件与关闭 | 真实 MySQL／Redis 分别产生 `queued → running → succeeded`，两个客户端仅收到各自任务事件且序号递增，关闭确认通过；Tern 完成延迟查询并显示 Unicode 结果 |
+
+百万 key 首次全量扫描在 180 秒只返回 51,000 个，已修复缓存分页索引、按页流式读取、TYPE pipeline、批量入库和仅更新未输出项。修复后完整扫描 1,000,000 个 key 的专属回归通过；统计与清理均由测试执行，未把全部 key 留在 UI 内存。
+
+发布仍受以下条件阻塞：另外五个目标尚无本次原生运行记录，六个真实产物未集齐，完整启动包组装因此明确失败；Windows ConPTY／权限与 Linux 凭据服务尚未实际验证。不能据本机成功或 CI 配置声称六目标验收通过。
