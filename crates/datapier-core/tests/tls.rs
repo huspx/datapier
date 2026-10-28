@@ -1,0 +1,138 @@
+//! 只在显式配置的一次性 MySQL／Redis TLS 测试实例上运行。
+//! 必填：DATAPIER_TLS_MYSQL_PORT、DATAPIER_TLS_MYSQL_SECRET、
+//! DATAPIER_TLS_REDIS_PORT、DATAPIER_TLS_CA、DATAPIER_TLS_WRONG_CA。
+//! DATAPIER_TLS_BAD_HOST 默认使用 127.1：它连接同一回环服务，
+//! 但不匹配仅包含 IP 127.0.0.1 和 DNS localhost 的证书，用于区分连通与身份验证。
+use datapier_core::{ExecutionSink, Store, model::*, providers::ProviderSession};
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+fn env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("set {name} for isolated TLS fixtures"))
+}
+
+struct TempStore(std::path::PathBuf);
+impl Drop for TempStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn exercise(kind: ProviderKind) {
+    let (port, secret) = match kind {
+        ProviderKind::Mysql => (
+            env("DATAPIER_TLS_MYSQL_PORT"),
+            Some(env("DATAPIER_TLS_MYSQL_SECRET")),
+        ),
+        ProviderKind::Redis => (env("DATAPIER_TLS_REDIS_PORT"), None),
+    };
+    let mut profile = Profile {
+        id: Uuid::new_v4(),
+        name: "tls-fixture".into(),
+        provider: kind,
+        host: "127.0.0.1".into(),
+        port: port.parse().unwrap(),
+        username: if kind == ProviderKind::Mysql {
+            "root".into()
+        } else {
+            String::new()
+        },
+        database: None,
+        redis_db: 0,
+        access_mode: AccessMode::ReadWrite,
+        tls: TlsConfig {
+            enabled: true,
+            ca_path: Some(env("DATAPIER_TLS_CA")),
+            ..Default::default()
+        },
+    };
+    let root =
+        TempStore(std::env::temp_dir().join(format!("datapier-tls-test-{}", Uuid::new_v4())));
+    let store = Store::open(&root.0).await.unwrap();
+    let task = store
+        .create_task(
+            Uuid::new_v4(),
+            "tls-fixture",
+            "execution.start",
+            json!({}),
+            false,
+        )
+        .await
+        .unwrap();
+    let sink = ExecutionSink::new(store.clone(), task.id);
+    let mut session = ProviderSession::connect(profile.clone(), secret.clone())
+        .await
+        .unwrap();
+    let text = if kind == ProviderKind::Mysql {
+        "SHOW STATUS LIKE 'Ssl_cipher'"
+    } else {
+        "PING"
+    };
+    let result = session
+        .call(
+            "execution.run",
+            json!({"text":text}),
+            &sink,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let id: Uuid = serde_json::from_value(result["results"][0].clone()).unwrap();
+    let page = store.result_page(id, 0, 10, 65536).await.unwrap();
+    if kind == ProviderKind::Mysql {
+        assert_eq!(page.rows[0][0].text(), "Ssl_cipher");
+        assert!(
+            !page.rows[0][1].text().is_empty(),
+            "MySQL must negotiate a TLS cipher"
+        );
+    } else {
+        assert!(
+            page.rows
+                .iter()
+                .flatten()
+                .any(|v| matches!(v, Value::Json(reply) if reply["value"] == "PONG")),
+            "unexpected Redis PING result: {:?}",
+            page.rows
+        );
+    }
+    session.close().await.unwrap();
+    profile.tls.ca_path = Some(env("DATAPIER_TLS_WRONG_CA"));
+    let err = match ProviderSession::connect(profile.clone(), secret.clone()).await {
+        Ok(_) => panic!("wrong CA accepted"),
+        Err(e) => e,
+    };
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("cert") || message.contains("issuer") || message.contains("tls"),
+        "wrong CA failed for unrelated reason: {err}"
+    );
+    profile.tls.ca_path = Some(env("DATAPIER_TLS_CA"));
+    profile.host = std::env::var("DATAPIER_TLS_BAD_HOST").unwrap_or_else(|_| "127.1".into());
+    let err = match ProviderSession::connect(profile, secret).await {
+        Ok(_) => panic!("wrong server identity accepted"),
+        Err(e) => e,
+    };
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("name")
+            || message.contains("identity")
+            || message.contains("valid for")
+            || message.contains("notvalidfor"),
+        "identity failed for unrelated reason: {err}"
+    );
+    store.pool.close().await;
+    store.cache.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit isolated TLS-only MySQL 8.4 fixture"]
+async fn mysql_tls_verifies_ca_and_identity() {
+    exercise(ProviderKind::Mysql).await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit isolated TLS-only Redis 8 fixture"]
+async fn redis_tls_verifies_ca_and_identity() {
+    exercise(ProviderKind::Redis).await;
+}
