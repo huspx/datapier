@@ -5,6 +5,7 @@ fn second_tab(app: &mut App) {
     app.tabs.push(Tab {
         title: "second".into(),
         query: Editor::new(""),
+        cli_query: Editor::default(),
         profile_id: None,
         id: Uuid::new_v4(),
         layout: Vec::new(),
@@ -527,4 +528,144 @@ fn terminal_event_before_start_response_keeps_guard_and_poll_fallback() {
     assert!(app.last_poll.elapsed() >= Duration::from_millis(700));
     app.request(&backend, "change.submit", "change.submit", json!({}));
     assert!(requests.try_recv().is_err());
+}
+
+fn ui_profile(provider: &str, name: &str) -> Profile {
+    serde_json::from_value(json!({
+        "id":Uuid::new_v4(),"name":name,"provider":provider,"host":"127.0.0.1",
+        "port":if provider == "mysql" {3306} else {6379},"access_mode":"read_write"
+    }))
+    .unwrap()
+}
+
+fn inline_app() -> App {
+    let mut app = app_with_grid_draft();
+    app.grid.as_mut().unwrap().discard();
+    app.profile = Some(ui_profile("mysql", "inline"));
+    app.edit_token = Some(json!(Uuid::new_v4()));
+    app.browse_result = true;
+    app.schema = Some(json!({"engine":"InnoDB","keys":[["name"]]}));
+    app
+}
+
+#[test]
+fn reconnect_keeps_unconfirmed_text_attached_to_its_original_row() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = inline_app();
+    let original_session = app.session_id();
+    app.begin_inline(&backend);
+    app.field_set("cell", "保持原行😀");
+    app.action("open", &backend);
+    assert!(app.workbench.inline.is_none());
+    assert_eq!(
+        app.grid.as_ref().unwrap().value(Cell { row: 0, column: 0 }),
+        Some(&CellValue::Text("保持原行😀".into()))
+    );
+    assert_eq!(app.session_id(), original_session);
+    assert!(requests.try_recv().is_err(), "存在草稿时不得关闭并重连会话");
+}
+
+#[test]
+fn paging_confirms_inline_before_changing_absolute_row_positions() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = inline_app();
+    let grid = app.grid.as_mut().unwrap();
+    grid.page.result.row_count = 2;
+    grid.page.next = Some(1);
+    app.result_id = Some(grid.page.result.id.to_string());
+    let mut next = grid.page.clone();
+    next.start = 1;
+    next.next = None;
+    next.rows = vec![vec![CellValue::Text("另一行".into())]];
+    app.begin_inline(&backend);
+    app.field_set("cell", "只修改旧行");
+    app.action("next", &backend);
+    app.response(
+        Response {
+            tag: "result.page".into(),
+            result: Ok(serde_json::to_value(next).unwrap()),
+        },
+        &backend,
+    );
+    let grid = app.grid.as_ref().unwrap();
+    assert!(app.workbench.inline.is_none());
+    assert_eq!(
+        grid.edits().get(&Cell { row: 0, column: 0 }),
+        Some(&CellValue::Text("只修改旧行".into()))
+    );
+    assert_eq!(
+        grid.value(Cell { row: 1, column: 0 }),
+        Some(&CellValue::Text("另一行".into()))
+    );
+}
+
+#[test]
+fn late_connection_reply_does_not_replace_a_newly_selected_connection() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("test".into());
+    let first = ui_profile("mysql", "first");
+    let second = ui_profile("redis", "second");
+    app.profiles = vec![first.clone(), second.clone()];
+    app.profile = Some(first.clone());
+    app.tabs[0].profile_id = Some(first.id);
+    app.operation_pending = true;
+    let first_tab = app.tabs[0].id;
+    app.select_profile(1, &backend);
+    assert_eq!(app.tabs.len(), 2);
+    app.routed_response(
+        Response {
+            tag: format!("{first_tab}:0:connection.open"),
+            result: Ok(json!({"session_id":Uuid::new_v4(),"profile":first})),
+        },
+        &backend,
+    );
+    assert_eq!(app.active, 1);
+    assert_eq!(app.profile.as_ref().unwrap().id, second.id);
+    assert!(app.tabs[0].runtime.session.is_some());
+}
+
+#[test]
+fn cli_text_selection_and_visibility_survive_workspace_reopen() {
+    let mut app = App::new("test".into());
+    second_tab(&mut app);
+    app.field_set("cli_text", "PING\nECHO 中文😀");
+    let end = app.field("cli_text").encode_utf16().count();
+    app.editor("cli_text").unwrap().set_selection(5, end);
+    app.workbench.cli = true;
+    app.switch_tab(1);
+    app.field_set("cli_text", "GET user:1042");
+    let saved: Workspace =
+        serde_json::from_value(serde_json::to_value(app.workspace_snapshot().unwrap()).unwrap())
+            .unwrap();
+    let mut reopened = App::new("test".into());
+    reopened.tabs = saved.tabs;
+    reopened.active = saved.active;
+    reopened.restore_browse();
+    assert_eq!(reopened.field("cli_text"), "GET user:1042");
+    reopened.switch_tab(0);
+    assert_eq!(reopened.field("cli_text"), "PING\nECHO 中文😀");
+    assert_eq!(
+        reopened.tabs[0].cli_query.selected_text(),
+        Some("ECHO 中文😀")
+    );
+    assert!(reopened.workbench.cli);
+}
+
+#[test]
+fn redis_workspace_migrates_the_previous_command_editor_without_losing_text() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("test".into());
+    let profile = ui_profile("redis", "legacy");
+    app.tabs[0].profile_id = Some(profile.id);
+    app.tabs[0].query = Editor::new("PING\nECHO 保存😀");
+    app.response(
+        Response {
+            tag: "profile.list".into(),
+            result: Ok(json!({"profiles":[profile]})),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("cli_text"), "PING\nECHO 保存😀");
+    assert!(app.tabs[0].query.text.is_empty());
+    assert!(app.tabs[0].browse.cli_visible);
 }

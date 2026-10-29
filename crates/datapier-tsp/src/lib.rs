@@ -8,6 +8,7 @@ mod grid;
 #[cfg(test)]
 mod regression;
 mod views;
+mod workbench;
 
 use backend::{Backend, Response};
 use datapier_core::{
@@ -28,6 +29,7 @@ use tern_sdk::{
     ui::{self, Node, View, html},
 };
 use uuid::Uuid;
+use workbench::Workbench;
 
 #[derive(Clone)]
 enum Msg {
@@ -51,12 +53,50 @@ struct LargeLoad {
     offset: u64,
     bytes: Vec<u8>,
 }
+impl LargeLoad {
+    fn consume(&mut self, value: &Value) -> Result<Option<datapier_core::model::Value>> {
+        use base64::Engine as _;
+        let encoded = value
+            .get("bytes_b64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::invalid("缺少字段分块"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| AppError::invalid(error.to_string()))?;
+        if value.get("offset").and_then(Value::as_u64) != Some(self.offset) {
+            return Err(AppError::invalid("大字段分块偏移不一致"));
+        }
+        let end = self
+            .offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| AppError::invalid("大字段长度溢出"))?;
+        self.bytes.extend_from_slice(&bytes);
+        if let Some(next) = value.get("next").and_then(Value::as_u64) {
+            if next != end || next <= self.offset {
+                return Err(AppError::invalid("大字段分块不连续"));
+            }
+            self.offset = next;
+            return Ok(None);
+        }
+        if value.get("total").and_then(Value::as_u64) != Some(end) {
+            return Err(AppError::invalid("大字段长度不一致"));
+        }
+        Ok(Some(serde_json::from_slice(&self.bytes)?))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct BrowseSettings {
     pattern: String,
     kind: String,
     filter: String,
     sort: String,
+    #[serde(default)]
+    object_filter: String,
+    #[serde(default)]
+    row_search: String,
+    #[serde(default)]
+    cli_visible: bool,
     database: Option<String>,
     target: Option<ResourceTarget>,
 }
@@ -67,6 +107,9 @@ impl Default for BrowseSettings {
             kind: String::new(),
             filter: "[]".into(),
             sort: "[]".into(),
+            object_filter: String::new(),
+            row_search: String::new(),
+            cli_visible: false,
             database: None,
             target: None,
         }
@@ -76,6 +119,8 @@ impl Default for BrowseSettings {
 struct Tab {
     title: String,
     query: Editor,
+    #[serde(default)]
+    cli_query: Editor,
     profile_id: Option<Uuid>,
     #[serde(default = "Uuid::new_v4")]
     id: Uuid,
@@ -118,6 +163,8 @@ struct TabRuntime {
     paste_preview: Option<grid::PastePreview>,
     browse_result: bool,
     generation: u64,
+    workbench: Workbench,
+    view: String,
 }
 #[derive(Serialize, Deserialize)]
 struct Workspace {
@@ -167,6 +214,7 @@ struct App {
     status: String,
     detail: String,
     view: String,
+    workbench: Workbench,
     last_poll: Instant,
 }
 impl App {
@@ -205,6 +253,9 @@ impl App {
             ("cell", ""),
             ("column", "0"),
             ("width", "160"),
+            ("object_filter", ""),
+            ("history_filter", ""),
+            ("row_search", ""),
         ] {
             fields.insert(name.into(), Editor::new(value));
         }
@@ -222,6 +273,7 @@ impl App {
             tabs: vec![Tab {
                 title: "查询 1".into(),
                 query: Editor::new(""),
+                cli_query: Editor::default(),
                 profile_id: None,
                 id: Uuid::new_v4(),
                 layout: Vec::new(),
@@ -262,21 +314,33 @@ impl App {
             status: "正在连接 Engine…".into(),
             detail: String::new(),
             view: "query".into(),
+            workbench: Workbench::default(),
             last_poll: Instant::now(),
         }
     }
     fn field(&self, name: &str) -> &str {
-        self.fields.get(name).map(|x| x.text.as_str()).unwrap_or("")
+        if name == "cli_text" {
+            &self.tabs[self.active].cli_query.text
+        } else {
+            self.fields.get(name).map(|x| x.text.as_str()).unwrap_or("")
+        }
     }
     fn editor(&mut self, name: &str) -> Option<&mut Editor> {
         if name == "query" {
             self.tabs.get_mut(self.active).map(|x| &mut x.query)
+        } else if name == "cli_text" {
+            self.tabs.get_mut(self.active).map(|tab| &mut tab.cli_query)
         } else {
             self.fields.get_mut(name)
         }
     }
     fn field_set(&mut self, name: &str, text: impl Into<String>) {
-        self.fields.insert(name.into(), Editor::new(text.into()));
+        let editor = Editor::new(text.into());
+        if name == "cli_text" {
+            self.tabs[self.active].cli_query = editor;
+        } else {
+            self.fields.insert(name.into(), editor);
+        }
     }
     fn has_live_drafts(&self) -> bool {
         self.grid.as_ref().is_some_and(|g| !g.edits().is_empty())
@@ -289,14 +353,34 @@ impl App {
         if matches!(name, "pattern" | "type") {
             self.scan_token = None;
             self.cursor = None;
+            self.workbench.scan_dirty = true;
         }
     }
+    fn migrate_cli_queries(&mut self) {
+        for tab in &mut self.tabs {
+            if tab.cli_query.text.is_empty()
+                && !tab.query.text.is_empty()
+                && self.profiles.iter().any(|profile| {
+                    Some(profile.id) == tab.profile_id
+                        && profile.provider == datapier_core::model::ProviderKind::Redis
+                })
+            {
+                tab.cli_query = std::mem::take(&mut tab.query);
+                self.dirty = true;
+                tab.browse.cli_visible = true;
+            }
+        }
+    }
+
     fn capture_browse(&mut self) {
         let browse = BrowseSettings {
             pattern: self.field("pattern").into(),
             kind: self.field("type").into(),
             filter: self.field("filter").into(),
             sort: self.field("sort").into(),
+            object_filter: self.field("object_filter").into(),
+            row_search: self.field("row_search").into(),
+            cli_visible: self.workbench.cli,
             database: self.database.clone(),
             target: self.target.clone(),
         };
@@ -308,6 +392,9 @@ impl App {
         self.field_set("type", browse.kind);
         self.field_set("filter", browse.filter);
         self.field_set("sort", browse.sort);
+        self.field_set("object_filter", browse.object_filter);
+        self.field_set("row_search", browse.row_search);
+        self.workbench.cli = browse.cli_visible;
         self.database = browse.database;
         self.target = browse.target;
     }
@@ -316,6 +403,7 @@ impl App {
             return;
         }
         self.capture_browse();
+        let dark = self.workbench.dark;
         macro_rules! swap_state {
             ($field:ident) => {
                 std::mem::swap(&mut self.$field, &mut self.tabs[self.active].runtime.$field);
@@ -346,12 +434,18 @@ impl App {
         swap_state!(paste_preview);
         swap_state!(browse_result);
         swap_state!(generation);
+        swap_state!(workbench);
+        swap_state!(view);
+        self.workbench.dark = dark;
         self.active = next;
         self.restore_browse();
         if self.profile.is_none() {
             self.profile = self.tabs[next]
                 .profile_id
                 .and_then(|id| self.profiles.iter().find(|p| p.id == id).cloned());
+        }
+        if self.view.is_empty() {
+            self.view = if self.is_redis() { "data" } else { "query" }.into();
         }
         if !self.tabs[next].pending.is_null() && self.edit_token.is_none() {
             self.detail = format!(
@@ -434,6 +528,7 @@ impl App {
         let long = matches!(
             method,
             "resource.browse"
+                | "connection.open"
                 | "execution.start"
                 | "change.submit"
                 | "transfer.import"
@@ -493,14 +588,14 @@ impl App {
             match g.cell_edit_text(cell) {
                 Ok(text) => {
                     self.field_set("cell", text);
-                    self.view = "edit".into();
+                    self.workbench.overlay = Some("cell".into());
+                    self.workbench.focus_request = Some("input-cell".into());
                 }
                 Err(e) => self.status = e.to_string(),
             }
         }
     }
     fn large_response(&mut self, tag: &str, value: Value, backend: &Backend) {
-        use base64::Engine as _;
         let Some(mut load) = self.large.take() else {
             return;
         };
@@ -508,52 +603,22 @@ impl App {
             self.large = Some(load);
             return;
         }
-        let decoded = value
-            .get("bytes_b64")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "缺少字段分块".to_string())
-            .and_then(|s| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(s)
-                    .map_err(|e| e.to_string())
-            });
-        let bytes = match decoded {
-            Ok(v) => v,
-            Err(e) => {
-                self.status = e;
+        let full = match load.consume(&value) {
+            Ok(Some(full)) => full,
+            Ok(None) => {
+                let id = load.id;
+                let next = load.offset;
+                self.large = Some(load);
+                self.request(
+                    backend,
+                    &format!("large.value/{id}/{next}"),
+                    "result.value",
+                    json!({"value_id":id,"offset":next,"max_bytes":262144}),
+                );
                 return;
             }
-        };
-        if value.get("offset").and_then(Value::as_u64) != Some(load.offset) {
-            self.status = "大字段分块偏移不一致".into();
-            return;
-        }
-        load.bytes.extend_from_slice(&bytes);
-        let end = load.offset + bytes.len() as u64;
-        if let Some(next) = value.get("next").and_then(Value::as_u64) {
-            if next != end || next <= load.offset {
-                self.status = "大字段分块不连续".into();
-                return;
-            }
-            load.offset = next;
-            let id = load.id;
-            self.large = Some(load);
-            self.request(
-                backend,
-                &format!("large.value/{id}/{next}"),
-                "result.value",
-                json!({"value_id":id,"offset":next,"max_bytes":262144}),
-            );
-            return;
-        }
-        if value.get("total").and_then(Value::as_u64) != Some(end) {
-            self.status = "大字段长度不一致".into();
-            return;
-        }
-        let full = match serde_json::from_slice::<datapier_core::model::Value>(&load.bytes) {
-            Ok(v) => v,
-            Err(e) => {
-                self.status = format!("大字段解码失败: {e}");
+            Err(error) => {
+                self.status = error.to_string();
                 return;
             }
         };
@@ -565,6 +630,11 @@ impl App {
             self.status = e.to_string();
             return;
         }
+        if let Some(original) = self.workbench.redis_loading.take() {
+            g.focus = Some(original);
+            self.workbench_redis_edit(backend);
+            return;
+        }
         if g.focus != Some(load.cell) {
             self.status = "已读取完整字段".into();
             return;
@@ -572,7 +642,13 @@ impl App {
         match g.cell_edit_text(load.cell) {
             Ok(text) => {
                 self.field_set("cell", text);
-                self.view = "edit".into();
+                if self.workbench.inline == Some(load.cell) {
+                    self.focus = "cell".into();
+                    self.workbench.focus_request = Some("cell-editor".into());
+                } else {
+                    self.workbench.overlay = Some("cell".into());
+                    self.workbench.focus_request = Some("input-cell".into());
+                }
                 self.status = "已读取完整字段".into();
             }
             Err(e) => self.status = e.to_string(),
@@ -773,7 +849,8 @@ impl App {
             self.field_set("key", p.tls.client_key_path.unwrap_or_default());
         }
         self.field_set("password", "");
-        self.view = "profile".into();
+        self.workbench.overlay = Some("profile".into());
+        self.workbench.focus_request = Some("input-name".into());
     }
     fn form_profile(&self) -> std::result::Result<Profile, String> {
         let optional = |s: &str| {
@@ -785,9 +862,167 @@ impl App {
         };
         serde_json::from_value(json!({"id":self.form_id.ok_or("请先新建或编辑连接")?,"name":self.field("name"),"host":self.field("host"),"port":self.field("port").parse::<u16>().map_err(|e|e.to_string())?,"username":self.field("user"),"database":optional(self.field("database")),"redis_db":self.field("redis_db").parse::<u32>().map_err(|e|e.to_string())?,"provider":self.field("provider"),"access_mode":self.field("access"),"tls":{"enabled":self.field("tls").parse::<bool>().map_err(|e|e.to_string())?,"ca_path":optional(self.field("ca")),"client_cert_path":optional(self.field("cert")),"client_key_path":optional(self.field("key"))}})).map_err(|e|e.to_string())
     }
+    /// 连接与资源各自保留 tab 运行态，切换对象不覆盖另一对象的草稿和结果。
+    fn select_profile(&mut self, index: usize, backend: &Backend) {
+        let Some(profile) = self.profiles.get(index).cloned() else {
+            return;
+        };
+        if let Some(index) = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            let session = if index == self.active {
+                &self.session
+            } else {
+                &tab.runtime.session
+            };
+            (tab.profile_id == Some(profile.id) && session.is_some()).then_some(index)
+        }) {
+            self.switch_tab(index);
+            return;
+        }
+        if self.session.is_some()
+            || self.has_live_drafts()
+            || self.operation_pending
+            || self.task.is_some()
+        {
+            self.action("new-tab", backend);
+        }
+        self.profile = Some(profile.clone());
+        self.tabs[self.active].profile_id = Some(profile.id);
+        self.field_set("password", "");
+        self.workbench.overlay = None;
+        self.dirty = true;
+        self.action("open", backend);
+    }
+
+    fn open_query_tab(&mut self, backend: &Backend) {
+        if !self.finish_inline(true) {
+            return;
+        }
+        self.action("new-tab", backend);
+        self.view = if self.is_redis() { "data" } else { "query" }.into();
+        self.workbench.overlay = None;
+        if self.session.is_none() && self.profile.is_some() {
+            self.action("open", backend);
+        }
+        if self.is_redis() {
+            self.workbench.cli = true;
+            self.focus = "cli_text".into();
+            self.workbench.focus_request = Some("input-cli_text".into());
+        } else {
+            self.focus = "query".into();
+            self.workbench.focus_request = Some("query-editor".into());
+        }
+    }
+
+    fn select_resource(&mut self, index: usize, backend: &Backend) {
+        let Some(resource) = self.resources.get(index).cloned() else {
+            return;
+        };
+        let target = ResourceTarget {
+            database: resource.database.or_else(|| self.database.clone()),
+            name: resource.name,
+            key_b64: resource.key_b64,
+            kind: resource.kind,
+        };
+        if target.kind == "database" {
+            if self.target.is_some()
+                || self.has_live_drafts()
+                || self.task.is_some()
+                || self.operation_pending
+            {
+                self.action("new-tab", backend);
+                self.workbench.queued_target = Some(target);
+                self.action("open", backend);
+            } else {
+                self.generation = self.generation.wrapping_add(1);
+                self.database = Some(target.name);
+                self.field_set("object_filter", "");
+                self.dirty = true;
+                self.action("list", backend);
+            }
+            return;
+        }
+        let profile_id = self.profile.as_ref().map(|p| p.id);
+        if let Some(index) = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            let current = if index == self.active {
+                &self.target
+            } else {
+                &tab.runtime.target
+            };
+            (tab.profile_id == profile_id
+                && current.as_ref().is_some_and(|current| {
+                    current.database == target.database
+                        && current.name == target.name
+                        && current.kind == target.kind
+                        && current.key_b64 == target.key_b64
+                }))
+            .then_some(index)
+        }) {
+            self.switch_tab(index);
+            self.view = "data".into();
+            self.workbench.overlay = None;
+            return;
+        }
+        if self.target.is_some()
+            || self.task.is_some()
+            || self.operation_pending
+            || self.has_live_drafts()
+            || !self.tabs[self.active].query.text.is_empty()
+        {
+            self.action("new-tab", backend);
+            self.workbench.queued_target = Some(target);
+            self.action("open", backend);
+        } else {
+            self.load_target(target, backend);
+        }
+    }
+
+    fn load_target(&mut self, target: ResourceTarget, backend: &Backend) {
+        self.generation = self.generation.wrapping_add(1);
+        self.scan_token = None;
+        self.database = target.database.clone().or_else(|| self.database.clone());
+        self.tabs[self.active].title = target.name.clone();
+        self.target = Some(target);
+        self.edit_token = None;
+        self.schema = None;
+        self.grid = None;
+        self.results.clear();
+        self.result_id = None;
+        self.page_history.clear();
+        self.page_token = None;
+        self.large = None;
+        self.browse_result = false;
+        self.view = "data".into();
+        self.workbench.section = "data".into();
+        self.workbench.overlay = None;
+        self.workbench.load_resource = true;
+        self.dirty = true;
+        self.action("describe", backend);
+    }
+
     fn action(&mut self, name: &str, backend: &Backend) {
-        if let Some(operation) = name.strip_prefix("redis-op:") {
-            self.field_set("operation", operation);
+        if name == "discard" {
+            self.finish_inline(false);
+        } else if matches!(
+            name,
+            "history"
+                | "new-tab"
+                | "close-tab"
+                | "new-profile"
+                | "edit-profile"
+                | "run"
+                | "selection"
+                | "current"
+                | "submit"
+                | "redis-submit"
+                | "open-cell"
+                | "open"
+                | "next"
+                | "previous"
+        ) && !self.finish_inline(true)
+        {
+            return;
+        }
+        if self.workbench_action(name, backend) {
             return;
         }
         let session = self.session_id();
@@ -812,6 +1047,22 @@ impl App {
         }
         match name {
             "workspace-copy" => self.save_workspace_copy(backend),
+            "databases" => {
+                if self.target.is_some() || self.has_live_drafts() || self.task.is_some() {
+                    self.action("new-tab", backend);
+                    self.workbench.queued_target = Some(ResourceTarget {
+                        database: None,
+                        name: String::new(),
+                        key_b64: None,
+                        kind: "database".into(),
+                    });
+                    self.action("open", backend);
+                } else {
+                    self.database = None;
+                    self.field_set("object_filter", "");
+                    self.action("list", backend);
+                }
+            }
             "new-profile" => self.profile_form(None),
             "edit-profile" => self.profile_form(self.profile.clone()),
             "save-profile" | "test-profile" => match self.form_profile() {
@@ -857,6 +1108,18 @@ impl App {
                             );
                             self.session = None;
                         }
+                        if self.workbench.queued_target.is_none() {
+                            self.workbench.queued_target = self.target.take();
+                        }
+                        self.edit_token = None;
+                        self.schema = None;
+                        self.grid = None;
+                        self.results.clear();
+                        self.result_id = None;
+                        self.page_token = None;
+                        self.page_history.clear();
+                        self.large = None;
+                        self.browse_result = false;
                         self.generation = self.generation.wrapping_add(1);
                         self.request(backend, "connection.open", "connection.open", json!({"profile_id":id,"secret":if self.field("password").is_empty(){None}else{Some(self.field("password"))}}));
                     }
@@ -883,6 +1146,9 @@ impl App {
                         self.scan_token = Some(token);
                         if name == "list" {
                             self.cursor = None;
+                            self.resources.clear();
+                            self.workbench.scan_dirty = false;
+                            self.workbench.key_page = 0;
                         }
                         self.request(backend,&format!("resource.list/{token}"),"resource.list",json!({"session_id":s,"database":self.database,"cursor":if name == "more" {self.cursor.clone()} else {None},"pattern":self.field("pattern"),"type":if self.field("type").is_empty(){None}else{Some(self.field("type"))},"limit":200}));
                     }
@@ -982,6 +1248,7 @@ impl App {
                 self.tabs.push(Tab {
                     title: format!("查询 {}", self.tabs.len() + 1),
                     query: Editor::new(""),
+                    cli_query: Editor::default(),
                     profile_id: self.profile.as_ref().map(|p| p.id),
                     id: Uuid::new_v4(),
                     layout: Vec::new(),
@@ -1017,12 +1284,15 @@ impl App {
                     }
                 }
             }
-            "history" => self.request(
-                backend,
-                "history.list",
-                "history.list",
-                json!({"workspace_id":self.workspace_id}),
-            ),
+            "history" => {
+                self.view = "history".into();
+                self.request(
+                    backend,
+                    "history.list",
+                    "history.list",
+                    json!({"workspace_id":self.workspace_id}),
+                );
+            }
             "file-open" | "file-save" => {
                 let method = if name == "file-open" {
                     "file.open"
@@ -1256,6 +1526,7 @@ impl App {
                 }
                 self.pending_rows = rows;
                 self.redis_changes = redis;
+                self.clear_redis_previews();
                 self.tabs[self.active].pending = Value::Null;
                 self.dirty = true;
                 self.detail = serde_json::to_string_pretty(
@@ -1400,21 +1671,6 @@ impl App {
                     }
                 }
             }
-            "redis-stage" => {
-                if self.edit_token.is_none() {
-                    self.status = "请先打开 Redis 编辑基线".into();
-                } else {
-                    match self.redis_operation() {
-                        Ok(change) => {
-                            self.redis_changes.push(change);
-                            self.detail = serde_json::to_string_pretty(&self.redis_changes)
-                                .unwrap_or_default();
-                            self.dirty = true;
-                        }
-                        Err(e) => self.status = e,
-                    }
-                }
-            }
             "redis-undo" => {
                 self.redis_changes.pop();
                 self.detail = serde_json::to_string_pretty(&self.redis_changes).unwrap_or_default();
@@ -1464,9 +1720,6 @@ impl App {
                     }
                 }
             }
-            "view-query" => self.view = "query".into(),
-            "view-transfer" => self.view = "transfer".into(),
-            "view-edit" => self.view = "edit".into(),
             _ => {}
         }
     }
@@ -1486,6 +1739,9 @@ impl App {
         let value = match response.result {
             Ok(v) => v,
             Err(e) => {
+                if self.workbench_error(&response.tag, &e) {
+                    return;
+                }
                 self.status = e.to_string();
                 if response.tag == "workspace.save" {
                     self.saving = false;
@@ -1501,10 +1757,16 @@ impl App {
                 }
                 if response.tag.starts_with("large.value/") {
                     self.large = None;
+                    self.workbench.inline = None;
+                    self.workbench.redis_loading = None;
+                }
+                if response.tag == "resource.describe" {
+                    self.workbench.load_resource = false;
                 }
                 if matches!(
                     response.tag.as_str(),
-                    "execution.start"
+                    "connection.open"
+                        | "execution.start"
                         | "resource.browse"
                         | "change.submit"
                         | "transfer.import"
@@ -1515,6 +1777,12 @@ impl App {
                 return;
             }
         };
+        if response.tag.starts_with("cli.")
+            || (self.workbench.cli_running && response.tag == "execution.get")
+        {
+            self.workbench_response(&response.tag, value, backend);
+            return;
+        }
         if response.tag.starts_with("large.value/") {
             self.large_response(&response.tag, value, backend);
             return;
@@ -1548,6 +1816,7 @@ impl App {
                 self.profiles =
                     serde_json::from_value(value.get("profiles").cloned().unwrap_or_default())
                         .unwrap_or_default();
+                self.migrate_cli_queries();
                 if self.profile.is_none() {
                     self.profile = self.tabs[self.active]
                         .profile_id
@@ -1582,6 +1851,7 @@ impl App {
                 {
                     self.tabs = state.tabs;
                     self.active = state.active.min(self.tabs.len() - 1);
+                    self.migrate_cli_queries();
                     self.restore_browse();
                     self.profile = self.tabs[self.active]
                         .profile_id
@@ -1609,14 +1879,23 @@ impl App {
                 }
             }
             "connection.open" => {
+                self.operation_pending = false;
                 match serde_json::from_value::<Profile>(
                     value.get("profile").cloned().unwrap_or(Value::Null),
                 ) {
                     Ok(profile) => {
                         self.tabs[self.active].profile_id = Some(profile.id);
+                        self.database = profile.database.clone();
                         self.profile = Some(profile);
                         self.session = Some(value);
                         self.status = "数据库连接已打开".into();
+                        if let Some(target) = self.workbench.queued_target.take() {
+                            if target.kind == "database" {
+                                self.database = (!target.name.is_empty()).then_some(target.name);
+                            } else {
+                                self.load_target(target, backend);
+                            }
+                        }
                         self.action("list", backend);
                     }
                     Err(e) => self.status = format!("数据库会话缺少有效连接信息: {e}"),
@@ -1624,11 +1903,26 @@ impl App {
             }
             "resource.list" => match serde_json::from_value::<ResourcePage>(value) {
                 Ok(page) => {
-                    self.resources = page.resources;
+                    if self.is_redis() {
+                        // Core 的扫描缓存按原始 key 去重，各页只发出尚未交付的项。
+                        self.resources.extend(page.resources);
+                        self.workbench.key_page =
+                            self.resources.len().saturating_sub(1) / workbench::KEY_PAGE_SIZE;
+                    } else {
+                        self.resources = page.resources;
+                    }
                     self.cursor = page.cursor;
                 }
                 Err(e) => self.status = e.to_string(),
             },
+            "history.list" => {
+                self.workbench.history = value
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                self.workbench.history_selected = (!self.workbench.history.is_empty()).then_some(0);
+            }
             "transfer.preview" => {
                 let valid = value
                     .get("errors")
@@ -1650,6 +1944,20 @@ impl App {
             "resource.describe" => {
                 self.schema = Some(value.clone());
                 self.detail = value.to_string();
+                if std::mem::take(&mut self.workbench.load_resource) {
+                    let writable = self.profile.as_ref().is_some_and(|p| {
+                        p.access_mode == datapier_core::model::AccessMode::ReadWrite
+                    });
+                    let editable = writable
+                        && (self.is_redis()
+                            || (self.target.as_ref().is_some_and(|t| t.kind == "table")
+                                && self
+                                    .schema
+                                    .as_ref()
+                                    .and_then(|s| s["keys"].as_array())
+                                    .is_some_and(|keys| !keys.is_empty())));
+                    self.action(if editable { "edit-open" } else { "browse" }, backend);
+                }
             }
             "current.info" => {
                 if let Some(mode) = value.get("sql_mode").and_then(Value::as_str) {
@@ -1681,7 +1989,11 @@ impl App {
             }
             "change.open" => {
                 self.edit_token = value.get("token").cloned();
-                self.schema = value.get("schema").cloned();
+                if let Some(schema) = value.get("schema") {
+                    self.schema = Some(schema.clone());
+                } else if self.is_redis() {
+                    self.schema = Some(value.clone());
+                }
                 self.detail = value.to_string();
                 if let Some(id) = value.get("result_id").and_then(Value::as_str) {
                     self.browse_result = true;
@@ -1689,15 +2001,14 @@ impl App {
                     self.page_history.clear();
                     self.result_id = Some(id.into());
                     self.page(backend, 0);
-                } else if let Some(g) = &mut self.grid {
-                    g.editable = self.browse_result
-                        && self
-                            .schema
-                            .as_ref()
-                            .and_then(|s| s.get("keys"))
-                            .and_then(Value::as_array)
-                            .is_some_and(|keys| !keys.is_empty());
+                } else {
+                    // MySQL change.open 只返回 token/schema；行数据必须再通过 browse 获取。
+                    self.action("browse", backend);
                 }
+            }
+            "change.discard" => {
+                self.workbench.load_resource = true;
+                self.action("describe", backend);
             }
             "execution.start" | "resource.browse" | "change.submit" | "transfer.import"
             | "transfer.export" => {
@@ -1740,6 +2051,8 @@ impl App {
                             }
                             self.pending_rows.clear();
                             self.redis_changes.clear();
+                            self.clear_redis_previews();
+                            self.workbench.overlay = None;
                             self.tabs[self.active].pending = Value::Null;
                             self.dirty = true;
                             self.tabs[self.active].pending_live = false;
@@ -1755,7 +2068,8 @@ impl App {
                                 self.resources.clear();
                                 self.action("list", backend);
                             } else {
-                                self.action("browse", backend);
+                                self.workbench.load_resource = true;
+                                self.action("describe", backend);
                             }
                             return;
                         } else {
@@ -1849,6 +2163,46 @@ impl App {
             }
         }
     }
+}
+
+// SDK 按区域、祖先 key 与子节点序号派生 id；只在请求焦点时沿当前 View 找路径，
+// 不复制整棵树，也不把业务字段名误当作终端中的节点 id。
+fn focus_node_id(view: &View<Msg>, key: &str) -> Option<String> {
+    fn find(node: &Node<Msg>, key: &str, path: &mut String) -> bool {
+        use std::fmt::Write as _;
+        if node.props().get("key").and_then(Value::as_str) == Some(key) {
+            return true;
+        }
+        for (index, child) in node.child_nodes().iter().enumerate() {
+            let length = path.len();
+            match child.props().get("key") {
+                Some(Value::String(child_key)) => {
+                    path.push('.');
+                    path.push_str(child_key);
+                }
+                Some(Value::Number(child_key)) => {
+                    let _ = write!(path, ".{child_key}");
+                }
+                _ => {
+                    let _ = write!(path, ".{index}");
+                }
+            }
+            if find(child, key, path) {
+                return true;
+            }
+            path.truncate(length);
+        }
+        false
+    }
+    for (region, node) in ["main", "dock", "layer"].into_iter().zip(view.regions()) {
+        if let Some(node) = node {
+            let mut path = region.to_owned();
+            if find(node, key, &mut path) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn tsp_error(error: tern_sdk::Error) -> AppError {
@@ -1973,9 +2327,16 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     .map_err(tsp_error)?;
                 css = next_css;
             }
-            session
-                .render(surface, views::render(&app))
-                .map_err(tsp_error)?;
+            let view = views::render(&app);
+            let focus = app
+                .workbench
+                .focus_request
+                .take()
+                .map(|key| focus_node_id(&view, &key));
+            session.render(surface, view).map_err(tsp_error)?;
+            if let Some(id) = focus {
+                session.focus(surface, id.as_deref()).map_err(tsp_error)?;
+            }
             changed = false;
         }
         match session.next(Some(Duration::from_millis(250))) {
@@ -2005,60 +2366,26 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         }
                     }
                     Msg::Profile(index) => {
-                        if let Some(profile) = app.profiles.get(index).cloned() {
-                            let bound = app
-                                .session
-                                .as_ref()
-                                .and_then(|s| s.get("profile"))
-                                .and_then(|p| p.get("id"))
-                                .and_then(Value::as_str)
-                                .and_then(|id| Uuid::parse_str(id).ok());
-                            if app.session.is_some() && bound != Some(profile.id) {
-                                app.status = "请新建 tab 连接其他配置".into();
-                            } else {
-                                app.profile = Some(profile.clone());
-                                app.tabs[app.active].profile_id = Some(profile.id);
-                                app.dirty = true;
-                                app.status = format!("已选择 {}", profile.name);
-                            }
+                        if app.finish_inline(true) {
+                            app.select_profile(index, &backend);
                         }
                     }
                     Msg::Resource(index) => {
-                        if let Some(resource) = app.resources.get(index).cloned() {
-                            if app.task.is_some() || app.operation_pending {
-                                app.status = "请等待或取消当前任务".into();
-                            } else if app.has_live_drafts() {
-                                app.status = "请先提交或丢弃待提交变更".into();
-                            } else if resource.kind == "database" {
-                                app.generation = app.generation.wrapping_add(1);
-                                app.database = Some(resource.name);
-                                app.dirty = true;
-                                app.action("list", &backend);
-                            } else {
-                                app.generation = app.generation.wrapping_add(1);
-                                app.target = Some(ResourceTarget {
-                                    database: resource.database.or_else(|| app.database.clone()),
-                                    name: resource.name,
-                                    key_b64: resource.key_b64,
-                                    kind: resource.kind,
-                                });
-                                app.edit_token = None;
-                                app.schema = None;
-                                app.grid = None;
-                                app.result_id = None;
-                                app.browse_result = false;
-                                app.dirty = true;
-                                app.status = "已选择资源".into();
-                            }
+                        if app.finish_inline(true) {
+                            app.select_resource(index, &backend);
                         }
                     }
                     Msg::Tab(index) => {
-                        if index < app.tabs.len() {
+                        if index < app.tabs.len() && app.finish_inline(true) {
                             app.switch_tab(index);
                             app.dirty = true;
                         }
                     }
                     Msg::ResultSet(id) => {
+                        if !app.finish_inline(true) {
+                            changed = true;
+                            continue;
+                        }
                         if app.has_live_drafts() {
                             app.status = "请先提交或丢弃待提交变更与粘贴预览".into();
                         } else {
@@ -2075,6 +2402,10 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         }
                     }
                     Msg::Cell(row, column, extend) => {
+                        if !app.finish_inline(true) {
+                            changed = true;
+                            continue;
+                        }
                         if let Some(grid) = &mut app.grid {
                             if let Err(e) = grid.select(Cell { row, column }, extend, false) {
                                 app.status = e.to_string();
@@ -2087,9 +2418,17 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         if let Some(grid) = &mut app.grid {
                             let _ = grid.select(Cell { row, column }, false, false);
                         }
-                        app.open_cell(&backend);
+                        if app.is_redis() {
+                            app.workbench_redis_edit(&backend);
+                        } else {
+                            app.begin_inline(&backend);
+                        }
                     }
                     Msg::Row(row, column) => {
+                        if !app.finish_inline(true) {
+                            changed = true;
+                            continue;
+                        }
                         if let Some(grid) = &mut app.grid {
                             if let Err(e) = grid.select(Cell { row, column }, false, true) {
                                 app.status = e.to_string();
@@ -2102,7 +2441,15 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 changed = true;
             }
             Ok(Some(Input::Key(key))) => {
+                if app.workbench_key(&key, &backend) {
+                    changed = true;
+                    continue;
+                }
                 if key.is("ctrl+q") {
+                    if !app.finish_inline(true) {
+                        changed = true;
+                        continue;
+                    }
                     if !app.workspace_loaded && app.dirty {
                         app.status = "工作区尚未加载，无法保存".into();
                     } else {
@@ -2114,7 +2461,11 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 }
                 if app.focus == "grid" {
                     if key.is("enter") || key.is("f2") {
-                        app.open_cell(&backend);
+                        if app.is_redis() {
+                            app.workbench_redis_edit(&backend);
+                        } else {
+                            app.begin_inline(&backend);
+                        }
                         changed = true;
                         continue;
                     }
@@ -2170,7 +2521,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                                             .join("\n")
                                     );
                                     app.paste_preview = Some(preview);
-                                    app.view = "edit".into();
+                                    app.workbench.overlay = Some("preview".into());
                                 }
                                 Err(e) => app.status = e.to_string(),
                             }

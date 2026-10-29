@@ -368,6 +368,7 @@ impl RedisSession {
             }
             let group = id.to_string();
             let mut resources = Vec::with_capacity(limit);
+            let mut ttl_query = redis::pipe();
             let mut last = 0i64;
             let mut size = 0usize;
             // SCAN 可返回空批次和重复项；只有服务端 cursor 为零才算扫描结束。
@@ -384,7 +385,8 @@ impl RedisSession {
                         name: String::from_utf8_lossy(key).into_owned(), kind: row.try_get(2)?,
                         database: Some(self.profile.redis_db.to_string()), key_b64: Some(STANDARD.encode(key)), data: Json::Null,
                     };
-                    let bytes = serde_json::to_vec(&resource)?.len() + 1;
+                    // TTL 是当前页的读取值；预留最坏 i64 JSON 长度，仍遵守分页字节上限。
+                    let bytes = serde_json::to_vec(&resource)?.len() + 1 + 32;
                     if size + bytes > 1024 * 1024 - 1024 {
                         if resources.is_empty() { return Err(AppError::new("result_too_large", "单个 Redis key 超过分页字节限制")); }
                         page_full = true;
@@ -392,6 +394,7 @@ impl RedisSession {
                     }
                     size += bytes;
                     last = seq;
+                    ttl_query.cmd("PTTL").arg(key);
                     resources.push(resource);
                     if resources.len() == limit { page_full = true; break; }
                 }
@@ -419,6 +422,16 @@ impl RedisSession {
                 }
                 scan.cursor = next;
                 scan.complete = next == 0;
+            }
+            if !resources.is_empty() {
+                ensure_not_cancelled(cancel)?;
+                let ttls: Vec<i64> = ttl_query.query_async(&mut self.conn).await?;
+                if ttls.len() != resources.len() {
+                    return Err(AppError::new("database", "Redis TTL 回复数量不匹配"));
+                }
+                for (resource, ttl) in resources.iter_mut().zip(ttls) {
+                    resource.data = json!({"ttl_ms": ttl});
+                }
             }
             let pending: Option<i64> = sqlx::query_scalar("SELECT 1 FROM redis_key_scan WHERE scan_id=? AND emitted=0 AND seq>? LIMIT 1")
                 .bind(&group).bind(last).fetch_optional(&scan.cache).await?;
