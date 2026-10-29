@@ -2,7 +2,7 @@
 
 ## 当前发布方式与边界
 
-当前实现版本为 0.1.0，尚未发布。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时构建六个原生目标并生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源。正式分发需要在验收完成后人工创建 GitHub Release 并上传组包产物。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
+当前实现版本为 0.1.0，尚未发布。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源。正式分发需要在验收完成后人工创建 GitHub Release 并上传组包产物。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
 
 [技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)记录了历史 macOS arm64 运行情况：其余五个目标尚无原生运行记录，六个真实产物尚未集齐，完整启动包组装受阻；Windows ConPTY／权限和 Linux 凭据服务尚未实际验证。历史记录不是本次重新运行的结果，不能据此声称六目标验收完成。
 
@@ -55,7 +55,7 @@
 | windows-2022 | x86_64-pc-windows-msvc |
 | windows-11-arm | aarch64-pc-windows-msvc |
 
-每个 job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、运行 `--version` smoke、调用单目标组包脚本并上传 `datapier-<target>` Actions artifact。默认测试与版本 smoke 不等于上面的真实运行验收。随后 bundle job 下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact；该产物仍需人工发布。
+独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、运行 `--version` smoke、调用单目标组包脚本并上传 `datapier-<target>` Actions artifact。默认测试与版本 smoke 不等于上面的真实运行验收。随后 bundle job 下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact；该产物仍需人工发布。
 
 也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `$Target` 替换为上表中的实际目标，构建后仍须完成相应运行验收。六个归档与 sidecar 必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
 

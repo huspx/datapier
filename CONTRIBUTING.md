@@ -11,7 +11,7 @@
 - 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，`rust-version` 为 1.88。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
 - 应用程序的 `Cargo.lock` 固定依赖并随源码提交；官方 `tern-sdk` 固定 Git revision `9e9c07463f4958b0c633424c9860aba499487d28`。六种目标使用一致的锁定依赖。
-- 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 和额外格式化工具不是强制开发条件。
+- 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
 
 构建本地程序并直接在 Tern 中启动：
@@ -70,6 +70,50 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 - 注释使用简体中文，标识符和技术术语保留 English；遵循语言生态的文档格式，Rust 接口使用 rustdoc。
 - 涉及 unsafe 时，按 Rust 约定在相邻位置通过 `SAFETY` 注释说明安全依据；对外暴露的 unsafe 接口通过 `# Safety` 文档说明调用方必须满足的条件。
 - 交付前检查本次变更中依赖背景知识才能理解的逻辑，确认关键原因与约束已记录；不以注释数量、行数或覆盖率代替可读性判断。
+
+## 代码格式化
+
+### 配置与工具职责
+
+[dprint.json](dprint.json) 是 dprint 插件版本、格式参数、包含和排除规则的唯一来源；仅使用固定版本的 Wasm 插件，禁止添加、使用或间接调用 Exec 插件。配置沿用现有空格缩进与 LF；各语言差异由配置表达，不在其他文档或编辑器中复制参数。
+
+| 当前文件范围 | Formatter 与边界 |
+|---|---|
+| Rust | 原生 `cargo fmt`／rustfmt，沿用 workspace edition 和当前 stable toolchain，不通过 dprint 调用 |
+| HTML、内嵌 JavaScript／CSS、独立 CSS | dprint；TypeScript 插件仅为现有 HTML 的内嵌 JavaScript 提供格式化，不启用独立 TypeScript 文件 |
+| JSON／JSONC 配置、YAML、TOML（含 Cargo manifest 与 plugin 配置） | dprint |
+| 独立 SQL | dprint，dialect 为 SQLite；当前文件是本地持久化 migration，不按 MySQL provider 选择方言 |
+| POSIX Shell、Luau | dprint 的 Wasm 插件，无须另装 shfmt 或 StyLua CLI |
+
+当前没有 Java、XML 或 Python 源文件，不预装相应插件；PowerShell 不接入格式化。Markdown 不属于当前 dprint 范围。新增语言前核对[官方插件目录](https://dprint.dev/plugins/)的实际支持并更新项目配置，不假定 XML 能格式化 MyBatis SQL，或原生语言 Formatter 能处理字符串中的 SQL。
+
+dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。当前 SQLite 迁移按 `PRAGMA user_version` 管理；SQL 格式整理必须保持 schema 与版本语义，并验证新建和旧版本升级路径，不借机修改历史迁移逻辑。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
+
+### 本地执行与 AI 修改要求
+
+修改前阅读适用规范并沿用附近实现；修改后显式列出本次任务改动的文件，优先只格式化这些文件，不包含用户已有的无关修改。以下命令均从仓库根目录执行，文件路径替换为本次实际变更：
+
+```sh
+dprint fmt --config ./dprint.json --config-discovery=false -- path/to/changed-file
+dprint check --config ./dprint.json --config-discovery=false -- path/to/changed-file
+```
+
+Rust 单文件使用同一套原生 rustfmt，避免递归改写未变更的子模块；全 workspace 使用现有 `cargo fmt` 做只读检查：
+
+```sh
+rustfmt --edition 2024 --config skip_children=true path/to/changed.rs
+cargo fmt --all --check
+```
+
+不默认运行全仓写入式 `dprint fmt` 或 `cargo fmt --all`；历史格式差异单独报告，批量迁移需有明确任务范围。使用上述仓库命令，不自行更换 Formatter、传入另一套插件或覆盖项目格式参数。编辑器若启用保存格式化，同类文件只能使用本节指定的 Formatter 并读取项目配置，避免与 Prettier、其他 StyLua 配置或个人全局配置重复处理。
+
+### 自动化与检查边界
+
+可执行的 CI 命令和 dprint CLI 固定版本维护在[现有工作流](.github/workflows/native-release.yml)的 `format` job；本地使用与该 job 一致的 CLI 版本。工具缺失时可按该 job 的安装命令或[dprint 官方安装说明](https://dprint.dev/install/)安装；本仓库不引入 npm 项目依赖、通用 Formatter 分发脚本或提交 Hook。
+
+Rust 运行原有全 workspace 格式检查；dprint 检查 PR base／push before 到当前提交之间仍存在的新增、复制、修改或重命名文件。没有有效 before 时检查当前提交相对父提交的变化，根提交检查全部文件；手动触发也遵循该规则。`--allow-no-files` 仅处理变更中没有 dprint 适用文件的情况，不忽略解析错误、插件错误或格式差异。没有全仓格式迁移时，不以全仓 dprint 检查阻塞无关历史差异。
+
+Formatter 仅负责格式，不替代 Clippy、类型／编译检查或行为验证；仍按[测试与验证](#测试与验证)执行适用检查。CLI 参数以[官方 CLI 文档](https://dprint.dev/cli/)为准，项目范围和插件配置以仓库文件为准。
 
 ## 模块边界
 
@@ -130,10 +174,9 @@ MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支
 
 ## 测试与验证
 
-Rust 改动按影响范围运行 `cargo check --locked`／`cargo test --locked`；常规格式、静态检查及 workspace 默认测试命令为：
+Rust 改动按影响范围运行 `cargo check --locked`／`cargo test --locked`；格式检查按[代码格式化](#代码格式化)执行。静态检查与 workspace 默认测试命令为：
 
 ```sh
-cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```

@@ -6,6 +6,45 @@ on:
 permissions:
   contents: read
 jobs:
+  format:
+    name: Formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install dprint
+        run: npm install --global dprint@0.64.3
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Check changed files with dprint
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          # 手动触发和新分支没有有效 before；根提交则检查全部新增文件。
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            if git rev-parse --verify --quiet HEAD^ > /dev/null; then
+              base=HEAD^
+            fi
+          fi
+          if [[ -n "$base" && ! "$base" =~ ^0+$ ]]; then
+            git diff --name-only --diff-filter=ACMR -z "$base" HEAD -- > "$RUNNER_TEMP/dprint-files"
+          else
+            git ls-files -z > "$RUNNER_TEMP/dprint-files"
+          fi
+          if [[ -s "$RUNNER_TEMP/dprint-files" ]]; then
+            files=()
+            while IFS= read -r -d '' file; do
+              files+=("$file")
+            done < "$RUNNER_TEMP/dprint-files"
+            dprint check --config ./dprint.json --config-discovery=false --allow-no-files -- "${files[@]}"
+          fi
   native:
     name: Native ${{ matrix.target }}
     strategy:
