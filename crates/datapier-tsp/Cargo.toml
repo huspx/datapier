@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
-datapier-core = { path = "../datapier-core" }
-datapier-engine = { path = "../datapier-engine" }
 base64.workspace = true
 csv.workspace = true
+datapier-core = { path = "../datapier-core" }
+datapier-engine = { path = "../datapier-engine" }
 serde.workspace = true
 serde_json.workspace = true
 tern-sdk.workspace = true

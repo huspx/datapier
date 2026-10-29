@@ -12,5 +12,5 @@ CREATE TABLE result_rows (
     result_id TEXT NOT NULL REFERENCES results(id) ON DELETE CASCADE,
     row_no INTEGER NOT NULL,
     payload BLOB NOT NULL,
-    PRIMARY KEY(result_id,row_no)
+    PRIMARY KEY(result_id, row_no)
 ) WITHOUT ROWID;

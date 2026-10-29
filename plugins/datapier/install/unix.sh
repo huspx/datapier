@@ -10,7 +10,13 @@ json_string() {
     printf '%s' "$1" | awk 'BEGIN { ORS=""; printf "\"" } { if (NR>1) printf "\\n"; for(i=1;i<=length($0);i++) { c=substr($0,i,1); if(c=="\\") printf "\\\\"; else if(c=="\"") printf "\\\""; else if(c=="\r") printf "\\r"; else if(c=="\t") printf "\\t"; else printf "%s",c } } END { printf "\"" }'
 }
 REPORTED=0
-fail() { REPORTED=1; printf '{"ok":false,"error":'; json_string "$1"; printf '}\n'; exit 1; }
+fail() {
+    REPORTED=1
+    printf '{"ok":false,"error":'
+    json_string "$1"
+    printf '}\n'
+    exit 1
+}
 cleanup() {
     status=$?
     trap - EXIT
@@ -26,9 +32,15 @@ hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d '
 mkdir -p "$CACHE" || fail '无法创建缓存目录'
 CACHE=$(CDPATH= cd -- "$CACHE" && pwd -P)
 case $(uname -s) in
- Darwin) OS=apple-darwin; if [ "$(sysctl -in hw.optional.arm64 2>/dev/null || printf 0)" = 1 ]; then ARCH=aarch64; else ARCH=x86_64; fi ;;
- Linux) OS=unknown-linux-gnu; case $(uname -m) in x86_64|amd64) ARCH=x86_64;; aarch64|arm64) ARCH=aarch64;; *) fail '不支持的 Linux CPU 架构';; esac ;;
- *) fail '不支持的操作系统';;
+Darwin)
+    OS=apple-darwin
+    if [ "$(sysctl -in hw.optional.arm64 2>/dev/null || printf 0)" = 1 ]; then ARCH=aarch64; else ARCH=x86_64; fi
+    ;;
+Linux)
+    OS=unknown-linux-gnu
+    case $(uname -m) in x86_64 | amd64) ARCH=x86_64 ;; aarch64 | arm64) ARCH=aarch64 ;; *) fail '不支持的 Linux CPU 架构' ;; esac
+    ;;
+*) fail '不支持的操作系统' ;;
 esac
 TARGET=$ARCH-$OS
 # 临时目录位于目标缓存所在文件系统，使校验后的硬链接发布保持原子性。
@@ -56,13 +68,13 @@ else
     if [ ! -f "$DEST/datapier" ]; then
         URL=${DATAPIER_RELEASE_URL:-}
         if [ -z "$URL" ] && [ -f "$PLUGIN_DIR/release-url.txt" ]; then URL=$(cat "$PLUGIN_DIR/release-url.txt"); fi
-        case $URL in https://*) ;; *) fail '未配置有效的 HTTPS 发布地址；请设置 DATAPIER_RELEASE_URL';; esac
+        case $URL in https://*) ;; *) fail '未配置有效的 HTTPS 发布地址；请设置 DATAPIER_RELEASE_URL' ;; esac
         command -v curl >/dev/null 2>&1 || fail '需要 curl 下载发布文件'
         curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error "${URL%/}/$FILE" -o "$TMP/package.tar.gz" || fail '下载发布文件失败'
         # 归档摘要验证下载内容，程序摘要再次验证解包结果；固定成员名也避免路径穿越。
         [ "$(hash "$TMP/package.tar.gz")" = "$DIGEST" ] || fail '发布文件 SHA256 不匹配'
         [ "$(tar -tzf "$TMP/package.tar.gz")" = datapier ] || fail '发布压缩包内容无效'
-        tar -xOzf "$TMP/package.tar.gz" datapier > "$TMP/datapier" || fail '解包失败'
+        tar -xOzf "$TMP/package.tar.gz" datapier >"$TMP/datapier" || fail '解包失败'
         [ "$(hash "$TMP/datapier")" = "$BINARY_HASH" ] || fail '发布程序 SHA256 不匹配'
     fi
 fi
@@ -76,4 +88,6 @@ fi
 [ -f "$DEST/datapier" ] && [ -x "$DEST/datapier" ] || fail '缓存程序不存在或不可执行'
 [ "$(hash "$DEST/datapier")" = "$BINARY_HASH" ] || fail '缓存程序校验失败，请移除对应缓存目录后重试'
 [ "$("$DEST/datapier" --version)" = "datapier $VERSION" ] || fail '缓存程序版本不匹配'
-printf '{"ok":true,"cwd":'; json_string "$DEST"; printf '}\n'
+printf '{"ok":true,"cwd":'
+json_string "$DEST"
+printf '}\n'

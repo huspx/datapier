@@ -7,7 +7,15 @@ function M.start(cx)
     local argv
     -- runtime 只保证提供 OS；硬件架构识别、摘要验证和缓存发布交给原生安装脚本。
     if os == "windows" then
-        argv = { "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tern.plugin.dir .. "/install/windows.ps1" }
+        argv = {
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            tern.plugin.dir .. "/install/windows.ps1",
+        }
     elseif os == "macos" or os == "linux" then
         argv = { "/bin/sh", tern.plugin.dir .. "/install/unix.sh" }
     else
