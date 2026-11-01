@@ -48,7 +48,7 @@
 | Linux | x86-64、arm64 | GNU／glibc |
 | Windows | x86-64、arm64 | MSVC |
 
-六种组合均要求原生运行验收，交叉编译成功不等于平台支持。CI 使用 macOS 14／15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
+六种组合均要求原生运行验收，交叉编译成功不等于平台支持。CI 使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
 
 当前开发基线为 **Tern 0.9.9 与 tern-sdk 0.2.0**；数据库验收范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点。数据库服务可以运行在独立服务器上；既有运行记录见[技术方案](docs/technical-design-0.1.0.md#11-实现与运行记录)。
 
