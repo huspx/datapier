@@ -4,9 +4,9 @@
 
 Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接、资源浏览、查询和数据编辑体验，同时保留不同数据库的数据模型与操作语义。
 
-首批支持 **MySQL 与 Redis**，以 **Rust TSP 应用＋Tern 启动 plugin** 交付。共享 Engine 独立于界面和 agent 协议；数据库采用内置 provider 扩展，后续可接入 PostgreSQL、MongoDB 及其他界面。
+首批支持 **MySQL 与 Redis**，以 **Rust TSP 应用＋Tern 启动 plugin** 交付。共享 Engine 独立于界面；数据库采用内置 provider 扩展，后续可接入 PostgreSQL、MongoDB 及其他界面。MCP 和 Agent 接入属于 0.2.0 规划，当前尚未实现；本文涉及 MCP 的架构、接口与验收均为未来目标。
 
-正式目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**，共六种原生运行组合。0.1.0 起按此范围交付 UI 与 Engine，0.2.0 起 MCP 同样覆盖全部目标。
+正式目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**，共六种原生运行组合。0.1.0 以此范围交付 UI 与 Engine，0.2.0 规划 MCP 同样覆盖全部目标；当前已记录的运行范围和未完成的原生验收见[技术方案第 11 节](technical-design-0.1.0.md#11-实现与运行记录)。
 
 核心使用场景：
 
@@ -22,7 +22,7 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 
 | 层次 | 选型 | 职责 |
 |---|---|---|
-| Tern 界面 | Rust、官方 `tern-sdk`、Tern 原生渲染 | 工作区、资源树、查询编辑器、数据 grid 与交互状态 |
+| Tern 界面 | Rust、官方 tern-sdk 0.2.0、Tern 0.9.9 原生渲染 | 工作区、资源树、查询编辑器、数据 grid 与交互状态 |
 | Tern 启动集成 | Tern 内嵌 Luau、Plugin SDK | 命令面板入口、快捷键、定位并启动 Rust 程序 |
 | 业务内核与 Engine | Rust、Tokio、Serde | 连接、provider、执行任务、结果、变更、持久化与生命周期 |
 | 内部通信 | macOS／Linux 使用 Unix domain socket，Windows 使用字节模式 Named Pipe；共用长度分帧的 JSON 消息 | UI／MCP 到 Engine 的请求、响应和任务事件；支持协议版本握手 |
@@ -30,16 +30,16 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 | Redis | redis-rs 1.8，启用 Tokio 与 TLS 支持 | 命令、游标扫描、类型化数据操作 |
 | 内部存储 | SQLite，通过 SQLx 访问 | 连接配置、工作区、草稿、查询历史和执行记录；不作为首批外部数据库入口 |
 | 凭据存储 | keyring 4.2，启用 `v1`；macOS Keychain、Windows Credential Manager、Linux Secret Service | 密码等秘密数据，与普通配置分离；凭据服务不可用时仅会话内保存 |
-| SQL 辅助 | sqlparser-rs、数据库元数据 | 语句定位、基础诊断和补全；实际执行以数据库反馈为准 |
+| SQL 辅助 | sqlparser-rs、sqlformat、数据库元数据 | 语句定位、基础诊断、补全与原生选区格式化；保留 token 语义，实际执行以数据库反馈为准 |
 | Agent 接入 | 官方 Rust MCP SDK rmcp 3.8、stdio | 0.2.0 提供 MCP tools 与结构化结果 |
 
-Rust 使用 stable toolchain、edition 2024；依赖补丁版本及 TSP SDK 版本锁定在 `Cargo.lock`。IPC 编解码和会话层共用异步字节流接口，平台实现负责连接建立、端点命名、访问权限、实例锁及进程启动／退出；业务逻辑不按 OS 分叉。
+Rust 使用 stable toolchain、edition 2024；TSP SDK 在 workspace 精确固定为 `0.2.0`，依赖由 `Cargo.lock` 锁定。界面使用 Tern 公开语义控件，表单与主操作保留明确层级；导航行、标签、grid 和状态入口按唯一 HTML 设计使用局部样式，不维护旧 SDK 兼容层。IPC 编解码和会话层共用异步字节流接口，平台实现负责连接建立、端点命名、访问权限、实例锁及进程启动／退出；业务逻辑不按 OS 分叉。
 
 ### 2.2 组件与进程边界
 
 ```mermaid
 flowchart LR
-    P["Tern 启动 plugin"] -->|启动| U["datapier ui · Rust TSP"]
+    P["Tern 启动 plugin"] -->|启动| U["datapier tui · Rust TSP"]
     T["Tern 原生渲染"] <-->|TSP · PTY| U
     A["MCP client"] <-->|MCP · stdio| M["datapier mcp"]
     U <-->|本地 IPC| E["datapier engine"]
@@ -56,7 +56,7 @@ flowchart LR
 - **Luau plugin** 使用 window entry，负责启动集成；界面与业务状态由 Rust 实现。
 - **MCP adapter** 只做协议转换、权限上下文传递和会话管理，复用 Engine 的 provider、任务及提交逻辑。
 
-发布一个 `datapier` 可执行文件，按子命令启动独立进程：`ui` 运行 TSP 界面，`engine` 运行共享内核，0.2.0 增加 `mcp`。UI 与 MCP 按同一用户数据目录发现或启动唯一 Engine；不同工作区可由同一 Engine 管理。
+发布一个 `datapier` 可执行文件，按子命令启动独立进程：`tui` 运行 TSP 界面，`engine` 运行共享内核，0.2.0 增加 `mcp`。UI 与 MCP 按同一用户数据目录发现或启动唯一 Engine；不同工作区可由同一 Engine 管理。
 
 TSP 和 MCP 分属不同进程及通道：UI 的 PTY 承载 TSP，MCP 的 stdin／stdout 仅承载 MCP 消息。Engine 不继承或持有这两套协议的 stdio，日志也不写入协议输出。
 
@@ -83,7 +83,13 @@ PostgreSQL、MongoDB 不绑定现有版本的交付日期；当前版本验收�
 
 单元格从浏览进入编辑，修改本地草稿，确认后进入待提交变更集；只有显式提交才写入数据库。编辑使用文本、UTF-16 光标和选区；支持 Tern 的原生编辑事件时由 Rust 声明能力并处理 `edit`／`undo`，否则由程序处理键盘编辑。native editing 只承担文本编辑，不替代 grid 导航、选择和变更管理。
 
+变更预览由 Core 共享的实际执行构造器产生：MySQL 展示参数化 SQL、绑定参数与事务／校验边界，Redis 展示真实字节命令、脚本和 TTL。预览不写库、不消费编辑令牌，提交时继续复核；截断展示明确标记，不能当作完整执行参数。
+
+标签可按右击目标关闭左侧、右侧或全部；关闭前整批预检草稿和任务，会话关闭等待确认。编辑连接前关闭当前工作区该连接全部标签，其他连接保留。全部关闭后显示零标签空态并持久化，不自动建立占位标签。
+
 0.1.0 包含分页、列宽设置、隐藏／冻结列、点击与键盘导航、Shift 选择、复制粘贴和单元格编辑。列宽可通过设置入口调整。鼠标拖拽列宽、跨单元格鼠标拖选、连续虚拟滚动先验证公开协议和实际运行效果，不作为 0.1.0 的交付承诺，也不依赖未公开的 Tern 事件。
+
+grid 的单格和矩形选区通过应用右键菜单或底部 copy 图标复制，不绑定 Ctrl+C 或 Command+C；后台完整读取大值并保留 TSV、NULL 与二进制语义。行复制和 MySQL INSERT 复制保留。Tern 自动附加的原生 `Copy` 只复制右击节点展示文字，不能读取应用选区或完整大值。
 
 结果展示按行数和字节数限量，只构建当前窗口的节点；编辑时保持其他节点标识稳定，更新受影响的展示部分。首个真实 UI 场景必须验证表头与行列对齐、分页、冻结、选择、中文／emoji 输入、撤销、编辑切换及大字段处理。
 
@@ -128,7 +134,7 @@ Engine 使用私有数据目录和 OS 文件锁保证实例唯一；运行描述
 | Windows | x86-64 | `x86_64-pc-windows-msvc` | Named Pipe |
 | Windows | arm64 | `aarch64-pc-windows-msvc` | Named Pipe |
 
-Linux 发布采用 GNU／glibc 目标，Windows 采用 MSVC 目标。构建配置明确最低 OS／glibc 要求，发布说明记录实际验证的系统版本及运行库依赖；最低版本需要同时满足 Tern、TSP SDK 与锁定依赖的要求。Rust target 可用不代表宿主或依赖已完成运行验证。
+Linux 发布采用 GNU／glibc 目标，Windows 采用 MSVC 目标。发布前须明确最低 OS／glibc 要求，并在发布说明记录实际验证的系统版本及运行库依赖；最低版本需要同时满足 Tern、TSP SDK 与锁定依赖的要求。现有 CI runner 只是构建基线，Rust target 可用不代表宿主或依赖已完成运行验证。
 
 TSP UI 使用各目标平台对应的 Tern 原生构建。Windows 使用 Tern 随附的 ConPTY，交由官方 SDK 处理 APC／OSC 877 的输入差异；macOS／Linux 使用 PTY。快捷键按平台适配 Command／Ctrl，文本与 IPC 的类型和编码语义保持一致。
 
@@ -137,14 +143,14 @@ TSP UI 使用各目标平台对应的 Tern 原生构建。Windows 使用 Tern �
 
 ## 3. 项目结构
 
-采用 monorepo，按实际版本新增可运行模块；不预建空壳 crate 或未接线的接口。以下均为规划新增路径。
+项目按实际版本新增可运行模块；不预建空壳 crate 或未接线的接口。以下为职责示意，包含后续版本规划，实际路径以源码为准。
 
 ```text
 datapier/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── crates/
-│   ├── datapier/                   # 单一可执行文件，分派 ui／engine／mcp
+│   ├── datapier/                   # 单一可执行文件，分派 tui／engine；mcp 为后续规划
 │   ├── datapier-core/
 │   │   └── src/
 │   │       ├── model/              # 资源、值类型、能力描述
@@ -180,7 +186,7 @@ datapier/
 
 ### 4.1 0.1.0：基础数据库工作台
 
-目标：完整覆盖“连接 → 浏览／查询 → 编辑 → 提交 → 导入导出”的日常工作流。
+目标：完整覆盖“连接 → 浏览／查询 → 编辑 → 提交 → 导入导出”的日常工作流。当前实现和运行验收范围见 [README](../README.md) 与[技术方案](technical-design-0.1.0.md#11-实现与运行记录)。
 
 | 功能 | 交付内容 |
 |---|---|
@@ -257,7 +263,7 @@ macOS 开发使用 Homebrew 安装的 Rust 与 Cargo，不强制引入 rustup；
 
 Luau 由 Tern 内嵌执行，不要求单独安装 Luau runtime。修改启动 plugin 时可由目标版本的 `tern plugin types` 生成声明供参考，真实行为通过 Tern 加载和启动验证，不以类型声明或 LSP 检查代替运行。TSP SDK 负责协议编码与事件接入，grid 和数据库工作流仍由 Datapier 实现。
 
-0.1.0 内先贯通启动入口、共享 Engine、MySQL／Redis 真实查询与 TSP 结果展示，验证第 2.4 节的基础交互，再完成浏览编辑、数据交换与恢复。后续 MCP 与高级功能复用这些能力。
+0.1.0 的实现与历史运行范围见[技术方案](technical-design-0.1.0.md#11-实现与运行记录)。后续 MCP 与高级功能计划复用现有能力。
 
 ### 5.2 验证标准
 
@@ -277,7 +283,7 @@ Luau 由 Tern 内嵌执行，不要求单独安装 Luau runtime。修改启动 p
 
 验收覆盖第 2.7 节全部六种原生组合，每种均验证安装启动、TSP 交互、数据库读写及 TLS、类型保真、凭据存取、多客户端 IPC、退出收尾和恢复；0.2.0 起增加 MCP stdio 及无 Tern 的独立运行。允许交叉编译，但交叉编译成功、模拟器或兼容层运行不替代目标架构的原生验收；缺少相应宿主或运行环境即为该目标尚未完成验收，不自动缩减交付范围。
 
-宿主与数据库验收基线为 Tern 0.9.5、MySQL 8.0／8.4、Redis 6.2／7.2／8.0 单节点。数据库实例可部署于独立测试服务器，六种目标上的 Datapier 客户端原生运行，不要求数据库服务端也在每种目标上本地安装。TSP SDK、协议事件及 native editing 以相应平台 Tern 的实际行为为准，Windows 同时验证随附 ConPTY；SDK 更新不等于已支持新的 Tern 能力。
+当前宿主验收基线为 Tern 0.9.9，数据库范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点。数据库实例可部署于独立测试服务器，六种目标上的 Datapier 客户端原生运行，不要求数据库服务端也在每种目标上本地安装。TSP SDK、协议事件及 native editing 以相应平台 Tern 的实际行为为准，Windows 同时验证随附 ConPTY；SDK 更新不等于已支持新的 Tern 能力。
 
 凭据库不可用时只在当前 Engine 会话保存秘密，重启后重新输入，不写入明文配置。Engine 或数据库不可达时保留草稿、显示失败原因并提供重新连接，不伪造空结果。
 

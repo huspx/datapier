@@ -7,8 +7,8 @@
 | 功能 | 0.1.0 交付 |
 |---|---|
 | 连接与工作区 | MySQL／Redis 直连、认证、TLS、数据库选择、只读／读写；多 tab、最近连接、草稿与布局恢复；多个 UI 共享 Engine |
-| MySQL | database／表／视图／字段／索引／约束／DDL 浏览；过滤、多列排序、分页；可靠键定位的基表增删改 |
-| Redis | 单节点 DB 选择、SCAN 与 pattern／type 过滤；String、Hash、List、Set、ZSet 浏览编辑；重命名、删除和 TTL |
+| MySQL | 5.7／8.0／8.4；database／表／视图／字段及列注释／索引／约束／DDL 浏览；过滤、多列排序、分页；可靠键定位的基表增删改 |
+| Redis | 单节点 DB 选择、SCAN 与 pattern／type 过滤；默认折叠的多级 key 树；String、Hash、List、Set、ZSet 浏览编辑；重命名、删除和 TTL |
 | 查询与命令 | 全文／选区／当前 SQL 执行，高亮、关键词／资源补全，多结果展示、错误、取消／停止等待、历史和查询文件 |
 | 数据 grid | 列宽设置、隐藏／冻结、单元格／行选择、键盘与 Shift 选择、复制粘贴；文本／JSON／NULL 编辑、撤销、变更集及冲突提示 |
 | 数据交换 | 单文件 CSV／JSON；列映射、类型转换、失败记录；从完整结果或数据库导出 |
@@ -22,19 +22,21 @@ MCP 属于 0.2.0；结构设计、高级编辑和迁移沿用产品规划的后�
 
 | 路径 | 实现内容 |
 |---|---|
-| `crates/datapier/src/main.rs` | CLI 分派；提供 `ui`、`engine`、`--version`；不编入 MCP |
+| `crates/datapier/src/main.rs` | CLI 分派；提供 `tui`、`engine`、`--version`；不编入 MCP |
 | `crates/datapier-core/src/model/` | Profile、资源、列、类型化值、分页、任务和错误 |
 | `crates/datapier-core/src/execution/` | 结果落盘入口、发送阶段与取消控制、流式导入导出 |
 | `crates/datapier-core/src/providers/{mysql,redis}/` | 内置连接、资源、只读策略、查询、编辑基线、并发检查及提交；按操作分派，不做逐单元格动态分派 |
 | `crates/datapier-core/src/storage/` | SQLite migrations、工作区、草稿、历史与执行记录；keyring 适配 |
-| `crates/datapier-engine/src/{lib,server,protocol,platform}.rs` | client／server／协议编解码、客户端租约、实例锁、端点、进程启动及收尾 |
-| `crates/datapier-tsp/src/{lib,backend,editor,grid,views}.rs` | TSP 事件循环、后台 IPC、界面状态、编辑与展示；只经 Engine client 访问数据 |
+| `crates/datapier-engine/` | client／server、协议编解码、客户端租约、实例锁、端点、进程启动及收尾 |
+| `crates/datapier-tsp/` | 界面状态与 tab 路由、IPC、连接表单、编辑模型和按功能组织的原生视图 |
 | `plugins/datapier/{plugin.toml,window.luau,lib/bootstrap.luau}` | 命令入口、异步安装检查、打开本机 TSP pane |
 | `plugins/datapier/install/{unix.sh,windows.ps1}` | 下载、校验、解包及安装原生产物；不编译 Rust |
 
 CLI 组合各模块；TSP 依赖 Engine 的 client／DTO，Engine 调用 Core，Core 不依赖 TSP。所有入口共用同一份 IPC 编解码；平台代码不进入 provider 的业务判断。
 
-使用产品规划的 Tokio、Serde、SQLx 0.9、redis-rs 1.8、keyring 4.2 `v1` 和 sqlparser-rs。已发布的 `tern-sdk 0.1.0` 缺少本实现所需的唤醒等 API，现固定官方仓库 Git revision `9e9c07463f4958b0c633424c9860aba499487d28`，由 `Cargo.lock` 固定全部依赖，不维护本地 fork。MySQL 保留 SQLx，采用 prepare 取元数据后单独执行的方式。
+各 crate 的测试统一放在 `tests/`：集成测试位于根目录，需访问私有实现的单元测试位于 `tests/unit/`，由源码通过 `#[cfg(test)]` 和相对路径的 `#[path = "..."]` 引入，保持原有私有边界。
+
+使用产品规划的 Tokio、Serde、SQLx 0.9、redis-rs 1.8、keyring 4.2 `v1`、sqlparser-rs 与纯 Rust sqlformat 0.5。官方 `tern-sdk` 使用 registry 的 `0.2.0`，workspace 精确固定版本，`Cargo.lock` 锁定全部依赖；不维护旧 SDK 兼容层或本地 fork。当前界面基线为 Tern 0.9.9；MySQL 保留 SQLx，采用 prepare 取元数据后单独执行的方式。
 
 ### 2.1 UI 与异步任务
 
@@ -53,16 +55,19 @@ UI 消息统一进入状态更新函数，只有状态变化才 render；静态�
 | Redis 命令 tab | 独占物理连接，隔离 DB 与事务状态；重连后重新选择 DB，不恢复未完成事务 |
 | Redis 可编辑 key | 专属监视连接和 edit token；与普通浏览及命令 tab 隔离 |
 
-修改 profile 后，新会话使用新配置，已有会话明确提示重连；不在执行中静默切换账号或数据库。数据库断连使旧会话与事务失效，不自动重放查询、写入或 COMMIT。
+连接设置的所有入口先整体检查该连接当前工作区标签的草稿、恢复意图、任务和连接操作；有阻塞时保持全部标签并提示处理。通过后按冻结标签 ID 关闭所属会话，等待 ACK 后再打开表单；`not_found` 表示会话已关闭，其余失败保留可恢复状态并报告。其他连接的标签保留。保存时再次检查，已有所属标签的重连重新加载 schema、结果可编辑性和 edit token，刷新只读／读写 UI；已关闭标签不自动重建。测试与保存使用文字按钮，TLS 与证书入口左对齐。新建表单每次重置字段、数据库候选与选择、TLS、错误及撤销历史。数据库断连使旧会话与事务失效，不自动重放查询、写入或 COMMIT。
+
+MySQL 元数据的独立连接建立和读取响应取消，取消后丢弃该连接并释放会话锁。未给出 database 且 profile 没有默认库时，先在共享查询连接读取 `SELECT DATABASE()`，保留 `USE` 语义；若这一步被中断，丢弃共享连接，后续明确返回 `connection_closed`，不静默重建并丢失事务或会话状态。
 
 ## 3. IPC、任务与生命周期
 
 ### 3.1 协议 v1
 
-macOS／Linux 使用 Tokio UDS，Windows 使用 Tokio 字节模式 Named Pipe。每帧为 **4 字节大端长度＋UTF-8 JSON**，消息体上限 8 MiB，解码前检查长度。
+macOS／Linux 使用 Tokio UDS，Windows 使用 Tokio 字节模式 Named Pipe。每帧为 **4 字节大端长度＋UTF-8 JSON**，消息体上限 8 MiB，解码前检查长度。Client 在写出任何字节前拒绝的超限请求只返回该请求的输入错误，并保留连接、其他并发请求及事件订阅；实际 I/O 或部分写入错误仍关闭连接。
 
 - 请求：`id`、`method`、`params`；响应：相同 `id` 及 `result` 或 `error`。
 - 事件：`seq`、`kind`、`task_id`、`payload`，无请求 `id`。`kind=execution.state`，`payload.state` 通知任务状态；序号在同一 Engine 内单调递增，仅向所属客户端发送，不携带 SQL、凭据或结果行。Client 单独订阅事件，UI 收到当前任务事件后查询状态；保留轮询核对遗漏，结果数据由分页接口拉取。
+- 全局语言更新使用 `kind=settings.changed` 广播给客户端；UI 按事件重新读取设置，并以周期读取补偿遗漏，不携带 SQL、凭据或结果数据。
 - 握手校验 `protocol_version=1`，返回 `engine_id`、`client_session_id` 和租约参数。业务会话 ID 与数据库会话 ID 分开。
 - 错误统一为 `code`、`message`、`details`、可选数据库错误码／SQLSTATE；区分权限、输入、冲突、断连、取消和结果待确认。
 - ID 用 UUID 字符串；请求 ID 仅关联响应，不构成写入重试授权。断连后按任务记录查结果，不自动重发写请求。
@@ -70,19 +75,28 @@ macOS／Linux 使用 Tokio UDS，Windows 使用 Tokio 字节模式 Named Pipe。
 | 接口组 | 方法与结果 |
 |---|---|
 | 客户端 | `session.open/heartbeat/close`；会话身份、租约和释放结果 |
-| 配置／工作区 | `profile.list/save/test/delete`、`workspace.load/save`；工作区写入带预期 revision，冲突不覆盖 |
-| 数据库会话 | `connection.open/close`；DB 会话 ID、当前数据库、capabilities |
+| 配置／工作区 | `profile.list/save/test/delete/databases`、`workspace.load/save`；工作区写入带预期 revision，冲突不覆盖；目录加载使用正在编辑的认证与 TLS，返回完整库列表 |
+| 应用设置 | `settings.get/set`；`settings.language` 为 `system`、`zh-CN` 或 `en`，按数据目录全局保存，更新后广播 `settings.changed` |
+| 数据库会话 | `connection.open/close`；DB 会话 ID、当前数据库、capabilities；Redis 可传临时 `redis_db`，不修改 profile，成功后才替换 UI 旧会话 |
 | 资源 | `resource.list/describe/browse`；资源树、结构及浏览任务／游标 |
 | 执行 | `execution.start/get/cancel`；任务 ID、状态及分语句结果摘要 |
 | 结果 | `result.page/value/release`；结果页、大字段分块及释放状态 |
-| 编辑 | `change.open/submit/discard`；编辑基线／token、类型化变更集及逐项结果 |
+| 编辑 | `change.open/preview/submit/discard`；编辑基线／token、实际 SQL／命令与参数预览、类型化变更集及逐项结果 |
 | 文件／交换 | `file.open/save`、`transfer.import/export`；Engine 本机文件、任务和失败报告 |
 
 耗时操作先返回任务 ID。任务在 Engine 内运行，不把单次 RPC 超时当作执行失败。分页、状态查询与取消可并发处理，同一数据库会话上的命令串行化。
 
+`change.preview` 与提交使用相同 token、target 和类型化草稿，读取但不消费 token。Core 共享实际执行构造器，返回 provider、事务标记、草稿总数、offset／next_offset、逐项操作及语句／有序参数；`offset` 从 0 开始，`limit` 默认和上限均为 20。MySQL 区分原值锁校验和 DML，Redis 包含真实 EVAL 脚本与最终页的 TTL 命令。预览不执行写入或锁定语句，不更改 WATCH；提交仍重新复核。参数显示带类型、原始字节数、完整性及动态参数标记，每值最多 1 KiB、每页展示预算 512 KiB；展示省略不影响完整绑定，不能将截断值拼成可执行 SQL。Redis List 删除的内部随机标记在提交时生成，重命名目标届时才 WATCH／检查；EXEC 单项错误不回滚其他命令。UI 预览与提交共用草稿组装，异步响应复核标签、generation、token 及草稿身份。
+
+Redis 批量 key 删除使用 `change.open {targets}`：目标必须属于同一当前 DB，保留 `key_b64` 原始身份，合法空字节 key 可表示为 `""`。Core 在独立连接 WATCH 全部目标后读取必要类型与 TTL 元数据，返回 `token`、原样 `targets`、`operation: "delete_keys"` 和基线；不完整浏览各 key 的 value。预览与提交传入同一 `token`、原顺序完整 `targets` 和 `operation`，只允许删除已绑定集合。预览直接展示实际 MULTI／DEL／EXEC 计划；提交在发送阶段记录保护内执行一次 DEL，返回实际删除数，WATCH 冲突整批拒绝且不自动重试。确认仅建立删除草稿，预览、提交、丢弃及工作区失效恢复沿用编辑生命周期；恢复需重新确认和建立 WATCH，不复用旧 token。复合条目多选删除保持单 key 基线，完整读取身份后一次暂存；List 映射原始索引并按执行索引降序删除，一次批量操作按一组撤销。
+
 ### 3.2 执行记录
 
 任务状态为 `queued → running → succeeded/failed/cancelled/outcome_unknown`，取消过程中标记 `cancelling`；只有确认取消生效才进入 `cancelled`。每条语句／变更另记已生效、未执行、已回滚或待确认，失败任务可以包含此前已生效的操作。
+
+`execution.get` 的任务记录提供任务 ID、创建时间、真实运行开始时间、任务耗时，以及结果的类型、已读取行数、已知列数和完成状态。开始时间在任务进入运行时记录；耗时由单调时钟测量任务运行至返回的经过时间，不冒充数据库纯执行耗时。任务元数据复用既有 `executions.summary`，连接／数据库与目标上下文在创建任务时保存到既有参数记录，不新增 schema 版本；终态、取消和写盘失败的内存完成记录保留同一份已观察元数据。历史缺失指标明确显示“未记录”，未知列数不显示为零；结果释放后只展示仍有真实记录支持的指标。
+
+普通任务查询不载入执行文本；打开详情以 `include_text: true` 按需读取，不返回整包参数。查询文本来自原始请求，浏览 SQL／Redis 命令来自 provider 实际构造和发送路径，记录有界并明确标记截断，不从资源名伪造命令。默认详情采用图标操作标题、右侧状态、双列分隔摘要、结果表和唯一执行文本区；逐语句结构与原始字段仅在完整诊断中展开，错误和部分执行状态仍须明确可见。开始时间、任务 ID 与连接上下文按任务归属呈现，迟到响应不能替换其他任务内容。
 
 写入发送前先持久化任务与发送阶段，接收最终结果后再更新记录。Engine 重启时，未开始操作标记未执行；可能已经发送且不能证明结果的写入标记待确认。数据库与本地 SQLite 不构成分布式事务，不以本地记录推断数据库必然提交或回滚。
 
@@ -96,6 +110,8 @@ UDS 放入仅当前用户可访问的短运行目录；Windows Named Pipe 按用
 
 心跳 **10 秒**、租约 **45 秒**、无人收尾 **30 秒**。任一客户端离开即停止其排队请求、取消读任务并回滚私有事务；已发送写入等待最终结果。最后会话离开或启动后一直无人接入时进入收尾；到期仍未知的写入落盘，关闭连接后退出。新会话可在正式停止接入前取消退出计时，旧任务不恢复。
 
+`connection.open`、`profile.test` 和 `profile.databases` 的只读等待归所属客户端的生命周期取消信号管理；断线或租约过期会结束等待并释放 profile 锁，已创建的测试任务记录取消终态。`profile.save/delete` 不随断线直接 abort，继续完成凭据库与 SQLite 的所有权交接。
+
 Engine 不继承 UI 的 PTY；stdout／stderr 写入独立日志或关闭，不持有客户端协议句柄。退出阶段在同一同步边界内检查会话数并停止接入，避免接入与退出竞态。Unix 崩溃残留 socket 取得锁后清理；Windows 句柄关闭后由系统回收管道。
 
 ## 4. 数据模型与持久化
@@ -104,7 +120,7 @@ Engine 不继承 UI 的 PTY；stdout／stderr 写入独立日志或关闭，不�
 
 `Value` 使用带类型的结构：null、bool、整数、精确小数、浮点、文本、二进制、日期／时间和 JSON。整数、小数及浮点以字符串传输，二进制以 Base64 传输；JSON 内的大数保留数字词法，不先转 `f64`。Redis key／field／member 始终保留原始字节，显示文本只是视图。
 
-列记录原生类型、长度／精度及可取得的来源信息；基表的键、生成列、默认值和可空性来自 catalog。MySQL TIME 保留负值和超 24 小时语义，日期不擅自转换为 UTC。驱动无法无损处理的类型明确报错或禁止对应编辑，不把显示字符串用于写回。
+列记录原生类型、长度／精度及可取得的来源信息；基表的键、生成列、自增标志、默认值和可空性来自 catalog。MySQL 从 `EXTRA` 分别识别生成列与 `auto_increment`，不把 `DEFAULT_GENERATED` 当成生成列。MySQL TIME 保留负值和超 24 小时语义，日期不擅自转换为 UTC；驱动无法无损处理的类型明确报错或禁止对应编辑，不把显示字符串用于写回。
 
 `ResultSet` 保存列、完成状态、已读取行数及截断原因；`Row` 使用结果内序号。编辑定位另用原始完整键与原值基线，禁止拿 UI 行号定位数据库行。Redis 缺失值、空字节和 NULL 分别表达。
 
@@ -116,17 +132,18 @@ Engine 不继承 UI 的 PTY；stdout／stderr 写入独立日志或关闭，不�
 
 ### 4.2 本地存储
 
-使用 SQLite WAL 与顺序 migration，配置库和结果缓存分开，避免大结果挤占工作区更新。
+使用 SQLite WAL，配置库和结果缓存分开，避免大结果挤占工作区更新；0.1.0 各以一份完整初始 migration 管理。
 
 | 表／文件 | 主要内容 |
 |---|---|
-| `profiles` | provider、地址、用户名、TLS／DB、access mode 与系统凭据条目追踪标记；无密码 |
-| `workspaces` | revision 与 JSON 快照：tab、布局、连接引用、文本／选区、过滤排序、列配置及未提交变更意图；运行期 edit token 不作为有效凭据恢复 |
+| `profiles` | provider、地址、用户名、TLS／DB、access mode、`visible_databases` 与系统凭据条目追踪标记；无密码；未设显示范围表示全部可访问库，空数组表示全部隐藏 |
+| `app_settings` | 数据目录内全局语言偏好，不属于 workspace 快照 |
+| `workspaces` | revision 与 JSON 快照：tab、共享侧栏收展、布局、连接引用、文本／选区、过滤排序、列配置及未提交变更意图；运行期 edit token 不作为有效凭据恢复 |
 | `executions` | 所属工作区、执行文本、状态、发送阶段及结构化错误；查询历史直接从执行记录读取 |
 | `cache.sqlite3`、`values/` | 结果元数据、类型化行、结果引用及大字段内容 |
 | keyring | macOS Keychain、Windows Credential Manager、Linux Secret Service；不可用时仅 Engine 内存保存 |
 
-配置库保留 schema 1，结果缓存升级为 schema 2，新增 `value_files` 登记外置字段与所属结果；原有行与文件保留，拒绝使用不支持该 schema 的旧程序降级打开。先登记归属，再异步写文件并等待 flush，最后提交结果行；追加和分页任务在调用方取消等待后仍持有结果锁直到该次操作结束。分页先释放读取连接，再登记与写入外置文件，避免并发耗尽连接池。释放结果先在 SQLite 事务中撤销结果与行，再删除文件；删除失败保留登记，结果读取返回已释放，可对同一结果 ID 再次释放完成清理，不自动启动后台清理。
+配置库和结果缓存均以完整 schema 1 在事务中初始化；重开时核对必需表与索引，拒绝较新版本或不完整基线。`value_files` 登记外置字段与所属结果，先登记归属，再异步写文件并等待 flush，最后提交结果行；追加和分页任务在调用方取消等待后仍持有结果锁直到该次操作结束。分页先释放读取连接，再登记与写入外置文件，避免并发耗尽连接池。释放结果先在 SQLite 事务中撤销结果与行，再删除文件；删除失败保留登记，结果读取返回已释放，可对同一结果 ID 再次释放完成清理，不自动启动后台清理。
 
 写入 keyring 前先保守登记条目；写入失败时新密码可仅保留在当前 Engine 内存，但不遗失可能已创建的系统条目。提供新密码且改为不持久化时先删除旧条目，无法删除则明确报错并保留配置。未提供新密码的元数据更新保留既有凭据。配置删除同样先清理条目，`NoEntry` 视为已清理，其他错误保留可重试状态。
 
@@ -136,7 +153,7 @@ Engine 不继承 UI 的 PTY；stdout／stderr 写入独立日志或关闭，不�
 
 ### 5.1 MySQL
 
-1. **Catalog。** 使用 `information_schema` 和受控的 `SHOW CREATE` 获取表／视图、字段、索引、约束和 DDL；标识符按 catalog 校验并转义，值全部参数绑定。可靠键优先主键，其次完整且各分量非 NULL 的唯一键；不把前缀／表达式索引直接当完整行键。无可靠键的表仍可浏览，行编辑只读。
+1. **Catalog。** 使用 `information_schema` 和受控的 `SHOW CREATE` 获取表／视图、字段、索引、约束和 DDL；标识符按 catalog 校验并转义，值全部参数绑定。列注释读取 `COLUMNS.COLUMN_COMMENT`，保持中文、多行和空字符串；表浏览按实际列名及顺序附带注释，任意 SQL 结果不猜测注释。5.7 的 `STATISTICS` 没有 `EXPRESSION` 列，按 catalog 能力选择查询；有该列时继续排除表达式索引。可靠键优先主键，其次完整且各分量非 NULL 的唯一键；不把前缀／表达式索引直接当完整行键。无可靠键的表仍可浏览，行编辑只读。
 2. **查询与元数据。** 普通单语句在 tab 专属连接上 `prepare`，从 `Statement::columns()` 保存列定义，再执行并消费 `fetch_many()`，保留空结果列和结果边界。生成的编辑 SQL 复用 prepared statement 并绑定参数，不先执行一遍 SQL 探测结构。
 3. **脚本。** 全文／选区逐条执行可可靠识别的顶层语句，当前语句定位依据 tokenizer、引号、注释和当前 `sql_mode`，不按分号盲切。模式变化后重新识别余下文本；遇到存储程序体或不可靠边界时禁用当前语句执行，全文／选区可走原始文本路径。MySQL 客户端 `DELIMITER` 等指令提示不支持，不当作服务端 SQL。
 4. **动态结果边界。** `prepare` 不能预先枚举 CALL／动态 SQL 的所有结果。此类执行仍消费每个结果，非空结果按实际行元数据展示；空动态结果若驱动未给出列则标记“列定义未知”，不伪造零列 schema，也不把后续结果套用前一个结果的列。普通 SELECT 空结果必须保留 prepare 得到的完整列。
@@ -144,6 +161,7 @@ Engine 不继承 UI 的 PTY；stdout／stderr 写入独立日志或关闭，不�
 6. **提交。** InnoDB 变更集在独立事务中按键锁定原行，比较全部受保护原值后执行参数化增删改。NULL、大小写／尾空格和二进制差异不能被默认 collation 吞掉；以数据库可观察且可无损往返的值定义比较。相同值更新视为无变化，不单凭 affected rows 为零判断冲突；冲突／失败回滚整组，逐项标记回滚或未执行。
 7. **非事务表。** 使用完整键及原值条件的单语句 CAS，验证 SQLx 的 matched-row 行为；逐项提交并报告已生效／失败／未执行，不宣称整组回滚。DDL 在查询 tab 中按 MySQL 隐式提交规则执行。
 8. **取消。** 记录目标连接 `CONNECTION_ID()`，控制连接发送 `KILL QUERY`；等待原查询终态。取消处理与原结果消费完成前不在该连接启动下一条命令；无法清理时关闭连接，避免迟到的 KILL 影响后续查询。权限不足和写入可能部分生效分别报告。
+9. **TLS 兼容。** Rustls 要求 TLS 1.2 的 ECDHE 或 TLS 1.3。5.7 可使用支持 ECDHE 的服务端构建；官方 5.7.42 Debian／OpenSSL 1.1.1n 已通过 TLS 1.2 验证。官方 5.7.44 Oracle Linux／OpenSSL 1.0.2k 的默认构建仅能协商 DHE，与当前 Rustls 不兼容；保持验证并报握手错误，不降级到明文或跳过证书检查。普通 5.7 查询、浏览和编辑与此 TLS 构建限制分别验收。
 
 ### 5.2 Redis
 
@@ -167,20 +185,37 @@ Redis 使用命令／子命令／参数的只读白名单，`COMMAND INFO` 只�
 采用 `screen` surface：连接／资源树、主 tab 区、底部任务与待提交区；表单和大值编辑放入 layer。界面状态分为工作区、tab、编辑器、grid 和操作状态，所有数据库结果带 tab generation，防止切换后被旧响应覆盖。
 
 - **Grid。** 使用公开 `el`／文本节点组成 CSS grid，共享列宽；单一滚动容器内的表头与冻结单元格使用 `position: sticky`，左偏移由固定列宽累加，不依赖读取 Tern scroll offset。稳定 key 由结果 ID、行序号和列 ID 构成，分页后不把焦点误映射到其他行。
-- **选择。** 浏览模式处理方向键、Tab、Home／End、Shift 扩展和 Shift＋点击；显式行选择入口支持整行复制。列配置、过滤和排序持久化，列宽通过设置表单调整。
+- **选择与列宽。** 单元格单击选单格、Shift 扩展矩形；行号独立维护普通、Shift 和平台主修饰键行多选。MySQL 表及 SQL 结果自动列宽按当前页内容和可用空间分配，范围 64–480px，超出总上限的空间可留白，窄区域内部横向滚动；手动设置保留，原位编辑期间冻结已有列宽。自然宽度在页面数据改变时更新，不在每次输入或 render 全量重复测量。Redis 内容与 CLI 沿用各自既有列宽策略。列配置、过滤和排序持久化。
 - **编辑。** 原位编辑方案在活动单元格外壳内覆盖或替换为 `input`／`editor`，只维护一个活动编辑器；内层定位容器随单元格滚动，冻结外壳保留 `sticky`，不读取或自行计算滚动偏移。Enter／F2／双击进入编辑，节点加入视图后显式请求其稳定 ID 的焦点；Enter 确认进入变更集，Tab 确认后移到下一可编辑格，Escape 放弃当前输入。长值使用侧栏或 layer，不让多行编辑器越过 grid 裁切区域。导航撤销与文本撤销分开；提交前可查看、撤销或丢弃待提交项，基线仍由 Engine 校验。
-- **文本。** Rust 保存文本、UTF-16 cursor／anchor、undo 栈，声明并处理 `edit`／`undo`。查询编辑器设置 `mode=insert`，由应用处理键盘选区，保证“执行选区”可取得真实文本；其他字段使用 native editing，并保留关闭 native editing 时的键盘路径。公开协议不报告原生拖拽选区的 anchor，查询编辑器不以原生选区或剪贴板冒充应用选区。IME 提交后更新模型，UTF-8 字节偏移与 UTF-16 索引有显式转换。
+- **文本。** Rust 保存文本、UTF-16 cursor／anchor、undo 栈，声明并处理 `edit`／`undo`。查询编辑器使用 `mode=insert` 保持应用键盘选区，保证执行、执行计划和格式化取得同一范围；其他字段使用 native editing，并保留关闭 native editing 时的键盘路径。协议不报告原生拖拽选区的 anchor，查询不以宿主选区或剪贴板冒充应用选区。IME 提交后更新模型，UTF-8 字节偏移与 UTF-16 索引有显式转换。
 - **补全与高亮。** 查询 editor 通过 `lang=sql` 使用 Tern 原生高亮，应用 tokenizer 负责当前语句范围和基础诊断；补全使用关键词及缓存 catalog，显式刷新结构后更新。服务端执行结果是最终依据。
-- **复制粘贴。** 复制选区为 TSV，沿用第 7 节 CSV 的 NULL／二进制／反斜线编码，改用制表符分隔并保留引号规则。普通粘贴先形成类型化编辑预览，验证维度和目标可编辑性，再加入变更集，不直接写库。文本编辑区保留普通文本粘贴行为。
+- **复制粘贴。** 应用右键菜单“复制选中单元格”和 grid 底部 copy 图标复制单格或矩形选区；grid 不绑定 Ctrl+C 或 Command+C，文本编辑器拥有焦点时保留其文本复制。菜单保留 Tern 自动附加的原生 `Copy`：它仅复制右击节点展示文字，不能读取应用选区或完整大值。选区复制沿用第 7 节 CSV 的 NULL／二进制／反斜线保真编码，改用制表符并保留引号规则。大字段在后台完整读取，按标签、generation、结果及选区内容校验后再写入剪贴板，读取失败或上下文改变不复制截断值或部分选区。行复制及 MySQL INSERT 复制继续由行菜单提供。普通粘贴先形成类型化编辑预览，验证维度和目标可编辑性，再加入变更集，不直接写库。
 - **文件。** 查询文件以 UTF-8 保存和打开；文件操作由本机 Engine 完成，失败保留编辑文本。跨 UI 的工作区更新使用 revision 检查，不覆盖另一窗口未确认的布局／草稿。
 
-[UI 交互设计稿](ui-redesign.html)对应的 Rust TSP 工作台已接入表／视图名过滤、主工作区查询历史与 SQL 预览，以及 32px 单行 Redis key 列表；Redis 默认将连接导航收为 58px 窄轨，可随时展开，当前连接与 DB 保留在顶栏。RDBMS 对象筛选位于对象树上方的独立工具区，与连接卡片左右对齐；仅按名称筛选当前连接数据库中的表和视图，保留匹配项的分组与计数，不影响连接列表、其他数据库或数据行过滤。表 tab 中的历史 SQL 打开到独立查询 tab，保留原表结果和编辑基线；已有查询打开历史时清除无关旧结果。标签条可横向滚动，查询、关闭和历史按钮保持可见；连接和资源切换保留原对象的结果与草稿。原位编辑使用自绘 `el` 网格内的单一 `input`，表单、值编辑与变更预览使用原生 `layer`。
+[UI 交互设计稿](ui-redesign.html)保留 SQL／Redis 的布局与交互定义。生产 Rust TSP 共享连接导航，宽屏收展偏好归工作区所有；进入 760px 及以下自动收起到 58px 窄轨，临时展开不覆盖宽屏偏好，返回宽屏恢复偏好，再次进入窄屏重新收起。SQL 树按连接显示配置允许的数据库，并按需加载各库表／视图；隐藏数据库不关闭其已打开 tab。表 tab 的历史 SQL 打开到独立查询 tab，保留原表结果和编辑基线；已有查询打开历史时清除无关旧结果。标签以活动下划线标识当前项；右键按冻结目标位置关闭左侧、右侧或全部，整批预检草稿和任务，会话关闭等待 ACK。全部关闭后 `tabs=[]`，显示居中空态并持久化；宽屏从侧栏选择连接，窄轨空态另提供选择连接入口，迟到响应不能重建已关闭标签。原位编辑使用网格内单一 input，表单、值编辑和变更预览使用高于主布局 sticky 元素的模态层。
+
+连接、数据库和表提供右键菜单。连接删除先保护所属草稿与任务，逐个等待当前工作区相关会话的关闭 ACK，再删除配置；明确的 `not_found` 按会话已关闭处理，其他关闭错误保留配置。MySQL 库／表删除冻结连接身份和资源，确认前及打开专用会话后均复核，配置已改但原会话未重连时拒绝。DROP 只在独立 Engine 会话执行，经取消或终态后等待关闭 ACK；来源标签保留占用，关闭确认弹窗后仍有停止等待入口。成功或结果未知时失效相关资源，未知写入不自动重放。
+
+行菜单以原始可靠行身份处理选中行复制、两种 INSERT 和确认删除；隐藏全部列仍可使用行号菜单。删除先形成草稿，禁止同一行继续生成更新或粘贴变更，提交组装拒绝重复非 INSERT 身份。
 
 Redis 复合项编辑使用独立控件：Hash 为 Field／Value，List 为 Index／Value，ZSet 为 Member／Score；List 的 Index 只读定位当前元素，Value 可多行，Score 单独校验。两个值分别进入结构化草稿和前后值预览，不用换行拼接或拆分字段；String 与 Set 保持单项编辑。
 
-生产视图和样式分别位于 `crates/datapier-tsp/src/views.rs` 与 `workbench.css`，交互状态与编辑生命周期位于 `workbench.rs`，IPC 和 tab generation 路由继续由 `lib.rs` 统一管理。焦点按当前 View 的祖先 key 路径解析，渲染后再请求实际控件 ID。布局使用 Surface 内的 absolute 定位，不依赖 TSP 不支持的 fixed 定位；正文使用 Tern 的 `--sans`，数据使用 `--mono`。
+生产视图按连接表单、共享控件、侧栏、grid、Redis 和弹窗组织，输入与渲染、连接管理、编辑生命周期、IPC 和 tab generation 路由各按职责分离。surface 使用 sans；表单和主操作采用 SDK 公开控件，导航行、标签、grid 和状态入口使用局部命名 CSS。新建与编辑连接均用带数据库图标的单选卡片选择类型。MySQL 二级导航右侧显示完整资源标识；数据、查询结果及 Redis 各类型工具区直接提供具名操作，不设通用更多入口。右键菜单以公开 Actions、MenuEntry、MenuItem 描述分组、禁用、图标与危险色，删除项包含 trash 图标，外壳和定位由宿主管理。overlay 正文有稳定 key；下拉展开时临时放开正文裁切，关闭后恢复滚动。变更预览先列真实语句，再以紧凑参数表展示类型、字节及完整性；详情冻结来源、连接和资源，优先显示语义事实，原始诊断按需展开。CLI 在对应结果上方保留执行时命令，后续输入不改变该归属。
+
+工作台不维护自定义明暗主题或主题切换按钮；颜色直接使用 TSP 的公开主题变量，如 `--panel`、`--card`、`--t1`、`--t3`、`--l2`、`--accent` 和 `--tv-sel`，随宿主主题更新。视觉还原以交互 HTML 为依据，从实际交互状态导出截图，在相同内容区域尺寸下与原生 TSP 截图对照布局、字体、间距、控件层次和密度；图片作为视觉参照，交互行为仍以 HTML 和真实数据路径为准。
+
+当前视觉目标见 [UI 交互设计稿](ui-redesign.html)及[还原说明](ui-redesign.md)。设计稿不能作为原生界面已完成还原或验收的证据；生产行为与运行范围以实际源码和验收记录为准。
 
 Redis 列表显示 SCAN 已加载的 key，类型与 TTL 来自真实 provider；TTL 以每页 pipeline 读取，永久、不存在和有限期限分别表达。命名空间只组织已加载项。CLI 的结果和分页与当前 key 的数据、编辑基线隔离；合法 UTF-8 直接展示，其他字节和字面 Base64 前缀保留可逆编码。JSON 与 HEX 仅改变展示，不改变写回值。
+
+Redis 复制原始 value 在后台解析完整缓存及大字段，结构数据按所有权移动编码。UI 每轮最多发送 64 KiB，批次间校验 tab、generation、结果、key 和草稿版本；失效或写入失败不发送提交帧。草稿版本随 tab 交换，在加入、撤销、恢复和清空时递增，避免逐批深比较整个草稿。
+
+查询编辑器使用公开 `lang=sql` 与 `nowrap`，行号和逐句按钮与文本共用滚动容器；横向滚动固定 gutter。语句定位沿用 tokenizer 和真实会话 `sql_mode`，无法可靠识别时保留原文并说明原因。工具栏始终提供执行计划入口，非空选区优先，否则取当前语句；校验为单条可解释 SQL 后只发送普通 `EXPLAIN FORMAT=JSON`，不加入 `ANALYZE`。选区由应用维护；协议未同步鼠标拖选范围，不能把宿主内部选择作为执行目标。格式化按 token 语义核对结果，通过一次 `Editor::edit` 接入撤销。剪切经 OSC 5522 写入，收到匹配请求的 `DONE` 后再次核对 tab 和完整原文再删除；拒绝、超时或上下文变化均保留 SQL。
+
+应用语言由 Core 全局设置经 Engine 同步，UI 进程读取自己的系统首选语言。消息保存静态 key、模板及原始参数，切换后重新渲染；SQL、对象名称、数据和数据库原始错误保留原文。macOS、Windows 与 Linux 使用各自系统语言来源，未知或不支持的语言回退英文；六平台运行证据仍分别验收。
+
+侧栏设置与退出之间提供图标化快捷键帮助，操作和键位均翻译，Command／Ctrl 按 UI 平台展示。执行、普通操作和删除分别使用宿主语义控件的 primary、default／quiet、danger 变体，不自建明暗主题颜色。DDL 全文复制保留图标入口。
+
 
 ## 7. 导入导出
 
@@ -201,7 +236,7 @@ MySQL 表导出开启新的只读读取任务；查询结果导出使用原结�
 
 ## 8. 跨平台与分发
 
-六个 Rust target 沿用产品规划第 2.7 节：macOS Darwin、Linux GNU／glibc、Windows MSVC，分别构建 x86-64 和 aarch64。固定最低 OS／glibc、TLS 后端和系统依赖，并在发布说明记录测试版本；原生链接库与可执行文件必须同架构。
+六个 Rust target 沿用产品规划第 2.7 节：macOS Darwin、Linux GNU／glibc、Windows MSVC，分别构建 x86-64 和 aarch64。发布前须明确最低 OS／glibc、TLS 后端和系统依赖，并在发布说明记录测试版本；现有 CI runner 只是构建基线。原生链接库与可执行文件必须同架构。
 
 启动包固定二进制版本及六目标 SHA-256。开发环境优先使用显式配置的本地二进制；发布安装由 `tern.process.run(argv)` 异步调用包内脚本，Unix 使用 curl／tar 与系统校验工具，Windows 使用系统 PowerShell。打包时从实际 `GITHUB_REPOSITORY` 或 `-Repository` 固化下载地址。脚本检测架构、写独立临时目录并验证摘要和版本；Unix 以内容寻址目录和硬链接原子发布，避免陈旧目录锁，Windows 使用进程文件锁。只返回简短机器可读结果，已有有效缓存无需下载地址。
 
@@ -211,66 +246,53 @@ MySQL 表导出开启新的只读读取任务；查询结果导出使用原结�
 
 缓存按版本／OS／架构隔离。Windows 更新写入新版本目录，不覆盖活动 exe；IPC 不兼容时提示先结束旧会话再重启，不强杀 Engine。Windows 验证 Tern 随附 ConPTY 及 OSC 877 输入；Linux 无 Secret Service 时使用会话凭据；macOS 验证 Keychain 授权及安装后的实际启动。
 
-## 9. 实施顺序与验收
+## 9. 验收要求
 
-| 步骤 | 产出及完成条件 |
+| 领域 | 验收要求 |
 |---|---|
-| 1. 运行闭环 | 四个 crate、SQLite migration、启动入口、IPC 与租约；在 Tern 中经 Engine 连真实 MySQL／Redis，显示查询结果并验证退出 |
-| 2. MySQL 浏览 | catalog、过滤排序、prepare＋执行、多结果缓存与分页；空 SELECT 有列，无键表跨页不重复执行 |
-| 3. Grid 与提交 | 公开 TSP 实现冻结／选择／文本编辑／撤销／变更预览；真实 InnoDB 冲突回滚及非事务表逐项反馈 |
-| 4. Redis 工作流 | 五类型、二进制 key、游标、WATCH 基线、List 重复值编辑、重命名及 TTL；并发变化被拒绝 |
-| 5. 查询工作区 | 两种命令 tab、全文／选区／当前语句、高亮补全、事务隔离、取消、历史、文件与草稿恢复全部接线 |
-| 6. 数据交换 | CSV／JSON 流式导入导出、映射、失败报告和取消范围；十万行及五种 Redis 类型真实往返 |
-| 7. 六目标发布 | 六种原生产物、干净安装、匹配下载、凭据／TLS／IPC／ConPTY／退出恢复；全部目标完成实际运行后发布 |
+| 运行与生命周期 | 四个 crate、SQLite migration、启动入口、IPC 与租约；在 Tern 中经 Engine 连真实 MySQL／Redis，显示查询结果并验证退出 |
+| MySQL 浏览 | catalog、过滤排序、prepare＋执行、多结果缓存与分页；空 SELECT 有列，无键表跨页不重复执行 |
+| Grid 与提交 | 公开 TSP 的冻结／选择／文本编辑／撤销／变更预览；真实 InnoDB 冲突回滚及非事务表逐项反馈 |
+| Redis 工作流 | 五类型、二进制 key、游标、WATCH 基线、List 重复值编辑、重命名及 TTL；并发变化被拒绝 |
+| 查询工作区 | 两种命令 tab、全文／选区／当前语句、高亮补全、事务隔离、取消、历史、文件与草稿恢复 |
+| 数据交换 | CSV／JSON 流式导入导出、映射、失败报告和取消范围；十万行及五种 Redis 类型真实往返 |
+| 六目标发布 | 六种原生产物、干净安装、匹配下载、凭据／TLS／IPC／ConPTY／退出恢复；全部目标完成实际运行后发布 |
 
 至少保留以下行为回归：中文／emoji 的 UTF-16 编辑与选区执行；引号和注释内分号；普通空结果集与连续空／非空结果；BIGINT／DECIMAL／NULL／二进制；同值更新、唯一键 NULL、并发删除、大小写／尾空格冲突；迟到取消不影响后续查询；Redis 重复 List 元素、过期导致 WATCH 失败、TTL 保留、EXEC 单项错误；写入断连不重放；最后客户端退出与新接入竞态。
 
-实际运行还须覆盖：十万行分页与全量导出、百万 key 增量扫描、大字段；重开后的草稿与布局；两 UI 同时操作；只读拒绝写入；磁盘不足和凭据服务不可用。六种目标均需原生运行，交叉编译／模拟器不能替代验收；数据库服务可在独立测试服务器上运行。数据库版本沿用 MySQL 8.0／8.4、Redis 6.2／7.2／8.0，Tern 基线为 0.9.5。
+实际运行还须覆盖：十万行分页与全量导出、百万 key 增量扫描、大字段；重开后的草稿与布局；两 UI 同时操作；只读拒绝写入；磁盘不足和凭据服务不可用。六种目标均需原生运行，交叉编译／模拟器不能替代验收；数据库版本为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0，当前 Tern 基线为 0.9.9。
 
 首版发布包含六目标二进制、校验清单、Tern 启动包和对应测试记录。文档、接口原型或编译成功不计为功能已验收。
 
 ## 10. 关键依据
 
-- [Rust TSP SDK 与同步 Session／waker](https://github.com/stencil-hq/tern-sdk/blob/main/rust/README.md)、[tern-sdk 0.1.0](https://docs.rs/tern-sdk/0.1.0/tern_sdk/)、[TSP 输入事件](https://docs.stencil.so/tern/protocol/input.md)
+- [Rust TSP SDK 0.2.0](https://docs.rs/tern-sdk/0.2.0/tern_sdk/)、[SDK 源码](https://github.com/stencil-hq/tern-sdk)、[默认视图设计](https://docs.stencil.so/tern/guides/design.md)、[TSP 输入事件](https://docs.stencil.so/tern/protocol/input.md)
 - [Tern CSS grid／sticky](https://docs.stencil.so/tern/styles/css.md)、[Launch 与 window API](https://docs.stencil.so/tern/reference/api-window.md)、[process／fetch／fs 限制](https://docs.stencil.so/tern/reference/api-shared.md)
 - [SQLx Statement 列元数据](https://docs.rs/sqlx/0.9.0/sqlx/trait.Statement.html)、[SQLx RawSql 多结果](https://docs.rs/sqlx/0.9.0/sqlx/struct.RawSql.html)、[MySQL prepared statements](https://dev.mysql.com/doc/refman/8.4/en/sql-prepared-statements.html)、[MySQL KILL](https://dev.mysql.com/doc/refman/8.4/en/kill.html)
 - [Redis WATCH／事务错误](https://redis.io/docs/latest/develop/using-commands/transactions/)、[SCAN](https://redis.io/docs/latest/commands/scan/)、[SET KEEPTTL](https://redis.io/docs/latest/commands/set/)、[redis-rs MultiplexedConnection](https://docs.rs/redis/1.8.0/redis/aio/struct.MultiplexedConnection.html)
 
 ## 11. 实现与运行记录
 
-当前源码包含四个 crate、共享 Engine、两种 provider、TSP 工作台、CSV／JSON 交换、启动 plugin、安装器及六目标 CI 配置，尚未发布。运行环境为 macOS arm64、Tern 0.9.5；数据库服务使用隔离容器。
+0.1.0 尚未发布。当前源码包含四个 crate、共享 Engine、MySQL／Redis provider、TSP 工作台、CSV／JSON 交换、启动 plugin、安装器及六目标 CI 配置。以下为既有 macOS arm64 运行证据，开发基线为 Tern 0.9.9、registry tern-sdk 0.2.0；这些记录不代表本轮重跑，也不能代替候选提交的验收。
 
-此前本机统一检查已通过：`cargo fmt --all`、Clippy `-D warnings`、workspace 默认测试 62 项，以及 debug／macOS arm64 release 构建；当时默认忽略的 22 项真实服务／系统专项须另行运行，已执行范围见下表。事件与生命周期审查发现的关闭确认竞态、通知背压阻塞租约、Backend 断连后等待不退出均已修复并加入回归。
-
-| 已执行场景 | 结果 |
+| 场景 | 既有运行证据 |
 |---|---|
-| MySQL 8.0／8.4 边界 | 每版本 6 项通过：只读视图拒绝函数写入、精确小数拒绝舍入、DEFINER／动态空结果、脚本部分失败、MyISAM CAS、可空唯一键 |
-| MySQL 8.0／8.4 查询与编辑 | 高精度数、二进制、NULL、空列、多结果、InnoDB 冲突和迟到取消通过 |
-| MySQL 十万行 CSV／JSON | 双格式完整导出、导回与值核对通过，包含生成列、YEAR 与列投影 |
-| Redis 6.2／7.2／8.0 | 每版本 5 项类型／TTL／WATCH／重命名／导出竞态回归及五类型双格式往返通过 |
-| MySQL 8.4／Redis 8 TLS | 真实查询成功，错误 CA 与服务端身份不匹配均被拒绝 |
-| macOS Keychain | 独立 Store 重开可读回凭据、SQLite 无明文密码、删除后不可再取通过 |
-| Tern 实际界面 | 原生渲染、中文／emoji、Shift 选区执行、多结果与完整大整数、Unicode 文件路径、列宽设置、实际编辑提交后自动读取新值通过 |
-| 安装与单目标包 | 8 进程并发安装、有效缓存复用、坏缓存拒绝；真实 PowerShell 脚本组装最新 macOS arm64 release，归档程序与摘要一致；安装器校验后从缓存运行实际 Tern 查询通过 |
-| 实际磁盘满 | 独立 32 MiB 文件系统耗尽至 0 可用字节；配置库与结果缓存同时无法落盘时，API 及 Tern 显示失败，释放空间后同一界面重新查询成功 |
-| 协议事件与关闭 | 真实 MySQL／Redis 分别产生 `queued → running → succeeded`，两个客户端仅收到各自任务事件且序号递增，关闭确认通过；Tern 完成延迟查询并显示 Unicode 结果 |
+| 自动化 | workspace 默认测试 255 项通过、48 项忽略；另有真实数据库专项 37 项通过，两者分别计数 |
+| MySQL | 5.7／8.0／8.4 的相关数据库回归；查询、类型保真、空结果与多结果、编辑冲突、取消竞态、只读、十万行 CSV／JSON 往返 |
+| Redis | 6.2／7.2／8.0 的五类型、TTL、WATCH、重命名及双格式往返；百万 key 扫描；复合条目多选、大值复制和批量删除 |
+| 安全与资源 | MySQL 8.4／Redis 8 的 TLS 成功及错误 CA／身份拒绝；macOS Keychain 存取；磁盘满后报错与恢复；外置文件清理失败及释放重试 |
+| 安装与生命周期 | macOS arm64 单目标包、并发安装、缓存复用和坏缓存拒绝；实际 Tern 查询、客户端事件隔离和最后会话退出收尾 |
+| TSP 工作台 | 中文／emoji、键盘选区、查询、多结果、分页、编辑、Redis 五类型、CLI、菜单、恢复、宿主主题及多客户端设置同步；既有大值复制和原生粘贴记录 |
 
-百万 key 首次全量扫描在 180 秒只返回 51,000 个，已修复缓存分页索引、按页流式读取、TYPE pipeline、批量入库和仅更新未输出项。修复后完整扫描 1,000,000 个 key 的专属回归通过；统计与清理均由测试执行，未把全部 key 留在 UI 内存。
+### 2026-11-01：结构整理、测试目录与复制
 
-本轮资源生命周期修复已在旧提交复现、在当前实现验证通过：会话密码替换后旧 Keychain 条目残留、Redis 暂存对象被外部替换后误删、外置文件部分写入失败后残留，以及释放中途失败后结果仍可读取。macOS 文件大小限制使 4 MiB 字段在实际写入 1,048,576 字节后失败，恢复限制并释放后无残留；目录阻断、释放重试、schema 1 缓存迁移及四路并发分页回归通过。
+本轮按职责拆分 MySQL 结果处理、Redis 命令／编辑／交换、Engine 会话及 TSP 动作／响应／视图。所有测试实现移至各 crate 的 `tests/`；私有单元测试放在 `tests/unit/`，通过条件模块加载，不扩大公开 API。代码未写入开发机器的个人绝对路径。
 
-本轮格式、Clippy `-D warnings`、rustdoc `-D warnings` 和 debug 构建通过；65 项永久默认测试与 2 项临时文件故障 smoke 通过。真实服务专项通过 36 项：MySQL 8.4 的查询／取消／编辑、6 项边界与十万行 CSV／JSON 往返，Redis 6.2／7.2／8.0 各 8 项回归、Redis 五类型双格式往返与 macOS Keychain 验证。本轮未重新执行历史 TLS、百万 key、安装及 release 组包验收。
+- **静态检查与默认测试**：`cargo fmt --all --check`、workspace 全 targets Clippy（`-D warnings`）通过；workspace 默认测试 256 项通过、48 项忽略。恢复默认 Copy 后额外复跑 TSP 测试，192 项通过、1 项忽略，并重新构建本机程序。
+- **真实数据库**：本轮使用隔离 MySQL 8.4.13、Redis 8.10.3，`databases`、`mysql_edges`、`redis_integration`、`transfers` 共 37 项通过，覆盖十万行 CSV／JSON 往返；不将该环境记为重新验证历史版本矩阵。
+- **配置一致性**：新增取消等待后配置锁仍覆盖凭据交接的回归；实际 Engine IPC 对接真实 Redis ACL 用户，12 轮并发保存配置／打开连接均通过，临时配置与 ACL 用户已清除。
+- **原生复制**：Tern 0.9.9 的自动附加 `Copy` 只复制右击节点的 `ORD-10421`；应用“复制选中单元格”复制完整 2×2 TSV。另将重复一万次的中文／emoji、NULL 和二进制一起复制、粘贴并保存工作区，逐字核对 70,009 字节原文，保留 `\N` 和 `AP8=`。
+- **界面与演示**：实际 Tern 验证资源浏览、SQL 结果、任务详情、Redis DB 选择和 Hash 字段；浏览器设计稿验证矩形复制、选区外目标和显示文本复制，无页面脚本错误。README 的 8 帧、12.6 秒 GIF 来自实际原生操作。
 
-较早一轮 debug 检查中，程序已在真实 Tern 渲染工作台并连接 Engine，最后客户端退出后 Engine 自动完成收尾。当时控制脚本的 `type` 命令超时，未完成连接表单输入；该轮没有计入完整查询交互，后续生产工作台验收见下文。
 
-原位编辑另以独立 Rust SDK probe 在本机 Tern 原生渲染器验证：单元格内覆盖的输入框可获取焦点、接收中文与 emoji、Enter 确认、Escape 取消，以及 Tab 确认并迁移焦点；窄 pane 横向滚动后，输入框与所属单元格同步移动，冻结列保持原位。该验证不包含生产工作台接线、操作系统 IME 候选窗口及全部冻结列交叉场景，不能替代完整 UI 验收。设计稿的表过滤、历史复用、过滤后行定位及跨表／key 草稿保留已通过浏览器交互检查。
-
-2026-10-29，按 UI 设计稿接入的生产 Rust TSP 工作台在 macOS arm64、Tern 0.9.6（`a6b5f62`）完成真实交互验证。workspace 默认测试 80 项通过、25 项环境专项保持忽略；格式检查、Clippy `-D warnings`、debug 与 macOS arm64 release 构建通过。忽略项不计为本轮重新执行的真实数据库专项。
-
-MySQL 隔离实例验证了中文／emoji 原位输入、变更预览、提交前不写库、显式提交后实际值核对与网格自动刷新，以及 243 行数据的分页往返。树外名称筛选同时保留匹配的表和视图，不影响连接列表；独立 SQL tab 实际执行 Unicode 查询，工作区历史可预览并打开原文，同时清除无关旧结果。从表打开历史后，返回原表仍可浏览并进入原位编辑；只读连接不提供写操作且拒绝 F2 编辑。深浅主题和跨 tab 主题一致性已验证。
-
-Redis 隔离实例验证了 Hash 的独立 Field／Value、多行 Unicode 写回，List 的只读 Index／多行 Value、ZSet 的 Member／Score，以及 Set 成员替换；List、ZSet、Set 的草稿预览与实际写入均由 `redis-cli` 核对。String 的 Text／HEX 显示切换不改写值。SCAN 加载到 400 个 key 后，前后翻页及第二页 key 的正确对象定位通过；156,026 字节 CLI 大值按需读取后显示 Unicode，CLI 结果与 key 详情独立，退出重开可恢复 CLI 命令草稿与展开状态。
-
-原生验收同时修复了复合按钮装饰子元素截获点击、模态遮罩被 sticky 表头／冻结列挡住、CLI 类型化 JSON 未解码、浅色输入文字对比度、窄栏工具区挤压输入框，以及历史查询覆盖表视图的问题。最终 release 程序已脱离临时样式覆盖重新启动并验证，临时验收 IPC 已关闭；最后客户端退出时共享 Engine 正常收尾，新启动可重新连接。操作系统 IME 候选窗口、其他平台与本轮未重跑的服务专项仍不计为已验收。
-
-按用户要求，其他平台的产物、安装与运行验证暂缓，保留为未验收项；六目标产品范围不变。发布仍受以下条件阻塞：另外五个目标尚无原生运行记录，六个真实产物未集齐，完整启动包尚未组装成功；Windows ConPTY／权限与 Linux 凭据服务尚未实际验证。不能据本机成功或 CI 配置声称六目标验收通过。
+其余五个目标尚未完成原生验收，Windows ConPTY／权限及 Linux 凭据服务尚未实际验证；六个真实产物尚未集齐，完整启动包尚未组装成功。正式发布仍须按第 8、9 节及[发布指南](../RELEASING.md)验证候选提交、各平台和实际产物；既有结果不能代替相应运行证据。

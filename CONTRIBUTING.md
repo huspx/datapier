@@ -2,23 +2,24 @@
 
 ## 文档职责与阅读顺序
 
-修改代码前，先读 [README](README.md)、[产品规划](docs/product-plan.md)和 [0.1.0 技术方案](docs/technical-design-0.1.0.md)的相关部分。本指南是开发规范入口；[AGENTS](AGENTS.md) 是 agent 的阅读入口、授权与交付说明；[发布指南](RELEASING.md) 负责发布流程。README 是产品和快速入口，产品规划定义范围与版本，技术方案定义设计约束并记录实施与运行结果。以实际文件确认实现状态，规划路径不能当作已存在的模块。
+修改代码前，先读 [README](README.md)、[产品规划](docs/product-plan.md)和 [0.1.0 技术方案](docs/technical-design-0.1.0.md)的相关部分。本指南是开发规范入口；[AGENTS](AGENTS.md) 是 agent 的阅读入口、授权与交付说明；[发布指南](RELEASING.md) 负责发布流程。README 是产品和快速入口，产品规划定义范围与版本，技术方案定义设计约束并汇总运行证据。以实际文件确认实现状态，规划路径不能当作已存在的模块。
 
 用户的新要求优先于历史方案；范围或架构变化时同步相关文档。功能任务按完整可运行路径交付，不留下空壳、假结果或未接线接口。仅涉及文档的任务不顺带创建 workspace、plugin 或数据库。
 
 ## 开发环境
 
-- 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，`rust-version` 为 1.88。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
+- 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，四个 crate 统一继承 `rust-version = 1.94`，与锁定的 SQLx 0.9 最低要求一致。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
-- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；官方 `tern-sdk` 固定 Git revision `9e9c07463f4958b0c633424c9860aba499487d28`。六种目标使用一致的锁定依赖。
+- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；官方 `tern-sdk` 使用 registry 的 `0.2.0`，版本在 workspace 中精确固定。六种目标使用一致的锁定依赖。
 - 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
+- 当前开发基线为 Tern 0.9.9 与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
 
 构建本地程序并直接在 Tern 中启动：
 
 ```sh
 cargo build --locked -p datapier
-tern -e "$PWD/target/debug/datapier" ui
+tern -e "$PWD/target/debug/datapier" tui
 ```
 
 也可链接启动 plugin，从带有本地程序路径的环境启动 Tern：
@@ -32,7 +33,7 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 
 发布安装所需的版本校验、下载覆盖和缓存配置见[发布指南的构建与组包](RELEASING.md#构建与组包)。
 
-`--data-dir` 或 `DATAPIER_DATA_DIR` 可指定独立用户数据目录，`ui --workspace NAME` 选择工作区。Unix 数据目录必须属于当前用户且权限为 `0700`；不接受已有共享目录，也不自动修改其权限。密码不写入 SQLite：连接表单尝试保存到系统凭据库，服务不可用时仅保留在当前 Engine 会话内存。
+`--data-dir` 或 `DATAPIER_DATA_DIR` 可指定独立用户数据目录，`tui --workspace NAME` 选择工作区。Unix 数据目录必须属于当前用户且权限为 `0700`；不接受已有共享目录，也不自动修改其权限。密码不写入 SQLite：连接表单尝试保存到系统凭据库，服务不可用时仅保留在当前 Engine 会话内存。
 
 ## 编码约定
 
@@ -87,7 +88,9 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 
 当前没有 Java、XML 或 Python 源文件，不预装相应插件；PowerShell 不接入格式化。Markdown 不属于当前 dprint 范围。新增语言前核对[官方插件目录](https://dprint.dev/plugins/)的实际支持并更新项目配置，不假定 XML 能格式化 MyBatis SQL，或原生语言 Formatter 能处理字符串中的 SQL。
 
-dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。当前 SQLite 迁移按 `PRAGMA user_version` 管理；SQL 格式整理必须保持 schema 与版本语义，并验证新建和旧版本升级路径，不借机修改历史迁移逻辑。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
+Windows 安装器由 Windows PowerShell 5.1 读取，源码保留 UTF-8 BOM，以正确识别中文；交给启动 plugin 的 stdout JSON 则固定为无 BOM 的 UTF-8。
+
+dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。0.1.0 的配置库与结果缓存各用一份完整初始 schema，以 `PRAGMA user_version=1` 管理；SQL 格式整理必须保持 schema 语义，验证新建、重开以及拒绝不完整或较新基线。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
 
 ### 本地执行与 AI 修改要求
 
@@ -128,6 +131,8 @@ Formatter 仅负责格式，不替代 Clippy、类型／编译检查或行为验
 | `plugins/datapier` | 薄 Luau 启动包及安装脚本；不复制数据库或 grid 业务 |
 
 MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支持需有类型、交互和真实运行证据，不能仅注册驱动就声明支持。首版不实现动态库加载或外部 provider 进程。
+
+四个 crate 按运行边界划分，当前不再拆包。单个 crate 内优先按功能维护私有模块；入口只保留分派和状态组合，纯计算逻辑可独立为私有模块（如编辑器、grid、Redis key 树）。只有出现独立消费者、明确依赖隔离或独立版本需求时再评估新 crate，不按文件行数拆包。
 
 ## 不可破坏的行为
 
@@ -174,6 +179,8 @@ MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支
 
 ## 测试与验证
 
+测试文件统一放在各 crate 的 `tests/`：集成测试放在该目录根部，需访问私有实现的单元测试放在 `tests/unit/`，可按源码职责建立子目录。源码以 `#[cfg(test)]` 和相对路径 `#[path = "..."]` 引入对应测试模块；不在 `src/` 内存放测试文件或内联测试模块，也不为测试扩大公开 API。
+
 Rust 改动按影响范围运行 `cargo check --locked`／`cargo test --locked`；格式检查按[代码格式化](#代码格式化)执行。静态检查与 workspace 默认测试命令为：
 
 ```sh
@@ -197,7 +204,7 @@ cargo test -p datapier-core --test tls -- --ignored
 
 普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
 
-按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-实施顺序与验收)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。发布前六目标原生验收见[发布前检查](RELEASING.md#发布前检查)。
+按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-验收要求)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。发布前六目标原生验收见[发布前检查](RELEASING.md#发布前检查)。
 
 只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。历史验收和剩余发布阻塞统一查阅[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)，不将其视为本次重新验证。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
 
@@ -207,6 +214,6 @@ cargo test -p datapier-core --test tls -- --ignored
 
 ## 文档与交付
 
-功能变更同步 README、设计说明及适用的版本记录；README 的安装命令、平台支持及功能状态必须与实际实现和发布产物一致。最终交付说明具体改动、实际验证和限制。
+功能变更同步 README、设计说明及根目录 [CHANGELOG](CHANGELOG.md) 中适用的未发布变更记录；发布时由维护者将相关记录整理到对应版本，并按[发布指南](RELEASING.md#发布说明与-changelog)人工编写发布说明。README 的安装命令、平台支持及功能状态必须与实际实现和发布产物一致。最终交付说明具体改动、实际验证和限制。
 
 遵循 [MIT License](LICENSE)，保留第三方分发要求。真实凭据、私有连接、生产数据、生成产物与本地索引不入库；测试样本使用可公开数据。

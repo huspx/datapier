@@ -4,7 +4,7 @@
 
 当前实现版本为 0.1.0，尚未发布。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源。正式分发需要在验收完成后人工创建 GitHub Release 并上传组包产物。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
 
-[技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)记录了历史 macOS arm64 运行情况：其余五个目标尚无原生运行记录，六个真实产物尚未集齐，完整启动包组装受阻；Windows ConPTY／权限和 Linux 凭据服务尚未实际验证。历史记录不是本次重新运行的结果，不能据此声称六目标验收完成。
+[技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成原生验收。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
 本指南描述发布步骤，不代表已完成这些操作，也不构成提交、推送、合并、创建 tag 或发布的授权。工作区有文件不代表目标提交或分发仓库包含它们；正式发布前必须确保实际源码、Cargo 配置和锁文件、plugin、安装器、组包脚本及工作流都已进入目标提交，不能依赖未跟踪或被忽略的本地文件。
 
@@ -13,7 +13,7 @@
 发布前逐项核对版本一致；目前以下位置均为 `0.1.0`：
 
 - 根 `Cargo.toml` 的 `workspace.package.version`；四个 crate 的 `Cargo.toml` 通过 `version.workspace = true` 继承，`Cargo.lock` 中四个本地包版本应同步。CLI 的 clap `version` 继承 crate 版本。
-- `crates/datapier-tsp/src/lib.rs` 的 TSP 应用版本、`plugins/datapier/plugin.toml` 的 plugin 版本，以及 `plugins/datapier/install/unix.sh` 和 `plugins/datapier/install/windows.ps1` 的安装器版本。
+- TSP 应用版本、`plugins/datapier/plugin.toml` 的 plugin 版本，以及 `plugins/datapier/install/unix.sh` 和 `plugins/datapier/install/windows.ps1` 的安装器版本。
 - `scripts/package-target.ps1` 和 `scripts/assemble-release.ps1` 的默认版本；前者只接受数字三段版本，不接受预发布后缀，后者目前有仅接受 `0.1.0` 的硬编码 guard。发布其他版本须先同步修改相关版本和 guard，不能仅传 `-Version`。
 - `.github/workflows/native-release.yml` 的 CLI smoke 期望输出 `datapier 0.1.0` 和汇总 artifact 名 `datapier-0.1.0-release`；新版本也要同步这些硬编码。
 
@@ -21,18 +21,18 @@
 
 ## 发布说明与 CHANGELOG
 
-当前没有 CHANGELOG 文件或自动生成发布说明的机制。根据实际产品变化、[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)及该版本真实验收记录人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。后续若存在 CHANGELOG，应同步相应版本记录；目前不假定已有 CHANGELOG 条目或生成流程。
+根目录 [CHANGELOG.md](CHANGELOG.md) 由贡献者人工维护，功能变更记入适用的未发布条目，发布时整理到对应版本；当前没有自动生成发布说明的机制。维护者结合变更记录、[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)及该版本真实验收记录人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。
 
 ## 发布前检查
 
 按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)完成适用检查，记录实际命令和结果。默认测试不包含默认忽略的真实数据库专项，编译、mock、交叉编译或模拟运行均不能替代实际运行证明。发布前六个目标都必须原生运行验收，不能因缺少环境而静默缩减范围。
 
-- 使用隔离的真实 MySQL 8.0／8.4 和 Redis 6.2／7.2／8.0 单节点，按实际版本验证连接、查询、编辑提交、导入导出、只读、并发冲突与取消；覆盖大整数、精确小数、NULL、二进制、普通空结果、多结果、写入断连不重放、Redis List 重复值、WATCH 与 TTL。数据库测试只创建并清理自身隔离资源，不使用生产数据或真实凭据作为样本。
+- 使用隔离的真实 MySQL 5.7／8.0／8.4 和 Redis 6.2／7.2／8.0 单节点，按实际版本验证连接、查询、编辑提交、导入导出、只读、并发冲突与取消；覆盖大整数、精确小数、NULL、二进制、普通空结果、多结果、写入断连不重放、Redis List 重复值、WATCH 与 TTL。数据库测试只创建并清理自身隔离资源，不使用生产数据或真实凭据作为样本。
 - 在实际 Tern 中验证完整交互，包括中文／emoji、选区、分页、大字段、草稿恢复、两个 UI、十万行全量导出及百万 key 增量扫描；观察 IPC、客户端退出及 Engine 收尾的进程和资源状态。验证 TLS 成功连接及错误 CA／身份拒绝、系统凭据存取和凭据服务不可用时的行为，确保日志、配置、导出和运行描述不含秘密。
 - 在每个原生目标验证干净安装、下载与 SHA-256 校验、缓存复用、启动、IPC 权限和退出恢复。macOS 检查 Keychain；Linux 检查 Secret Service 不可用路径；Windows 检查 Named Pipe 当前用户权限及拒绝远程客户端、Tern 随附 ConPTY／OSC 877、进程退出、文件锁和活动 exe 更新。记录平台、架构、系统和依赖版本及实际结果。
 - 核对 README 的安装、功能和平台描述与实际结果一致，保留 [MIT License](LICENSE) 及第三方分发要求。0.1.0 的 MySQL／Redis 单节点范围及不支持项目以 [README](README.md) 和[技术方案](docs/technical-design-0.1.0.md#1-目标与范围)为准，不以配置或单一平台结果扩大支持声明。
 
-各目标验收结果应能关联具体提交、构建产物和环境；任何未完成项保留为发布阻塞。详细验收场景见[技术方案第 8 节](docs/technical-design-0.1.0.md#8-跨平台与分发)和[第 9 节](docs/technical-design-0.1.0.md#9-实施顺序与验收)。正式 Release 下载地址需在实际上传后核对；发布前对候选包和隔离下载源的安装验证，不能写成正式下载地址已可用。
+各目标验收结果应能关联具体提交、构建产物和环境；任何未完成项保留为发布阻塞。详细验收场景见[技术方案第 8 节](docs/technical-design-0.1.0.md#8-跨平台与分发)和[第 9 节](docs/technical-design-0.1.0.md#9-验收要求)。正式 Release 下载地址需在实际上传后核对；发布前对候选包和隔离下载源的安装验证，不能写成正式下载地址已可用。
 
 ## PR 与合并
 
