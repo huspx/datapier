@@ -2,7 +2,7 @@
 
 ## 当前发布方式与边界
 
-0.1.0 已于 2026-11-01 在 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.1.0) 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 仅在目标为 `main` 的 pull request、`main` 的 push 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；普通工作分支和 tag 的 push 不自动触发。它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源，正式发布仍由维护者执行。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
+0.1.0 已于 2026-11-01 在 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.1.0) 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 仅在目标为 `main` 的 pull request、`main` 的 push 或手动触发时执行独立格式检查和六目标原生验证；只有运行 ref 为 `refs/heads/main` 时组包并生成 Actions artifact，PR 和手动运行其他分支均不生成交付物。普通工作分支和 tag 的 push 不自动触发。工作流权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源，正式发布仍由维护者执行。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
 
 [技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成完整原生验收。0.1.0 经维护者明确接受已披露的验收范围后公开，例外与限制保留在对应 Release 说明中；该次授权不代表其余平台已验收，也不自动放宽后续版本的发布要求。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
@@ -65,7 +65,7 @@
 | windows-2022 | x86_64-pc-windows-msvc |
 | windows-11-arm | aarch64-pc-windows-msvc |
 
-独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、运行 `--version` smoke、调用单目标组包脚本并上传 `datapier-<target>` Actions artifact。默认测试与版本 smoke 不等于上面的真实运行验收。随后 bundle job 下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact；该产物仍需人工发布。
+独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件并运行 `--version` smoke。PR 到此完成验证，不执行单目标组包、不上传 artifact，runner 内临时二进制随 job 清理。只有运行 ref 为 `refs/heads/main` 时，才调用单目标组包脚本并上传 `datapier-<target>` Actions artifact；bundle job 同样仅在 main 运行，下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact。手动选择 main 时生成交付物，选择其他分支时仅验证。默认测试、版本 smoke 和交付物生成不等于完整原生运行验收；正式发布仍按后文人工核对。
 
 官方 Actions 使用 Node.js 24 运行时：`actions/checkout@v7`、`actions/upload-artifact@v7` 和 `actions/download-artifact@v8`。升级时核对官方运行时声明、runner 要求及产物参数兼容性；当前使用 GitHub 托管 runner。
 
