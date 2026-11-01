@@ -67,13 +67,20 @@ impl Drop for PendingRequest {
         self.inner.pending.lock().unwrap().remove(&self.id);
     }
 }
+// 由 Arc 在最后一个句柄释放时调用，避免并发 Drop 各自观察到非唯一引用。
+struct ClientLifetime(CancellationToken);
+impl Drop for ClientLifetime {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 /// 一个可并发请求的 Engine 会话，所有 clone 共享请求 ID 空间、事件流和租约。
 ///
 /// 最后一个客户端句柄释放会停止本地 I/O 与心跳；单独持有事件 receiver 不保活会话。
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Inner>,
-    lifetime: Arc<()>,
+    lifetime: Arc<ClientLifetime>,
 }
 impl Client {
     /// 连接并握手；必要时启动使用同一可执行文件的 Engine 候选进程。
@@ -129,7 +136,27 @@ impl Client {
             loop {
                 tokio::select! {
                     _ = writer_inner.shutdown.cancelled() => break,
-                    message = rx.recv() => match message { Some(message) => if protocol::write(&mut writer, &message).await.is_err() { break }, None => break },
+                    message = rx.recv() => match message {
+                        Some(message) => {
+                            // 写入取消后帧可能不完整，立即关闭通道，不能继续发送下一帧。
+                            tokio::select! {
+                                biased;
+                                _ = writer_inner.shutdown.cancelled() => break,
+                                result = protocol::write(&mut writer, &message) => if let Err(error) = result {
+                                    if error.code != "invalid_input" {
+                                        break;
+                                    }
+                                    // 编码或超限错误发生在写入帧头前；请求可能已取消。
+                                    if let Some(id) = message.get("id").and_then(Value::as_str)
+                                        && let Some(tx) = writer_inner.pending.lock().unwrap().remove(id)
+                                    {
+                                        let _ = tx.send(Err(error));
+                                    }
+                                },
+                            }
+                        }
+                        None => break,
+                    },
                 }
             }
             writer_inner.shutdown.cancel();
@@ -166,8 +193,8 @@ impl Client {
             }
         });
         let client = Self {
+            lifetime: Arc::new(ClientLifetime(inner.shutdown.clone())),
             inner,
-            lifetime: Arc::new(()),
         };
         let handshake = match client
             .request("session.open", json!({"protocol_version":1}))
@@ -194,14 +221,14 @@ impl Client {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let (Some(inner), Some(lifetime)) = (weak.upgrade(), lifetime.upgrade()) else {
+                let Some(inner) = weak.upgrade() else {
                     break;
                 };
-                if inner.shutdown.is_cancelled() {
+                // 不升级 lifetime：心跳不能使最后一个外部句柄的 Drop 错过关闭连接。
+                if lifetime.strong_count() == 0 || inner.shutdown.is_cancelled() {
                     break;
                 }
-                if (Client { inner, lifetime })
-                    .request("session.heartbeat", json!({}))
+                if Client::request_inner(&inner, "session.heartbeat", json!({}))
                     .await
                     .is_err()
                 {
@@ -228,32 +255,36 @@ impl Client {
     }
     /// 发送一个请求并等待同 ID 的响应；服务端业务错误保留原始错误内容。
     ///
+    /// 超过 8 MiB 的序列化请求在发送前以 `invalid_input` 拒绝，不影响共享会话。
     /// 取消此 future 只停止本地等待，不保证请求未发送或数据库未执行。
     /// 连接错误尤其不能作为重试写入的依据；耗时任务应使用返回的任务 ID 查询结果。
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        Self::request_inner(&self.inner, method, params).await
+    }
+    async fn request_inner(inner: &Arc<Inner>, method: &str, params: Value) -> Result<Value> {
         let id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.inner.pending.lock().unwrap();
-            if self.inner.shutdown.is_cancelled() || self.inner.closed.load(Ordering::Acquire) {
+            let mut pending = inner.pending.lock().unwrap();
+            if inner.shutdown.is_cancelled() || inner.closed.load(Ordering::Acquire) {
                 return Err(AppError::new("disconnected", "Engine 连接已关闭"));
             }
             pending.insert(id.clone(), tx);
         }
         let _pending = PendingRequest {
-            inner: self.inner.clone(),
+            inner: inner.clone(),
             id: id.clone(),
         };
         tokio::select! {
             biased;
-            sent = self.inner.send.send(json!({"id":id,"method":method,"params":params})) => if sent.is_err() { return Err(AppError::new("disconnected", "Engine 连接已断开")); },
-            _ = self.inner.shutdown.cancelled() => return Err(AppError::new("disconnected", "Engine 连接已断开")),
+            sent = inner.send.send(json!({"id":id,"method":method,"params":params})) => if sent.is_err() { return Err(AppError::new("disconnected", "Engine 连接已断开")); },
+            _ = inner.shutdown.cancelled() => return Err(AppError::new("disconnected", "Engine 连接已断开")),
         }
         // 服务端可能在发送关闭确认后立即断开；两者同时就绪时必须优先交付已收到的响应。
         tokio::select! {
             biased;
             result = rx => result.map_err(|_| AppError::new("disconnected", "Engine 连接已断开"))?,
-            _ = self.inner.shutdown.cancelled() => Err(AppError::new("disconnected", "Engine 连接已断开")),
+            _ = inner.shutdown.cancelled() => Err(AppError::new("disconnected", "Engine 连接已断开")),
         }
     }
     /// 请求释放整个共享会话并停止本地 I/O，影响本句柄的全部 clone。
@@ -269,109 +300,7 @@ impl Client {
         result
     }
 }
-impl Drop for Client {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.lifetime) == 1 {
-            self.inner.shutdown.cancel();
-        }
-    }
-}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn interleaved_events_and_responses_do_not_hold_client_open() {
-        let (stream, mut peer) = tokio::io::duplex(4096);
-        let task_id = Uuid::new_v4();
-        let server = tokio::spawn(async move {
-            let open = protocol::read(&mut peer).await.unwrap();
-            protocol::write(
-                &mut peer,
-                &json!({"id":open["id"],"result":{"protocol_version":1}}),
-            )
-            .await
-            .unwrap();
-            let first = protocol::read(&mut peer).await.unwrap();
-            let second = protocol::read(&mut peer).await.unwrap();
-            protocol::write(&mut peer, &json!({"seq":1,"kind":"execution.state","task_id":task_id,"payload":{"state":"running"}})).await.unwrap();
-            protocol::write(&mut peer, &json!({"id":second["id"],"result":2}))
-                .await
-                .unwrap();
-            protocol::write(&mut peer, &json!({"seq":2,"kind":"execution.state","task_id":task_id,"payload":{"state":"succeeded"}})).await.unwrap();
-            protocol::write(&mut peer, &json!({"id":first["id"],"result":1}))
-                .await
-                .unwrap();
-            let _ = protocol::read(&mut peer).await;
-        });
-        let client = Client::handshake(Box::new(stream)).await.unwrap();
-        let mut events = client.subscribe_events();
-        let one = client.request("one", json!({}));
-        let two = client.request("two", json!({}));
-        let (one, two) = tokio::join!(one, two);
-        assert_eq!(one.unwrap(), 1);
-        assert_eq!(two.unwrap(), 2);
-        assert_eq!(events.recv().await.unwrap().payload["state"], "running");
-        assert_eq!(events.recv().await.unwrap().payload["state"], "succeeded");
-        drop(client);
-        assert!(matches!(
-            events.recv().await,
-            Err(broadcast::error::RecvError::Closed)
-        ));
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn received_close_response_wins_over_disconnect() {
-        let (send, mut receive) = mpsc::channel(4);
-        let inner = Arc::new(Inner {
-            send,
-            pending: Mutex::new(HashMap::new()),
-            shutdown: CancellationToken::new(),
-            closed: AtomicBool::new(false),
-            events: Mutex::new(Some(broadcast::channel(128).0)),
-        });
-        let client = Client {
-            inner: inner.clone(),
-            lifetime: Arc::new(()),
-        };
-        let request = tokio::spawn(async move { client.close().await });
-        let message = receive.recv().await.unwrap();
-        let id = message["id"].as_str().unwrap();
-        let response = inner.pending.lock().unwrap().remove(id).unwrap();
-        response.send(Ok(json!({"closed": true}))).unwrap();
-        inner.shutdown.cancel();
-        request.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn cancelled_requests_are_removed_and_shutdown_wakes_waiters() {
-        let (send, mut receive) = mpsc::channel(4);
-        let inner = Arc::new(Inner {
-            send,
-            pending: Mutex::new(HashMap::new()),
-            shutdown: CancellationToken::new(),
-            closed: AtomicBool::new(false),
-            events: Mutex::new(Some(broadcast::channel(128).0)),
-        });
-        let client = Client {
-            inner: inner.clone(),
-            lifetime: Arc::new(()),
-        };
-        let pending_client = client.clone();
-        let task = tokio::spawn(async move { pending_client.request("slow", json!({})).await });
-        receive.recv().await.unwrap();
-        assert_eq!(inner.pending.lock().unwrap().len(), 1);
-        task.abort();
-        let _ = task.await;
-        assert!(inner.pending.lock().unwrap().is_empty());
-
-        let pending_client = client.clone();
-        let task = tokio::spawn(async move { pending_client.request("slow", json!({})).await });
-        receive.recv().await.unwrap();
-        inner.shutdown.cancel();
-        assert_eq!(task.await.unwrap().unwrap_err().code, "disconnected");
-        assert!(inner.pending.lock().unwrap().is_empty());
-    }
-}
+#[path = "../tests/unit/client.rs"]
+mod tests;

@@ -447,6 +447,195 @@ pub fn current_statement(
     Ok(byte_to_utf16(sql, start + left).unwrap()..byte_to_utf16(sql, start + right).unwrap())
 }
 
+/// 一个可安全定位的语句，范围使用 UTF-16，行号从一开始。
+#[derive(Clone, Debug)]
+pub struct StatementRange {
+    pub range: Range<usize>,
+    pub first_line: usize,
+    pub last_line: usize,
+}
+
+/// 列出每条语句；任何无法可靠分割的脚本都整体拒绝。
+pub fn statements(sql: &str, mode: MysqlMode) -> Result<Vec<StatementRange>, String> {
+    let tokens = tokenize(sql, mode)?;
+    let Some(first) = tokens
+        .iter()
+        .find(|t| t.kind != Some(HighlightKind::Comment) && &sql[t.start..t.end] != ";")
+    else {
+        return Ok(Vec::new());
+    };
+    // current_statement 包含客户端命令、存储程序和模式变更的统一安全检查。
+    current_statement(sql, byte_to_utf16(sql, first.start).unwrap(), mode)?;
+    let mut result = Vec::new();
+    let mut start = 0;
+    for end in tokens
+        .iter()
+        .filter(|t| t.kind.is_none() && &sql[t.start..t.end] == ";")
+        .map(|t| t.start)
+        .chain(std::iter::once(sql.len()))
+    {
+        if let Some(first) = tokens
+            .iter()
+            .find(|t| t.start >= start && t.end <= end && t.kind != Some(HighlightKind::Comment))
+        {
+            let fragment = &sql[start..end];
+            let left = start + fragment.len() - fragment.trim_start().len();
+            let right = start + fragment.trim_end().len();
+            result.push(StatementRange {
+                range: byte_to_utf16(sql, left).unwrap()..byte_to_utf16(sql, right).unwrap(),
+                first_line: sql[..first.start].bytes().filter(|b| *b == b'\n').count() + 1,
+                last_line: sql[..right].bytes().filter(|b| *b == b'\n').count() + 1,
+            });
+        }
+        start = end.saturating_add(1);
+    }
+    Ok(result)
+}
+
+/// 验证单条可解释语句；用于控件状态时不构造执行文本。
+pub fn validate_explain_selection(sql: &str, mode: MysqlMode) -> Result<(), String> {
+    if mode.ansi_quotes || mode.no_backslash_escapes {
+        return Err("当前 SQL 模式无法安全解析执行计划".into());
+    }
+    if statements(sql, mode)?.len() != 1 {
+        return Err("执行计划只支持单条 SQL".into());
+    }
+    let parsed = sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, sql)
+        .map_err(|_| "无法安全解析选中的 SQL")?;
+    if parsed.len() != 1
+        || !matches!(
+            &parsed[0],
+            sqlparser::ast::Statement::Query(_)
+                | sqlparser::ast::Statement::Insert(_)
+                | sqlparser::ast::Statement::Update(_)
+                | sqlparser::ast::Statement::Delete(_)
+        )
+    {
+        return Err("该语句不支持执行计划".into());
+    }
+    Ok(())
+}
+
+/// 验证后生成普通 EXPLAIN；不会执行目标语句或加入 ANALYZE。
+pub fn explain_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
+    validate_explain_selection(sql, mode)?;
+    Ok(format!("EXPLAIN FORMAT=JSON {sql}"))
+}
+
+/// 仅接受格式化前后词法与 AST 均一致的结果，避免改写注释、占位符和 SQL 语义。
+pub fn format_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
+    if mode.ansi_quotes || mode.no_backslash_escapes {
+        return Err("当前 SQL 模式与格式化器不兼容".into());
+    }
+    if statements(sql, mode)?.is_empty() {
+        return Err("选区没有完整的 SQL 语句".into());
+    }
+    let before = tokenize(sql, mode)?;
+    // sqlformat 将任意 -- 视为注释；MySQL 要求后接空白或控制字符。
+    if before.windows(2).any(|pair| {
+        &sql[pair[0].start..pair[0].end] == "-"
+            && &sql[pair[1].start..pair[1].end] == "-"
+            && pair[0].end == pair[1].start
+    }) {
+        return Err("选区包含格式化器无法安全识别的减号".into());
+    }
+    let original_ast =
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, sql)
+            .map_err(|_| "选区不是可安全解析的完整 SQL")?;
+    let formatted = sqlformat::format(
+        sql,
+        &sqlformat::QueryParams::None,
+        &sqlformat::FormatOptions::default(),
+    );
+    let after = tokenize(&formatted, mode)?;
+    if before.len() != after.len()
+        || before
+            .iter()
+            .zip(&after)
+            .any(|(a, b)| a.kind != b.kind || sql[a.start..a.end] != formatted[b.start..b.end])
+    {
+        return Err("格式化结果改变了 SQL 词法内容".into());
+    }
+    // 一些 MySQL 运算符、变量、字符集前缀和函数依赖相邻字符之间有无空白。
+    for (a, b) in before.windows(2).zip(after.windows(2)) {
+        let left = &sql[a[0].start..a[0].end];
+        let right = &sql[a[1].start..a[1].end];
+        let punct = |text: &str| {
+            matches!(
+                text,
+                "@" | ":"
+                    | "."
+                    | "-"
+                    | "/"
+                    | "*"
+                    | "!"
+                    | "<"
+                    | ">"
+                    | "="
+                    | "|"
+                    | "&"
+                    | "^"
+                    | "%"
+                    | "+"
+                    | "~"
+            )
+        };
+        let sensitive = (punct(left) && punct(right))
+            || matches!(left, "@" | ":" | ".")
+            || right == "."
+            || matches!(
+                a[1].kind,
+                Some(HighlightKind::String | HighlightKind::Identifier)
+            )
+            || (right == "("
+                && left
+                    .bytes()
+                    .last()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_'));
+        if sensitive && (a[0].end == a[1].start) != (b[0].end == b[1].start) {
+            return Err("格式化结果改变了 SQL 敏感的空白边界".into());
+        }
+    }
+    let result_ast =
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, &formatted)
+            .map_err(|_| "格式化结果无法安全解析")?;
+    if original_ast != result_ast {
+        return Err("格式化结果改变了 SQL 语义".into());
+    }
+    Ok(formatted)
+}
+
+/// 格式化时同时校验选区与外围文本的词法连接，避免破坏跨选区的 token。
+pub fn format_range(text: &str, range: Range<usize>, mode: MysqlMode) -> Result<String, String> {
+    let start = utf16_to_byte(text, range.start).ok_or("SQL 选区无效")?;
+    let end = utf16_to_byte(text, range.end).ok_or("SQL 选区无效")?;
+    let selected = text.get(start..end).ok_or("SQL 选区无效")?;
+    let formatted = format_selection(selected, mode)?;
+    let original = tokenize(text, mode)?;
+    let mut combined = String::with_capacity(text.len() - selected.len() + formatted.len());
+    combined.push_str(&text[..start]);
+    combined.push_str(&formatted);
+    combined.push_str(&text[end..]);
+    let updated = tokenize(&combined, mode)?;
+    if original.len() != updated.len()
+        || original
+            .iter()
+            .zip(&updated)
+            .any(|(a, b)| a.kind != b.kind || text[a.start..a.end] != combined[b.start..b.end])
+    {
+        return Err("格式化会改变选区边界处的 SQL".into());
+    }
+    // 选区边界相邻时，即使 tokenizer 恰好分出相同 token，也可能改变运算符或前缀。
+    for (a, b) in original.windows(2).zip(updated.windows(2)) {
+        if (a[0].end <= start && a[1].start >= start || a[0].end <= end && a[1].start >= end)
+            && (a[0].end == a[1].start) != (b[0].end == b[1].start)
+        {
+            return Err("格式化会改变选区边界处的空白".into());
+        }
+    }
+    Ok(formatted)
+}
+
 /// 从 SQL 关键词和调用方缓存的目录名称中补全，按大小写无关方式排序去重。
 pub fn completions(prefix: &str, catalog: &[String]) -> Vec<String> {
     let lower = prefix.to_lowercase();
@@ -463,120 +652,5 @@ pub fn completions(prefix: &str, catalog: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn utf16_selection_edit_and_undo_preserve_unicode() {
-        let mut editor = Editor::new("中😀文");
-        assert!(!editor.set_selection(1, 2));
-        assert!(editor.set_selection(1, 3));
-        assert_eq!(editor.selected_text(), Some("😀"));
-        assert!(editor.key(Key::Text("好"), false));
-        assert_eq!(editor.text, "中好文");
-        assert!(editor.undo());
-        assert_eq!(editor.selected_text(), Some("😀"));
-        assert!(editor.key(Key::Backspace, false));
-        assert_eq!(editor.text, "中文");
-    }
-
-    #[test]
-    fn shift_selection_tracks_utf16_across_chinese_and_emoji() {
-        let mut editor = Editor::new("中😀文");
-        assert!(editor.key(Key::Left, true));
-        assert_eq!((editor.anchor, editor.cursor), (4, 3));
-        assert_eq!(editor.selected_text(), Some("文"));
-        assert!(editor.key(Key::Left, true));
-        assert_eq!((editor.anchor, editor.cursor), (4, 1));
-        assert_eq!(editor.selected_text(), Some("😀文"));
-        assert!(editor.key(Key::Left, true));
-        assert_eq!((editor.anchor, editor.cursor), (4, 0));
-        assert_eq!(editor.selected_text(), Some("中😀文"));
-        assert!(editor.key(Key::Right, true));
-        assert_eq!((editor.anchor, editor.cursor), (4, 1));
-        assert_eq!(editor.selected_text(), Some("😀文"));
-        assert!(editor.key(Key::Right, false));
-        assert_eq!((editor.anchor, editor.cursor), (4, 4));
-        assert_eq!(editor.selected_text(), None);
-    }
-
-    #[test]
-    fn vertical_navigation_preserves_character_column_and_shift_anchor() {
-        let mut editor = Editor::new("甲😀乙\na😀z\n短");
-        assert!(editor.set_selection(3, 3));
-        assert!(editor.key(Key::Down, true));
-        assert_eq!(editor.cursor, 8);
-        assert_eq!(editor.anchor, 3);
-        assert_eq!(editor.selected_text(), Some("乙\na😀"));
-        assert!(editor.key(Key::Down, false));
-        assert_eq!(editor.cursor, 11);
-        assert_eq!(editor.anchor, 11);
-        assert!(editor.key(Key::Up, false));
-        assert_eq!(editor.cursor, 6);
-    }
-
-    #[test]
-    fn mysql_statement_respects_quotes_comments_and_mode() {
-        let sql = "SELECT '😀;x' /* ; */; SELECT `中;文`;";
-        let cursor = sql[..sql.find("`中").unwrap()].encode_utf16().count();
-        let range = current_statement(sql, cursor, MysqlMode::default()).unwrap();
-        assert_eq!(
-            &sql[utf16_to_byte(sql, range.start).unwrap()..utf16_to_byte(sql, range.end).unwrap()],
-            "SELECT `中;文`"
-        );
-        assert!(current_statement("SELECT 'unterminated;", 0, MysqlMode::default()).is_err());
-        assert!(
-            current_statement(
-                "CREATE DEFINER = root PROCEDURE p() BEGIN SELECT 1; END;",
-                0,
-                MysqlMode::default()
-            )
-            .is_err()
-        );
-        assert!(current_statement("SELECT 1; \\g", 0, MysqlMode::default()).is_err());
-    }
-
-    #[test]
-    fn mysql_rejects_ambiguous_comments_and_client_directives() {
-        let mode = MysqlMode::default();
-        for sql in [
-            "SELECT 1 /*!80000 ; SELECT 2 */;",
-            "SELECT 1 /*M!100000 ; SELECT 2 */;",
-            "SELECT 1 /* outer /* inner */ ; SELECT 2 */;",
-            "SELECT 1 # comment\r; SELECT 2",
-            "DELIMITER $$\nSELECT 1$$",
-            "SET @@session.`sql_mode` = ''; SELECT 1;",
-        ] {
-            assert!(current_statement(sql, 0, mode).is_err(), "{sql}");
-        }
-        let sql = "SELECT 1 -- comment;\r\n; SELECT 2";
-        let cursor = sql.find("SELECT 2").unwrap();
-        let range = current_statement(sql, cursor, mode).unwrap();
-        assert_eq!(&sql[range], "SELECT 2");
-    }
-
-    #[test]
-    fn mysql_modes_control_backslash_and_double_quotes() {
-        let string_sql = r"SELECT 'a\'; SELECT 2;";
-        assert!(current_statement(string_sql, 0, MysqlMode::default()).is_err());
-        let no_escape = MysqlMode {
-            no_backslash_escapes: true,
-            ansi_quotes: false,
-        };
-        assert_eq!(
-            &string_sql[current_statement(string_sql, 0, no_escape).unwrap()],
-            r"SELECT 'a\'"
-        );
-
-        let quoted_sql = r#"SELECT "a\"; SELECT 2;"#;
-        assert!(current_statement(quoted_sql, 0, MysqlMode::default()).is_err());
-        let ansi = MysqlMode {
-            no_backslash_escapes: false,
-            ansi_quotes: true,
-        };
-        assert_eq!(
-            &quoted_sql[current_statement(quoted_sql, 0, ansi).unwrap()],
-            r#"SELECT "a\""#
-        );
-    }
-}
+#[path = "../tests/unit/editor.rs"]
+mod tests;

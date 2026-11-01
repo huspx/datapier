@@ -2,21 +2,24 @@ use std::collections::{BTreeMap, HashSet};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value as Json, json};
-use sqlx::{MySql, MySqlConnection, QueryBuilder};
+use sqlx::{MySql, MySqlConnection, Row, mysql::MySqlArguments, query::Query};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{MysqlSession, catalog};
 use crate::{
     ExecutionSink,
+    model::preview::{
+        ChangePreview, PreviewBudget, PreviewItem, PreviewStatement, preview_json, preview_page,
+    },
     model::{AppError, Column, ResourceTarget, Result, RowChange, TableSchema, Value, param},
 };
 
-#[derive(Clone)]
 enum Bind {
     Null,
     Text(String),
     Bytes(Vec<u8>),
+    Year(u16),
     Float32(f32),
     Float64(f64),
 }
@@ -178,6 +181,21 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
         )));
     }
     Ok(match value {
+        // BIT 接收二进制字符串时按字节值解释，绑定十进制文本会写入 ASCII 字节。
+        Value::Bool(v) if base == "bit" => Bind::Bytes(vec![u8::from(*v)]),
+        Value::Unsigned(v) if base == "bit" => {
+            let n = v
+                .parse::<u64>()
+                .map_err(|_| AppError::invalid("无效的位值"))?;
+            let width = bit_width(&ty).ok_or_else(|| AppError::invalid("无效的位宽"))?;
+            let bytes = n.to_be_bytes();
+            Bind::Bytes(bytes[8 - width.div_ceil(8) as usize..].to_vec())
+        }
+        // MySQL 将字符串 '0' 当作 2000 年，整数 0 才表示零年。
+        Value::Integer(v) | Value::Unsigned(v) if base == "year" => Bind::Year(
+            v.parse::<u16>()
+                .map_err(|_| AppError::invalid("无效的年份"))?,
+        ),
         Value::Bool(v) => Bind::Text(if *v { "1" } else { "0" }.into()),
         Value::Integer(v)
         | Value::Unsigned(v)
@@ -209,32 +227,87 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
     })
 }
 
-/// 导入预检复用写入绑定规则；生成列、类型不匹配和无法无损表示的值返回错误。
-pub(crate) fn validate_import_value(value: &Value, column: &Column) -> Result<()> {
+/// 表单和导入预检复用写入绑定规则；生成列、类型不匹配和无法无损表示的值返回错误。
+pub fn validate_import_value(value: &Value, column: &Column) -> Result<()> {
     if column.generated {
         return Err(AppError::invalid(format!("生成列不可写: {}", column.name)));
     }
     bind_value(value, column).map(|_| ())
 }
 
-fn push_bind(q: &mut QueryBuilder<MySql>, value: Bind) {
-    match value {
-        Bind::Null => {
-            q.push_bind(Option::<String>::None);
-        }
-        Bind::Text(v) => {
-            q.push_bind(v);
-        }
-        Bind::Bytes(v) => {
-            q.push_bind(v);
-        }
-        Bind::Float32(v) => {
-            q.push_bind(v);
-        }
-        Bind::Float64(v) => {
-            q.push_bind(v);
+struct StatementPlan {
+    text: String,
+    parameters: Vec<Bind>,
+}
+impl StatementPlan {
+    fn new(text: &str) -> Self {
+        Self {
+            text: text.into(),
+            parameters: Vec::new(),
         }
     }
+    fn push(&mut self, text: impl AsRef<str>) -> &mut Self {
+        self.text.push_str(text.as_ref());
+        self
+    }
+    fn push_bind(&mut self, value: Bind) {
+        self.text.push('?');
+        self.parameters.push(value);
+    }
+    fn query(&self) -> Query<'_, MySql, MySqlArguments> {
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(self.text.as_str()));
+        for value in &self.parameters {
+            q = match value {
+                Bind::Null => q.bind(Option::<&str>::None),
+                Bind::Text(v) => q.bind(v.as_str()),
+                Bind::Bytes(v) => q.bind(v.as_slice()),
+                Bind::Year(v) => q.bind(*v),
+                Bind::Float32(v) => q.bind(*v),
+                Bind::Float64(v) => q.bind(*v),
+            };
+        }
+        q
+    }
+    fn preview(&self, role: &'static str, budget: &mut PreviewBudget) -> PreviewStatement {
+        let parameters = self
+            .parameters
+            .iter()
+            .map(|bind| match bind {
+                Bind::Null => budget.parameter("null", b"NULL", false),
+                Bind::Text(v) => budget.parameter("text", v.as_bytes(), false),
+                Bind::Bytes(v) => budget.parameter("bytes", v, false),
+                Bind::Year(v) => {
+                    let mut p = budget.parameter("year", v.to_string().as_bytes(), false);
+                    p.byte_len = Some(2);
+                    p
+                }
+                Bind::Float32(v) => {
+                    let mut p = budget.parameter("float32", v.to_string().as_bytes(), false);
+                    p.byte_len = Some(4);
+                    p
+                }
+                Bind::Float64(v) => {
+                    let mut p = budget.parameter("float64", v.to_string().as_bytes(), false);
+                    p.byte_len = Some(8);
+                    p
+                }
+            })
+            .map(|mut p| {
+                if p.kind == "null" {
+                    p.byte_len = Some(0);
+                }
+                p
+            })
+            .collect();
+        PreviewStatement {
+            role,
+            text: self.text.clone(),
+            parameters,
+        }
+    }
+}
+fn push_bind(q: &mut StatementPlan, value: Bind) {
+    q.push_bind(value);
 }
 
 fn table(schema: &TableSchema) -> Result<String> {
@@ -304,9 +377,9 @@ fn validate(schema: &TableSchema, change: &RowChange) -> Result<()> {
 }
 
 // 使用二进制比较避免排序规则、大小写和尾随空格被视为相等；JSON 先由
-// MySQL 规范化再比较其可观察序列化结果。NULL、浮点和时间分别按原生语义比较。
+// MySQL 规范化再比较其可观察序列化结果。NULL、浮点、年份和时间按原生语义比较。
 fn predicate(
-    q: &mut QueryBuilder<MySql>,
+    q: &mut StatementPlan,
     schema: &TableSchema,
     values: &BTreeMap<String, Value>,
 ) -> Result<()> {
@@ -320,7 +393,12 @@ fn predicate(
             q.push(ident).push(" IS NULL");
             continue;
         }
-        if matches!(value, Value::Float(_)) {
+        if matches!(value, Value::Float(_))
+            || c.type_name
+                .split(|c: char| c == '(' || c.is_ascii_whitespace())
+                .next()
+                .is_some_and(|ty| ty.eq_ignore_ascii_case("year"))
+        {
             q.push(ident).push(" <=> ");
             push_bind(q, bind_value(value, c)?);
             continue;
@@ -349,31 +427,30 @@ fn predicate(
     Ok(())
 }
 
-async fn run_change(
-    conn: &mut MySqlConnection,
+struct ChangePlan {
+    check: Option<StatementPlan>,
+    write: StatementPlan,
+    insert: bool,
+}
+
+fn plan_change(
     schema: &TableSchema,
     change: &RowChange,
     transactional: bool,
-) -> std::result::Result<(), AppError> {
+) -> Result<ChangePlan> {
     let table = table(schema)?;
     // InnoDB 先锁住与完整原值匹配的行，再按可靠键写入；其他引擎直接在
     // 写语句中比较完整原值，避免独立检查与写入之间的竞态。
-    if transactional && change.operation != "insert" {
-        let mut check = QueryBuilder::<MySql>::new("SELECT 1 FROM ");
+    let check = if transactional && change.operation != "insert" {
+        let mut check = StatementPlan::new("SELECT 1 FROM ");
         check.push(&table).push(" WHERE ");
         predicate(&mut check, schema, &change.before)?;
         check.push(" FOR UPDATE");
-        if check
-            .build()
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(super::errors::mysql_error)?
-            .is_none()
-        {
-            return Err(AppError::conflict("行已变更或不存在"));
-        }
-    }
-    let mut q = QueryBuilder::<MySql>::new("");
+        Some(check)
+    } else {
+        None
+    };
+    let mut q = StatementPlan::new("");
     match change.operation.as_str() {
         "insert" => {
             q.push("INSERT INTO ").push(&table).push(" (");
@@ -426,14 +503,32 @@ async fn run_change(
         }
         _ => return Err(AppError::invalid("未知行变更操作")),
     }
-    let result = q.build().execute(&mut *conn).await.map_err(|e| {
+    Ok(ChangePlan {
+        check,
+        write: q,
+        insert: change.operation == "insert",
+    })
+}
+
+async fn run_change(conn: &mut MySqlConnection, plan: &ChangePlan) -> Result<()> {
+    if let Some(check) = &plan.check
+        && check
+            .query()
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(super::errors::mysql_error)?
+            .is_none()
+    {
+        return Err(AppError::conflict("行已变更或不存在"));
+    }
+    let result = plan.write.query().execute(&mut *conn).await.map_err(|e| {
         if matches!(e, sqlx::Error::Database(_)) {
             super::errors::mysql_error(e)
         } else {
             AppError::unknown(format!("写入结果无法确认: {e}"))
         }
     })?;
-    if change.operation != "insert" && result.rows_affected() == 0 {
+    if !plan.insert && result.rows_affected() == 0 {
         return Err(AppError::conflict("行已变更或不存在"));
     }
     Ok(())
@@ -446,10 +541,14 @@ fn editable(schema: &TableSchema) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn open(s: &mut MysqlSession, params: Json) -> Result<Json> {
+pub(super) async fn open(
+    s: &mut MysqlSession,
+    params: Json,
+    cancel: &CancellationToken,
+) -> Result<Json> {
     s.profile.ensure_write()?;
     let target: ResourceTarget = param(&params, "target")?;
-    let schema = catalog::schema(s, target).await?;
+    let schema = catalog::schema(s, target, cancel).await?;
     editable(&schema)?;
     if schema.keys.is_empty() {
         return Err(AppError::invalid("表没有可靠键，不能编辑行"));
@@ -467,6 +566,32 @@ pub(super) async fn discard(s: &mut MysqlSession, params: Json) -> Result<Json> 
     Ok(json!({"discarded":true}))
 }
 
+async fn resolve_and_validate(
+    schema: &TableSchema,
+    change: &mut RowChange,
+    sink: &ExecutionSink,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    for value in change
+        .key
+        .values_mut()
+        .chain(change.before.values_mut())
+        .chain(change.values.values_mut())
+    {
+        if cancel.is_cancelled() {
+            return Err(AppError::cancelled());
+        }
+        if let Value::Large { id, .. } = value {
+            let resolved = sink.store.read_value(*id).await?;
+            if matches!(resolved, Value::Large { .. }) {
+                return Err(AppError::invalid("大字段引用未解析为原始值"));
+            }
+            *value = resolved;
+        }
+    }
+    validate(schema, change)
+}
+
 async fn execute_batch(
     s: &mut MysqlSession,
     schema: &TableSchema,
@@ -481,32 +606,7 @@ async fn execute_batch(
         return Ok(json!({"items":items,"affected_rows":0}));
     }
     for (index, change) in changes.iter_mut().enumerate() {
-        for value in change
-            .key
-            .values_mut()
-            .chain(change.before.values_mut())
-            .chain(change.values.values_mut())
-        {
-            if cancel.is_cancelled() {
-                return Err(AppError::cancelled().with_details(json!({"items":items})));
-            }
-            if let Value::Large { id, .. } = value {
-                let id = *id;
-                match sink.store.read_value(id).await {
-                    Ok(resolved) if !matches!(resolved, Value::Large { .. }) => *value = resolved,
-                    Ok(_) => {
-                        let error = AppError::invalid("大字段引用未解析为原始值");
-                        items[index] = json!({"index":index,"status":"failed","error":error});
-                        return Err(error.with_details(json!({"items":items})));
-                    }
-                    Err(error) => {
-                        items[index] = json!({"index":index,"status":"failed","error":error});
-                        return Err(error.with_details(json!({"items":items})));
-                    }
-                }
-            }
-        }
-        if let Err(e) = validate(schema, change) {
+        if let Err(e) = resolve_and_validate(schema, change, sink, cancel).await {
             items[index] = json!({"index":index,"status":"failed","error":e});
             return Err(e.with_details(json!({"items":items})));
         }
@@ -533,7 +633,11 @@ async fn execute_batch(
             failure = Some((index, e));
             break;
         }
-        match run_change(&mut conn, schema, change, transactional).await {
+        let result = match plan_change(schema, change, transactional) {
+            Ok(plan) => run_change(&mut conn, &plan).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => items[index] = json!({"index":index,"status":"applied"}),
             Err(e) => {
                 failure = Some((index, e));
@@ -541,12 +645,31 @@ async fn execute_batch(
             }
         }
     }
+    // 最后一条语句执行期间也可能收到取消；COMMIT 前仍可安全回滚。
+    if failure.is_none() && transactional && cancel.is_cancelled() {
+        failure = Some((changes.len(), AppError::cancelled()));
+    }
     if let Some((index, mut error)) = failure {
         let unknown = error.code == "outcome_unknown";
-        items[index] = json!({"index":index,"status":if unknown {"unknown"} else if error.code == "cancelled" {"not_executed"} else if error.code == "conflict" {"conflict"} else {"failed"},"error":error});
-        // 事务回滚得到确认后才能标记已执行项为 rolled_back；失联则保持未知。
+        if index < items.len() {
+            items[index] = json!({"index":index,"status":if unknown {"unknown"} else if error.code == "cancelled" {"not_executed"} else if error.code == "conflict" {"conflict"} else {"failed"},"error":error});
+        }
+        // 事务回滚成功仍可能留下非事务表的修改，须在同一连接读取回滚诊断。
         if transactional {
-            let rolled_back = sqlx::raw_sql("ROLLBACK").execute(&mut conn).await.is_ok();
+            let rolled_back = if sqlx::raw_sql("ROLLBACK").execute(&mut conn).await.is_ok() {
+                // COUNT 不受 max_error_count 限制；原始查询避免预处理覆盖诊断区。
+                sqlx::raw_sql("SHOW COUNT(*) WARNINGS")
+                    .fetch_optional(&mut conn)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|row| {
+                        row.try_get::<u64, _>(0).is_ok_and(|count| count == 0)
+                            || row.try_get::<i64, _>(0).is_ok_and(|count| count == 0)
+                    })
+            } else {
+                false
+            };
             for item in &mut items[..index] {
                 item["status"] = json!(if rolled_back {
                     "rolled_back"
@@ -554,7 +677,7 @@ async fn execute_batch(
                     "unknown"
                 });
             }
-            if unknown && rolled_back {
+            if unknown && rolled_back && index < items.len() {
                 items[index]["status"] = json!("rolled_back");
             }
             if !rolled_back {
@@ -579,6 +702,65 @@ async fn execute_batch(
     Ok(json!({"items":items,"affected_rows":changes.len()}))
 }
 
+pub(super) async fn preview(
+    s: &mut MysqlSession,
+    params: Json,
+    sink: &ExecutionSink,
+    cancel: &CancellationToken,
+) -> Result<Json> {
+    s.profile.ensure_write()?;
+    let token: Uuid = param(&params, "token")?;
+    let mut changes: Vec<RowChange> = param(&params, "rows")?;
+    let target = s
+        .edits
+        .get(&token)
+        .cloned()
+        .ok_or_else(|| AppError::invalid("编辑令牌已失效"))?;
+    let schema = catalog::schema(s, target, cancel).await?;
+    editable(&schema)?;
+    for change in &mut changes {
+        resolve_and_validate(&schema, change, sink, cancel).await?;
+    }
+    if cancel.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+    let transactional = schema.engine.eq_ignore_ascii_case("innodb");
+    let total = changes.len();
+    let (offset, end, next_offset) = preview_page(&params, total)?;
+    let mut budget = PreviewBudget::new();
+    let mut items = Vec::new();
+    for (index, change) in changes
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(end.saturating_sub(offset))
+    {
+        if cancel.is_cancelled() {
+            return Err(AppError::cancelled());
+        }
+        let plan = plan_change(&schema, change, transactional)?;
+        let mut statements = Vec::new();
+        if let Some(check) = &plan.check {
+            statements.push(check.preview("check", &mut budget));
+        }
+        statements.push(plan.write.preview("write", &mut budget));
+        items.push(PreviewItem {
+            index: Some(index),
+            operation: change.operation.clone(),
+            statements,
+        });
+    }
+    preview_json(ChangePreview {
+        provider: "mysql",
+        transactional,
+        total_changes: total,
+        offset,
+        next_offset,
+        items,
+        notes: Vec::new(),
+    })
+}
+
 pub(super) async fn submit(
     s: &mut MysqlSession,
     params: Json,
@@ -593,7 +775,7 @@ pub(super) async fn submit(
         .edits
         .remove(&token)
         .ok_or_else(|| AppError::invalid("编辑令牌已失效"))?;
-    let schema = catalog::schema(s, target).await?;
+    let schema = catalog::schema(s, target, cancel).await?;
     editable(&schema)?;
     execute_batch(s, &schema, changes, sink, cancel).await
 }
@@ -615,7 +797,7 @@ pub(super) async fn import(
     if columns.iter().any(|c| !seen.insert(c)) {
         return Err(AppError::invalid("导入列重复"));
     }
-    let schema = catalog::schema(s, target).await?;
+    let schema = catalog::schema(s, target, cancel).await?;
     editable(&schema)?;
     let mut changes = Vec::with_capacity(rows.len());
     for row in rows {
@@ -633,127 +815,5 @@ pub(super) async fn import(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_consumers(ty: &str, value: Value, accepted: bool) {
-        let column = Column::new("amount", ty);
-        let schema = TableSchema {
-            target: ResourceTarget {
-                database: Some("db".into()),
-                name: "t".into(),
-                key_b64: None,
-                kind: "table".into(),
-            },
-            columns: vec![column.clone()],
-            keys: Vec::new(),
-            ddl: String::new(),
-            engine: "InnoDB".into(),
-            details: Json::Null,
-        };
-        let change = RowChange {
-            operation: "insert".into(),
-            key: BTreeMap::new(),
-            before: BTreeMap::new(),
-            values: [(column.name.clone(), value.clone())].into_iter().collect(),
-        };
-        assert_eq!(
-            validate_import_value(&value, &column).is_ok(),
-            accepted,
-            "import {ty}: {value:?}"
-        );
-        assert_eq!(
-            validate(&schema, &change).is_ok(),
-            accepted,
-            "write {ty}: {value:?}"
-        );
-    }
-
-    #[test]
-    fn decimal_precision_and_scale_are_lossless_for_import_and_write() {
-        for (ty, value, accepted) in [
-            ("decimal(5,2)", "999.99", true),
-            ("decimal(5,2)", "-999.9900", true),
-            ("decimal(5,2)", "1.234", false),
-            ("decimal(5,2)", "1000", false),
-            ("decimal(5,2)", "0.0010", false),
-            ("decimal(5,2)", "1e2", true),
-            ("decimal(5,2)", "1e-3", false),
-            ("decimal(2,2)", "0.99", true),
-            ("decimal(2,2)", "1", false),
-            ("decimal(5,2) unsigned", "-0.01", false),
-            ("decimal(5,2) unsigned", "-0.000", true),
-            ("decimal(5,2)", "invalid", false),
-            ("decimal", "1", false),
-            ("decimal(2,3)", "1", false),
-        ] {
-            assert_consumers(ty, Value::Decimal(value.into()), accepted);
-        }
-    }
-
-    #[test]
-    fn integer_width_sign_and_year_are_checked_for_import_and_write() {
-        for (ty, value, accepted) in [
-            ("tinyint", "-128", true),
-            ("tinyint", "127", true),
-            ("tinyint", "128", false),
-            ("tinyint unsigned", "-1", false),
-            ("tinyint unsigned", "255", true),
-            ("tinyint unsigned", "256", false),
-            ("smallint", "-32769", false),
-            ("mediumint", "8388607", true),
-            ("mediumint", "8388608", false),
-            ("int unsigned", "4294967295", true),
-            ("int unsigned", "4294967296", false),
-            ("bigint", "-9223372036854775808", true),
-            ("year", "0", true),
-            ("year", "1901", true),
-            ("year", "2155", true),
-            ("year", "1900", false),
-            ("year", "2156", false),
-            ("year", "70", false),
-        ] {
-            assert_consumers(ty, Value::Integer(value.into()), accepted);
-        }
-        for (ty, value, accepted) in [
-            ("bigint unsigned", "18446744073709551615", true),
-            ("bigint", "18446744073709551615", false),
-            ("int", "2147483647", true),
-            ("int", "2147483648", false),
-            ("mediumint unsigned", "16777215", true),
-            ("mediumint unsigned", "16777216", false),
-            ("year", "2026", true),
-            ("year", "99", false),
-            ("year", "2156", false),
-        ] {
-            assert_consumers(ty, Value::Unsigned(value.into()), accepted);
-        }
-    }
-
-    #[test]
-    fn bit_width_is_checked_for_import_and_write() {
-        for (ty, value, accepted) in [
-            ("bit(1)", "1", true),
-            ("bit(1)", "2", false),
-            ("bit(9)", "511", true),
-            ("bit(9)", "512", false),
-            ("bit(64)", "18446744073709551615", true),
-            ("bit(65)", "1", false),
-        ] {
-            assert_consumers(ty, Value::Unsigned(value.into()), accepted);
-        }
-        for (ty, bytes, accepted) in [
-            ("bit(1)", vec![1], true),
-            ("bit(1)", vec![2], false),
-            ("bit(9)", vec![1, 255], true),
-            ("bit(9)", vec![2, 0], false),
-            ("bit(9)", vec![0, 1, 255], true),
-            ("bit(64)", vec![255; 8], true),
-            ("bit(64)", vec![1; 9], false),
-            ("bit(1)", vec![], false),
-        ] {
-            assert_consumers(ty, Value::Bytes(STANDARD.encode(bytes)), accepted);
-        }
-        assert_consumers("bit(8)", Value::Bytes("invalid!".into()), false);
-    }
-}
+#[path = "../../../tests/unit/mysql/changes.rs"]
+mod tests;

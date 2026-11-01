@@ -4,6 +4,34 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use datapier_core::model::{AppError, Column, Result, ResultPage, RowChange, Value};
 use serde::{Deserialize, Serialize};
 
+/// 仅在结果列与基表列一一对应时合并约束；失败时不修改页面。
+pub(super) fn merge_table_columns(page: &mut ResultPage, columns: &[Column]) -> Result<()> {
+    if page.result.columns.len() != columns.len() {
+        return Err(AppError::invalid("结果列与基表结构不匹配"));
+    }
+    let mut by_name = BTreeMap::new();
+    for column in columns {
+        if by_name.insert(column.name.as_str(), column).is_some() {
+            return Err(AppError::invalid("基表结构包含重复列名"));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for column in &page.result.columns {
+        if !seen.insert(column.name.as_str()) || !by_name.contains_key(column.name.as_str()) {
+            return Err(AppError::invalid("结果列与基表结构不匹配"));
+        }
+    }
+    for column in &mut page.result.columns {
+        let source = by_name[column.name.as_str()];
+        column.nullable = source.nullable;
+        column.generated = source.generated;
+        column.primary_key = source.primary_key;
+        column.auto_increment = source.auto_increment;
+        column.default_value = source.default_value.clone();
+    }
+    Ok(())
+}
+
 /// 结果集中的绝对行号和原始列下标，不随分页或隐藏列改变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cell {
@@ -30,6 +58,9 @@ pub struct ColumnSetting {
     pub width: u16,
     pub hidden: bool,
     pub frozen: bool,
+    // 旧工作区没有该标记时保留原列宽；新建布局随 pane 自适应，手动设置后固定。
+    #[serde(default)]
+    pub auto_width: bool,
 }
 impl Default for ColumnSetting {
     fn default() -> Self {
@@ -37,8 +68,38 @@ impl Default for ColumnSetting {
             width: 160,
             hidden: false,
             frozen: false,
+            auto_width: true,
         }
     }
+}
+
+fn content_width<'a>(column: &Column, values: impl Iterator<Item = &'a Value>) -> u16 {
+    fn units(text: &str) -> usize {
+        text.chars()
+            .take(66)
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum()
+    }
+    let mut width = (units(&column.name) * 7 + 24).max(units(&column.type_name) * 5 + 24);
+    for value in values {
+        let length = match value {
+            Value::Integer(text)
+            | Value::Unsigned(text)
+            | Value::Decimal(text)
+            | Value::Float(text)
+            | Value::Text(text)
+            | Value::Date(text)
+            | Value::Time(text)
+            | Value::DateTime(text) => units(text),
+            Value::Bytes(encoded) => encoded.len().saturating_mul(3) / 4,
+            Value::Large { preview, .. } => units(preview),
+            Value::Null | Value::Bool(_) => 5,
+            Value::Missing => 6,
+            Value::Json(_) | Value::Array(_) | Value::Map(_) => 40,
+        };
+        width = width.max(length.min(66) * 7 + 24);
+    }
+    width.clamp(64, 480) as u16
 }
 
 /// 单个单元格的粘贴前后值，用于预览及失效检测。
@@ -62,13 +123,17 @@ pub struct GridState {
     pub settings: Vec<ColumnSetting>,
     pub focus: Option<Cell>,
     pub anchor: Option<Cell>,
-    pub select_rows: bool,
+    selected_rows: BTreeSet<u64>,
+    row_anchor: Option<u64>,
+    visible_rows: Option<BTreeSet<u64>>,
     pub editable: bool,
     // 跨页保留发生编辑的整行基线，以便之后定位行并检查原值。
     originals: BTreeMap<u64, Vec<Value>>,
     resolved: BTreeMap<Cell, Value>,
     edits: BTreeMap<Cell, Value>,
     undo: Vec<Vec<(Cell, Option<Value>)>>,
+    natural_widths: Vec<u16>,
+    fitted_width: Option<(u32, bool)>,
 }
 
 impl GridState {
@@ -82,17 +147,30 @@ impl GridState {
             None
         };
         let settings = vec![ColumnSetting::default(); page.result.columns.len()];
+        let natural_widths = page
+            .result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                content_width(column, page.rows.iter().filter_map(|row| row.get(index)))
+            })
+            .collect();
         Self {
             page,
             settings,
             focus,
             anchor: focus,
-            select_rows: false,
+            selected_rows: BTreeSet::new(),
+            row_anchor: None,
+            visible_rows: None,
             editable,
             originals: BTreeMap::new(),
             resolved: BTreeMap::new(),
             edits: BTreeMap::new(),
             undo: Vec::new(),
+            natural_widths,
+            fitted_width: None,
         }
     }
 
@@ -103,13 +181,126 @@ impl GridState {
             return Err(AppError::invalid("结果页与当前 grid 不匹配"));
         }
         self.page = page;
-        // 选区采用绝对行号；离开当前页后重置，避免误选新页的同一偏移。
+        self.refresh_natural_widths();
+        // 行身份只在当前页有效，翻页不能把相同偏移误认为原来的行。
+        self.selected_rows.clear();
+        self.row_anchor = None;
+        self.visible_rows = None;
         if !self.focus.is_some_and(|cell| self.row_in_page(cell.row)) {
             self.focus = self.first_cell();
             self.anchor = self.focus;
-            self.select_rows = false;
         }
         Ok(())
+    }
+    fn refresh_natural_widths(&mut self) {
+        self.natural_widths = self
+            .page
+            .result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                content_width(
+                    column,
+                    (0..self.page.rows.len()).filter_map(|row| {
+                        self.value(Cell {
+                            row: self.page.start + row as u64,
+                            column: index,
+                        })
+                    }),
+                )
+            })
+            .collect();
+        self.fitted_width = None;
+    }
+
+    /// 自动列只分配剩余空间，显式列宽不变；窄窗口保留内容最小宽度并横向滚动。
+    pub fn fit_columns(&mut self, available: u32, mysql: bool) {
+        if self.fitted_width == Some((available, mysql)) {
+            return;
+        }
+        self.fitted_width = Some((available, mysql));
+        let mut fixed = 0u32;
+        let mut natural = 0u32;
+        let mut last_auto = None;
+        for (index, setting) in self.settings.iter().enumerate() {
+            if setting.hidden {
+                continue;
+            }
+            if setting.auto_width {
+                natural += u32::from(if mysql {
+                    self.natural_widths[index]
+                } else {
+                    self.natural_widths[index].min(320)
+                });
+                last_auto = Some(index);
+            } else {
+                fixed += u32::from(setting.width);
+            }
+        }
+        if natural == 0 {
+            return;
+        }
+        if mysql {
+            // 按自然宽度分配剩余空间；达到上限的列退出分配，余量继续分给其他列。
+            let mut remaining = available.saturating_sub(fixed).max(natural);
+            let mut weight = natural;
+            let mut pending: Vec<usize> = self
+                .settings
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| (!s.hidden && s.auto_width).then_some(i))
+                .collect();
+            loop {
+                let capped: Vec<usize> = pending
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        u64::from(remaining) * u64::from(self.natural_widths[i])
+                            >= u64::from(480u32) * u64::from(weight)
+                    })
+                    .collect();
+                if capped.is_empty() {
+                    break;
+                }
+                for i in capped {
+                    self.settings[i].width = 480;
+                    remaining = remaining.saturating_sub(480);
+                    weight -= u32::from(self.natural_widths[i]);
+                    pending.retain(|&item| item != i);
+                }
+                if pending.is_empty() {
+                    return;
+                }
+            }
+            for (position, &i) in pending.iter().enumerate() {
+                let width = if position + 1 == pending.len() {
+                    remaining
+                } else {
+                    (u64::from(remaining) * u64::from(self.natural_widths[i]) / u64::from(weight))
+                        as u32
+                };
+                self.settings[i].width = width.clamp(64, 480) as u16;
+                remaining = remaining.saturating_sub(u32::from(self.settings[i].width));
+                weight -= u32::from(self.natural_widths[i]);
+            }
+            return;
+        }
+        let target = available.saturating_sub(fixed).max(natural);
+        let mut used = 0u32;
+        for (index, setting) in self.settings.iter_mut().enumerate() {
+            if setting.hidden || !setting.auto_width {
+                continue;
+            }
+            let width = if Some(index) == last_auto {
+                target.saturating_sub(used)
+            } else {
+                (u64::from(target) * u64::from(self.natural_widths[index].min(320))
+                    / u64::from(natural)) as u32
+            };
+            setting.width = width.clamp(1, u32::from(u16::MAX)) as u16;
+            used += u32::from(setting.width);
+        }
     }
 
     pub fn visible_columns(&self) -> Vec<usize> {
@@ -140,16 +331,28 @@ impl GridState {
             .settings
             .get_mut(column)
             .ok_or_else(|| AppError::invalid("列不存在"))?;
-        *target = setting;
+        *target = ColumnSetting {
+            auto_width: false,
+            ..setting
+        };
+        self.fitted_width = None;
         if self.focus.is_some_and(|c| self.settings[c.column].hidden) {
             self.focus = self.first_cell();
             self.anchor = self.focus;
         }
         Ok(())
     }
-    fn row_in_page(&self, row: u64) -> bool {
+    pub(super) fn row_in_page(&self, row: u64) -> bool {
         row >= self.page.start && row - self.page.start < self.page.rows.len() as u64
     }
+    pub(super) fn row_visible(&self, row: u64) -> bool {
+        self.row_in_page(row)
+            && self
+                .visible_rows
+                .as_ref()
+                .is_none_or(|rows| rows.contains(&row))
+    }
+
     fn first_cell(&self) -> Option<Cell> {
         if self.page.rows.is_empty() {
             return None;
@@ -159,7 +362,27 @@ impl GridState {
             column: *column,
         })
     }
-    pub fn select(&mut self, cell: Cell, extend: bool, rows: bool) -> Result<()> {
+    /// 更新筛选后的行集合，并清除已不可见的行选择和锚点。
+    pub(super) fn set_visible_rows(&mut self, rows: impl IntoIterator<Item = u64>) {
+        let rows: BTreeSet<_> = rows
+            .into_iter()
+            .filter(|&row| self.row_in_page(row))
+            .collect();
+        self.selected_rows.retain(|row| rows.contains(row));
+        if self.row_anchor.is_some_and(|row| !rows.contains(&row)) {
+            self.row_anchor = None;
+        }
+        if self.focus.is_some_and(|cell| !rows.contains(&cell.row)) {
+            self.focus = None;
+        }
+        if self.anchor.is_some_and(|cell| !rows.contains(&cell.row)) {
+            self.anchor = self.focus;
+        }
+        self.visible_rows = Some(rows);
+    }
+
+    /// 选择单元格范围，普通单元格操作不构造行选区。
+    pub fn select(&mut self, cell: Cell, extend: bool) -> Result<()> {
         if !self.row_in_page(cell.row) || self.settings.get(cell.column).is_none_or(|s| s.hidden) {
             return Err(AppError::invalid("选区不在当前页或列已隐藏"));
         }
@@ -167,22 +390,81 @@ impl GridState {
             self.anchor = Some(cell);
         }
         self.focus = Some(cell);
-        self.select_rows = rows;
+        self.selected_rows.clear();
+        self.row_anchor = None;
         Ok(())
     }
+    /// 按当前页绝对行号选择；Shift 扩展锚点范围，add 切换单行。
+    pub fn select_row(&mut self, row: u64, column: usize, extend: bool, add: bool) -> Result<()> {
+        if !self.row_in_page(row)
+            || self
+                .visible_rows
+                .as_ref()
+                .is_some_and(|rows| !rows.contains(&row))
+        {
+            return Err(AppError::invalid("选区不在当前页或列已隐藏"));
+        }
+        let focus_column = self
+            .settings
+            .get(column)
+            .filter(|s| !s.hidden)
+            .map(|_| column)
+            .or_else(|| self.visible_columns().first().copied());
+        let cell = focus_column.map(|column| Cell { row, column });
+        if extend {
+            let anchor = self.row_anchor.unwrap_or(row);
+            if !add {
+                self.selected_rows.clear();
+            }
+            if let Some(visible) = &self.visible_rows {
+                self.selected_rows
+                    .extend(visible.range(anchor.min(row)..=anchor.max(row)).copied());
+            } else {
+                self.selected_rows.extend(anchor.min(row)..=anchor.max(row));
+            }
+            self.row_anchor = Some(anchor);
+        } else if add {
+            if !self.selected_rows.remove(&row) {
+                self.selected_rows.insert(row);
+            }
+            self.row_anchor = Some(row);
+        } else {
+            self.selected_rows.clear();
+            self.selected_rows.insert(row);
+            self.row_anchor = Some(row);
+        }
+        self.focus = cell;
+        self.anchor = cell;
+        Ok(())
+    }
+    pub fn is_row_selected(&self, row: u64) -> bool {
+        self.row_in_page(row) && self.selected_rows.contains(&row)
+    }
+    pub fn selected_row_count(&self) -> usize {
+        self.selected_rows.len()
+    }
+    /// 当前页选中行的绝对行号，按结果自然顺序排列。
+    pub fn selected_rows(&self) -> Vec<u64> {
+        self.selected_rows.iter().copied().collect()
+    }
     pub fn is_selected(&self, cell: Cell) -> bool {
+        if !self.row_in_page(cell.row)
+            || self
+                .settings
+                .get(cell.column)
+                .is_none_or(|setting| setting.hidden)
+        {
+            return false;
+        }
+        if !self.selected_rows.is_empty() {
+            return self.selected_rows.contains(&cell.row);
+        }
         let Some((anchor, focus)) = self.anchor.zip(self.focus) else {
             return false;
         };
-        self.row_in_page(cell.row)
-            && self
-                .settings
-                .get(cell.column)
-                .is_some_and(|setting| !setting.hidden)
-            && (anchor.row.min(focus.row)..=anchor.row.max(focus.row)).contains(&cell.row)
-            && (self.select_rows
-                || (anchor.column.min(focus.column)..=anchor.column.max(focus.column))
-                    .contains(&cell.column))
+        (anchor.row.min(focus.row)..=anchor.row.max(focus.row)).contains(&cell.row)
+            && (anchor.column.min(focus.column)..=anchor.column.max(focus.column))
+                .contains(&cell.column)
     }
     pub fn navigate(&mut self, direction: Navigation, extend: bool) {
         let Some(mut cell) = self.focus.or_else(|| self.first_cell()) else {
@@ -217,6 +499,8 @@ impl GridState {
                 }
             }
         }
+        self.selected_rows.clear();
+        self.row_anchor = None;
         if !extend || self.anchor.is_none() {
             self.anchor = Some(cell);
         }
@@ -323,7 +607,18 @@ impl GridState {
             .ok_or_else(|| AppError::invalid("缺少编辑基线"))?;
         decode_value(text, original, column)
     }
-    fn selected_cells(&self) -> Result<Vec<Vec<Cell>>> {
+    pub(super) fn selected_cells(&self) -> Result<Vec<Vec<Cell>>> {
+        if !self.selected_rows.is_empty() {
+            return Ok(self
+                .selected_rows
+                .iter()
+                .map(|&row| {
+                    (0..self.page.result.columns.len())
+                        .map(|column| Cell { row, column })
+                        .collect()
+                })
+                .collect());
+        }
         let (anchor, focus) = self
             .anchor
             .zip(self.focus)
@@ -337,47 +632,120 @@ impl GridState {
             .visible_columns()
             .into_iter()
             .filter(|&col| {
-                self.select_rows
-                    || (col >= anchor.column.min(focus.column)
-                        && col <= anchor.column.max(focus.column))
+                col >= anchor.column.min(focus.column) && col <= anchor.column.max(focus.column)
             })
             .collect();
         Ok((start..=end)
+            .filter(|row| self.row_visible(*row))
             .map(|row| cols.iter().map(|&column| Cell { row, column }).collect())
             .collect())
     }
+    /// 仅接受与结果完整匹配的基表 schema，使用当前页草稿而不是展示文本。
+    pub fn copy_insert(
+        &self,
+        database: &str,
+        table: &str,
+        schema: &[Column],
+        exclude_auto_primary: bool,
+    ) -> Result<String> {
+        if database.is_empty()
+            || table.is_empty()
+            || schema.is_empty()
+            || schema.len() != self.page.result.columns.len()
+            || schema
+                .iter()
+                .zip(&self.page.result.columns)
+                .any(|(a, b)| a.name != b.name)
+        {
+            return Err(AppError::invalid("结果与基表 schema 不匹配"));
+        }
+        if self.selected_rows.is_empty() {
+            return Err(AppError::invalid("没有选中行"));
+        }
+        let columns: Vec<_> = schema
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| {
+                !col.generated && !(exclude_auto_primary && col.auto_increment && col.primary_key)
+            })
+            .collect();
+        let mut output = String::new();
+        for &row in &self.selected_rows {
+            if !self.row_in_page(row) {
+                return Err(AppError::invalid("选区跨越未加载的结果页"));
+            }
+            let mut values = Vec::with_capacity(columns.len());
+            for &(index, column) in &columns {
+                let value = self
+                    .value(Cell { row, column: index })
+                    .ok_or_else(|| AppError::invalid("结果行缺少列"))?;
+                // 默认 sql_mode 会把自增列的零转换为新值，不能保证复制后保真。
+                if column.auto_increment
+                    && matches!(value,
+                    Value::Integer(text) | Value::Unsigned(text) if text.parse::<i128>() == Ok(0))
+                {
+                    return Err(AppError::invalid(
+                        "自增列的零值依赖目标会话 sql_mode，无法安全生成 INSERT",
+                    ));
+                }
+                values.push(mysql_literal(value)?);
+            }
+            use std::fmt::Write;
+            let names = columns
+                .iter()
+                .map(|(_, col)| mysql_identifier(&col.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                output,
+                "INSERT INTO {}.{} ({}) VALUES ({});",
+                mysql_identifier(database),
+                mysql_identifier(table),
+                names,
+                values.join(", ")
+            );
+        }
+        Ok(output)
+    }
     /// 将当前页可见选区编码为 TSV；未加载大值和不存在的值不能复制。
     pub fn copy_tsv(&self) -> Result<String> {
-        let mut writer = csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .terminator(csv::Terminator::Any(b'\n'))
-            .from_writer(Vec::new());
-        for row in self.selected_cells()? {
-            let fields = row
-                .into_iter()
-                .map(|cell| {
-                    self.value(cell)
-                        .ok_or_else(|| AppError::invalid("结果行缺少列"))
-                        .and_then(encode_value)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            writer
-                .write_record(fields)
-                .map_err(|e| AppError::invalid(e.to_string()))?;
-        }
-        let bytes = writer
-            .into_inner()
-            .map_err(|e| AppError::invalid(e.to_string()))?;
-        String::from_utf8(bytes).map_err(|e| AppError::invalid(e.to_string()))
+        let rows = self
+            .selected_cells()?
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| {
+                        self.value(cell)
+                            .cloned()
+                            .ok_or_else(|| AppError::invalid("结果行缺少列"))
+                    })
+                    .collect()
+            })
+            .collect::<Result<Vec<Vec<Value>>>>()?;
+        encode_tsv(&rows)
     }
     /// 解析 TSV 并按目标列的原值类型生成预览；越界或任一值无效时不产生草稿。
     pub fn preview_paste(&self, text: &str) -> Result<PastePreview> {
         if !self.editable {
             return Err(AppError::invalid("当前结果不可编辑"));
         }
-        let start = self
+        let focus = self
             .focus
             .ok_or_else(|| AppError::invalid("没有选中单元格"))?;
+        let anchor = self.anchor.unwrap_or(focus);
+        let row_selection = !self.selected_rows.is_empty();
+        let bounded = row_selection || anchor != focus;
+        let start = if row_selection {
+            Cell {
+                row: *self.selected_rows.first().unwrap(),
+                column: focus.column,
+            }
+        } else {
+            Cell {
+                row: anchor.row.min(focus.row),
+                column: anchor.column.min(focus.column),
+            }
+        };
         let visible = self.visible_columns();
         let col_start = visible
             .iter()
@@ -389,12 +757,19 @@ impl GridState {
             .flexible(false)
             .from_reader(text.as_bytes());
         let mut edits = Vec::new();
+        let mut selected_rows = self.selected_rows.iter().copied();
         for (offset, record) in reader.records().enumerate() {
             let record = record.map_err(|e| AppError::invalid(format!("粘贴内容格式错误: {e}")))?;
-            let row = start
-                .row
-                .checked_add(offset as u64)
-                .ok_or_else(|| AppError::invalid("行号溢出"))?;
+            let row = if row_selection {
+                selected_rows
+                    .next()
+                    .ok_or_else(|| AppError::invalid("粘贴范围超出选中行"))?
+            } else {
+                start
+                    .row
+                    .checked_add(offset as u64)
+                    .ok_or_else(|| AppError::invalid("行号溢出"))?
+            };
             if !self.row_in_page(row) || col_start + record.len() > visible.len() {
                 return Err(AppError::invalid("粘贴范围超出当前页或可见列"));
             }
@@ -403,6 +778,9 @@ impl GridState {
                     row,
                     column: visible[col_start + offset],
                 };
+                if bounded && !self.is_selected(cell) {
+                    return Err(AppError::invalid("粘贴范围超出选区"));
+                }
                 let column = &self.page.result.columns[cell.column];
                 if column.generated {
                     return Err(AppError::invalid(format!("列 {} 不可编辑", column.name)));
@@ -481,6 +859,7 @@ impl GridState {
         }
         if !undo.is_empty() {
             self.undo.push(undo);
+            self.refresh_natural_widths();
         }
         Ok(())
     }
@@ -508,15 +887,71 @@ impl GridState {
                 self.edits.remove(&cell);
             }
         }
+        self.refresh_natural_widths();
         true
     }
     pub fn discard(&mut self) {
         self.edits.clear();
         self.originals.clear();
         self.undo.clear();
+        self.refresh_natural_widths();
     }
     pub fn edits(&self) -> &BTreeMap<Cell, Value> {
         &self.edits
+    }
+    /// 全部校验通过后才返回删除变更；调用方负责检查已有待提交行。
+    pub(super) fn delete_changes(
+        &self,
+        rows: &[u64],
+        key_columns: &[String],
+    ) -> Result<Vec<RowChange>> {
+        if !self.editable || rows.is_empty() || key_columns.is_empty() {
+            return Err(AppError::invalid("当前结果没有可用的编辑基线或可靠键"));
+        }
+        let mut changes: Vec<RowChange> = Vec::with_capacity(rows.len());
+        for &row in rows {
+            if !self.row_in_page(row) || self.edits.keys().any(|cell| cell.row == row) {
+                return Err(AppError::invalid("目标行已失效或包含单元格修改"));
+            }
+            let original = self
+                .original_row(row)
+                .ok_or_else(|| AppError::invalid("缺少编辑基线"))?;
+            if original.len() != self.page.result.columns.len() {
+                return Err(AppError::invalid("编辑基线列数不匹配"));
+            }
+            let before: BTreeMap<_, _> = self
+                .page
+                .result
+                .columns
+                .iter()
+                .zip(original)
+                .map(|(column, value)| (column.name.clone(), value.clone()))
+                .collect();
+            if before.len() != original.len() {
+                return Err(AppError::invalid("编辑基线包含重复列名"));
+            }
+            let mut key = BTreeMap::new();
+            for name in key_columns {
+                let value = before
+                    .get(name)
+                    .ok_or_else(|| AppError::invalid("没有可靠行标识"))?;
+                if matches!(value, Value::Null | Value::Missing | Value::Large { .. })
+                    || key.insert(name.clone(), value.clone()).is_some()
+                {
+                    return Err(AppError::invalid("没有可靠行标识"));
+                }
+            }
+            if changes.iter().any(|change| change.key == key) {
+                return Err(AppError::invalid("选中行包含重复的行标识"));
+            }
+            changes.push(RowChange {
+                operation: "delete".into(),
+                key,
+                before,
+                values: BTreeMap::new(),
+            });
+        }
+        Ok(changes)
     }
     /// 使用调用方从 schema 选出的完整可靠键生成行更新；缺少基线或可定位键时报错。
     pub fn changes(&self, key_columns: &[String]) -> Result<Vec<RowChange>> {
@@ -567,6 +1002,23 @@ impl GridState {
     }
 }
 
+pub(super) fn encode_tsv(rows: &[Vec<Value>]) -> Result<String> {
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    for row in rows {
+        let fields = row.iter().map(encode_value).collect::<Result<Vec<_>>>()?;
+        writer
+            .write_record(fields)
+            .map_err(|e| AppError::invalid(e.to_string()))?;
+    }
+    let bytes = writer
+        .into_inner()
+        .map_err(|e| AppError::invalid(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| AppError::invalid(e.to_string()))
+}
+
 // \N 专用于 NULL；非 NULL 值中的反斜线加倍，避免文本 \N 与 NULL 混淆。
 // Bytes 沿用模型中的编码字符串，不能使用展示文本替代原值。
 fn encode_value(value: &Value) -> Result<String> {
@@ -589,6 +1041,15 @@ fn encode_value(value: &Value) -> Result<String> {
         Value::Array(_) | Value::Map(_) => serde_json::to_string(value)?,
     };
     Ok(text.replace('\\', "\\\\"))
+}
+
+/// 表单文本是原文，NULL 由单独控件表达；复用网格的类型和校验规则。
+pub(crate) fn decode_form_value(text: &str, null: bool, column: &Column) -> Result<Value> {
+    if null {
+        decode_value("\\N", &Value::Null, column)
+    } else {
+        decode_value(&text.replace('\\', "\\\\"), &Value::Null, column)
+    }
 }
 
 fn decode_value(field: &str, original: &Value, column: &Column) -> Result<Value> {
@@ -631,25 +1092,44 @@ fn decode_value(field: &str, original: &Value, column: &Column) -> Result<Value>
             return Err(AppError::invalid("不存在的值或未加载的大值不可编辑"));
         }
         Value::Null => {
-            if kind.contains("unsigned") {
-                Value::Unsigned(text)
-            } else if kind.contains("int") {
-                Value::Integer(text)
-            } else if kind.contains("decimal") || kind.contains("numeric") {
+            let base = kind
+                .split(|c: char| c == '(' || c.is_ascii_whitespace())
+                .next()
+                .unwrap_or("");
+            if base == "decimal" || base == "numeric" {
                 Value::Decimal(text)
-            } else if kind.contains("float") || kind.contains("double") || kind.contains("real") {
+            } else if matches!(base, "float" | "double" | "real") {
                 Value::Float(text)
-            } else if kind.contains("binary") || kind.contains("blob") || kind.contains("bytes") {
+            } else if matches!(
+                base,
+                "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint"
+            ) {
+                if kind.contains("unsigned") || kind.contains("zerofill") {
+                    Value::Unsigned(text)
+                } else {
+                    Value::Integer(text)
+                }
+            } else if matches!(
+                base,
+                "binary"
+                    | "varbinary"
+                    | "tinyblob"
+                    | "blob"
+                    | "mediumblob"
+                    | "longblob"
+                    | "bytes"
+                    | "bit"
+            ) {
                 Value::Bytes(text)
-            } else if kind.contains("json") {
+            } else if base == "json" {
                 Value::Json(serde_json::from_str(&text)?)
-            } else if kind.contains("datetime") || kind.contains("timestamp") {
+            } else if matches!(base, "datetime" | "timestamp") {
                 Value::DateTime(text)
-            } else if kind == "date" {
+            } else if base == "date" {
                 Value::Date(text)
-            } else if kind == "time" {
+            } else if base == "time" {
                 Value::Time(text)
-            } else if kind == "bool" || kind == "boolean" {
+            } else if matches!(base, "bool" | "boolean") {
                 Value::Bool(match text.as_str() {
                     "true" | "1" => true,
                     "false" | "0" => false,
@@ -679,7 +1159,7 @@ fn validate_value(value: &Value, column: &Column) -> Result<()> {
             return Err(AppError::invalid("无效无符号整数"));
         }
         Value::Decimal(s) if !valid_decimal(s) => return Err(AppError::invalid("无效精确小数")),
-        Value::Float(s) if s.parse::<f64>().is_err() => {
+        Value::Float(s) if !s.parse::<f64>().is_ok_and(f64::is_finite) => {
             return Err(AppError::invalid("无效浮点数"));
         }
         Value::Bytes(s) if STANDARD.decode(s).is_err() => {
@@ -702,3 +1182,68 @@ fn valid_decimal(s: &str) -> bool {
         && integer.bytes().all(|c| c.is_ascii_digit())
         && fraction.is_none_or(|s| s.bytes().all(|c| c.is_ascii_digit()))
 }
+
+// 反引号标识符使用 MySQL 的双反引号转义，与字符串的 sql_mode 无关。
+pub(super) fn mysql_identifier(value: &str) -> String {
+    format!("`{}`", value.replace('`', "``"))
+}
+
+// 文本使用显式 utf8mb4 十六进制字面量，避免反斜线、引号及 SQL mode 改变原值。
+fn mysql_hex(bytes: &[u8], text: bool) -> String {
+    use std::fmt::Write;
+    let mut output = if text {
+        "_utf8mb4 X'".to_owned()
+    } else {
+        "X'".to_owned()
+    };
+    for byte in bytes {
+        let _ = write!(output, "{byte:02X}");
+    }
+    output.push('\'');
+    output
+}
+
+fn mysql_literal(value: &Value) -> Result<String> {
+    match value {
+        Value::Null => Ok("NULL".into()),
+        Value::Bool(value) => Ok(if *value { "1" } else { "0" }.into()),
+        Value::Integer(value) | Value::Unsigned(value) | Value::Decimal(value) => {
+            if !valid_decimal(value) || value.bytes().filter(u8::is_ascii_digit).count() > 65 {
+                return Err(AppError::invalid("数值不能无损编码为 MySQL 字面量"));
+            }
+            Ok(value.clone())
+        }
+        Value::Float(value) => {
+            // 防止特殊浮点值及非数值 SQL 进入生成文本。
+            if !value.parse::<f64>().is_ok_and(f64::is_finite)
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.' | b'e' | b'E'))
+            {
+                return Err(AppError::invalid("浮点值不能无损编码为 MySQL 字面量"));
+            }
+            Ok(value.clone())
+        }
+        Value::Text(value) | Value::Date(value) | Value::Time(value) | Value::DateTime(value) => {
+            Ok(mysql_hex(value.as_bytes(), true))
+        }
+        Value::Bytes(value) => STANDARD
+            .decode(value)
+            .map(|bytes| mysql_hex(&bytes, false))
+            .map_err(|_| AppError::invalid("二进制值不是有效 Base64")),
+        Value::Json(value) => Ok(format!(
+            "CAST({} AS JSON)",
+            mysql_hex(serde_json::to_string(value)?.as_bytes(), true)
+        )),
+        Value::Missing | Value::Large { .. } => {
+            Err(AppError::invalid("不存在的值或未加载的大值不能复制"))
+        }
+        Value::Array(_) | Value::Map(_) => {
+            Err(AppError::invalid("该值不能无损编码为 MySQL 字面量"))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/grid.rs"]
+mod selection_tests;

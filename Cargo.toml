@@ -6,10 +6,9 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.88"
+rust-version = "1.94"
 
 [workspace.dependencies]
-anyhow = "1"
 base64 = "0.22"
 bigdecimal = { version = "0.4", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -23,6 +22,7 @@ redis = { version = "1.8", default-features = false, features = ["tokio-rustls-c
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"
+sqlformat = "=0.5.0"
 sqlparser = "0.62"
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
@@ -34,8 +34,7 @@ sqlx = { version = "0.9", default-features = false, features = [
   "chrono",
   "json",
 ] }
-tern-sdk = { git = "https://github.com/stencil-hq/tern-sdk.git", rev = "9e9c07463f4958b0c633424c9860aba499487d28" }
-thiserror = "2"
+tern-sdk = "=0.2.0"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"

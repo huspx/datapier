@@ -1,4 +1,4 @@
-//! 单一可执行文件的入口：仅分派 UI／Engine，数据库业务留在 Core 和 Engine。
+//! 单一可执行文件的入口：分派终端界面与 Engine；当前终端界面仅提供 TSP。
 
 use clap::{Parser, Subcommand};
 use datapier_core::Result;
@@ -15,7 +15,7 @@ struct Arguments {
 #[derive(Subcommand)]
 enum Command {
     /// 打开 Tern TSP 工作台
-    Ui {
+    Tui {
         #[arg(long, default_value = "default")]
         workspace: String,
     },
@@ -35,7 +35,7 @@ fn run() -> Result<()> {
         None => datapier_engine::default_data_dir()?,
     };
     match args.command {
-        Command::Ui { workspace } => datapier_tsp::run(root, workspace),
+        Command::Tui { workspace } => datapier_tsp::run(root, workspace),
         Command::Engine => {
             // stdout 可能承载调用方协议，日志固定写 stderr；Engine 子进程的 stdio 由平台层隔离。
             tracing_subscriber::fmt()

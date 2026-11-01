@@ -42,6 +42,7 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
         redis_db: 15,
         access_mode: AccessMode::ReadWrite,
         tls: TlsConfig::default(),
+        visible_databases: None,
     };
     (store, profile, secret)
 }
@@ -178,6 +179,62 @@ async fn mysql_hundred_thousand_rows_csv_and_json_round_trip() {
     }
 }
 
+#[tokio::test]
+#[ignore = "需要显式配置的隔离 MySQL"]
+async fn mysql_csv_enum_set_type_names_round_trip() {
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let mut session = ProviderSession::connect(profile, secret).await.unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let source = format!("dp_enum_src_{suffix}");
+    let destination = format!("dp_enum_dst_{suffix}");
+    let csv_path = store.root.join("enum-set.csv");
+    let result = AssertUnwindSafe(async {
+        let definition = "(id INT UNSIGNED PRIMARY KEY, choice ENUM('print','other') NOT NULL, bit_choice ENUM('BIT','other') NOT NULL, flags SET('BIT','REAL','JSON','DATE','BLOB') NOT NULL, payload VARBINARY(8) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+        for table in [&source, &destination] {
+            sql(&mut session, &store, &format!("CREATE TABLE `{table}` {definition}")).await;
+        }
+        sql(&mut session, &store, &format!("INSERT INTO `{source}` VALUES (1,'print','BIT','BIT,REAL,JSON,DATE,BLOB',X'00FF')")).await;
+        let exported = transfer_call(&mut session, &store, "transfer.export", json!({"format":"csv","path":csv_path,"target":mysql_target(&source)})).await;
+        assert_eq!(exported["progress"]["completed_rows"], 1);
+        let preview = transfer::preview(
+            &mut session,
+            json!({"format":"csv","path":csv_path,"target":mysql_target(&destination)}),
+            &sink(&store, "transfer.preview").await,
+            &CancellationToken::new(),
+        ).await.unwrap();
+        assert_eq!(preview["errors"], json!([]));
+        assert_eq!(preview["sample_complete"], true);
+        let preview_rows: Vec<Vec<Value>> = serde_json::from_value(preview["rows"].clone()).unwrap();
+        assert_eq!(preview_rows, vec![vec![
+            Value::Unsigned("1".into()),
+            Value::Text("print".into()),
+            Value::Text("BIT".into()),
+            Value::Text("BIT,REAL,JSON,DATE,BLOB".into()),
+            Value::Bytes(STANDARD.encode([0, 255])),
+        ]]);
+        let imported = transfer_call(&mut session, &store, "transfer.import", json!({"format":"csv","path":csv_path,"target":mysql_target(&destination)})).await;
+        assert_eq!(imported["progress"]["completed_rows"], 1);
+        let query = |table: &str| format!("SELECT id, CAST(choice AS CHAR), CAST(bit_choice AS CHAR), CAST(flags AS CHAR), payload FROM `{table}` ORDER BY id");
+        let before = sql(&mut session, &store, &query(&source)).await;
+        let after = sql(&mut session, &store, &query(&destination)).await;
+        assert_eq!(rows(&store, &before).await, rows(&store, &after).await);
+    }).catch_unwind().await;
+    for table in [&source, &destination] {
+        let _ = call(
+            &mut session,
+            &store,
+            "execution.run",
+            json!({"text":format!("DROP TABLE IF EXISTS `{table}`")}),
+        )
+        .await;
+    }
+    let _ = session.close().await;
+    clean(store).await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 fn redis_target(key: &[u8], kind: &str) -> ResourceTarget {
     ResourceTarget {
         database: Some("15".into()),
@@ -290,6 +347,10 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
             .arg(&[0u8, 255][..])
             .arg("-2.5")
             .arg("member")
+            .arg("+inf")
+            .arg("positive-infinity")
+            .arg("-inf")
+            .arg("negative-infinity")
             .query_async(&mut conn)
             .await
             .unwrap();

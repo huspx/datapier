@@ -38,6 +38,7 @@ impl Fixture {
             redis_db: 15,
             access_mode: AccessMode::ReadWrite,
             tls: TlsConfig::default(),
+            visible_databases: None,
         };
         let client = Client::open(format!("redis://127.0.0.1:{port}/15")).unwrap();
         let raw = client.get_multiplexed_async_connection().await.unwrap();
@@ -894,5 +895,414 @@ async fn import_close_preserves_replacement_and_cleans_owned_key() {
             .unwrap();
         assert_eq!(exists, 0);
     }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
+async fn preview_preserves_watch_token_and_absolute_ttl() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"preview\xff", "string");
+    let key = raw_key(&target);
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg("before")
+        .arg("PX")
+        .arg(60000)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let expiry = f.expiry(&key).await;
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let params = json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_string","value":binary(b"\xff\0new")}]});
+    let preview = f.call("change.preview", params.clone()).await.unwrap();
+    assert_eq!(preview["items"][0]["statements"][0]["text"], "SET");
+    assert_eq!(
+        preview["items"][0]["statements"][0]["parameters"][1]["kind"],
+        "bytes"
+    );
+    assert_eq!(
+        preview["items"][0]["statements"][0]["parameters"][1]["display"],
+        STANDARD.encode(b"\xff\0new")
+    );
+    assert_eq!(preview["items"][1]["operation"], "ttl");
+    let value: Vec<u8> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(value, b"before");
+    assert!((f.expiry(&key).await - expiry).abs() <= 4);
+    assert_applied(&f.call("change.submit", params).await.unwrap());
+    assert!((f.expiry(&key).await - expiry).abs() <= 4);
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let params = json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_string","value":binary(b"next")}]});
+    f.call("change.preview", params.clone()).await.unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg("external")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.call("change.submit", params).await.unwrap_err().code,
+        "conflict"
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
+async fn preview_list_dynamic_marker_pagination_ttl_and_exec_errors() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"preview-list", "list");
+    let key = raw_key(&target);
+    let _: i64 = redis::cmd("RPUSH")
+        .arg(&key)
+        .arg("same")
+        .arg("same")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let changes = json!([{"operation":"list_delete","index":1},{"operation":"list_set","index":99,"value":binary(b"x")},{"operation":"set_ttl","ttl_ms":50000},{"operation":"set_ttl","ttl_ms":60000}]);
+    let params = json!({"target":target,"token":opened["token"],"changes":changes,"limit":2});
+    let first = f.call("change.preview", params.clone()).await.unwrap();
+    assert_eq!(first["next_offset"], 2);
+    let marker = &first["items"][0]["statements"][0]["parameters"][4];
+    assert_eq!(marker["dynamic"], true);
+    assert_eq!(marker["complete"], false);
+    let mut last_params = params.clone();
+    last_params["offset"] = json!(2);
+    let last = f.call("change.preview", last_params).await.unwrap();
+    assert!(last["next_offset"].is_null());
+    assert_eq!(last["items"][2]["index"], Json::Null);
+    let ttl = &last["items"][2]["statements"][0]["parameters"];
+    assert_eq!(ttl[5]["display"], "\"60000\"");
+    let result = f.call("change.submit", params).await.unwrap();
+    assert_eq!(result["items"][0]["status"], "applied");
+    assert_eq!(result["items"][1]["status"], "error");
+    let values: Vec<Vec<u8>> = redis::cmd("LRANGE")
+        .arg(&key)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(values, vec![b"same".to_vec()]);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
+async fn preview_rename_defers_destination_check_until_submit() {
+    let mut f = Fixture::new().await;
+    let source = f.target(b"preview-rename-source", "string");
+    let destination = f.target(b"preview-rename-destination", "string");
+    let src = raw_key(&source);
+    let dst = raw_key(&destination);
+    let _: () = redis::cmd("SET")
+        .arg(&src)
+        .arg("source")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&dst)
+        .arg("occupied")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let opened = f
+        .call("change.open", json!({"target":source}))
+        .await
+        .unwrap();
+    let params = json!({"target":source,"token":opened["token"],"changes":[{"operation":"rename","new_key_b64":destination.key_b64}]});
+    let preview = f.call("change.preview", params.clone()).await.unwrap();
+    assert_eq!(preview["items"][0]["statements"][0]["text"], "RENAMENX");
+    assert_eq!(
+        f.call("change.submit", params).await.unwrap_err().code,
+        "conflict"
+    );
+    let value: String = redis::cmd("GET")
+        .arg(&dst)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(value, "occupied");
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 DATAPIER_TEST_REDIS_PORT 和隔离的 Redis 实例"]
+async fn batch_delete_preserves_binary_identity_and_watch_contract() {
+    let mut f = Fixture::new().await;
+    let a = f.target(b"batch\0\xff", "string");
+    let b = f.target(b"batch-second", "string");
+    let keys = [raw_key(&a), raw_key(&b)];
+    for key in &keys {
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("value")
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+    }
+    let targets = json!([a, b]);
+    let opened = f
+        .call("change.open", json!({"targets":targets}))
+        .await
+        .unwrap();
+    let token = opened["token"].clone();
+    assert_eq!(opened["targets"], targets);
+    let input = json!({"token":token,"targets":targets,"operation":"delete_keys"});
+    let preview = f.call("change.preview", input.clone()).await.unwrap();
+    let statements = preview["items"][0]["statements"].as_array().unwrap();
+    assert_eq!(
+        statements
+            .iter()
+            .map(|s| s["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["MULTI", "DEL", "EXEC"]
+    );
+    assert_eq!(statements[1]["parameters"][0]["kind"], "bytes");
+    assert_eq!(
+        statements[1]["parameters"][0]["display"],
+        STANDARD.encode(&keys[0])
+    );
+    let mut altered = input.clone();
+    altered["targets"][0]["name"] = json!("tampered");
+    assert!(f.call("change.preview", altered).await.is_err());
+    let mut injected = input.clone();
+    injected["changes"] = json!([{"operation":"delete_key"}]);
+    assert!(f.call("change.preview", injected).await.is_err());
+    let _: () = redis::cmd("SET")
+        .arg(&keys[1])
+        .arg("changed")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.call("change.submit", input.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    assert!(f.call("change.submit", input).await.is_err());
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg(&keys)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(exists, 2);
+    let opened = f
+        .call("change.open", json!({"targets":targets}))
+        .await
+        .unwrap();
+    let input = json!({"token":opened["token"],"targets":targets,"operation":"delete_keys"});
+    let mut forged = input.clone();
+    forged["token"] = json!(Uuid::new_v4());
+    assert!(f.call("change.submit", forged).await.is_err());
+    let result = f.call("change.submit", input).await.unwrap();
+    assert_eq!(result["affected"], 2);
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg(&keys)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(exists, 0);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 DATAPIER_TEST_REDIS_PORT 和隔离的 Redis 实例"]
+async fn batch_delete_rejects_invalid_targets_and_read_only() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"batch-validation", "string");
+    let key = raw_key(&target);
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg("value")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let target_json = json!(target);
+    assert!(f.call("change.open", json!({"targets":[]})).await.is_err());
+    assert!(
+        f.call(
+            "change.open",
+            json!({"target":target_json,"targets":[target_json]})
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        f.call("change.open", json!({"targets":[target_json,target_json]}))
+            .await
+            .is_err()
+    );
+    for (field, value) in [
+        ("database", json!("14")),
+        ("key_b64", json!("%%%")),
+        ("key_b64", Json::Null),
+        ("kind", json!("table")),
+    ] {
+        let mut invalid = target_json.clone();
+        invalid[field] = value;
+        assert!(
+            f.call("change.open", json!({"targets":[invalid]}))
+                .await
+                .is_err()
+        );
+    }
+    let opened = f
+        .call("change.open", json!({"targets":[target_json]}))
+        .await
+        .unwrap();
+    let token = opened["token"].clone();
+    assert_eq!(
+        f.call("change.discard", json!({"token":token}))
+            .await
+            .unwrap()["discarded"],
+        true
+    );
+    assert!(
+        f.call(
+            "change.preview",
+            json!({"token":token,"targets":[target_json],"operation":"delete_keys"})
+        )
+        .await
+        .is_err()
+    );
+    let opened = f
+        .call("change.open", json!({"targets":[target_json]}))
+        .await
+        .unwrap();
+    let tampered = json!({"token":opened["token"],"targets":[target_json],"operation":"delete_keys","changes":[]});
+    assert!(f.call("change.submit", tampered).await.is_err());
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg(&key)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(exists, 1);
+    let opened = f
+        .call("change.open", json!({"targets":[target_json]}))
+        .await
+        .unwrap();
+    let _: i64 = redis::cmd("PEXPIREAT")
+        .arg(&key)
+        .arg(1)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let expired =
+        json!({"token":opened["token"],"targets":[target_json],"operation":"delete_keys"});
+    assert_eq!(
+        f.call("change.submit", expired).await.unwrap_err().code,
+        "conflict"
+    );
+    let mut read_only = f.profile.clone();
+    read_only.access_mode = AccessMode::ReadOnly;
+    let mut session = ProviderSession::connect(read_only, None).await.unwrap();
+    let sink = f.sink().await;
+    let err = session
+        .call(
+            "change.open",
+            json!({"targets":[target_json]}),
+            &sink,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "permission_denied");
+    session.close().await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 DATAPIER_TEST_REDIS_PORT 和隔离的 Redis 实例"]
+async fn empty_key_field_and_member_are_valid_identities() {
+    let mut f = Fixture::new().await;
+    // NX 避免覆盖已有的空 key；临时过期时间保证异常退出后不会永久残留。
+    let marker = Uuid::new_v4().to_string();
+    let claimed: Option<String> = redis::cmd("SET")
+        .arg(&b""[..])
+        .arg(&marker)
+        .arg("NX")
+        .arg("PX")
+        .arg(60000)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert!(claimed.is_some(), "隔离 Redis 中的空 key 已被占用");
+    let empty = ResourceTarget {
+        database: Some("15".into()),
+        name: String::new(),
+        key_b64: Some(String::new()),
+        kind: "string".into(),
+    };
+    let other = f.target(b"empty-identity-other", "string");
+    let _: () = redis::cmd("SET")
+        .arg(raw_key(&other))
+        .arg("value")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let targets = json!([empty, other]);
+    let opened = f
+        .call("change.open", json!({"targets":targets}))
+        .await
+        .unwrap();
+    let input = json!({"token":opened["token"],"targets":targets,"operation":"delete_keys"});
+    let preview = f.call("change.preview", input.clone()).await.unwrap();
+    assert_eq!(
+        preview["items"][0]["statements"][1]["parameters"][0]["byte_len"],
+        0
+    );
+    assert_eq!(f.call("change.submit", input).await.unwrap()["affected"], 2);
+
+    let hash = f.target(b"empty-field", "hash");
+    let set = f.target(b"empty-member", "set");
+    let _: i64 = redis::cmd("HSET")
+        .arg(raw_key(&hash))
+        .arg(&b""[..])
+        .arg("value")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let _: i64 = redis::cmd("SADD")
+        .arg(raw_key(&set))
+        .arg(&b""[..])
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    f.edit(
+        &hash,
+        json!([{"operation":"hash_delete","field":binary(b"")}]),
+    )
+    .await;
+    f.edit(
+        &set,
+        json!([{"operation":"set_remove","member":binary(b"")}]),
+    )
+    .await;
+    let remaining: i64 = redis::cmd("EXISTS")
+        .arg(raw_key(&hash))
+        .arg(raw_key(&set))
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
     f.close().await;
 }

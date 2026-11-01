@@ -4,7 +4,7 @@
 //! 同一物理连接上的命令。`transition` 则把取消检查、发送阶段持久化与完成记录
 //! 放在同一控制门内，不能用注册表锁替代，也不能把取消等待解释为撤销写入。
 
-use crate::{EngineEvent, platform, protocol};
+use crate::{EngineEvent, platform};
 use datapier_core::{
     AppError, ExecutionSink, Result, Store,
     model::{self, AccessMode, Profile},
@@ -22,12 +22,17 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod session;
+use session::client;
 #[cfg(test)]
-#[path = "server_tests.rs"]
+use session::client_with_lease;
+
+#[cfg(test)]
+#[path = "../tests/unit/server.rs"]
 mod tests;
 
 struct Database {
@@ -42,6 +47,7 @@ struct Running {
     cancel: CancellationToken,
     transition: Arc<AsyncMutex<()>>,
     abort: Option<tokio::task::AbortHandle>,
+    started: Option<Instant>,
 }
 // SQLite 最终更新失败时仍须给存活客户端一个终态，不能继续返回磁盘中的 running。
 // 该副本只在本次 Engine 内有效；重启后的未知写入仍按已落盘的 sent 阶段恢复。
@@ -55,12 +61,21 @@ impl UnpersistedCompletion {
         task.state.clear();
         task.state.push_str(self.state);
         task.summary = self.summary.clone();
+        task.started_at = self
+            .summary
+            .pointer("/_task/started_at")
+            .and_then(Value::as_f64);
+        task.elapsed_ms = self
+            .summary
+            .pointer("/_task/elapsed_ms")
+            .and_then(Value::as_u64);
         task.error = Some(self.error.clone());
     }
 }
 struct State {
     accepting: bool,
     clients: HashSet<Uuid>,
+    client_cancels: HashMap<Uuid, CancellationToken>,
     event_senders: HashMap<Uuid, broadcast::Sender<EngineEvent>>,
     event_seq: u64,
     idle: Instant,
@@ -139,6 +154,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
         state: Mutex::new(State {
             accepting: true,
             clients: HashSet::new(),
+            client_cancels: HashMap::new(),
             event_senders: HashMap::new(),
             event_seq: 0,
             idle: Instant::now(),
@@ -194,149 +210,6 @@ pub async fn run(root: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn client(engine: Arc<Engine>, owner: Uuid, stream: platform::Stream) {
-    client_with_lease(engine, owner, stream, Duration::from_secs(45), 128).await;
-}
-
-async fn client_with_lease(
-    engine: Arc<Engine>,
-    owner: Uuid,
-    stream: platform::Stream,
-    lease_duration: Duration,
-    queue_capacity: usize,
-) {
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    let (tx, mut rx) = mpsc::channel::<Value>(queue_capacity);
-    let mut writer_task = tokio::spawn(async move {
-        while let Some(value) = rx.recv().await {
-            if let Err(error) = protocol::write(&mut writer, &value).await
-                && (error.code != "invalid_input"
-                    || protocol::write(
-                        &mut writer,
-                        &response(value.get("id").cloned().unwrap_or(Value::Null), Err(error)),
-                    )
-                    .await
-                    .is_err())
-            {
-                break;
-            }
-        }
-    });
-    let first = tokio::time::timeout(lease_duration, protocol::read(&mut reader)).await;
-    let mut opened = false;
-    let mut events = None;
-    if let Ok(Ok(request)) = first {
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let result = if request.get("method").and_then(Value::as_str) != Some("session.open") {
-            Err(AppError::invalid("必须先进行协议握手"))
-        } else if request
-            .pointer("/params/protocol_version")
-            .and_then(Value::as_u64)
-            != Some(1)
-        {
-            Err(AppError::new(
-                "protocol_incompatible",
-                "Engine 协议版本不兼容",
-            ))
-        } else if !engine.register(owner) {
-            Err(AppError::new("disconnected", "Engine 正在退出"))
-        } else {
-            opened = true;
-            events = Some(engine.state.lock().unwrap().event_senders[&owner].subscribe());
-            Ok(
-                json!({"protocol_version":1,"engine_id":engine.id,"client_session_id":owner,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
-            )
-        };
-        let _ = tx.send(response(id, result)).await;
-    }
-    if opened {
-        let mut events = events.expect("registered session has event subscription");
-        let mut lease = tokio::time::Instant::now() + lease_duration;
-        loop {
-            // read_exact 消费帧前缀后不能重启；收到事件时保留同一个读取 future 和租约截止时间。
-            let read = tokio::time::timeout_at(lease, protocol::read(&mut reader));
-            tokio::pin!(read);
-            let request = loop {
-                tokio::select! {
-                    event = events.recv() => match event {
-                        // 通知允许丢失并由状态查询补齐，不能等待满队列而阻断租约检查。
-                        Ok(event) => match tx.try_send(serde_json::to_value(event).expect("event serialization")) {
-                            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => (),
-                            Err(mpsc::error::TrySendError::Closed(_)) => break None,
-                        },
-                        Err(broadcast::error::RecvError::Lagged(_)) => (),
-                        Err(broadcast::error::RecvError::Closed) => break None,
-                    },
-                    request = &mut read => break match request {
-                        Ok(Ok(value)) => Some(value),
-                        _ => None,
-                    },
-                }
-            };
-            let Some(request) = request else { break };
-            lease = tokio::time::Instant::now() + lease_duration;
-            let id = request.get("id").cloned().unwrap_or(Value::Null);
-            let method = match request.get("method").and_then(Value::as_str) {
-                Some(v) => v.to_owned(),
-                None => {
-                    if !send_before(
-                        &tx,
-                        lease,
-                        response(id, Err(AppError::invalid("缺少 method"))),
-                    )
-                    .await
-                    {
-                        break;
-                    }
-                    continue;
-                }
-            };
-            let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-            if method == "session.close" {
-                let _ = send_before(&tx, lease, response(id, Ok(json!({"closed":true})))).await;
-                break;
-            }
-            if method == "session.heartbeat" {
-                if !send_before(&tx, lease, response(id, Ok(json!({"ok":true})))).await {
-                    break;
-                }
-                continue;
-            }
-            let engine = engine.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let result = engine.dispatch(owner, &method, params).await;
-                let _ = tx.send(response(id, result)).await;
-            });
-        }
-    }
-    engine.disconnect(owner).await;
-    drop(tx);
-    // close 确认已先入队；后台操作仍可能持有 sender，给 writer 有限时间 flush 后结束连接。
-    if tokio::time::timeout(Duration::from_secs(1), &mut writer_task)
-        .await
-        .is_err()
-    {
-        writer_task.abort();
-    }
-}
-// 控制响应不可静默丢弃，但慢客户端也不能无限拖延会话释放。
-async fn send_before(
-    tx: &mpsc::Sender<Value>,
-    deadline: tokio::time::Instant,
-    value: Value,
-) -> bool {
-    matches!(
-        tokio::time::timeout_at(deadline, tx.send(value)).await,
-        Ok(Ok(()))
-    )
-}
-fn response(id: Value, result: Result<Value>) -> Value {
-    match result {
-        Ok(value) => json!({"id":id,"result":value}),
-        Err(error) => json!({"id":id,"error":error}),
-    }
-}
 impl Engine {
     fn register(&self, owner: Uuid) -> bool {
         let mut state = self.state.lock().unwrap();
@@ -344,6 +217,7 @@ impl Engine {
             return false;
         }
         state.clients.insert(owner);
+        state.client_cancels.insert(owner, CancellationToken::new());
         state.event_senders.insert(owner, broadcast::channel(128).0);
         true
     }
@@ -358,6 +232,19 @@ impl Engine {
                 payload: json!({"state":task_state}),
             };
             let _ = state.event_senders[&owner].send(event);
+        }
+    }
+    fn emit_settings_changed(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.event_seq += 1;
+        let event = EngineEvent {
+            seq: state.event_seq,
+            kind: "settings.changed".into(),
+            task_id: Uuid::nil(),
+            payload: Value::Null,
+        };
+        for sender in state.event_senders.values() {
+            let _ = sender.send(event.clone());
         }
     }
     fn profile_lock(&self, id: Uuid) -> Arc<AsyncMutex<()>> {
@@ -415,6 +302,9 @@ impl Engine {
             if state.clients.remove(&owner) && state.clients.is_empty() {
                 state.idle = Instant::now();
             }
+            if let Some(cancel) = state.client_cancels.remove(&owner) {
+                cancel.cancel();
+            }
             state.event_senders.remove(&owner);
             let dbs = state
                 .databases
@@ -456,9 +346,22 @@ impl Engine {
             if cancel.is_cancelled() {
                 return Err(AppError::cancelled());
             }
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| AppError::new("internal", e.to_string()))?
+                .as_secs_f64();
+            let instant = Instant::now();
             self.store
-                .update_task(sink.execution_id, "running", Value::Null, None)
+                .update_task(
+                    sink.execution_id,
+                    "running",
+                    json!({"_task":{"started_at":wall}}),
+                    None,
+                )
                 .await?;
+            if let Some(running) = self.state.lock().unwrap().tasks.get_mut(&sink.execution_id) {
+                running.started = Some(instant);
+            }
             self.emit_state(db.owner, sink.execution_id, "running");
         }
         if method == "transfer.preview" {
@@ -481,14 +384,33 @@ impl Engine {
                 .await
         }
     }
+    fn apply_live_elapsed(&self, task: &mut model::TaskRecord) {
+        if let Some(started) = self
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .get(&task.id)
+            .and_then(|r| r.started)
+        {
+            task.elapsed_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        }
+    }
     async fn task(&self, id: Uuid) -> Result<model::TaskRecord> {
         let mut task = self.store.task(id).await?;
         if let Some(completion) = self.state.lock().unwrap().unpersisted.get(&id) {
             completion.apply(&mut task);
         }
+        self.apply_live_elapsed(&mut task);
         Ok(task)
     }
-    async fn finish_task(&self, owner: Uuid, id: Uuid, result: &Result<Value>) {
+    async fn finish_task(
+        &self,
+        owner: Uuid,
+        id: Uuid,
+        result: &Result<Value>,
+        started: Option<Instant>,
+    ) {
         let transition = self
             .state
             .lock()
@@ -501,17 +423,30 @@ impl Engine {
             None => None,
         };
         // 错误本身不能证明写入未发生；结合已持久化的 sent/may_write 判定是否需要人工核对。
-        let record = match result {
-            Err(_) => self.store.task(id).await.ok(),
-            Ok(_) => None,
-        };
+        let record = self.store.task(id).await.ok();
         let (state, summary, error) = match result {
             Ok(value) => ("succeeded", value.clone(), None),
             Err(error) => {
+                // change.submit 的 rolled_back 仅在事务 ROLLBACK 得到确认后产生。
+                let rolled_back = error.code == "cancelled"
+                    && record.as_ref().is_some_and(|r| r.method == "change.submit")
+                    && error
+                        .details
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .is_some_and(|items| {
+                            !items.is_empty()
+                                && items.iter().enumerate().all(|(index, item)| {
+                                    item.get("index").and_then(Value::as_u64) == Some(index as u64)
+                                        && item.get("status").and_then(Value::as_str)
+                                            == Some("rolled_back")
+                                })
+                        });
                 let unknown = record.as_ref().is_some_and(|r| r.sent && r.may_write)
                     && (error.code == "cancelled"
                         || error.code == "disconnected"
-                        || error.code == "outcome_unknown");
+                        || error.code == "outcome_unknown")
+                    && !rolled_back;
                 (
                     if unknown {
                         "outcome_unknown"
@@ -525,6 +460,22 @@ impl Engine {
                 )
             }
         };
+        let mut summary = match summary {
+            Value::Object(map) => Value::Object(map),
+            Value::Null => json!({}),
+            other => json!({"value":other}),
+        };
+        let mut metadata = record
+            .as_ref()
+            .and_then(|r| r.summary.get("_task"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if let Some(started) = started {
+            metadata["elapsed_ms"] =
+                json!(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        }
+        summary["_task"] = metadata;
+        let completion_summary = summary.clone();
         let mut final_state = state;
         if let Err(e) = self.store.update_task(id, state, summary, error).await {
             tracing::error!(task_id = %id, "任务状态持久化失败: {e}");
@@ -540,10 +491,7 @@ impl Engine {
             }
             let completion = UnpersistedCompletion {
                 state: if unknown { "outcome_unknown" } else { "failed" },
-                summary: match result {
-                    Ok(value) => value.clone(),
-                    Err(error) => (*error.details).clone(),
-                },
+                summary: completion_summary,
                 error: AppError::new("storage", message).with_details(json!({
                     "observed_state":state,
                     "execution_error":result.as_ref().err(),
@@ -571,6 +519,13 @@ impl Engine {
         let session_id: Uuid = model::param(&params, "session_id")?;
         let mut persisted_params = params.clone();
         redact(&mut persisted_params);
+        let context = json!({"connection":db.profile.name,"provider":db.profile.provider,
+            "database":if matches!(method, "execution.start" | "execution.run") { None } else { params.pointer("/target/database").and_then(Value::as_str).or_else(|| params.get("database").and_then(Value::as_str)).or(db.profile.database.as_deref()) },
+            "redis_db":if db.profile.provider == model::ProviderKind::Redis { Some(db.profile.redis_db) } else { None },
+            "targets":[]});
+        if let Some(object) = persisted_params.as_object_mut() {
+            object.insert("_task_context".into(), context);
+        }
         let record = self
             .store
             .create_task(owner, workspace(&params), method, persisted_params, false)
@@ -596,6 +551,7 @@ impl Engine {
                     session_id,
                     cancel: cancel.clone(),
                     transition: transition.clone(),
+                    started: None,
                     abort: None,
                 },
             );
@@ -613,7 +569,14 @@ impl Engine {
                     .provider(db, &method, params, &sink, &cancel, &transition)
                     .await
             };
-            engine.finish_task(owner, id, &result).await;
+            let started = engine
+                .state
+                .lock()
+                .unwrap()
+                .tasks
+                .get(&id)
+                .and_then(|task| task.started);
+            engine.finish_task(owner, id, &result, started).await;
             result
         };
         let task = tokio::spawn(future);
@@ -630,23 +593,95 @@ impl Engine {
     }
     async fn dispatch(self: &Arc<Self>, owner: Uuid, method: &str, params: Value) -> Result<Value> {
         self.active(owner)?;
+        let owner_cancel = self
+            .state
+            .lock()
+            .unwrap()
+            .client_cancels
+            .get(&owner)
+            .cloned()
+            .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
         match method {
+            "settings.get" => serialize(self.store.settings().await?),
+            "settings.set" => {
+                let settings: model::AppSettings = model::param(&params, "settings")?;
+                self.store.set_settings(&settings).await?;
+                self.emit_settings_changed();
+                serialize(settings)
+            }
+            "profile.databases" | "profile.test" => {
+                let profile: Profile = model::param(&params, "profile")?;
+                profile.validate()?;
+                if method == "profile.databases" && profile.provider != model::ProviderKind::Mysql {
+                    return Err(AppError::invalid("仅 MySQL 连接支持加载数据库"));
+                }
+                let secret = optional(&params, "secret")?;
+                let mut provider = tokio::select! {
+                    biased;
+                    _ = owner_cancel.cancelled() => return Err(AppError::cancelled()),
+                    result = async {
+                        let secret = match secret {
+                            Some(value) => Some(value),
+                            None => self.store.secret(profile.id).await?,
+                        };
+                        ProviderSession::connect(profile.clone(), secret).await
+                    } => result?,
+                };
+                let record = self
+                    .store
+                    .create_task(owner, workspace(&params), method, json!({"_task_context":{"connection":profile.name,"provider":profile.provider,"database":profile.database,"redis_db":if profile.provider == model::ProviderKind::Redis { Some(profile.redis_db) } else { None },"targets":[]}}), false)
+                    .await?;
+                self.emit_state(owner, record.id, "queued");
+                let mut started = None;
+                let result = async {
+                    let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| AppError::new("internal", e.to_string()))?.as_secs_f64();
+                    let instant = Instant::now();
+                    self.store.update_task(record.id, "running", json!({"_task":{"started_at":wall}}), None).await?;
+                    started = Some(instant);
+                    self.emit_state(owner, record.id, "running");
+                    let sink = ExecutionSink::new(self.store.clone(), record.id);
+                    tokio::select! {
+                        biased;
+                        _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
+                        result = provider.call(
+                            if method == "profile.test" { "connection.info" } else { "resource.list" },
+                            json!({}), &sink, &owner_cancel,
+                        ) => result,
+                    }
+                }.await;
+                // 已中断的只读连接直接丢弃，避免关闭握手再次阻塞断线清理。
+                if !owner_cancel.is_cancelled() {
+                    tokio::select! {
+                        _ = owner_cancel.cancelled() => (),
+                        _ = provider.close() => (),
+                    }
+                }
+                self.finish_task(owner, record.id, &result, started).await;
+                if method == "profile.test" {
+                    Ok(json!({"ok":true,"info":result?}))
+                } else {
+                    result
+                }
+            }
             "profile.list" => Ok(json!({"profiles":self.store.profiles().await?})),
             "profile.save" => {
                 let profile: Profile = model::param(&params, "profile")?;
                 profile.validate()?;
-                let saved = self
-                    .store
-                    .save_profile(
-                        &profile,
-                        optional(&params, "secret")?,
-                        params
-                            .get("save_secret")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    )
-                    .await?;
-                Ok(json!({"profile":profile,"credential_saved":saved}))
+                let secret = optional(&params, "secret")?;
+                let persist = params
+                    .get("save_secret")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let engine = self.clone();
+                // 保存任务独占连接配置锁直到凭据交接完成；调用方停止等待不能提前放行打开连接。
+                tokio::spawn(async move {
+                    let lock = engine.profile_lock(profile.id);
+                    let _guard = lock.lock().await;
+                    let saved = engine.store.save_profile(&profile, secret, persist).await?;
+                    Ok(json!({"profile":profile,"credential_saved":saved}))
+                })
+                .await
+                .map_err(|e| AppError::new("internal", format!("保存连接配置任务异常结束：{e}")))?
             }
             "profile.delete" => {
                 let id: Uuid = model::param(&params, "profile_id")?;
@@ -664,36 +699,6 @@ impl Engine {
                 }
                 self.store.delete_profile(id).await?;
                 Ok(json!({"deleted":true}))
-            }
-            "profile.test" => {
-                let profile: Profile = model::param(&params, "profile")?;
-                profile.validate()?;
-                let secret = match optional(&params, "secret")? {
-                    Some(value) => Some(value),
-                    None => self.store.secret(profile.id).await?,
-                };
-                let mut provider = ProviderSession::connect(profile, secret).await?;
-                let record = self
-                    .store
-                    .create_task(owner, workspace(&params), "profile.test", json!({}), false)
-                    .await?;
-                self.emit_state(owner, record.id, "queued");
-                self.store
-                    .update_task(record.id, "running", Value::Null, None)
-                    .await?;
-                self.emit_state(owner, record.id, "running");
-                let sink = ExecutionSink::new(self.store.clone(), record.id);
-                let result = provider
-                    .call(
-                        "connection.info",
-                        json!({}),
-                        &sink,
-                        &CancellationToken::new(),
-                    )
-                    .await;
-                let _ = provider.close().await;
-                self.finish_task(owner, record.id, &result).await;
-                Ok(json!({"ok":true,"info":result?}))
             }
             "workspace.load" => {
                 self.store
@@ -715,19 +720,33 @@ impl Engine {
             "connection.open" => {
                 let id: Uuid = model::param(&params, "profile_id")?;
                 let lock = self.profile_lock(id);
-                let _guard = lock.lock().await;
-                let profile = self
-                    .store
-                    .profiles()
-                    .await?
-                    .into_iter()
-                    .find(|p| p.id == id)
-                    .ok_or_else(|| AppError::new("not_found", "连接配置不存在"))?;
-                let secret = match optional(&params, "secret")? {
-                    Some(s) => Some(s),
-                    None => self.store.secret(id).await?,
+                let _guard = tokio::select! {
+                    biased;
+                    _ = owner_cancel.cancelled() => return Err(AppError::cancelled()),
+                    guard = lock.lock() => guard,
                 };
-                let session = ProviderSession::connect(profile.clone(), secret).await?;
+                // 只取消只读配置和连接等待；profile.save/delete 的凭据交接必须完成。
+                let (profile, session) = tokio::select! {
+                    biased;
+                    _ = owner_cancel.cancelled() => return Err(AppError::cancelled()),
+                    result = async {
+                        let mut profile = self.store.profiles().await?.into_iter()
+                            .find(|p| p.id == id)
+                            .ok_or_else(|| AppError::new("not_found", "连接配置不存在"))?;
+                        if let Some(redis_db) = optional::<u32>(&params, "redis_db")? {
+                            if profile.provider != model::ProviderKind::Redis {
+                                return Err(AppError::invalid("仅 Redis 连接支持指定 DB"));
+                            }
+                            profile.redis_db = redis_db;
+                        }
+                        let secret = match optional(&params, "secret")? {
+                            Some(s) => Some(s),
+                            None => self.store.secret(id).await?,
+                        };
+                        let session = ProviderSession::connect(profile.clone(), secret).await?;
+                        Ok::<_, AppError>((profile, session))
+                    } => result?,
+                };
                 let session_id = Uuid::new_v4();
                 let db = Arc::new(Database {
                     owner,
@@ -745,7 +764,8 @@ impl Engine {
                     }
                 };
                 if !inserted {
-                    let _ = db.session.lock().await.close().await;
+                    // owner 已离开，直接丢弃新建会话，不能在 profile 锁内等待关闭握手。
+                    drop(db);
                     return Err(AppError::new("disconnected", "客户端会话已关闭"));
                 }
                 Ok(
@@ -776,12 +796,25 @@ impl Engine {
                 Ok(json!({"closed":true}))
             }
             "connection.info" | "resource.list" | "resource.describe" | "change.open"
-            | "change.discard" | "transfer.preview" => {
+            | "change.discard" | "change.preview" | "transfer.preview" => {
                 self.start(owner, method, params, false).await
             }
             "resource.browse" | "execution.start" | "change.submit" | "transfer.import"
             | "transfer.export" => self.start(owner, method, params, true).await,
-            "execution.get" => serialize(self.task(model::param(&params, "task_id")?).await?),
+            "execution.get" => {
+                let id = model::param(&params, "task_id")?;
+                let include_text = optional::<bool>(&params, "include_text")?.unwrap_or(false);
+                let mut task = if include_text {
+                    self.store.task_details(id).await?
+                } else {
+                    self.store.task(id).await?
+                };
+                if let Some(completion) = self.state.lock().unwrap().unpersisted.get(&id) {
+                    completion.apply(&mut task);
+                }
+                self.apply_live_elapsed(&mut task);
+                serialize(task)
+            }
             "execution.list" => {
                 let mut tasks = self
                     .store
@@ -796,6 +829,9 @@ impl Engine {
                     }
                 }
                 drop(state);
+                for task in &mut tasks {
+                    self.apply_live_elapsed(task);
+                }
                 Ok(json!({"executions":tasks}))
             }
             "execution.cancel" => {
@@ -883,29 +919,40 @@ impl Engine {
             }
             "result.release" => {
                 let id: Uuid = model::param(&params, "result_id")?;
-                let meta = self.store.result_meta(id).await?;
-                if self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .tasks
-                    .contains_key(&meta.execution_id)
-                {
-                    return Err(AppError::new(
-                        "busy",
-                        "任务仍在写入结果，请在任务结束后释放",
-                    ));
+                match self.store.result_meta(id).await {
+                    Ok(meta) => {
+                        if self
+                            .state
+                            .lock()
+                            .unwrap()
+                            .tasks
+                            .contains_key(&meta.execution_id)
+                        {
+                            return Err(AppError::new(
+                                "busy",
+                                "任务仍在写入结果，请在任务结束后释放",
+                            ));
+                        }
+                    }
+                    Err(error) if error.code == "not_found" => {}
+                    Err(error) => return Err(error),
                 }
                 self.store.release_result(id).await?;
                 Ok(json!({"released":true}))
             }
             "file.open" => {
                 let path: String = model::param(&params, "path")?;
+                if path.trim().is_empty() {
+                    return Err(AppError::invalid("文件路径不能为空"));
+                }
                 let text = tokio::fs::read_to_string(&path).await?;
                 Ok(json!({"path":path,"text":text}))
             }
             "file.save" => {
                 let path: String = model::param(&params, "path")?;
+                if path.trim().is_empty() {
+                    return Err(AppError::invalid("文件路径不能为空"));
+                }
                 let text: String = model::param(&params, "text")?;
                 tokio::fs::write(&path, &text).await?;
                 Ok(json!({"path":path,"text":text}))

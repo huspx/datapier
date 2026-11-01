@@ -39,6 +39,7 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
         redis_db: 15,
         access_mode: AccessMode::ReadWrite,
         tls: TlsConfig::default(),
+        visible_databases: None,
     };
     (store, profile, secret)
 }
@@ -89,7 +90,7 @@ async fn clean(store: Store) {
 }
 
 #[tokio::test]
-#[ignore = "需要隔离的 MySQL 8.0 或 8.4 实例"]
+#[ignore = "需要隔离的 MySQL 5.7、8.0 或 8.4 实例"]
 async fn mysql_preserves_values_empty_columns_and_conflicting_edits() {
     let (store, profile, secret) = context(ProviderKind::Mysql).await;
     let mut db = ProviderSession::connect(profile, secret).await.unwrap();
@@ -144,7 +145,7 @@ async fn mysql_preserves_values_empty_columns_and_conflicting_edits() {
     let multiple = execute(
         &mut db,
         &store,
-        "SELECT 1 AS one; SELECT 2 AS empty_set WHERE FALSE; SELECT 3 AS three",
+        "SELECT 1 AS one; SELECT 2 AS empty_set FROM DUAL WHERE FALSE; SELECT 3 AS three",
     )
     .await
     .unwrap();

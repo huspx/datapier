@@ -1,5 +1,7 @@
 //! Core 与调用方共享的连接、类型化值、结果和任务模型。
 
+pub mod preview;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
@@ -106,6 +108,25 @@ pub struct TlsConfig {
     #[serde(default)]
     pub client_key_path: Option<String>,
 }
+/// 应用全局界面语言偏好。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum LanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en")]
+    En,
+}
+
+/// 保存在数据目录中、由各工作区共享的应用设置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub language: LanguagePreference,
+}
+
 /// 不含密码的连接配置；凭据由存储层单独管理。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -118,6 +139,9 @@ pub struct Profile {
     pub username: String,
     #[serde(default)]
     pub database: Option<String>,
+    /// None 显示全部可访问数据库，空列表表示全部隐藏。
+    #[serde(default)]
+    pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
     pub redis_db: u32,
     #[serde(default)]
@@ -138,6 +162,23 @@ impl Profile {
     pub fn validate(&self) -> Result<()> {
         if self.host.trim().is_empty() || self.name.trim().is_empty() || self.port == 0 {
             return Err(AppError::invalid("连接名称、地址和端口不可为空"));
+        }
+        let paths = [
+            &self.tls.ca_path,
+            &self.tls.client_cert_path,
+            &self.tls.client_key_path,
+        ];
+        if paths
+            .iter()
+            .any(|p| p.as_ref().is_some_and(|s| s.trim().is_empty()))
+        {
+            return Err(AppError::invalid("TLS 证书路径不能为空白"));
+        }
+        if !self.tls.enabled && paths.iter().any(|p| p.is_some()) {
+            return Err(AppError::invalid("关闭 TLS 时不能提供证书路径"));
+        }
+        if self.tls.client_cert_path.is_some() != self.tls.client_key_path.is_some() {
+            return Err(AppError::invalid("TLS 客户端证书与私钥必须成对提供"));
         }
         Ok(())
     }
@@ -210,7 +251,12 @@ pub struct Column {
     #[serde(default)]
     pub primary_key: bool,
     #[serde(default)]
+    pub auto_increment: bool,
+    #[serde(default)]
     pub default_value: Option<String>,
+    /// 资源结构中的原始列注释；任意查询结果未提供时为 None。
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 fn default_true() -> bool {
     true
@@ -223,7 +269,9 @@ impl Column {
             nullable: true,
             generated: false,
             primary_key: false,
+            auto_increment: false,
             default_value: None,
+            comment: None,
         }
     }
 }
@@ -299,6 +347,29 @@ pub struct ResultPage {
     pub start: u64,
     pub next: Option<u64>,
 }
+/// 创建任务时冻结的连接和资源上下文。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskContext {
+    pub connection: String,
+    pub provider: ProviderKind,
+    pub database: Option<String>,
+    pub redis_db: Option<u32>,
+    #[serde(default)]
+    pub targets: Vec<ResourceTarget>,
+}
+
+/// 任务关联结果的轻量状态，不包含列定义或行数据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskResultSummary {
+    pub id: Uuid,
+    pub row_count: u64,
+    pub complete: bool,
+    pub kind: String,
+    pub column_count: Option<u64>,
+    #[serde(default)]
+    pub redis_type: Option<String>,
+}
+
 /// 持久化任务状态；`sent` 与 `may_write` 共同用于中断后的保守恢复。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
@@ -306,10 +377,24 @@ pub struct TaskRecord {
     pub workspace_id: String,
     pub owner: Uuid,
     pub method: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub execution_text_truncated: bool,
+    #[serde(default)]
+    pub started_at: Option<f64>,
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default)]
+    pub context: Option<TaskContext>,
+    #[serde(default)]
+    pub created_at: f64,
     pub state: String,
     pub sent: bool,
     pub may_write: bool,
     pub results: Vec<Uuid>,
+    #[serde(default)]
+    pub result_summaries: Vec<TaskResultSummary>,
     pub summary: Json,
     pub error: Option<AppError>,
 }

@@ -3,13 +3,20 @@ name = "datapier-tsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 [dependencies]
 base64.workspace = true
+chrono.workspace = true
 csv.workspace = true
 datapier-core = { path = "../datapier-core" }
 datapier-engine = { path = "../datapier-engine" }
 serde.workspace = true
 serde_json.workspace = true
+sqlformat.workspace = true
+sqlparser.workspace = true
 tern-sdk.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio-util.workspace = true

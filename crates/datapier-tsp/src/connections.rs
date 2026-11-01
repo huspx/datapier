@@ -1,0 +1,299 @@
+use super::*;
+use datapier_core::model::{AccessMode, ProviderKind, TlsConfig};
+
+/// 新建表单与应用初始值共用同一份默认值；重开时同时丢弃旧字段的撤销历史。
+pub(super) const PROFILE_DEFAULTS: &[(&str, &str)] = &[
+    ("name", ""),
+    ("host", "127.0.0.1"),
+    ("port", "3306"),
+    ("user", ""),
+    ("password", ""),
+    ("database", ""),
+    ("redis_db", "0"),
+    ("provider", "mysql"),
+    ("access", "read_only"),
+    ("tls", "false"),
+    ("ca", ""),
+    ("cert", ""),
+    ("key", ""),
+];
+
+impl App {
+    pub(super) fn connection_form_busy(&self) -> bool {
+        self.form_id
+            .is_some_and(|id| self.profile_saves.contains(&id))
+    }
+
+    pub(super) fn connection_form_is_editing(&self) -> bool {
+        self.form_editing
+    }
+    pub(super) fn connection_form_has_tabs(&self) -> bool {
+        self.form_id
+            .is_some_and(|id| self.tabs.iter().any(|tab| tab.profile_id == Some(id)))
+    }
+
+    pub(super) fn profile_form(&mut self, profile: Option<Profile>) {
+        if self.connection_form_busy() {
+            return;
+        }
+        self.navigation_form_open(profile.as_ref());
+        self.navigation.form_redis_db_menu = false;
+        self.workbench.profile_error = None;
+        self.workbench.field_error = None;
+        self.form_editing = profile.is_some();
+        self.form_id = Some(profile.as_ref().map_or_else(Uuid::new_v4, |p| p.id));
+        for &(name, value) in PROFILE_DEFAULTS {
+            self.field_set(name, value);
+        }
+        if let Some(profile) = profile {
+            self.field_set("name", profile.name);
+            self.field_set("host", profile.host);
+            self.field_set("port", profile.port.to_string());
+            self.field_set("user", profile.username);
+            self.field_set("database", profile.database.unwrap_or_default());
+            self.field_set("redis_db", profile.redis_db.to_string());
+            self.field_set(
+                "provider",
+                match profile.provider {
+                    ProviderKind::Mysql => "mysql",
+                    ProviderKind::Redis => "redis",
+                },
+            );
+            self.field_set(
+                "access",
+                match profile.access_mode {
+                    AccessMode::ReadOnly => "read_only",
+                    AccessMode::ReadWrite => "read_write",
+                },
+            );
+            self.field_set("tls", profile.tls.enabled.to_string());
+            self.field_set("ca", profile.tls.ca_path.unwrap_or_default());
+            self.field_set("cert", profile.tls.client_cert_path.unwrap_or_default());
+            self.field_set("key", profile.tls.client_key_path.unwrap_or_default());
+        }
+        self.workbench.profile_tls_details = self.field("tls") == "true";
+        self.workbench.overlay = Some("profile".into());
+        self.workbench.focus_request = Some("input-name".into());
+    }
+
+    pub(super) fn form_profile(&self) -> std::result::Result<Profile, String> {
+        let optional = |name: &str| {
+            let value = self.field(name);
+            (!value.is_empty()).then(|| value.to_owned())
+        };
+        Ok(Profile {
+            id: self.form_id.ok_or("请先新建或编辑连接")?,
+            name: self.field("name").to_owned(),
+            host: self.field("host").to_owned(),
+            port: self
+                .field("port")
+                .parse::<u16>()
+                .map_err(|e| e.to_string())?,
+            username: self.field("user").to_owned(),
+            database: optional("database"),
+            visible_databases: self.navigation_form_selection(),
+            redis_db: self
+                .field("redis_db")
+                .parse::<u32>()
+                .map_err(|e| e.to_string())?,
+            provider: match self.field("provider") {
+                "mysql" => ProviderKind::Mysql,
+                "redis" => ProviderKind::Redis,
+                _ => return Err("未知数据库类型".into()),
+            },
+            access_mode: match self.field("access") {
+                "read_only" => AccessMode::ReadOnly,
+                "read_write" => AccessMode::ReadWrite,
+                _ => return Err("无效访问模式".into()),
+            },
+            tls: TlsConfig {
+                enabled: self
+                    .field("tls")
+                    .parse::<bool>()
+                    .map_err(|e| e.to_string())?,
+                ca_path: optional("ca"),
+                client_cert_path: optional("cert"),
+                client_key_path: optional("key"),
+            },
+        })
+    }
+
+    pub(super) fn validate_profile_form(&mut self) -> bool {
+        let error = if self.field("name").trim().is_empty() {
+            Some(("name", "请填写连接名称"))
+        } else if self.field("host").trim().is_empty() {
+            Some(("host", "请填写主机"))
+        } else if self
+            .field("port")
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .is_none()
+        {
+            Some(("port", "请输入有效端口"))
+        } else if self.field("redis_db").parse::<u32>().is_err() {
+            Some(("redis_db", "请输入有效 Redis DB"))
+        } else if !matches!(self.field("provider"), "mysql" | "redis") {
+            Some(("provider", "未知数据库类型"))
+        } else if !matches!(self.field("access"), "read_only" | "read_write") {
+            Some(("access", "无效访问模式"))
+        } else if !matches!(self.field("tls"), "true" | "false") {
+            Some(("tls", "无效 TLS 配置"))
+        } else if self.field("tls") == "false"
+            && ["ca", "cert", "key"]
+                .iter()
+                .any(|field| !self.field(field).is_empty())
+        {
+            Some(("tls", "使用证书路径前请启用 TLS"))
+        } else if let Some(field) = ["ca", "cert", "key"]
+            .into_iter()
+            .find(|field| !self.field(field).is_empty() && self.field(field).trim().is_empty())
+        {
+            Some((field, "证书路径不能只包含空白"))
+        } else if self.field("cert").is_empty() != self.field("key").is_empty() {
+            Some((
+                if self.field("cert").is_empty() {
+                    "cert"
+                } else {
+                    "key"
+                },
+                "客户端证书和私钥必须成对填写",
+            ))
+        } else {
+            None
+        };
+        if let Some((field, message)) = error {
+            if matches!(field, "ca" | "cert" | "key" | "tls") {
+                self.workbench.profile_tls_details = true;
+            }
+            self.field_error(field, i18n::UiMessage::key(message));
+            return false;
+        }
+        self.workbench.field_error = None;
+        true
+    }
+
+    pub(super) fn submit_profile_form(&mut self, save: bool, backend: &Backend) {
+        if self.connection_form_busy() {
+            return;
+        }
+        if !self.validate_profile_form() {
+            return;
+        }
+        let profile = match self.form_profile() {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.workbench.profile_error = Some(error.clone());
+                self.status = i18n::UiMessage::local(error);
+                return;
+            }
+        };
+        // 保存后会重连该配置的标签；先拒绝任何可能被重连丢弃的工作。
+        if save && self.form_editing && self.navigation_profile_has_pending_work(profile.id) {
+            let reason = "该连接存在草稿或任务，请先处理";
+            self.workbench.profile_error = Some(i18n::tr(reason).into_owned());
+            self.status = i18n::UiMessage::key(reason);
+            return;
+        }
+        self.workbench.profile_error = None;
+        let secret =
+            (!self.field("password").is_empty()).then(|| self.field("password").to_owned());
+        let method = if save { "profile.save" } else { "profile.test" };
+        self.request(
+            backend,
+            &format!("{method}/{}", profile.id),
+            method,
+            json!({"profile":profile,"secret":secret,"save_secret":true}),
+        );
+    }
+
+    pub(super) fn profile_saved(&mut self, value: Value, backend: &Backend) {
+        let profile: Profile = match serde_json::from_value(value["profile"].clone()) {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.workbench.profile_error = Some(error.to_string());
+                self.status = i18n::UiMessage::raw(error.to_string());
+                return;
+            }
+        };
+        self.workbench.profile_error = None;
+        self.form_id = Some(profile.id);
+        self.navigation_invalidate_profile(profile.id);
+        if let Some(current) = self.profiles.iter_mut().find(|p| p.id == profile.id) {
+            *current = profile.clone();
+        } else {
+            self.profiles.push(profile.clone());
+        }
+        self.field_set("password", "");
+        self.workbench.overlay = None;
+        if self.form_editing {
+            self.reconnect_saved_profile(profile, backend);
+        } else {
+            // 新建并保存其他配置，不改变现有标签的连接或编辑归属。
+            if self.session.is_none()
+                && self
+                    .tabs
+                    .get(self.active)
+                    .is_some_and(|tab| tab.profile_id.is_none_or(|id| id == profile.id))
+            {
+                self.profile = Some(profile.clone());
+                self.tabs[self.active].profile_id = Some(profile.id);
+                self.dirty = true;
+            }
+            self.status = i18n::UiMessage::key("连接已保存");
+        }
+        self.request(backend, "profile.list", "profile.list", json!({}));
+    }
+
+    fn reconnect_saved_profile(&mut self, profile: Profile, backend: &Backend) {
+        // 异步保存完成前状态仍可能因外部输入变化；绝不因此丢弃任务或草稿。
+        if self.navigation_profile_has_pending_work(profile.id) {
+            self.status = i18n::UiMessage::key("连接已保存；请处理相关草稿或任务后再次保存以重连");
+            return;
+        }
+        let active = self.active;
+        let mut found = false;
+        for index in 0..self.tabs.len() {
+            if self.tabs[index].profile_id != Some(profile.id) {
+                continue;
+            }
+            found = true;
+            self.switch_tab(index);
+            if self
+                .profile
+                .as_ref()
+                .is_some_and(|current| current.provider != profile.provider)
+            {
+                // 资源 target 带 provider 语义，不能把表名当作 Redis key 或反向复用。
+                self.target = None;
+                self.database = None;
+                self.workbench.queued_target = None;
+                self.tabs[index].browse = BrowseSettings::default();
+                self.field_set("pattern", "*");
+                self.field_set("type", "");
+                self.field_set("filter", "[]");
+                self.field_set("sort", "[]");
+                self.view = if profile.provider == ProviderKind::Redis {
+                    "data"
+                } else {
+                    "query"
+                }
+                .into();
+            }
+            self.profile = Some(profile.clone());
+            self.clear_cli_session();
+            self.action("open", backend);
+        }
+        self.switch_tab(active);
+        if !found {
+            self.status = i18n::UiMessage::key("连接已保存");
+            return;
+        }
+        self.dirty = true;
+        self.status = i18n::UiMessage::key("连接已保存，正在重连");
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/connections.rs"]
+mod tests;

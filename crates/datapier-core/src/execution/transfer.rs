@@ -1,6 +1,13 @@
 //! CSV／版本化 JSON 的文件导入、导出和有限样本预览。
 //! 结果按页读取、导入按批提交；失败报告保留已完成进度，不暗示跨批回滚。
 
+mod preview;
+pub use preview::preview;
+
+#[cfg(test)]
+#[path = "../../tests/unit/transfer.rs"]
+mod tests;
+
 use crate::{
     ExecutionSink,
     model::{
@@ -60,6 +67,7 @@ pub async fn run(
     sink: &ExecutionSink,
     cancel: &CancellationToken,
 ) -> Result<Json> {
+    validate_options(&params)?;
     let mut progress = Progress::default();
     let result = match method {
         "transfer.export" | "export" => export(session, &params, sink, cancel, &mut progress).await,
@@ -72,6 +80,29 @@ pub async fn run(
         e
     })
 }
+fn validate_options(params: &Json) -> Result<()> {
+    if params
+        .get("column_mapping")
+        .is_some_and(|v| !v.is_null() && !v.is_object())
+    {
+        return Err(AppError::invalid("column_mapping 必须是对象"));
+    }
+    if params.get("binary_columns").is_some_and(|v| {
+        !v.is_null()
+            && v.as_array()
+                .is_none_or(|a| a.iter().any(|v| !v.is_string()))
+    }) {
+        return Err(AppError::invalid("binary_columns 必须是字符串数组"));
+    }
+    if params
+        .get("backslash_escape")
+        .is_some_and(|v| !v.is_null() && !v.is_boolean())
+    {
+        return Err(AppError::invalid("backslash_escape 必须是布尔值"));
+    }
+    Ok(())
+}
+
 fn format(params: &Json) -> Result<&str> {
     match params.get("format").and_then(Json::as_str) {
         Some("csv") => Ok("csv"),
@@ -81,7 +112,7 @@ fn format(params: &Json) -> Result<&str> {
 }
 fn path(params: &Json) -> Result<PathBuf> {
     let s: String = param(params, "path")?;
-    if s.is_empty() {
+    if s.trim().is_empty() {
         return Err(AppError::invalid("文件路径不能为空"));
     }
     Ok(PathBuf::from(s))
@@ -332,15 +363,15 @@ async fn export_redis(
         export_key(session, target, sink, cancel, p, &mut writer).await?;
     } else {
         // SCAN 可能重复返回 key；以磁盘索引去重，避免将全库 key 保存在内存。
-        let seen_path = temp_path(&sink.store.root, "scan");
+        let seen_path = temp_path(&sink.store.root.join("transfer-scan"), "scan");
         let opts = SqliteConnectOptions::new()
             .filename(&seen_path)
             .create_if_missing(true);
         let mut seen = SqliteConnection::connect_with(&opts).await?;
-        sqlx::query("CREATE TABLE seen (key TEXT PRIMARY KEY)")
-            .execute(&mut seen)
-            .await?;
         let scan_result: Result<()> = async {
+            sqlx::query("CREATE TABLE seen (key TEXT PRIMARY KEY)")
+                .execute(&mut seen)
+                .await?;
             let mut cursor: Option<String> = None;
             loop { ensure_not_cancelled(cancel)?;
                 let page: ResourcePage = serde_json::from_value(session.call("resource.list", json!({"cursor":cursor,"pattern":params.get("pattern"),"type":params.get("type"),"limit":500}), sink, cancel).await?)?;
@@ -351,9 +382,10 @@ async fn export_redis(
                 if page.complete || page.cursor.is_none() { break; } cursor = page.cursor;
             } Ok(())
         }.await;
-        seen.close().await?;
+        let close_result = seen.close().await;
         let _ = fs::remove_file(seen_path);
         scan_result?;
+        close_result?;
     }
     if let Some(c) = writer.csv.as_mut() {
         flush_csv(c, &mut writer.out, true)?;
@@ -429,9 +461,6 @@ async fn export_key(
             if ty == "list" && fields[6].parse::<u64>().ok() != Some(row_count) {
                 return Err(AppError::conflict("Redis List 索引不连续"));
             }
-            if ty == "zset" && fields[8].parse::<f64>().is_err() {
-                return Err(AppError::invalid("Redis ZSet 分数无效"));
-            }
             for value in &row {
                 if let Value::Bytes(s) = value {
                     valid_b64(s)?;
@@ -482,6 +511,19 @@ fn redis_bytes(v: &Value) -> Result<String> {
         _ => Err(AppError::invalid("Redis 内容必须是二进制类型")),
     }
 }
+pub(crate) fn validate_redis_score(score: &str) -> Result<()> {
+    if score
+        .strip_prefix('+')
+        .or_else(|| score.strip_prefix('-'))
+        .unwrap_or(score)
+        .eq_ignore_ascii_case("inf")
+        || score.parse::<f64>().is_ok_and(f64::is_finite)
+    {
+        Ok(())
+    } else {
+        Err(AppError::invalid("无效 ZSet 分数"))
+    }
+}
 fn redis_csv_row(key: &str, ty: &str, row: &[Value]) -> Result<Vec<String>> {
     let mut r = vec![
         "1".into(),
@@ -510,6 +552,7 @@ fn redis_csv_row(key: &str, ty: &str, row: &[Value]) -> Result<Vec<String>> {
         }
         ("set", [m]) => r[7] = redis_bytes(m)?,
         ("zset", [m, Value::Float(s)]) => {
+            validate_redis_score(s)?;
             r[7] = redis_bytes(m)?;
             r[8] = s.clone();
         }
@@ -809,33 +852,45 @@ fn unescape(s: &str) -> Result<String> {
 }
 fn csv_typed(s: String, col: &Column, binary: bool) -> Result<Value> {
     let ty = col.type_name.to_ascii_uppercase();
-    if binary || ty.contains("BINARY") || ty.contains("BLOB") || ty.contains("BIT") {
+    let base = ty
+        .split(|c: char| c == '(' || c.is_ascii_whitespace())
+        .next()
+        .unwrap_or("");
+    if binary
+        || matches!(
+            base,
+            "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BIT"
+        )
+    {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(&s)
             .map_err(|e| AppError::invalid(format!("无效 Base64: {e}")))?;
         Ok(Value::Bytes(s))
-    } else if ty.contains("INT") || ty.starts_with("YEAR") {
-        if ty.contains("UNSIGNED") || ty.starts_with("YEAR") {
+    } else if matches!(
+        base,
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "YEAR"
+    ) {
+        if ty.contains("UNSIGNED") || base == "YEAR" {
             u64::from_str(&s).map_err(|_| AppError::invalid("无效无符号整数"))?;
             Ok(Value::Unsigned(s))
         } else {
             i64::from_str(&s).map_err(|_| AppError::invalid("无效整数"))?;
             Ok(Value::Integer(s))
         }
-    } else if ty.contains("DECIMAL") || ty.contains("NUMERIC") {
+    } else if matches!(base, "DECIMAL" | "NUMERIC") {
         bigdecimal::BigDecimal::from_str(&s).map_err(|_| AppError::invalid("无效精确小数"))?;
         Ok(Value::Decimal(s))
-    } else if ty.contains("FLOAT") || ty.contains("DOUBLE") || ty.contains("REAL") {
+    } else if matches!(base, "FLOAT" | "DOUBLE" | "REAL") {
         f64::from_str(&s).map_err(|_| AppError::invalid("无效浮点数"))?;
         Ok(Value::Float(s))
-    } else if ty.contains("JSON") {
+    } else if base == "JSON" {
         Ok(Value::Json(serde_json::from_str(&s)?))
-    } else if ty.contains("DATETIME") || ty.contains("TIMESTAMP") {
+    } else if matches!(base, "DATETIME" | "TIMESTAMP") {
         Ok(Value::DateTime(s))
-    } else if ty.starts_with("DATE") {
+    } else if base == "DATE" {
         Ok(Value::Date(s))
-    } else if ty.starts_with("TIME") {
+    } else if base == "TIME" {
         Ok(Value::Time(s))
     } else {
         Ok(Value::Text(s))
@@ -1244,7 +1299,15 @@ async fn push_key(
     cancel: &CancellationToken,
 ) -> Result<()> {
     // 写入临时 key 前校验与 provider 浏览相同的行布局和 List 索引。
-    redis_csv_row(&key.key, &key.kind, &row)?;
+    validate_key_row(key, &row)?;
+    key.batch.push(row);
+    if key.batch.len() == PAGE {
+        append_key(session, key, sink, cancel).await?;
+    }
+    Ok(())
+}
+fn validate_key_row(key: &mut KeyImport, row: &[Value]) -> Result<()> {
+    redis_csv_row(&key.key, &key.kind, row)?;
     if key.kind == "list" {
         let index = match &row[0] {
             Value::Integer(s) | Value::Unsigned(s) => s.parse::<u64>().ok(),
@@ -1258,9 +1321,10 @@ async fn push_key(
     if key.kind == "string" && key.rows + key.batch.len() as u64 != 0 {
         return Err(AppError::invalid("String 只能包含一行"));
     }
-    key.batch.push(row);
-    if key.batch.len() == PAGE {
-        append_key(session, key, sink, cancel).await?;
+    for value in row {
+        if let Value::Bytes(s) = value {
+            valid_b64(s)?;
+        }
     }
     Ok(())
 }
@@ -1297,12 +1361,14 @@ async fn discard_key(
     key: &KeyImport,
     sink: &ExecutionSink,
 ) -> Result<()> {
+    let mut cleanup_sink = sink.clone();
+    cleanup_sink.cancel = CancellationToken::new();
     session
         .call(
             "import.discard",
             json!({"token":key.token}),
-            sink,
-            &CancellationToken::new(),
+            &cleanup_sink,
+            &cleanup_sink.cancel,
         )
         .await
         .map(|_| ())
@@ -1341,9 +1407,7 @@ fn csv_item(record: &csv::StringRecord, key: &KeyImport) -> Result<Vec<Value>> {
         }
         "set" => Ok(vec![bytes(7)?]),
         "zset" => {
-            record[8]
-                .parse::<f64>()
-                .map_err(|_| AppError::invalid("无效 ZSet 分数"))?;
+            validate_redis_score(&record[8])?;
             Ok(vec![bytes(7)?, Value::Float(record[8].to_owned())])
         }
         _ => Err(AppError::invalid("不支持的 Redis 类型")),
@@ -1498,667 +1562,5 @@ async fn import_redis_json(
             p.failed += 1;
             Err(cleanup_key(session, &active, sink, e).await)
         }
-    }
-}
-
-const PREVIEW_ROWS: usize = 50;
-const PREVIEW_BYTES: usize = 256 * 1024;
-struct Preview {
-    columns: Vec<Column>,
-    rows: Vec<Vec<Value>>,
-    errors: Vec<Json>,
-    bytes: usize,
-    complete: bool,
-}
-impl Preview {
-    fn new(columns: Vec<Column>) -> Self {
-        Self {
-            columns,
-            rows: Vec::new(),
-            errors: Vec::new(),
-            bytes: 0,
-            complete: true,
-        }
-    }
-    fn push(&mut self, row: Vec<Value>) -> Result<bool> {
-        let bytes = serde_json::to_vec(&row)?.len();
-        if self.rows.len() == PREVIEW_ROWS || self.bytes.saturating_add(bytes) > PREVIEW_BYTES {
-            self.complete = false;
-            return Ok(false);
-        }
-        self.bytes += bytes;
-        self.rows.push(row);
-        Ok(true)
-    }
-    fn failure(&mut self, record: u64, error: AppError) {
-        self.errors.push(json!({"record":record,"error":error}));
-        self.complete = false;
-    }
-}
-struct LimitedJson {
-    bytes: Vec<u8>,
-    overflow: bool,
-}
-impl Write for LimitedJson {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let room = PREVIEW_BYTES.saturating_sub(self.bytes.len());
-        let n = room.min(data.len());
-        self.bytes.extend_from_slice(&data[..n]);
-        if n < data.len() {
-            self.overflow = true;
-        }
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-fn preview_json_value<T: serde::de::DeserializeOwned>(
-    reader: &mut JsonReader,
-    cancel: &CancellationToken,
-) -> Result<T> {
-    let mut buffer = LimitedJson {
-        bytes: Vec::new(),
-        overflow: false,
-    };
-    reader.copy_value(&mut buffer, cancel)?;
-    if buffer.overflow {
-        return Err(AppError::new(
-            "preview_too_large",
-            "单条预览记录超过 256 KiB",
-        ));
-    }
-    Ok(serde_json::from_slice(&buffer.bytes)?)
-}
-
-/// 读取有限样本并校验文件和目标列映射，不提交导入数据。
-/// 返回样本是否完整及逐记录错误；MySQL 预览会查询目标表结构。
-pub async fn preview(
-    session: &mut ProviderSession,
-    params: Json,
-    sink: &ExecutionSink,
-    cancel: &CancellationToken,
-) -> Result<Json> {
-    let fmt = format(&params)?;
-    let target: ResourceTarget = param(&params, "target")?;
-    let file = File::open(path(&params)?)?;
-    let provider = session.profile().provider;
-    if provider == ProviderKind::Redis
-        && let Some(db) = target.database.as_deref()
-        && db.parse::<u32>().ok() != Some(session.profile().redis_db)
-    {
-        return Err(AppError::invalid("目标数据库与连接不一致"));
-    }
-    let result = match (provider, fmt) {
-        (ProviderKind::Mysql, "csv") => {
-            preview_mysql_csv(session, &params, &target, sink, cancel, file).await?
-        }
-        (ProviderKind::Mysql, _) => {
-            preview_mysql_json(session, &params, &target, sink, cancel, file).await?
-        }
-        (ProviderKind::Redis, "csv") => preview_redis_csv(&target, cancel, file)?,
-        (ProviderKind::Redis, _) => preview_redis_json(&target, sink, cancel, file)?,
-    };
-    Ok(
-        json!({"columns":result.columns,"rows":result.rows,"target":target,"format":fmt,"provider":provider,"sample_complete":result.complete,"errors":result.errors}),
-    )
-}
-
-async fn preview_mysql_csv(
-    session: &mut ProviderSession,
-    params: &Json,
-    target: &ResourceTarget,
-    sink: &ExecutionSink,
-    cancel: &CancellationToken,
-    file: File,
-) -> Result<Preview> {
-    let length = file.metadata()?.len();
-    let limit = (PREVIEW_BYTES + 1) as u64;
-    let mut reader = csv::Reader::from_reader(BufReader::new(file.take(limit)));
-    let names: Vec<String> = reader
-        .headers()
-        .map_err(csv_error)?
-        .iter()
-        .map(str::to_owned)
-        .collect();
-    let projection = mapped_columns(
-        &names,
-        params,
-        &schema(session, target, sink, cancel).await?,
-    )?;
-    let null = params
-        .get("null_marker")
-        .and_then(Json::as_str)
-        .unwrap_or("\\N");
-    let escaped = params
-        .get("backslash_escape")
-        .and_then(Json::as_bool)
-        .unwrap_or(true);
-    let binary: HashSet<&str> = params
-        .get("binary_columns")
-        .and_then(Json::as_array)
-        .map(|a| a.iter().filter_map(Json::as_str).collect())
-        .unwrap_or_default();
-    let mut preview = Preview::new(projection.columns.clone());
-    let mut record_no = 0u64;
-    loop {
-        ensure_not_cancelled(cancel)?;
-        let mut record = csv::StringRecord::new();
-        let read = match reader.read_record(&mut record) {
-            Ok(v) => v,
-            Err(e) => {
-                preview.failure(record_no + 1, csv_error(e));
-                break;
-            }
-        };
-        if !read {
-            if length > limit {
-                preview.complete = false;
-            }
-            break;
-        }
-        record_no += 1;
-        if length > limit && reader.position().byte() >= limit {
-            preview.complete = false;
-            break;
-        }
-        if preview.rows.len() == PREVIEW_ROWS {
-            preview.complete = false;
-            break;
-        }
-        let converted = projection.csv_row(&record, &names, null, escaped, &binary);
-        match converted.and_then(|row| {
-            validate_preview_mysql(&row, &preview.columns)?;
-            Ok(row)
-        }) {
-            Ok(row) => {
-                if !preview.push(row)? {
-                    break;
-                }
-            }
-            Err(e) => {
-                preview.failure(record_no, e);
-                break;
-            }
-        }
-    }
-    Ok(preview)
-}
-async fn preview_mysql_json(
-    session: &mut ProviderSession,
-    params: &Json,
-    target: &ResourceTarget,
-    sink: &ExecutionSink,
-    cancel: &CancellationToken,
-    file: File,
-) -> Result<Preview> {
-    let doc = json_document(file, &sink.store.root, "rows", cancel)?;
-    let source = doc
-        .columns
-        .ok_or_else(|| AppError::invalid("JSON 缺少列定义"))?;
-    let names: Vec<String> = source.iter().map(|c| c.name.clone()).collect();
-    let projection = mapped_columns(
-        &names,
-        params,
-        &schema(session, target, sink, cancel).await?,
-    )?;
-    let mut preview = Preview::new(projection.columns.clone());
-    let mut r = doc.data.reader()?;
-    r.expect(b'[')?;
-    let mut first = true;
-    let mut record_no = 0;
-    while r.array_next(&mut first)? {
-        ensure_not_cancelled(cancel)?;
-        record_no += 1;
-        if preview.rows.len() == PREVIEW_ROWS {
-            preview.complete = false;
-            break;
-        }
-        match preview_json_value::<Vec<Value>>(&mut r, cancel)
-            .and_then(|row| projection.project(row))
-        {
-            Ok(row) => {
-                if let Err(e) = validate_preview_mysql(&row, &preview.columns) {
-                    preview.failure(record_no, e);
-                    break;
-                }
-                if !preview.push(row)? {
-                    break;
-                }
-            }
-            Err(e) if e.code == "cancelled" => return Err(e),
-            Err(e) => {
-                preview.failure(record_no, e);
-                break;
-            }
-        }
-    }
-    Ok(preview)
-}
-fn validate_preview_mysql(row: &[Value], columns: &[Column]) -> Result<()> {
-    for (value, column) in row.iter().zip(columns) {
-        crate::providers::mysql::validate_import_value(value, column)?;
-    }
-    Ok(())
-}
-fn redis_preview_columns() -> Vec<Column> {
-    ["key_b64", "type", "expires_at_ms", "record", "values"]
-        .into_iter()
-        .map(|name| Column::new(name, "redis"))
-        .collect()
-}
-fn redis_preview_row(
-    key: &str,
-    kind: &str,
-    expiry: &Json,
-    record: &str,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    vec![
-        Value::Text(key.to_owned()),
-        Value::Text(kind.to_owned()),
-        if expiry.is_null() {
-            Value::Null
-        } else {
-            Value::Text(expiry.as_str().unwrap_or_default().to_owned())
-        },
-        Value::Text(record.to_owned()),
-        Value::Array(values),
-    ]
-}
-fn preview_redis_csv(
-    _target: &ResourceTarget,
-    cancel: &CancellationToken,
-    file: File,
-) -> Result<Preview> {
-    let length = file.metadata()?.len();
-    let limit = (PREVIEW_BYTES + 1) as u64;
-    let mut reader = csv::Reader::from_reader(BufReader::new(file.take(limit)));
-    if reader.headers().map_err(csv_error)?.iter().ne(REDIS_HEADER) {
-        return Err(AppError::invalid("Redis CSV 表头不匹配"));
-    }
-    let mut preview = Preview::new(redis_preview_columns());
-    let mut active: Option<KeyImport> = None;
-    let mut expiry = Json::Null;
-    let mut record_no = 0;
-    loop {
-        ensure_not_cancelled(cancel)?;
-        let mut record = csv::StringRecord::new();
-        let read = match reader.read_record(&mut record) {
-            Ok(v) => v,
-            Err(e) => {
-                preview.failure(record_no + 1, csv_error(e));
-                break;
-            }
-        };
-        if !read {
-            if length > limit {
-                preview.complete = false;
-            }
-            break;
-        }
-        record_no += 1;
-        if length > limit && reader.position().byte() >= limit {
-            preview.complete = false;
-            break;
-        }
-        if preview.rows.len() == PREVIEW_ROWS {
-            preview.complete = false;
-            break;
-        }
-        let converted: Result<Vec<Value>> = (|| {
-            if record.len() != REDIS_HEADER.len() || &record[0] != "1" {
-                return Err(AppError::invalid("Redis CSV 记录格式错误"));
-            }
-            if &record[1] == "key" {
-                valid_b64(&record[2])?;
-                if !matches!(&record[3], "string" | "hash" | "list" | "set" | "zset") {
-                    return Err(AppError::invalid("不支持的 Redis 类型"));
-                }
-                expiry = if &record[4] == "permanent" {
-                    Json::Null
-                } else {
-                    record[4]
-                        .parse::<i64>()
-                        .map_err(|_| AppError::invalid("无效绝对过期时间"))?;
-                    Json::String(record[4].to_owned())
-                };
-                active = Some(KeyImport {
-                    token: Json::Null,
-                    key: record[2].to_owned(),
-                    kind: record[3].to_owned(),
-                    batch: Vec::new(),
-                    rows: 0,
-                    next_index: 0,
-                });
-                Ok(redis_preview_row(
-                    &record[2],
-                    &record[3],
-                    &expiry,
-                    "key",
-                    Vec::new(),
-                ))
-            } else {
-                let key = active
-                    .as_ref()
-                    .ok_or_else(|| AppError::invalid("Redis CSV 元素缺少 key 记录"))?;
-                let values = csv_item(&record, key)?;
-                Ok(redis_preview_row(
-                    &key.key, &key.kind, &expiry, "item", values,
-                ))
-            }
-        })();
-        match converted {
-            Ok(row) => {
-                if !preview.push(row)? {
-                    break;
-                }
-            }
-            Err(e) => {
-                preview.failure(record_no, e);
-                break;
-            }
-        }
-    }
-    Ok(preview)
-}
-fn preview_redis_json(
-    _target: &ResourceTarget,
-    sink: &ExecutionSink,
-    cancel: &CancellationToken,
-    file: File,
-) -> Result<Preview> {
-    let doc = json_document(file, &sink.store.root, "records", cancel)?;
-    let mut r = doc.data.reader()?;
-    r.expect(b'[')?;
-    let mut preview = Preview::new(redis_preview_columns());
-    let mut first = true;
-    let mut record_no = 0u64;
-    while r.array_next(&mut first)? {
-        ensure_not_cancelled(cancel)?;
-        record_no += 1;
-        if preview.rows.len() == PREVIEW_ROWS {
-            preview.complete = false;
-            break;
-        }
-        let parsed: Result<(String, String, Json, JsonSpool)> = (|| {
-            r.expect(b'{')?;
-            let mut fields_first = true;
-            let mut key: Option<String> = None;
-            let mut kind: Option<String> = None;
-            let mut expiry: Option<Json> = None;
-            let mut rows: Option<JsonSpool> = None;
-            while let Some(field) = r.object_next(&mut fields_first)? {
-                ensure_not_cancelled(cancel)?;
-                match field.as_str() {
-                    "key_b64" if key.is_none() => key = Some(preview_json_value(&mut r, cancel)?),
-                    "type" if kind.is_none() => kind = Some(preview_json_value(&mut r, cancel)?),
-                    "expires_at_ms" if expiry.is_none() => {
-                        expiry = Some(preview_json_value(&mut r, cancel)?)
-                    }
-                    "rows" if rows.is_none() => {
-                        rows = Some(JsonSpool::copy(&mut r, &sink.store.root, cancel)?)
-                    }
-                    "key_b64" | "type" | "expires_at_ms" | "rows" => {
-                        return Err(AppError::invalid("Redis JSON 字段重复"));
-                    }
-                    _ => r.copy_value(&mut std::io::sink(), cancel)?,
-                }
-            }
-            let key = key.ok_or_else(|| AppError::invalid("Redis JSON 缺少 key_b64"))?;
-            valid_b64(&key)?;
-            let kind = kind.ok_or_else(|| AppError::invalid("Redis JSON 缺少 type"))?;
-            if !matches!(kind.as_str(), "string" | "hash" | "list" | "set" | "zset") {
-                return Err(AppError::invalid("不支持的 Redis 类型"));
-            }
-            let expiry =
-                expiry.ok_or_else(|| AppError::invalid("Redis JSON 缺少 expires_at_ms"))?;
-            if !expiry.is_null()
-                && expiry
-                    .as_str()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .is_none()
-            {
-                return Err(AppError::invalid("无效绝对过期时间"));
-            }
-            Ok((
-                key,
-                kind,
-                expiry,
-                rows.ok_or_else(|| AppError::invalid("Redis JSON 缺少 rows"))?,
-            ))
-        })();
-        let (key, kind, expiry, rows) = match parsed {
-            Ok(v) => v,
-            Err(e) if e.code == "cancelled" => return Err(e),
-            Err(e) => {
-                preview.failure(record_no, e);
-                break;
-            }
-        };
-        if !preview.push(redis_preview_row(&key, &kind, &expiry, "key", Vec::new()))? {
-            break;
-        }
-        let mut row_reader = rows.reader()?;
-        if let Err(e) = row_reader.expect(b'[') {
-            preview.failure(record_no, e);
-            break;
-        }
-        let mut row_first = true;
-        let mut next_index = 0u64;
-        let mut values_count = 0u64;
-        loop {
-            let has_row = match row_reader.array_next(&mut row_first) {
-                Ok(v) => v,
-                Err(e) => {
-                    preview.failure(record_no, e);
-                    break;
-                }
-            };
-            if !has_row {
-                if values_count == 0 {
-                    preview.failure(record_no, AppError::invalid("Redis key 内容为空"));
-                }
-                break;
-            }
-            if preview.rows.len() == PREVIEW_ROWS {
-                preview.complete = false;
-                break;
-            }
-            let values: Vec<Value> = match preview_json_value(&mut row_reader, cancel) {
-                Ok(v) => v,
-                Err(e) if e.code == "cancelled" => return Err(e),
-                Err(e) => {
-                    preview.failure(record_no, e);
-                    break;
-                }
-            };
-            let validated = redis_csv_row(&key, &kind, &values).and_then(|_| {
-                if kind == "list" {
-                    let index = match &values[0] {
-                        Value::Integer(s) | Value::Unsigned(s) => s.parse::<u64>().ok(),
-                        _ => None,
-                    };
-                    if index != Some(next_index) {
-                        return Err(AppError::invalid("List 索引不连续"));
-                    }
-                    next_index += 1;
-                }
-                if kind == "string" && values_count != 0 {
-                    return Err(AppError::invalid("String 只能包含一行"));
-                }
-                for v in &values {
-                    if let Value::Bytes(s) = v {
-                        valid_b64(s)?;
-                    }
-                }
-                Ok(())
-            });
-            if let Err(e) = validated {
-                preview.failure(record_no, e);
-                break;
-            }
-            values_count += 1;
-            if !preview.push(redis_preview_row(&key, &kind, &expiry, "item", values))? {
-                break;
-            }
-        }
-        if !preview.complete {
-            break;
-        }
-        if let Err(e) = row_reader.end_document() {
-            preview.failure(record_no, e);
-            break;
-        }
-    }
-    Ok(preview)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn table() -> TableSchema {
-        let mut generated = Column::new("doubled", "int");
-        generated.generated = true;
-        TableSchema {
-            target: ResourceTarget {
-                database: None,
-                name: "t".into(),
-                key_b64: None,
-                kind: "table".into(),
-            },
-            columns: vec![
-                Column::new("id", "int"),
-                generated,
-                Column::new("year", "year"),
-                Column::new("text", "varchar"),
-            ],
-            keys: Vec::new(),
-            ddl: String::new(),
-            engine: "InnoDB".into(),
-            details: Json::Null,
-        }
-    }
-    fn names() -> Vec<String> {
-        ["id", "doubled", "year", "text"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    #[test]
-    fn generated_and_explicitly_excluded_columns_are_projected_consistently() {
-        let p =
-            mapped_columns(&names(), &json!({"column_mapping":{"text":null}}), &table()).unwrap();
-        assert_eq!(p.indices, vec![0, 2]);
-        assert_eq!(
-            p.columns
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["id", "year"]
-        );
-        let csv = csv::StringRecord::from(vec!["7", "14", "2026", "ignored"]);
-        let expected = vec![Value::Integer("7".into()), Value::Unsigned("2026".into())];
-        assert_eq!(
-            p.csv_row(&csv, &names(), "\\N", true, &HashSet::new())
-                .unwrap(),
-            expected
-        );
-        assert_eq!(
-            p.project(vec![
-                Value::Integer("7".into()),
-                Value::Integer("14".into()),
-                Value::Unsigned("2026".into()),
-                Value::Text("ignored".into())
-            ])
-            .unwrap(),
-            expected
-        );
-        assert!(
-            mapped_columns(
-                &names(),
-                &json!({"column_mapping":{"id":"doubled"}}),
-                &table()
-            )
-            .is_err()
-        );
-        crate::providers::mysql::validate_import_value(&expected[1], &p.columns[1]).unwrap();
-    }
-
-    #[test]
-    fn csv_distinguishes_null_and_escaped_literal() {
-        let p = mapped_columns(&names(), &json!({}), &table()).unwrap();
-        let row = csv::StringRecord::from(vec!["1", "2", "2026", "\\N"]);
-        assert_eq!(
-            p.csv_row(&row, &names(), "\\N", true, &HashSet::new())
-                .unwrap()[2],
-            Value::Null
-        );
-        let row = csv::StringRecord::from(vec!["1", "2", "2026", "\\\\N"]);
-        assert_eq!(
-            p.csv_row(&row, &names(), "\\N", true, &HashSet::new())
-                .unwrap()[2],
-            Value::Text("\\N".into())
-        );
-    }
-
-    #[test]
-    fn unordered_json_fields_preserve_typed_rows() {
-        let root = std::env::temp_dir().join(format!("datapier-transfer-test-{}", Uuid::new_v4()));
-        fs::create_dir(&root).unwrap();
-        let input = root.join("input.json");
-        fs::write(&input, r#"{"rows":[[{"type":"unsigned","value":"2026"}]],"ignored":{"nested":[1,2]},"columns":[{"name":"year","type_name":"year"}],"version":1,"format":"datapier"}"#).unwrap();
-        let doc = json_document(
-            File::open(input).unwrap(),
-            &root,
-            "rows",
-            &CancellationToken::new(),
-        )
-        .unwrap();
-        assert_eq!(doc.columns.as_ref().unwrap()[0].name, "year");
-        let mut reader = doc.data.reader().unwrap();
-        reader.expect(b'[').unwrap();
-        let mut first = true;
-        assert!(reader.array_next(&mut first).unwrap());
-        assert_eq!(
-            reader.value::<Vec<Value>>().unwrap(),
-            vec![Value::Unsigned("2026".into())]
-        );
-        assert!(!reader.array_next(&mut first).unwrap());
-        reader.end_document().unwrap();
-        drop(reader);
-        drop(doc);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn export_never_replaces_an_existing_file() {
-        let root = std::env::temp_dir().join(format!("datapier-export-test-{}", Uuid::new_v4()));
-        fs::create_dir(&root).unwrap();
-        let tmp = root.join("partial");
-        let dst = root.join("output");
-        fs::write(&tmp, b"new").unwrap();
-        fs::write(&dst, b"existing").unwrap();
-        assert_eq!(publish_export(&tmp, &dst).unwrap_err().code, "conflict");
-        assert_eq!(fs::read(&dst).unwrap(), b"existing");
-        assert_eq!(fs::read(&tmp).unwrap(), b"new");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn redis_export_rejects_changed_type_and_incompatible_rows() {
-        assert!(validate_redis_browse_type("string", &json!({"type":"hash"})).is_err());
-        assert!(validate_redis_browse_type("string", &json!({})).is_err());
-        assert!(
-            redis_csv_row(
-                "aw==",
-                "string",
-                &[Value::Bytes("YQ==".into()), Value::Bytes("Yg==".into())]
-            )
-            .is_err()
-        );
-        assert!(redis_csv_row("aw==", "string", &[Value::Bytes("YQ==".into())]).is_ok());
     }
 }

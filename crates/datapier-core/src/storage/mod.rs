@@ -14,7 +14,7 @@ use sqlx::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 use tokio::{
@@ -30,13 +30,41 @@ pub struct Store {
     pub cache: SqlitePool,
     pub root: Arc<PathBuf>,
     secrets: Arc<RwLock<HashMap<Uuid, String>>>,
-    result_gates: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
+    result_gates: Arc<StdMutex<HashMap<Uuid, ResultGate>>>,
     profile_gate: Arc<Mutex<()>>,
 }
 
+struct ResultGate {
+    lock: Arc<Mutex<()>>,
+    users: usize,
+}
+
+struct ResultGateRegistration {
+    id: Uuid,
+    gates: Arc<StdMutex<HashMap<Uuid, ResultGate>>>,
+}
+
+impl Drop for ResultGateRegistration {
+    fn drop(&mut self) {
+        let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(gate) = gates.get_mut(&self.id) {
+            gate.users -= 1;
+            if gate.users == 0 {
+                gates.remove(&self.id);
+            }
+        }
+    }
+}
+
+struct ResultGuard {
+    // 字段按声明顺序释放，先解锁再移除最后一个登记。
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _registration: ResultGateRegistration,
+}
+
 impl Store {
-    /// 打开或创建数据目录与数据库，并执行受支持版本的迁移。
-    /// 调用方负责确保目录权限；较新 schema 或 I/O 错误会使打开失败。
+    /// 打开或创建数据目录与数据库，并安装或检查当前 schema。
+    /// 调用方负责确保目录权限；不完整或较新 schema 及 I/O 错误会使打开失败。
     pub async fn open(root: &Path) -> Result<Self> {
         tokio::fs::create_dir_all(root.join("values")).await?;
         let root = tokio::fs::canonicalize(root).await?;
@@ -59,7 +87,7 @@ impl Store {
             cache,
             root: Arc::new(root),
             secrets: Arc::new(RwLock::new(HashMap::new())),
-            result_gates: Arc::new(Mutex::new(HashMap::new())),
+            result_gates: Arc::new(StdMutex::new(HashMap::new())),
             profile_gate: Arc::new(Mutex::new(())),
         })
     }
@@ -72,6 +100,23 @@ impl Store {
         rows.iter()
             .map(|r| serde_json::from_str(r.get::<&str, _>(0)).map_err(Into::into))
             .collect()
+    }
+
+    /// 读取应用全局设置；无效的持久化值会返回错误。
+    pub async fn settings(&self) -> Result<AppSettings> {
+        let payload: String = sqlx::query_scalar("SELECT payload FROM app_settings WHERE id=1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(serde_json::from_str(&payload)?)
+    }
+
+    /// 原子替换应用全局设置。
+    pub async fn set_settings(&self, settings: &AppSettings) -> Result<()> {
+        sqlx::query("UPDATE app_settings SET payload=? WHERE id=1")
+            .bind(serde_json::to_string(settings)?)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// 保存连接配置和可选凭据；返回是否已标记为保存到系统凭据库。
@@ -139,6 +184,8 @@ impl Store {
     /// 优先读取会话内凭据；已标记持久化时从系统凭据库读取并缓存。
     /// 凭据库不可用返回错误，未保存凭据返回 `None`。
     pub async fn secret(&self, id: Uuid) -> Result<Option<String>> {
+        // 与保存、删除共用锁，避免旧凭据读取完成后覆盖新的会话凭据。
+        let _guard = self.profile_gate.lock().await;
         if let Some(secret) = self.secrets.read().await.get(&id).cloned() {
             return Ok(Some(secret));
         }
@@ -238,6 +285,7 @@ impl Store {
     ) -> Result<u64> {
         let next = expected_revision
             .checked_add(1)
+            .filter(|next| *next <= i64::MAX as u64)
             .ok_or_else(|| AppError::invalid("工作区版本溢出"))?;
         let mut tx = self.pool.begin().await?;
         let result = if expected_revision == 0 {
@@ -276,26 +324,84 @@ impl Store {
             .bind(i64::from(may_write)).execute(&self.pool).await?;
         self.task(id).await
     }
+    /// 查询开始时记录物理连接的当前数据库，不能以初始连接配置代替 USE 后的状态。
+    pub async fn record_task_database(&self, id: Uuid, database: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE executions SET params=json_set(params,'$._task_context.database',?) WHERE id=? AND json_type(params,'$._task_context')='object'")
+            .bind(database).bind(id.to_string()).execute(&self.pool).await?;
+        Ok(())
+    }
 
-    /// 读取任务及关联的缓存结果 ID；任务不存在时返回 `not_found`。
+    /// 读取任务及关联结果的轻量状态；任务不存在时返回 `not_found`。
     pub async fn task(&self, id: Uuid) -> Result<TaskRecord> {
-        let row = sqlx::query("SELECT owner,workspace_id,method,state,sent,may_write,summary,error FROM executions WHERE id=?")
+        let row = sqlx::query("SELECT owner,workspace_id,method,state,sent,may_write,summary,error,CAST(created_at AS REAL),json_extract(params,'$._task_context'),CASE WHEN json_type(params,'$.target')='object' THEN json_extract(params,'$.target') END,CASE WHEN json_type(params,'$.targets')='array' THEN json_extract(params,'$.targets') END,COALESCE(json_extract(params,'$._execution_text_truncated'),0) FROM executions WHERE id=?")
             .bind(id.to_string()).fetch_optional(&self.pool).await?.ok_or_else(|| AppError::new("not_found", "任务不存在"))?;
         let owner = Uuid::parse_str(row.get::<&str, _>(0))
             .map_err(|e| AppError::new("storage", e.to_string()))?;
         let error: Option<String> = row.get(7);
+        let result_rows = sqlx::query(
+            "SELECT id,row_count,complete,kind,CASE WHEN kind='columns_unknown' THEN NULL ELSE json_array_length(columns) END,json_extract(summary,'$.redis_type') FROM results WHERE execution_id=? ORDER BY rowid",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.cache)
+        .await?;
+        let result_summaries: Vec<TaskResultSummary> = result_rows
+            .iter()
+            .map(|result| {
+                Ok(TaskResultSummary {
+                    id: parse_id(result.get::<&str, _>(0))?,
+                    row_count: result.get::<i64, _>(1) as u64,
+                    complete: result.get::<i64, _>(2) != 0,
+                    kind: result.get(3),
+                    column_count: result.get::<Option<i64>, _>(4).map(|n| n as u64),
+                    redis_type: result.get(5),
+                })
+            })
+            .collect::<Result<_>>()?;
+        let summary: Json = serde_json::from_str(row.get::<&str, _>(6))?;
+        let context: Option<String> = row.get(9);
+        let mut context: Option<crate::model::TaskContext> = context
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
+        if let Some(context) = &mut context {
+            let targets: Option<String> = row.get(11);
+            let target: Option<String> = row.get(10);
+            context.targets = if let Some(targets) = targets {
+                serde_json::from_str(&targets).unwrap_or_default()
+            } else if let Some(target) = target {
+                serde_json::from_str(&target).ok().into_iter().collect()
+            } else {
+                Vec::new()
+            };
+        }
         Ok(TaskRecord {
             id,
             owner,
             workspace_id: row.get(1),
             method: row.get(2),
+            text: None,
+            execution_text_truncated: row.get::<i64, _>(12) != 0,
+            started_at: summary.pointer("/_task/started_at").and_then(Json::as_f64),
+            elapsed_ms: summary.pointer("/_task/elapsed_ms").and_then(Json::as_u64),
+            context,
+            created_at: row.get(8),
             state: row.get(3),
             sent: row.get::<i64, _>(4) != 0,
             may_write: row.get::<i64, _>(5) != 0,
-            results: self.result_ids(id).await?,
-            summary: serde_json::from_str(row.get::<&str, _>(6))?,
+            results: result_summaries.iter().map(|result| result.id).collect(),
+            result_summaries,
+            summary,
             error: error.map(|e| serde_json::from_str(&e)).transpose()?,
         })
+    }
+
+    /// 按需读取任务文本；普通任务查询不载入执行文本。
+    pub async fn task_details(&self, id: Uuid) -> Result<TaskRecord> {
+        let mut task = self.task(id).await?;
+        task.text = sqlx::query_scalar("SELECT COALESCE(CASE WHEN json_type(params,'$.text')='text' THEN json_extract(params,'$.text') END, CASE WHEN json_type(params,'$._execution_text')='text' THEN json_extract(params,'$._execution_text') END) FROM executions WHERE id=?")
+            .bind(id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(task)
     }
 
     /// 返回工作区最近的最多 500 条任务。
@@ -307,6 +413,14 @@ impl Store {
             tasks.push(self.task(parse_id(&id)?).await?);
         }
         Ok(tasks)
+    }
+
+    /// 在真实执行路径追加有界文本，原始请求 text 始终独立保留。
+    pub async fn append_execution_text(&self, id: Uuid, text: &str, truncated: bool) -> Result<()> {
+        const LIMIT: i64 = 65536;
+        sqlx::query("UPDATE executions SET params=json_set(params,'$._execution_text',substr(COALESCE(json_extract(params,'$._execution_text'),'') || ?,1,?),'$._execution_text_truncated',json(CASE WHEN ? OR COALESCE(json_extract(params,'$._execution_text_truncated'),0) OR length(COALESCE(json_extract(params,'$._execution_text'),'') || ?) > ? THEN 'true' ELSE 'false' END)) WHERE id=?")
+            .bind(text).bind(LIMIT).bind(truncated).bind(text).bind(LIMIT).bind(id.to_string()).execute(&self.pool).await?;
+        Ok(())
     }
 
     /// 持久化任务状态、摘要和可选错误。
@@ -367,15 +481,26 @@ impl Store {
         Ok(id)
     }
     // 文件和 SQLite 行的修改共用结果锁，避免追加、投影和释放彼此交错。
-    async fn result_guard(&self, id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
-        let gate = self
-            .result_gates
-            .lock()
-            .await
-            .entry(id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        gate.lock_owned().await
+    async fn result_guard(&self, id: Uuid) -> ResultGuard {
+        let (gate, registration) = {
+            let mut gates = self.result_gates.lock().unwrap_or_else(|e| e.into_inner());
+            let gate = gates.entry(id).or_insert_with(|| ResultGate {
+                lock: Arc::new(Mutex::new(())),
+                users: 0,
+            });
+            gate.users += 1;
+            let registration = ResultGateRegistration {
+                id,
+                gates: self.result_gates.clone(),
+            };
+            (gate.lock.clone(), registration)
+        };
+        // 等待被取消时登记也会释放，不能只在成功释放结果时清理。
+        let guard = gate.lock_owned().await;
+        ResultGuard {
+            _guard: guard,
+            _registration: registration,
+        }
     }
     /// 追加一批行；大值可能先写入外置文件，再将行写入缓存数据库。
     pub async fn append_rows(&self, id: Uuid, rows: Vec<Vec<Value>>) -> Result<()> {
@@ -545,18 +670,27 @@ impl Store {
                 "列定义超过页大小，请增加页预算或减少查询列数",
             ));
         }
+        // SQLite 行号是有符号整数；越界偏移不能转换后回绕到结果开头。
+        if start >= result.row_count {
+            return Ok(ResultPage {
+                result,
+                rows,
+                start,
+                next: None,
+            });
+        }
         let mut first_over_budget = None;
         let mut stream = sqlx::query("SELECT payload FROM result_rows WHERE result_id=? AND row_no>=? ORDER BY row_no LIMIT ?")
             .bind(id.to_string()).bind(start as i64).bind(max_rows as i64).fetch(&self.cache);
         while let Some(row) = stream.try_next().await? {
             let payload: Vec<u8> = row.get(0);
-            if bytes + payload.len() > max_bytes {
+            if bytes + payload.len() + 1 > max_bytes {
                 if rows.is_empty() {
                     first_over_budget = Some(payload);
                 }
                 break;
             }
-            bytes += payload.len();
+            bytes += payload.len() + 1;
             rows.push(serde_json::from_slice(&payload)?);
         }
         // 外置文件登记需要另一条连接，必须先释放读取连接，避免并发分页耗尽连接池。
@@ -569,7 +703,7 @@ impl Store {
                     preview.clear();
                 }
             }
-            let mut size = serde_json::to_vec(&values)?.len();
+            let mut size = serde_json::to_vec(&values)?.len() + 1;
             if bytes + size > max_bytes {
                 for value in &mut values {
                     if matches!(value, Value::Large { .. }) {
@@ -613,10 +747,10 @@ impl Store {
                     .bind(id.to_string()).bind((start + 1) as i64).bind((max_rows - 1) as i64).fetch(&self.cache);
                 while let Some(row) = stream.try_next().await? {
                     let payload: Vec<u8> = row.get(0);
-                    if bytes + payload.len() > max_bytes {
+                    if bytes + payload.len() + 1 > max_bytes {
                         break;
                     }
-                    bytes += payload.len();
+                    bytes += payload.len() + 1;
                     rows.push(serde_json::from_slice(&payload)?);
                 }
             }
@@ -717,14 +851,6 @@ impl Store {
                 .execute(&self.cache)
                 .await?;
         }
-        // 仅在没有等待者持有锁引用时移除门，避免并发操作取得不同的锁。
-        let mut gates = self.result_gates.lock().await;
-        if gates
-            .get(&id)
-            .is_some_and(|gate| Arc::strong_count(gate) == 2)
-        {
-            gates.remove(&id);
-        }
         Ok(())
     }
     async fn ensure_value_available(&self, id: Uuid) -> Result<()> {
@@ -777,7 +903,7 @@ async fn migrate(pool: &SqlitePool, schema: &'static str, cache: bool) -> Result
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
         .await?;
-    if version > if cache { 2 } else { 1 } {
+    if version > 1 {
         return Err(AppError::new(
             "storage_version",
             "数据目录来自较新版本，拒绝降级打开",
@@ -791,18 +917,38 @@ async fn migrate(pool: &SqlitePool, schema: &'static str, cache: bool) -> Result
             .await?;
         tx.commit().await?;
     }
-    if cache && version < 2 {
-        let mut tx = pool.begin().await?;
-        sqlx::raw_sql(include_str!("../../migrations/0002_cache.sql"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("PRAGMA user_version=2")
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+    // 基线必须包含完整对象集合，不能只凭版本号接受部分 schema。
+    let required: &[(&str, &str)] = if cache {
+        &[
+            ("table", "results"),
+            ("table", "result_rows"),
+            ("table", "value_files"),
+            ("index", "results_execution"),
+            ("index", "value_files_result"),
+        ]
+    } else {
+        &[
+            ("table", "profiles"),
+            ("table", "workspaces"),
+            ("table", "executions"),
+            ("table", "app_settings"),
+            ("index", "executions_workspace"),
+        ]
+    };
+    for (kind, name) in required {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type=? AND name=?")
+                .bind(*kind)
+                .bind(*name)
+                .fetch_one(pool)
+                .await?;
+        if exists != 1 {
+            return Err(AppError::new("storage_version", "数据目录 schema 不完整"));
+        }
     }
     Ok(())
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/storage.rs"]
 mod tests;

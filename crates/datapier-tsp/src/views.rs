@@ -1,12 +1,79 @@
 use super::*;
+mod grid_view;
+use grid_view::grid;
+mod sidebar;
+use sidebar::resource_panel;
+mod redis_browser;
+use redis_browser::redis_browser;
+mod dialogs;
+pub(super) use dialogs::overlay;
+mod controls;
+mod profile_form;
+use controls::{button, choices, field, flat_action, icon_button, page_button};
+mod redis_detail;
+use redis_detail::{cli_panel, string_value};
+mod history;
+use history::history_panel;
 
-fn button(label: &str, action: &str) -> Node<Msg> {
-    html::button(label)
-        .class("button")
-        .key(action.to_owned())
-        .on_click(Msg::Action(action.into()))
-        .into()
+fn provider_icon(app: &App, redis: bool) -> Node<Msg> {
+    if let Some(icons) = &app.icon_blobs {
+        html::span("")
+            .class("provider-icon")
+            .child(
+                ui::image()
+                    .blob(if redis {
+                        icons.redis.clone()
+                    } else {
+                        icons.mysql.clone()
+                    })
+                    .alt(if redis { "Redis" } else { "MySQL" })
+                    .w(22.0)
+                    .h(22.0),
+            )
+            .into()
+    } else {
+        html::span("")
+            .class("provider-icon")
+            .child(ui::icon("database"))
+            .into()
+    }
 }
+
+fn redis_db_picker(app: &App, form: bool) -> Node<Msg> {
+    let current = if form {
+        app.field("redis_db").parse::<u32>().unwrap_or(0)
+    } else {
+        app.profile.as_ref().map_or(0, |profile| profile.redis_db)
+    };
+    let open = if form {
+        app.navigation.form_redis_db_menu
+    } else {
+        app.navigation.redis_db_menu
+    };
+    let prefix = if form { "form-redis-db" } else { "redis-db" };
+    let mut select = ui::select()
+        .value(current.to_string())
+        .open(open)
+        .disabled(form && app.connection_form_busy())
+        .on_toggle(move |collapsed| Msg::Action(format!("{prefix}-menu-open:{}", !collapsed)))
+        .on_change(move |change| {
+            Msg::Action(format!(
+                "{prefix}:{}",
+                change.value.as_str().unwrap_or_default()
+            ))
+        });
+    for db in 0..16 {
+        select = select.option(ui::SelectOption::new(db.to_string(), format!("DB {db}")));
+    }
+    if current >= 16 {
+        select = select.option(ui::SelectOption::new(
+            current.to_string(),
+            format!("DB {current}"),
+        ));
+    }
+    select.into()
+}
+
 fn redis_bytes_text(encoded: &str) -> std::borrow::Cow<'_, str> {
     use base64::Engine as _;
     let text = base64::engine::general_purpose::STANDARD
@@ -79,343 +146,109 @@ fn cell_preview(app: &App, value: &datapier_core::model::Value) -> String {
     }
     preview
 }
-fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
-    let ed = if name == "cli_text" {
-        &app.tabs[app.active].cli_query
+
+fn shortcut_help() -> Node<Msg> {
+    let primary = if cfg!(target_os = "macos") {
+        "Command"
     } else {
-        &app.fields[name]
+        "Ctrl"
     };
-    let display = if name == "password" {
-        "•".repeat(ed.text.encode_utf16().count())
-    } else {
-        ed.text.clone()
-    };
-    let f = name.to_string();
-    let u = f.clone();
-    let n = f.clone();
-    if name == "cell" || name == "redis_value" || name == "cli_text" {
-        html::div()
-            .class("field")
-            .key(name.to_string())
-            .child(html::span(label).class("label"))
-            .child(
-                ui::editor()
-                    .key(format!("input-{name}"))
-                    .text(display)
-                    .cursor(ed.cursor)
-                    .anchor(ed.anchor)
-                    .max_lines(16u32)
-                    .on_focus(Msg::Focus(f))
-                    .on_undo(Msg::Undo(u))
-                    .on_edit(move |e| {
-                        Msg::Edit(n.clone(), e.from, e.to, e.text.clone(), e.cursor, e.len)
-                    }),
-            )
-            .into()
-    } else {
-        html::div()
-            .class("field")
-            .key(name.to_string())
-            .child(html::span(label).class("label"))
-            .child(
-                ui::input()
-                    .key(format!("input-{name}"))
-                    .text(display)
-                    .cursor(ed.cursor)
-                    .anchor(ed.anchor)
-                    .on_focus(Msg::Focus(f))
-                    .on_undo(Msg::Undo(u))
-                    .on_edit(move |e| {
-                        Msg::Edit(n.clone(), e.from, e.to, e.text.clone(), e.cursor, e.len)
-                    }),
-            )
-            .into()
-    }
-}
-fn query(app: &App) -> Node<Msg> {
-    let e = &app.tabs[app.active].query;
-    ui::editor()
-        .key("query-editor")
-        .text(e.text.clone())
-        .cursor(e.cursor)
-        .anchor(e.anchor)
-        .mode("insert")
-        .lang("sql")
-        .max_lines(12u32)
-        .on_focus(Msg::Focus("query".into()))
-        .on_undo(Msg::Undo("query".into()))
-        .on_edit(|e| {
-            Msg::Edit(
-                "query".into(),
-                e.from,
-                e.to,
-                e.text.clone(),
-                e.cursor,
-                e.len,
-            )
-        })
-        .into()
-}
-fn completions(app: &App) -> Node<Msg> {
-    let query = &app.tabs[app.active].query;
-    let mut row = html::div().class("completion");
-    if let Some(byte) = editor::utf16_to_byte(&query.text, query.cursor) {
-        let before = &query.text[..byte];
-        let start = before
-            .char_indices()
-            .rev()
-            .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        let prefix = &before[start..];
-        if !prefix.is_empty() {
-            let catalog: Vec<String> = app.resources.iter().map(|r| r.name.clone()).collect();
-            let from = before[..start].encode_utf16().count();
-            for item in editor::completions(prefix, &catalog).into_iter().take(8) {
-                row = row.child(
-                    html::button(item.clone())
-                        .class("button")
-                        .on_click(Msg::Complete(item, from, query.cursor)),
-                );
-            }
-        }
-    }
-    row.into()
-}
-fn resource_panel(app: &App) -> Node<Msg> {
-    let compact = app.navigation_compact();
-    let mut panel = html::div()
-        .class(if compact {
-            "sidebar compact"
-        } else {
-            "sidebar"
-        })
-        .key("sidebar")
-        .child(html::strong(if compact { "D" } else { "D  Datapier" }).class("brand"))
-        .child(button(
-            if compact { "+" } else { "+ 新建连接" },
-            "new-profile",
-        ));
-    for (i, p) in app.profiles.iter().enumerate() {
-        let active = app
-            .profile
-            .as_ref()
-            .is_some_and(|selected| selected.id == p.id);
-        let provider = if p.provider == datapier_core::model::ProviderKind::Redis {
-            "RED"
-        } else {
-            "SQL"
-        };
-        let mut card = html::button("")
-            .class(if active {
-                "connection active"
-            } else {
-                "connection"
-            })
-            .key(format!("p{}", p.id))
-            .prop(
-                "title",
-                format!("{} · {} · {}:{}", p.name, provider, p.host, p.port),
-            )
-            .child(html::span(provider).class("connection-icon"));
-        if !compact {
-            card = card.child(
-                html::div()
-                    .class("connection-info")
-                    .child(html::strong(p.name.clone()))
-                    .child(
-                        html::span(format!("{} · {}:{}", provider, p.host, p.port)).class("muted"),
-                    ),
-            );
-        }
-        panel = panel.child(card.on_click(Msg::Profile(i)));
-    }
-    if !compact {
-        panel = panel.child(
-            html::div()
-                .class("toolbar")
-                .child(button("连接", "open"))
-                .child(button("设置", "edit-profile"))
-                .child(button("删除", "delete-profile")),
-        );
-        if app.session.is_some() && !app.is_redis() {
-            let ed = &app.fields["object_filter"];
+    let groups: &[(&str, &[(&str, &str)])] = &[
+        (
+            "全局",
+            &[("Ctrl+Q", "保存工作区并退出"), ("Escape", "关闭弹窗或下拉")],
+        ),
+        (
+            "SQL 查询",
+            &[
+                ("{mod}+Enter", "执行选区或当前语句"),
+                ("{mod}+Shift+Enter", "执行全部 SQL"),
+            ],
+        ),
+        (
+            "文本编辑",
+            &[
+                ("{mod}+A", "全选"),
+                ("{mod}+C / X", "复制 / 剪切"),
+                ("{mod}+Z", "撤销"),
+                ("Shift+方向键 / Home / End", "扩展文本选区"),
+            ],
+        ),
+        (
+            "数据 grid",
+            &[
+                ("Enter / F2", "编辑单元格"),
+                ("方向键 / Home / End", "移动单元格焦点"),
+                ("Shift+方向键 / Home / End", "扩展单元格选区"),
+                ("Tab / Shift+Tab", "移动到后一个 / 前一个单元格"),
+                ("{mod}+Z", "撤销 grid 草稿"),
+                ("{mod}+单击行号", "增选或取消选中行"),
+                ("Shift+单击行号", "连续选择行"),
+            ],
+        ),
+        (
+            "原位编辑",
+            &[
+                ("Enter", "保留当前编辑为草稿"),
+                ("Escape", "取消当前原位输入"),
+                ("Tab / Shift+Tab", "保留编辑并移动到相邻单元格"),
+            ],
+        ),
+        ("Redis CLI", &[("Enter", "执行 CLI 命令")]),
+    ];
+    let mut panel = html::div().class("shortcuts-help");
+    for (title, rows) in groups {
+        panel = panel.child(html::strong(crate::i18n::tr(title).into_owned()));
+        for (keys, label) in *rows {
             panel = panel.child(
-                html::div().class("object-search").child(
-                    ui::input()
-                        .key("input-object_filter")
-                        .text(ed.text.clone())
-                        .cursor(ed.cursor)
-                        .anchor(ed.anchor)
-                        .on_focus(Msg::Focus("object_filter".into()))
-                        .on_undo(Msg::Undo("object_filter".into()))
-                        .on_edit(|e| {
-                            Msg::Edit(
-                                "object_filter".into(),
-                                e.from,
-                                e.to,
-                                e.text.clone(),
-                                e.cursor,
-                                e.len,
-                            )
-                        }),
-                ),
-            );
-            if let Some(db) = &app.database {
-                panel = panel.child(html::strong(format!("数据库  {db}")).class("group-title"));
-            }
-            let needle = app.field("object_filter").to_lowercase();
-            for kind in ["database", "table", "view"] {
-                let mut group = html::div().class("resource-group");
-                let mut count = 0;
-                let mut total = 0;
-                for (i, r) in app.resources.iter().enumerate() {
-                    if r.kind != kind
-                        || (kind != "database" && r.database.as_deref() != app.database.as_deref())
-                    {
-                        continue;
-                    }
-                    total += 1;
-                    if kind != "database" && !r.name.to_lowercase().contains(&needle) {
-                        continue;
-                    }
-                    count += 1;
-                    let active = app.target.as_ref().is_some_and(|t| {
-                        t.name == r.name && t.database == r.database && t.kind == r.kind
-                    });
-                    group = group.child(
-                        html::button(r.name.clone())
-                            .class(if active {
-                                "resource active"
-                            } else {
-                                "resource"
-                            })
-                            .key(format!("r{i}"))
-                            .on_click(Msg::Resource(i)),
-                    );
-                }
-                if kind == "database" && total == 0 {
-                    continue;
-                }
-                let title = match kind {
-                    "database" => "数据库",
-                    "table" => "表",
-                    _ => "视图",
-                };
-                if kind != "database" && count == 0 {
-                    group = group.child(html::span("无匹配对象").class("empty-note"));
-                }
-                panel = panel
+                html::div()
+                    .class("shortcut-row")
                     .child(
-                        html::strong(if kind == "database" {
-                            title.to_string()
-                        } else {
-                            format!("{title}  {count}/{total}")
-                        })
-                        .class("group-title"),
+                        html::span(crate::i18n::tr(keys).replace("{mod}", primary))
+                            .class("shortcut-keys"),
                     )
-                    .child(group);
-            }
-            panel = panel.child(button("刷新资源", "list"));
+                    .child(html::span(crate::i18n::tr(label).into_owned()).class("shortcut-label")),
+            );
         }
     }
     panel.into()
 }
-fn grid(app: &App) -> Option<Node<Msg>> {
-    let grid = app.grid.as_ref()?;
-    let cols = grid.visible_columns();
-    let mut wrapper = html::div().class("gridscroll").key("grid");
-    let mut header = html::div().class("gridrow header").key("header");
-    header = header.child(html::span("#").class("rownum"));
-    for &col in &cols {
-        header = header
-            .child(html::span(&grid.page.result.columns[col].name).class(format!("cell col{col}")));
-    }
-    wrapper = wrapper.child(header);
-    let needle = app.field("row_search").to_lowercase();
-    for (i, row) in grid.page.rows.iter().enumerate() {
-        let row_id = grid.page.start + i as u64;
-        if !needle.is_empty()
-            && !row.iter().enumerate().any(|(col, value)| {
-                let value = grid
-                    .value(Cell {
-                        row: row_id,
-                        column: col,
-                    })
-                    .unwrap_or(value);
-                value_text(value, app.is_redis())
-                    .to_lowercase()
-                    .contains(&needle)
-            })
-        {
-            continue;
-        }
-        let mut line = html::div().class("gridrow").key(format!("r{row_id}"));
-        let first = cols.first().copied().unwrap_or(0);
-        line = line.child(
-            html::button((row_id + 1).to_string())
-                .class("rownum")
-                .on_click(Msg::Row(row_id, first)),
-        );
-        for &col in &cols {
-            let cell = Cell {
-                row: row_id,
-                column: col,
-            };
-            let value = grid.value(cell).or_else(|| row.get(col));
-            let text = value.map(|v| cell_preview(app, v)).unwrap_or_default();
-            let selected = grid.is_selected(cell);
-            let class = if selected {
-                format!("cell col{col} selected")
-            } else {
-                format!("cell col{col}")
-            };
-            if app.workbench.inline == Some(cell) && app.large.is_none() {
-                let ed = &app.fields["cell"];
-                line = line.child(
-                    html::div().class(class).key(format!("c{col}")).child(
-                        ui::input()
-                            .key("cell-editor")
-                            .text(ed.text.clone())
-                            .cursor(ed.cursor)
-                            .anchor(ed.anchor)
-                            .on_focus(Msg::Focus("cell".into()))
-                            .on_undo(Msg::Undo("cell".into()))
-                            .on_edit(|e| {
-                                Msg::Edit(
-                                    "cell".into(),
-                                    e.from,
-                                    e.to,
-                                    e.text.clone(),
-                                    e.cursor,
-                                    e.len,
-                                )
-                            }),
-                    ),
-                );
-            } else {
-                line = line.child(
-                    html::button(text)
-                        .class(class)
-                        .key(format!("c{col}"))
-                        .prop("actions", json!({"click":"click"}))
-                        .on_action_with("click", move |event| {
-                            Msg::Cell(row_id, col, event.mods.iter().any(|m| m == "shift"))
-                        })
-                        .on_dblclick(Msg::CellOpen(row_id, col)),
-                );
-            }
-        }
-        wrapper = wrapper.child(line);
-    }
-    Some(wrapper.into())
+
+fn row_search(app: &App) -> Node<Msg> {
+    let ed = &app.fields["row_search"];
+    html::div()
+        .class("row-search")
+        .child(
+            ui::input()
+                .variant(ui::InputVariant::Field)
+                .key("input-row_search")
+                .text(ed.text.clone())
+                .cursor(ed.cursor)
+                .anchor(ed.anchor)
+                .placeholder(crate::i18n::tr("筛选本页…").into_owned())
+                .on_focus(Msg::Focus("row_search".into()))
+                .on_undo(Msg::Undo("row_search".into()))
+                .on_edit(|e| {
+                    Msg::Edit(
+                        "row_search".into(),
+                        e.from,
+                        e.to,
+                        e.text.clone(),
+                        e.cursor,
+                        e.len,
+                    )
+                }),
+        )
+        .into()
 }
+
 pub fn stylesheet(app: &App) -> String {
     let mut css = include_str!("workbench.css").to_string();
     if let Some(g) = &app.grid {
         for (i, s) in g.settings.iter().enumerate() {
             let sticky = g
                 .frozen_offset(i)
-                .map(|x| format!("position:sticky; left:{}px; z-index:2;", x + 48))
+                .map(|x| format!("position:sticky; left:{}px; z-index:2;", x + 38))
                 .unwrap_or_default();
             css.push_str(&format!(".col{i} {{ width:{}px; {sticky} }}", s.width));
         }
@@ -431,95 +264,89 @@ fn writable(app: &App) -> bool {
         && (app.is_redis() || app.grid.as_ref().is_some_and(|g| g.editable))
 }
 
-fn history_panel(app: &App) -> Node<Msg> {
-    let mut list = html::div().class("history-list");
-    let needle = app.field("history_filter").to_lowercase();
-    for (i, item) in app.workbench.history.iter().enumerate() {
-        let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-        let state = item.get("state").and_then(Value::as_str).unwrap_or("");
-        let time = item
-            .get("created_at")
-            .map(Value::to_string)
-            .unwrap_or_default();
-        if !format!("{text} {state} {time}")
-            .to_lowercase()
-            .contains(&needle)
-        {
-            continue;
-        }
-        list = list.child(
-            html::button(format!(
-                "{}  ·  {}  ·  {}",
-                text.replace('\n', " "),
-                time,
-                state
-            ))
-            .class(if app.workbench.history_selected == Some(i) {
-                "history-item active"
-            } else {
-                "history-item"
-            })
-            .on_click(Msg::Action(format!("history-select:{i}"))),
-        );
-    }
-    let mut preview = html::div()
-        .class("detail-panel")
-        .child(html::strong("SQL 预览"));
-    if let Some(i) = app.workbench.history_selected
-        && let Some(item) = app.workbench.history.get(i)
-    {
-        preview = preview
-            .child(button("打开到查询", &format!("history-open:{i}")))
-            .child(
-                html::pre(item.get("text").and_then(Value::as_str).unwrap_or("")).class("preview"),
-            );
-    }
-    html::div()
-        .class("body")
-        .child(field(app, "history_filter", "搜索历史"))
-        .child(html::div().class("split").child(list).child(preview))
-        .into()
+fn timestamp_text(value: Option<&Value>) -> String {
+    let seconds = value.and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse::<f64>().ok())
+    });
+    seconds
+        .filter(|seconds| seconds.is_finite())
+        .and_then(|seconds| {
+            let whole = seconds.floor();
+            if whole < i64::MIN as f64 || whole > i64::MAX as f64 {
+                return None;
+            }
+            chrono::DateTime::<chrono::Utc>::from_timestamp(
+                whole as i64,
+                ((seconds - whole) * 1_000_000_000.0).floor() as u32,
+            )
+        })
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| crate::i18n::tr("未记录").into_owned())
 }
 
-fn choices(app: &App, field_name: &str, label: &str, options: &[(&str, &str)]) -> Node<Msg> {
-    let mut row = html::div()
-        .class("choice-row")
-        .child(html::span(label).class("label"));
-    for &(value, title) in options {
-        row = row.child(
-            html::button(title)
-                .class(if app.field(field_name) == value {
-                    "button active"
-                } else {
-                    "button"
-                })
-                .on_click(Msg::Action(format!("field:{field_name}:{value}"))),
-        );
-    }
-    row.into()
+fn task_state_text(state: &str) -> String {
+    crate::i18n::tr(match state {
+        "queued" => "排队中",
+        "running" => "执行中",
+        "cancelling" => "取消中",
+        "succeeded" => "已完成",
+        "failed" => "失败",
+        "cancelled" => "已取消",
+        "outcome_unknown" => "结果待确认",
+        _ => state,
+    })
+    .into_owned()
 }
 
 fn ttl_label(ttl: Option<i64>) -> String {
     match ttl {
-        Some(-1) => "永久".into(),
-        Some(-2) => "不存在".into(),
-        Some(ms) if ms >= 0 => format!("{} 秒", ms / 1000),
-        _ => "未读取".into(),
+        Some(-1) => crate::i18n::tr("永久").into_owned(),
+        Some(-2) => crate::i18n::tr("不存在").into_owned(),
+        Some(ms) if ms >= 0 => {
+            crate::i18n::format_message("{count} 秒", &[("count", &(ms / 1000).to_string())])
+        }
+        _ => crate::i18n::tr("未读取").into_owned(),
+    }
+}
+
+fn ttl_short(ttl: Option<i64>) -> String {
+    match ttl {
+        Some(-1) => "∞".into(),
+        Some(-2) => crate::i18n::tr("不存在").into_owned(),
+        Some(ms) if ms >= 86_400_000 => format!("≈{}d", ms / 86_400_000),
+        Some(ms) if ms >= 3_600_000 => format!("≈{}h", ms / 3_600_000),
+        Some(ms) if ms >= 60_000 => format!("≈{}m", ms / 60_000),
+        Some(ms) if ms >= 0 => format!("≈{}s", ms / 1000),
+        _ => crate::i18n::tr("未知").into_owned(),
     }
 }
 
 fn schema_panel(app: &App) -> Node<Msg> {
     let mut panel = html::div().class("schema-panel");
     if let Some(schema) = &app.schema {
-        panel = panel.child(html::strong("字段").class("section-title"));
+        panel = panel.child(
+            html::div()
+                .class("schema-row schema-header schema-columns")
+                .child(html::strong(crate::i18n::tr("字段").into_owned()))
+                .child(html::span(crate::i18n::tr("类型").into_owned()))
+                .child(html::span("NULL"))
+                .child(html::span(crate::i18n::tr("约束").into_owned()))
+                .child(html::span(crate::i18n::tr("注释").into_owned())),
+        );
         if let Some(columns) = schema.get("columns").and_then(Value::as_array) {
             for col in columns {
                 let name = col.get("name").and_then(Value::as_str).unwrap_or("");
                 let ty = col.get("type_name").and_then(Value::as_str).unwrap_or("");
                 let nullable = if col.get("nullable").and_then(Value::as_bool) == Some(false) {
-                    "NOT NULL"
+                    "NO"
                 } else {
-                    "可空"
+                    "YES"
                 };
                 let key = if col.get("primary_key").and_then(Value::as_bool) == Some(true) {
                     "主键"
@@ -531,31 +358,57 @@ fn schema_panel(app: &App) -> Node<Msg> {
                 } else {
                     ""
                 };
-                let default = col
-                    .get("default_value")
-                    .and_then(Value::as_str)
-                    .unwrap_or("—");
+                let mut constraints = html::span("").class("schema-constraints");
+                let mut constrained = false;
+                for label in [
+                    key,
+                    generated,
+                    if col.get("auto_increment").and_then(Value::as_bool) == Some(true) {
+                        "AUTO_INCREMENT"
+                    } else {
+                        ""
+                    },
+                ] {
+                    if !label.is_empty() {
+                        constrained = true;
+                        constraints = constraints.child(
+                            html::span(crate::i18n::tr(label).into_owned()).class("schema-key"),
+                        );
+                    }
+                }
+                if let Some(default) = col.get("default_value").and_then(Value::as_str) {
+                    constrained = true;
+                    constraints = constraints.child(html::span(crate::i18n::format_message(
+                        "默认 {value}",
+                        &[("value", default)],
+                    )));
+                }
+                if !constrained {
+                    constraints = constraints.child(html::span("—").class("muted"));
+                }
+                let comment = col.get("comment").and_then(Value::as_str).unwrap_or("");
                 panel = panel.child(
                     html::div()
-                        .class("schema-row")
+                        .class("schema-row schema-columns")
                         .child(html::strong(name))
                         .child(html::span(ty))
-                        .child(html::span(nullable))
-                        .child(html::span(key))
-                        .child(html::span(generated))
-                        .child(html::span(format!("默认 {default}"))),
+                        .child(html::span(crate::i18n::tr(nullable).into_owned()))
+                        .child(constraints)
+                        .child(html::span(comment).class("schema-comment")),
                 );
             }
         }
         for (key, title) in [("indexes", "索引"), ("constraints", "约束")] {
-            panel = panel.child(html::strong(title).class("section-title"));
+            panel = panel
+                .child(html::strong(crate::i18n::tr(title).into_owned()).class("section-title"));
             if let Some(items) = schema
                 .get("details")
                 .and_then(|v| v.get(key))
                 .and_then(Value::as_array)
             {
                 if items.is_empty() {
-                    panel = panel.child(html::span("无").class("empty-note"));
+                    panel = panel
+                        .child(html::span(crate::i18n::tr("无").into_owned()).class("empty-note"));
                 }
                 for item in items {
                     let part = |name| item.get(name).and_then(Value::as_str).unwrap_or("");
@@ -572,11 +425,13 @@ fn schema_panel(app: &App) -> Node<Msg> {
                         format!(
                             "{}  {}  {}",
                             part("type"),
-                            if item.get("unique").and_then(Value::as_bool) == Some(true) {
-                                "唯一"
-                            } else {
-                                "非唯一"
-                            },
+                            crate::i18n::tr(
+                                if item.get("unique").and_then(Value::as_bool) == Some(true) {
+                                    "唯一"
+                                } else {
+                                    "非唯一"
+                                }
+                            ),
                             item.get("expression")
                                 .and_then(Value::as_str)
                                 .or_else(|| item.get("column").and_then(Value::as_str))
@@ -595,836 +450,723 @@ fn schema_panel(app: &App) -> Node<Msg> {
             }
         }
     } else {
-        panel = panel.child(html::span("正在读取结构或尚未选择对象").class("empty-note"));
+        panel = panel.child(
+            html::span(crate::i18n::tr("正在读取结构或尚未选择对象").into_owned())
+                .class("empty-note"),
+        );
     }
     panel.into()
 }
 
-fn draft_field(value: &Value) -> String {
-    if let Some(kind) = value.get("type").and_then(Value::as_str) {
-        let data = value.get("value").and_then(Value::as_str).unwrap_or("");
-        return match kind {
-            "bytes" => {
-                value_text(&datapier_core::model::Value::Bytes(data.to_owned()), true).into_owned()
-            }
-            "text" => data.to_owned(),
-            _ => "无法显示".into(),
-        };
-    }
-    match value {
-        Value::Null => "永久".into(),
-        Value::String(s) => s.clone(),
-        _ => value.to_string(),
-    }
-}
-fn redis_draft_before(before: &Value) -> String {
-    let Some(fields) = before.as_object() else {
-        return "未载入".into();
+fn cell_drawer(app: &App) -> Node<Msg> {
+    let mut drawer = html::div().class("drawer").child(
+        html::div()
+            .class("toolbar")
+            .child(html::strong(crate::i18n::tr("单元格编辑").into_owned()))
+            .child(html::span("").class("spacer"))
+            .child(button("关闭", "overlay-close")),
+    );
+    let Some(cell) = app.detail_cell() else {
+        return drawer
+            .child(
+                html::span(crate::i18n::tr("原结果已不可用，请重新选择单元格").into_owned())
+                    .class("empty-note"),
+            )
+            .into();
     };
-    [
-        ("field", "字段"),
-        ("index", "索引"),
-        ("member", "成员"),
-        ("value", "值"),
-        ("score", "分数"),
-    ]
-    .iter()
-    .filter_map(|(key, label)| {
-        fields
-            .get(*key)
-            .map(|value| format!("{label}：{}", draft_field(value)))
-    })
-    .collect::<Vec<_>>()
-    .join(" · ")
-}
-fn redis_draft_after(change: &Value) -> String {
-    let op = change
-        .get("operation")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let label = match op {
-        "set_string" | "hash_set" | "list_set" => "设置",
-        "list_insert" | "set_add" => "添加",
-        "hash_delete" | "list_delete" | "set_remove" | "zset_remove" | "delete_key" => "删除",
-        "zset_set" => "设置成员",
-        "rename" => "重命名",
-        "set_ttl" => "设置 TTL",
-        _ => "变更",
-    };
-    let mut parts = vec![label.to_owned()];
-    for (key, name) in [
-        ("field", "字段"),
-        ("index", "索引"),
-        ("member", "成员"),
-        ("value", "值"),
-        ("score", "分数"),
-        ("ttl_ms", "TTL 毫秒"),
-    ] {
-        if let Some(value) = change.get(key) {
-            parts.push(format!("{name}：{}", draft_field(value)));
-        }
-    }
-    if let Some(encoded) = change.get("new_key_b64").and_then(Value::as_str) {
-        let value = datapier_core::model::Value::Bytes(encoded.to_owned());
-        parts.push(format!("新 key：{}", value_text(&value, true)));
-    }
-    parts.join(" · ")
-}
-
-fn draft_panel(app: &App) -> Node<Msg> {
-    let mut panel = html::div().class("draft-list");
-    if let Some(grid) = &app.grid {
-        for (cell, after) in grid.edits() {
-            let name = grid
+    let grid = app.grid.as_ref().unwrap();
+    let mut identity = Vec::new();
+    if let Some(keys) = app
+        .schema
+        .as_ref()
+        .and_then(|schema| schema.get("keys"))
+        .and_then(Value::as_array)
+        .and_then(|keys| keys.first())
+        .and_then(Value::as_array)
+    {
+        for name in keys.iter().filter_map(Value::as_str) {
+            if let Some(column) = grid
                 .page
                 .result
                 .columns
-                .get(cell.column)
-                .map(|c| c.name.as_str())
-                .unwrap_or("");
-            let before = grid
-                .original(*cell)
-                .map(|v| cell_preview(app, v))
-                .unwrap_or_default();
-            panel = panel.child(
-                html::div()
-                    .class("draft-item")
-                    .child(html::strong(format!("第 {} 行 · {}", cell.row + 1, name)))
-                    .child(html::span(format!("原值：{before}")))
-                    .child(html::span(format!("新值：{}", cell_preview(app, after)))),
-            );
-        }
-    }
-    for row in &app.pending_rows {
-        let before = row
-            .before
-            .iter()
-            .map(|(k, v)| format!("{k}: {}", cell_preview(app, v)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let after = row
-            .values
-            .iter()
-            .map(|(k, v)| format!("{k}: {}", cell_preview(app, v)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        panel = panel.child(
-            html::div()
-                .class("draft-item")
-                .child(html::strong(row.operation.clone()))
-                .child(html::span(format!("原值：{before}")))
-                .child(html::span(format!("新值：{after}"))),
-        );
-    }
-    for (index, item) in app.redis_changes.iter().enumerate() {
-        if let Some(preview) = app
-            .workbench
-            .redis_previews
-            .iter()
-            .find(|preview| preview.start == index)
-        {
-            let after = &app.redis_changes[preview.end - 1];
-            panel = panel.child(
-                html::div()
-                    .class("draft-item")
-                    .child(html::strong(
-                        app.target
-                            .as_ref()
-                            .map(|target| target.name.as_str())
-                            .unwrap_or("Redis"),
-                    ))
-                    .child(html::pre(format!(
-                        "原值：{}",
-                        redis_draft_before(&preview.before)
-                    )))
-                    .child(html::pre(format!("新值：{}", redis_draft_after(after)))),
-            );
-        } else if !app
-            .workbench
-            .redis_previews
-            .iter()
-            .any(|preview| preview.start < index && index < preview.end)
-        {
-            panel = panel.child(
-                html::div()
-                    .class("draft-item")
-                    .child(html::strong(
-                        app.target
-                            .as_ref()
-                            .map(|target| target.name.as_str())
-                            .unwrap_or("Redis"),
-                    ))
-                    .child(html::span("原值：未载入"))
-                    .child(html::span("恢复的操作；原基线已失效，请重新确认"))
-                    .child(html::pre(format!("新值：{}", redis_draft_after(item)))),
-            );
-        }
-    }
-    if let Some(paste) = &app.paste_preview {
-        for edit in &paste.edits {
-            panel = panel.child(
-                html::div()
-                    .class("draft-item")
-                    .child(html::strong(format!(
-                        "粘贴 · 第 {} 行，第 {} 列",
-                        edit.cell.row + 1,
-                        edit.cell.column + 1
-                    )))
-                    .child(html::span(format!(
-                        "原值：{}",
-                        cell_preview(app, &edit.before)
-                    )))
-                    .child(html::span(format!(
-                        "新值：{}",
-                        cell_preview(app, &edit.after)
-                    ))),
-            );
-        }
-    }
-    panel.into()
-}
-
-fn redis_browser(app: &App) -> Node<Msg> {
-    let mut list = html::div()
-        .class("key-browser")
-        .child(field(app, "pattern", "SCAN 匹配"))
-        .child(choices(
-            app,
-            "type",
-            "类型",
-            &[
-                ("", "全部"),
-                ("string", "String"),
-                ("hash", "Hash"),
-                ("list", "List"),
-                ("set", "Set"),
-                ("zset", "ZSet"),
-            ],
-        ))
-        .child(
-            html::div()
-                .class("toolbar")
-                .child(button("刷新", "list"))
-                .child(button("更多", "more"))
-                .child(button(
-                    if app.workbench.tree {
-                        "列表"
-                    } else {
-                        "命名空间"
-                    },
-                    "tree-toggle",
-                )),
-        )
-        .child(
-            html::span(format!(
-                "已加载 {} 个 key · {}",
-                app.resources.len(),
-                if app.workbench.scan_dirty {
-                    "条件已更改，请刷新"
-                } else if app.scan_token.is_some() {
-                    "扫描中"
-                } else if app.cursor.is_some() {
-                    "可加载更多"
-                } else {
-                    "扫描完成"
-                }
-            ))
-            .class("muted"),
-        );
-    let page_count = app
-        .resources
-        .len()
-        .div_ceil(workbench::KEY_PAGE_SIZE)
-        .max(1);
-    let page = app.workbench.key_page.min(page_count - 1);
-    list = list.child(
-        html::div()
-            .class("toolbar")
-            .child(button("上一页", "keys-previous"))
-            .child(html::span(format!("第 {} / {} 页", page + 1, page_count)).class("muted"))
-            .child(button("下一页", "keys-next")),
-    );
-    let start = page * workbench::KEY_PAGE_SIZE;
-    let end = (start + workbench::KEY_PAGE_SIZE).min(app.resources.len());
-    let mut indices: Vec<usize> = (start..end).collect();
-    if app.workbench.tree {
-        indices.sort_by(|&a, &b| app.resources[a].name.cmp(&app.resources[b].name));
-    }
-    let mut namespace = String::new();
-    for i in indices {
-        let r = &app.resources[i];
-        if app.workbench.tree {
-            let next = r
-                .name
-                .split_once(':')
-                .map(|(prefix, _)| prefix)
-                .unwrap_or("其他");
-            if next != namespace {
-                namespace = next.to_string();
-                list = list.child(html::strong(namespace.clone()).class("group-title"));
-            }
-        }
-        let active = app
-            .target
-            .as_ref()
-            .is_some_and(|t| t.key_b64 == r.key_b64 && t.name == r.name);
-        let ttl = ttl_label(r.data.get("ttl_ms").and_then(Value::as_i64));
-        list = list.child(
-            html::button("")
-                .class(if active {
-                    "resource key-row active"
-                } else {
-                    "resource key-row"
+                .iter()
+                .position(|column| column.name == name)
+                && let Some(value) = grid.value(Cell {
+                    row: cell.row,
+                    column,
                 })
-                .key(format!("r{i}"))
-                .child(html::span(r.kind.clone()).class("key-type"))
-                .child(html::span(r.name.clone()).class("key-name"))
-                .child(html::span(ttl).class("key-ttl"))
-                .on_click(Msg::Resource(i)),
-        );
-    }
-    list.into()
-}
-
-fn overlay(app: &App, kind: &str) -> Node<Msg> {
-    let mut panel = html::div().class("modal").child(
-        html::div()
-            .class("toolbar")
-            .child(html::strong(match kind {
-                "profile" => "连接设置",
-                "transfer" => "导入 / 导出",
-                "cell" => "单元格",
-                "cli-value" => "CLI 单元格",
-                "redis" => "Redis 操作",
-                "columns" => "列配置",
-                "filters" => "过滤与排序",
-                "row" => "行操作",
-                "preview" => "变更预览",
-                "file" => "查询文件",
-                _ => "设置",
-            }))
-            .child(button(
-                "关闭",
-                if app.view == "profile" {
-                    "view-query"
-                } else {
-                    "overlay-close"
-                },
-            )),
-    );
-    match kind {
-        "profile" => {
-            panel = panel
-                .child(field(app, "name", "名称"))
-                .child(choices(
-                    app,
-                    "provider",
-                    "类型",
-                    &[("mysql", "MySQL"), ("redis", "Redis")],
-                ))
-                .child(field(app, "host", "主机"))
-                .child(field(app, "port", "端口"))
-                .child(field(app, "user", "用户名"));
-            if app.field("provider") == "mysql" {
-                panel = panel.child(field(app, "database", "数据库"));
-            } else {
-                panel = panel.child(field(app, "redis_db", "Redis DB"));
-            }
-            panel = panel
-                .child(field(app, "password", "密码"))
-                .child(choices(
-                    app,
-                    "access",
-                    "权限",
-                    &[("read_only", "只读"), ("read_write", "读写")],
-                ))
-                .child(choices(
-                    app,
-                    "tls",
-                    "TLS",
-                    &[("false", "关闭"), ("true", "启用")],
-                ));
-            if app.field("tls") == "true" {
-                for (name, label) in [("ca", "CA 路径"), ("cert", "证书路径"), ("key", "私钥路径")]
-                {
-                    panel = panel.child(field(app, name, label));
-                }
-            }
-            panel = panel
-                .child(button("测试连接", "test-profile"))
-                .child(button("保存连接", "save-profile"));
-        }
-        "transfer" => {
-            for (name, label) in [
-                ("path", "文件路径"),
-                ("format", "格式 csv/json"),
-                ("mapping", "列映射 JSON"),
-                ("null_marker", "NULL 标记"),
-                ("backslash_escape", "反斜线转义"),
-                ("binary_columns", "二进制列 JSON"),
-            ] {
-                panel = panel.child(field(app, name, label));
-            }
-            if (writable(app)
-                && (app.is_redis() || app.target.as_ref().is_some_and(|t| t.kind == "table")))
-                || (app.is_redis()
-                    && app.target.is_none()
-                    && app.profile.as_ref().is_some_and(|p| {
-                        p.access_mode == datapier_core::model::AccessMode::ReadWrite
-                    }))
             {
-                panel = panel
-                    .child(button("预览导入", "preview-import"))
-                    .child(button("确认导入", "import"));
-            }
-            panel = panel.child(button("导出完整结果", "export"));
-        }
-        "file" => {
-            panel = panel
-                .child(field(app, "path", "文件路径"))
-                .child(button("打开", "file-open"))
-                .child(button("保存", "file-save"));
-        }
-        "columns" => {
-            panel = panel
-                .child(field(app, "column", "列序号"))
-                .child(field(app, "width", "宽度"))
-                .child(button("设置宽度", "column-width"))
-                .child(button("隐藏 / 显示", "column-hide"))
-                .child(button("冻结 / 解冻", "column-freeze"));
-        }
-        "filters" => {
-            panel = panel
-                .child(field(app, "filter", "过滤 JSON"))
-                .child(field(app, "sort", "排序 JSON"))
-                .child(button("应用并刷新", "browse"));
-        }
-        "row" => {
-            if writable(app) {
-                panel = panel
-                    .child(field(app, "row_values", "新增行 JSON"))
-                    .child(button("新增行草稿", "insert-row"))
-                    .child(button("删除选中行", "delete-row"))
-                    .child(button("撤销行草稿", "undo-row"));
+                identity.push(format!("{name} = {}", value_text(value, false)));
             }
         }
-        "cell" => {
-            panel = panel.child(html::pre(app.field("cell")).class("preview"));
-            if writable(app) && !app.is_redis() {
-                panel = panel
-                    .child(field(app, "cell", "单元格值"))
-                    .child(button("设置文本", "set-cell"))
-                    .child(button("设置 JSON", "set-json"))
-                    .child(button("设置 NULL", "set-null"));
-            }
-        }
-        "cli-value" => {
-            if let Some(cell) = app.workbench.cli_cell
-                && let Some(grid) = &app.workbench.cli_grid
-                && let Some(value) = grid.value(cell)
-            {
-                if matches!(value, datapier_core::model::Value::Large { .. }) {
-                    let message = if app.workbench.cli_large.is_some() {
-                        "读取中…"
-                    } else if !app.workbench.cli_error.is_empty() {
-                        app.workbench.cli_error.as_str()
-                    } else {
-                        "尚未读取完整值"
-                    };
-                    panel = panel.child(html::span(message).class("muted"));
-                } else {
-                    panel = panel
-                        .child(html::pre(value_text(value, true).into_owned()).class("preview"));
-                }
-            }
-        }
-        "preview" => {
-            panel = panel.child(draft_panel(app));
-            if app.paste_preview.is_some() && writable(app) {
-                panel = panel.child(button("确认粘贴", "paste-confirm"));
-            }
-            if writable(app) {
-                panel = panel.child(button(
-                    "提交变更",
-                    if app.is_redis() {
-                        "redis-submit"
-                    } else {
-                        "submit"
-                    },
-                ));
-            }
-        }
-        "diagnostics" => {
-            panel = panel.child(html::pre(app.detail.clone()).class("preview"));
-        }
-        "redis" if writable(app) => {
-            let kind = app.target.as_ref().map(|t| t.kind.as_str()).unwrap_or("");
-            let ops: &[(&str, &str)] = match kind {
-                "string" => &[("设置值", "set_string")],
-                "hash" => &[("设置字段", "hash_set"), ("删除字段", "hash_delete")],
-                "list" => &[
-                    ("设置元素", "list_set"),
-                    ("插入元素", "list_insert"),
-                    ("删除元素", "list_delete"),
-                ],
-                "set" => &[("添加成员", "set_add"), ("删除成员", "set_remove")],
-                "zset" => &[("设置成员", "zset_set"), ("删除成员", "zset_remove")],
-                _ => &[],
-            };
-            for (label, op) in ops.iter().copied().chain([
-                ("重命名", "rename"),
-                ("删除 key", "delete_key"),
-                ("设置 TTL", "set_ttl"),
-            ]) {
-                panel = panel.child(button(label, &format!("redis-op:{op}")));
-            }
-            let op = app.field("operation");
-            panel = panel.child(html::span(format!("当前操作：{op}")).class("muted"));
-            match op {
-                "set_string" => panel = panel.child(field(app, "redis_value", "Value")),
-                "hash_set" | "hash_delete" => {
-                    panel = panel.child(field(app, "redis_field", "Field"));
-                    if op == "hash_set" {
-                        panel = panel.child(field(app, "redis_value", "Value"));
-                    }
-                }
-                "list_set" | "list_insert" | "list_delete" => {
-                    panel = panel.child(html::span(format!("Index: {}", app.field("redis_index"))));
-                    if op != "list_delete" {
-                        panel = panel.child(field(app, "redis_value", "Value"));
-                    }
-                }
-                "set_add" | "set_remove" => {
-                    panel = panel.child(field(app, "redis_member", "Member"))
-                }
-                "zset_set" | "zset_remove" => {
-                    panel = panel.child(field(app, "redis_member", "Member"));
-                    if op == "zset_set" {
-                        panel = panel.child(field(app, "redis_score", "Score"));
-                    }
-                }
-                "rename" => panel = panel.child(field(app, "redis_key", "新 key")),
-                "set_ttl" => panel = panel.child(field(app, "redis_ttl", "TTL 毫秒（空为永久）")),
-                _ => {}
-            }
-            panel = panel.child(button("加入变更预览", "redis-stage"));
-        }
-        _ => {}
     }
-    panel.into()
-}
-
-fn string_value(app: &App) -> Node<Msg> {
-    let mut panel = html::div()
-        .class("string-value")
-        .child(html::strong("Value"));
-    if let Some(grid) = &app.grid
-        && let Some(value) = grid.value(Cell {
-            row: grid.page.start,
-            column: 0,
-        })
-    {
-        let text = if let datapier_core::model::Value::Bytes(encoded) = value {
-            use base64::Engine as _;
-            match base64::engine::general_purpose::STANDARD.decode(encoded) {
-                Ok(bytes) if app.workbench.value_format == "hex" => {
-                    use std::fmt::Write as _;
-                    let mut text = String::with_capacity(bytes.len().saturating_mul(3));
-                    for (i, byte) in bytes.iter().enumerate() {
-                        if i > 0 {
-                            text.push(' ');
-                        }
-                        let _ = write!(text, "{byte:02X}");
-                    }
-                    text
-                }
-                Ok(bytes) if app.workbench.value_format == "json" => {
-                    match serde_json::from_slice::<Value>(&bytes) {
-                        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_default(),
-                        Err(error) => format!("JSON 解析失败：{error}"),
-                    }
-                }
-                _ => value_text(value, true).into_owned(),
-            }
-        } else {
-            value_text(value, true).into_owned()
-        };
-        panel = panel.child(html::pre(text).class("value-content"));
-    }
-    panel.into()
-}
-
-fn cli_panel(app: &App) -> Node<Msg> {
-    let mut panel = html::div().class("cli-panel").child(
-        html::div()
-            .class("toolbar")
-            .child(html::strong("CLI"))
-            .child(button("执行", "cli-run"))
-            .child(button("取消", "cancel"))
-            .child(button("上一页", "cli-previous"))
-            .child(button("下一页", "cli-next"))
-            .child(button("收起", "cli-toggle")),
-    );
-    panel = panel.child(field(app, "cli_text", "命令"));
-    if app.workbench.cli_running {
-        panel = panel.child(html::span("执行中…").class("muted"));
-    }
-    if !app.workbench.cli_error.is_empty() {
-        panel = panel.child(html::span(app.workbench.cli_error.clone()).class("empty-note"));
-    }
-    for (i, _) in app.workbench.cli_results.iter().enumerate() {
-        panel = panel.child(button(
-            &format!("结果 {}", i + 1),
-            &format!("cli-result:{i}"),
+    if identity.is_empty() {
+        identity.push(crate::i18n::format_message(
+            "第 {row} 行",
+            &[("row", &(cell.row + 1).to_string())],
         ));
     }
-    if let Some(grid) = &app.workbench.cli_grid {
-        let mut result = html::div().class("cli-results");
-        let mut header = html::div().class("gridrow header");
-        for col in &grid.page.result.columns {
-            header = header.child(html::span(col.name.clone()).class("cli-cell"));
-        }
-        result = result.child(header);
-        for (i, row) in grid.page.rows.iter().enumerate() {
-            let row_id = grid.page.start + i as u64;
-            let mut line = html::div().class("gridrow");
-            for (col, value) in row.iter().enumerate() {
-                let cell = Cell {
-                    row: row_id,
-                    column: col,
-                };
-                let value = grid.value(cell).unwrap_or(value);
-                let label = match value {
-                    datapier_core::model::Value::Large { bytes, .. } => {
-                        format!("大值（{bytes} 字节），点击读取")
-                    }
-                    _ => cell_preview(app, value),
-                };
-                line = line.child(
-                    html::button(label)
-                        .class("cli-cell")
-                        .on_click(Msg::Action(format!("cli-open:{row_id}:{col}"))),
-                );
-            }
-            result = result.child(line);
-        }
-        panel = panel.child(result);
+    let mut selector = ui::select()
+        .value(cell.column.to_string())
+        .open(app.workbench.cell_fields_open)
+        .on_toggle(|collapsed| Msg::Action(format!("cell-fields-open:{}", !collapsed)))
+        .on_change(|change| {
+            Msg::Action(format!(
+                "cell-field:{}",
+                change.value.as_str().unwrap_or_default()
+            ))
+        });
+    for (index, column) in grid.page.result.columns.iter().enumerate() {
+        selector = selector.option(ui::SelectOption::new(
+            index.to_string(),
+            column.name.clone(),
+        ));
     }
-    panel.into()
+    drawer = drawer
+        .child(html::span(crate::i18n::tr("当前行").into_owned()).class("label"))
+        .child(html::span(identity.join(" · ")).class("mono"))
+        .child(ui::field(crate::i18n::tr("字段").into_owned()).child(selector));
+    if writable(app) && grid.editable && !grid.page.result.columns[cell.column].generated {
+        drawer = drawer
+            .child(field(app, "cell", "值"))
+            .child(
+                html::div()
+                    .class("choice-row")
+                    .child(button("加入草稿", "set-cell"))
+                    .child(button("设为 NULL", "set-null")),
+            )
+            .child(button("设置 JSON", "set-json"))
+            .child(
+                html::span(crate::i18n::tr("长值可在侧栏编辑，变更先进入草稿。").into_owned())
+                    .class("empty-note"),
+            );
+    } else {
+        drawer = drawer.child(html::pre(app.field("cell")).class("preview"));
+    }
+    drawer.into()
 }
 
 pub fn render(app: &App) -> View<Msg> {
     let redis = app.is_redis();
-    let mut context = html::div()
-        .class("context")
-        .child(button(
-            if app.navigation_compact() {
-                "›"
-            } else {
-                "‹"
-            },
-            "navigation-toggle",
-        ))
-        .child(html::strong(
+    let mut context = html::div().class("context");
+    if app.profile.is_some() {
+        context = context.child(provider_icon(app, redis));
+    }
+    context = context.child(
+        html::strong(
             app.profile
                 .as_ref()
-                .map(|p| p.name.as_str())
-                .unwrap_or("未选择连接"),
-        ))
-        .child(
-            html::span(if redis {
-                format!(" / DB {}", app.profile.as_ref().map_or(0, |p| p.redis_db))
-            } else {
-                format!(" / {}", app.database.as_deref().unwrap_or("未选择数据库"))
-            })
-            .class("muted"),
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| crate::i18n::tr("未选择连接").into_owned()),
         )
-        .child(
-            html::span(if app.session.is_some() {
-                "已连接"
-            } else {
-                "未连接"
-            })
-            .class("muted"),
-        )
-        .child(html::span("").class("spacer"))
-        .child(button(
-            if app.workbench.dark {
-                "浅色"
-            } else {
-                "深色"
-            },
-            "theme-toggle",
-        ))
-        .child(button("连接设置", "edit-profile"));
-    if app.session.is_some() && !redis {
-        context = context.child(button("数据库", "databases"));
+        .class("context-title"),
+    );
+    if !redis {
+        context = context.child(
+            html::span(format!(
+                " / {}",
+                app.database
+                    .as_deref()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| crate::i18n::tr("未选择数据库").into_owned())
+            ))
+            .class("breadcrumb"),
+        );
+    }
+    if redis && app.profile.is_some() {
+        context = context.child(
+            html::div()
+                .class("db-picker")
+                .child(redis_db_picker(app, false)),
+        );
+    }
+    if let Some(profile) = &app.profile {
+        context = context
+            .child(html::span(if redis { "Redis" } else { "MySQL" }).class("tag"))
+            .child(
+                html::span(
+                    crate::i18n::tr(
+                        if profile.access_mode == datapier_core::model::AccessMode::ReadWrite {
+                            "读写"
+                        } else {
+                            "只读"
+                        },
+                    )
+                    .into_owned(),
+                )
+                .class("tag"),
+            );
     }
     let mut tab_strip = html::div().class("tab-strip").key("tab-strip");
     for (i, t) in app.tabs.iter().enumerate() {
-        tab_strip = tab_strip.child(
-            html::button(t.title.clone())
-                .class(if i == app.active {
-                    "button active"
-                } else {
-                    "button"
-                })
-                .key(format!("tab{i}"))
-                .on_click(Msg::Tab(i)),
-        );
+        let left = format!("tab-close-left:{}", t.id);
+        let right = format!("tab-close-right:{}", t.id);
+        let all = format!("tab-close-all:{}", t.id);
+        let target = if i == app.active {
+            app.target.as_ref()
+        } else {
+            t.runtime.target.as_ref().or(t.browse.target.as_ref())
+        };
+        let view = if i == app.active {
+            app.view.as_str()
+        } else {
+            t.runtime.view.as_str()
+        };
+        let icon = if view == "query" || target.is_none() {
+            "terminal"
+        } else if target.is_some_and(|target| target.kind == "table") {
+            "table"
+        } else if target.is_some_and(|target| target.kind == "view") {
+            "eye"
+        } else {
+            "layers"
+        };
+        let title = html::button("")
+            .class("tab-title")
+            .child(ui::icon(icon))
+            .child(html::span(t.title.clone()))
+            .actions(
+                ui::Actions::new()
+                    .menu(ui::MenuEntry::header(
+                        crate::i18n::tr("标签操作").into_owned(),
+                    ))
+                    .menu(
+                        ui::MenuItem::new(&left, crate::i18n::tr("关闭左侧标签").into_owned())
+                            .icon("arrow-left")
+                            .disabled(i == 0),
+                    )
+                    .menu(
+                        ui::MenuItem::new(&right, crate::i18n::tr("关闭右侧标签").into_owned())
+                            .icon("arrow-right")
+                            .disabled(i + 1 == app.tabs.len()),
+                    )
+                    .menu(ui::MenuEntry::Separator)
+                    .menu(
+                        ui::MenuItem::new(&all, crate::i18n::tr("关闭全部标签").into_owned())
+                            .icon("x"),
+                    ),
+            )
+            .on_action(left.clone(), Msg::Action(left))
+            .on_action(right.clone(), Msg::Action(right))
+            .on_action(all.clone(), Msg::Action(all))
+            .on_click(Msg::Tab(i));
+        let close = flat_action("x", "关闭标签", &format!("close-tab:{}", t.id)).class("tab-close");
+        let tab = html::div()
+            .class(if i == app.active { "tab active" } else { "tab" })
+            .key(format!("tab{i}"));
+        tab_strip = tab_strip.child(if cfg!(target_os = "macos") {
+            tab.child(close).child(title)
+        } else {
+            tab.child(title).child(close)
+        });
     }
     let tabs = html::div()
         .class("tabs")
+        .key("tabs")
         .child(tab_strip)
-        .child(button("+ 查询", "view-query"))
-        .child(button("关闭标签", "close-tab"))
-        .child(button("历史", "history"));
-    let mut content = html::div()
-        .class("content")
-        .key("content")
-        .child(context)
-        .child(tabs);
+        .child(icon_button("plus", "新建查询", "view-query"));
+    let mut content = html::div().class("content").key("content").child(context);
+    if let Some(error) = &app.workbench.connection_error {
+        let mut feedback = html::div()
+            .class("connection-feedback")
+            .child(html::span(error.clone()).class("connection-message"));
+        if app.workbench.connection_tls_required {
+            feedback = feedback.child(button("启用 TLS", "connection-enable-tls"));
+        }
+        content = content.child(
+            feedback
+                .child(button("重试连接", "open"))
+                .child(button("连接设置", "edit-profile")),
+        );
+    }
+    content = content.child(tabs);
     if app.save_blocked {
         content = content.child(
             html::div()
                 .class("draftbar")
-                .child(html::span("工作区保存冲突"))
+                .child(html::span(crate::i18n::tr("工作区保存冲突").into_owned()))
                 .child(button("另存工作区副本", "workspace-copy")),
         );
     }
-    if app.view == "history" {
-        content = content.child(history_panel(app));
-    } else if app.view == "profile" {
-        content = content.child(overlay(app, "profile"));
+    if app.tabs.is_empty() {
+        let mut empty = html::div()
+            .class("empty-state")
+            .child(html::strong(crate::i18n::tr("没有打开的标签").into_owned()))
+            .child(html::span(
+                crate::i18n::tr("从侧栏选择连接，或新建查询。").into_owned(),
+            ))
+            .child(button("新建查询", "view-query"));
+        if app.navigation_compact() {
+            empty = empty.child(button("选择连接", "navigation-toggle"));
+        }
+        content = content.child(empty);
     } else {
-        let mut body = html::div().class("detail-panel");
+        let mut body = html::div().class(if redis {
+            "detail-panel key-details"
+        } else {
+            "body detail-panel"
+        });
         if !redis && (app.target.is_none() || (app.view == "query" && !app.browse_result)) {
-            let mut tools = html::div().class("toolbar");
-            for (label, action) in [
-                ("执行", "run"),
-                ("执行选区", "selection"),
-                ("当前语句", "current"),
-                ("取消", "cancel"),
-                ("查询文件", "overlay:file"),
-            ] {
-                tools = tools.child(button(label, action));
-            }
-            body = body.child(tools).child(query(app)).child(completions(app));
+            body = body
+                .child(crate::query_ui::toolbar(app))
+                .child(crate::query_ui::panel(app));
         } else if redis && app.target.is_none() {
             let mut empty = html::div()
                 .class("empty-state")
-                .child(html::strong("选择一个 key"))
-                .child(html::span("从左侧已加载的 key 中选择，查看类型和值。"));
+                .child(html::strong(crate::i18n::tr("选择一个 key").into_owned()))
+                .child(html::span(
+                    crate::i18n::tr("从左侧已加载的 key 中选择，查看类型和值。").into_owned(),
+                ));
             if app
                 .profile
                 .as_ref()
                 .is_some_and(|p| p.access_mode == datapier_core::model::AccessMode::ReadWrite)
             {
-                empty = empty.child(button("导入数据库", "overlay:transfer"));
+                empty = empty.child(button("导入数据库", "overlay:import"));
             }
             body = body.child(empty);
         } else if redis {
-            let title = app
-                .target
+            let target = app.target.as_ref().unwrap();
+            let ttl = app
+                .schema
                 .as_ref()
-                .map(|t| format!("{}  ·  {}", t.name, t.kind))
-                .unwrap_or_default();
-            let mut tools = html::div().class("toolbar").child(html::strong(title));
-            if let Some(schema) = &app.schema {
+                .and_then(|schema| schema.get("ttl_ms"))
+                .and_then(Value::as_i64);
+            let kind = app
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or(&target.kind);
+            let type_label = match kind {
+                "string" => "String",
+                "hash" => "Hash",
+                "list" => "List",
+                "set" => "Set",
+                "zset" => "ZSet",
+                "none" => "不存在",
+                _ => kind,
+            };
+            let type_label = if kind == "none" {
+                crate::i18n::tr("不存在").into_owned()
+            } else {
+                type_label.to_owned()
+            };
+            let mut metadata = html::div().class("key-meta");
+            if let Some(length) = app
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.get("length"))
+                .and_then(Value::as_u64)
+            {
+                metadata = metadata.child(html::span(format!(
+                    "{length} {}",
+                    crate::i18n::tr(match kind {
+                        "string" => "字节",
+                        "hash" => "字段",
+                        _ => "项",
+                    })
+                )));
+            }
+            metadata = metadata.child(html::span(format!("TTL {}", ttl_label(ttl))));
+            if writable(app) {
+                metadata = metadata.child(icon_button("edit", "编辑 TTL", "redis-op:set_ttl"));
+            }
+            let mut heading = html::div()
+                .class("key-heading")
+                .child(html::span(type_label).class("tag"))
+                .child(html::strong(target.name.clone()));
+            if writable(app) {
+                heading = heading.child(icon_button("edit", "编辑 key 名称", "redis-op:rename"));
+            }
+            let copy_label = crate::i18n::tr("复制完整 key").into_owned();
+            heading = heading.child(
+                ui::button("")
+                    .variant(ui::ButtonVariant::Quiet)
+                    .size(ui::ButtonSize::Sm)
+                    .icon("copy")
+                    .key("copy-key")
+                    .title(copy_label.clone())
+                    .aria(copy_label)
+                    .on_click(Msg::CopyText(workbench::redis_key_text(
+                        &target.name,
+                        target.key_b64.as_deref(),
+                    ))),
+            );
+            if writable(app) {
+                let label = crate::i18n::tr("删除 key").into_owned();
+                heading = heading.child(
+                    ui::button("")
+                        .variant(ui::ButtonVariant::Quiet)
+                        .size(ui::ButtonSize::Md)
+                        .icon("trash")
+                        .role("redis-delete")
+                        .title(label.clone())
+                        .aria(label)
+                        .on_click(Msg::Action("redis-op:delete_key".into())),
+                );
+            }
+            let title = html::div()
+                .class("key-title")
+                .child(heading)
+                .child(metadata);
+            body = body.child(title);
+            let mut tools = html::div().class("key-actions");
+            if app.target.as_ref().is_some_and(|t| t.kind == "string") {
+                let mut formats = ui::tabs()
+                    .variant(ui::TabsVariant::Segmented)
+                    .active(app.workbench.value_format.clone());
+                for (value, label) in [("text", "Text"), ("json", "JSON"), ("hex", "HEX")] {
+                    formats = formats.tab(value, label);
+                }
+                tools =
+                    tools.child(formats.on_select(|value| Msg::Action(format!("format:{value}"))));
+            } else {
                 tools = tools.child(
-                    html::span(format!(
-                        "TTL {}",
-                        ttl_label(schema.get("ttl_ms").and_then(Value::as_i64))
-                    ))
+                    html::span(match kind {
+                        "hash" => "Fields",
+                        "list" => "Items",
+                        "set" | "zset" => "Members",
+                        _ => "Value",
+                    })
                     .class("muted"),
                 );
             }
             tools = tools.child(html::span("").class("spacer"));
-            if app.target.as_ref().is_some_and(|t| t.kind == "string") {
-                for (label, action) in [
-                    ("Text", "format:text"),
-                    ("JSON", "format:json"),
-                    ("HEX", "format:hex"),
-                ] {
-                    tools = tools.child(button(label, action));
-                }
+            if writable(app) {
+                tools = tools.child(icon_button("edit", "编辑 value", "redis-edit"));
             }
             if writable(app) {
-                tools = tools
-                    .child(button("操作 key", "overlay:redis"))
-                    .child(button("编辑选中项", "redis-edit"));
+                let operations: &[(&str, &str, &str)] = match kind {
+                    "hash" => &[("plus", "设置 Hash 字段", "hash_set")],
+                    "list" => &[("plus", "插入 List 元素", "list_insert")],
+                    "set" => &[("plus", "添加 Set 成员", "set_add")],
+                    "zset" => &[("plus", "设置 ZSet 成员", "zset_set")],
+                    _ => &[],
+                };
+                for (icon, label, operation) in operations {
+                    tools = tools.child(icon_button(icon, label, &format!("redis-op:{operation}")));
+                }
+                if matches!(kind, "hash" | "list" | "set" | "zset") {
+                    let label = crate::i18n::tr("删除选中条目").into_owned();
+                    tools = tools.child(
+                        ui::button("")
+                            .variant(ui::ButtonVariant::Quiet)
+                            .size(ui::ButtonSize::Md)
+                            .icon("trash")
+                            .role("redis-delete")
+                            .key("redis-row-delete")
+                            .title(label.clone())
+                            .aria(label)
+                            .disabled(!app.redis_row_delete_enabled())
+                            .on_click(Msg::Action("redis-row-delete".into())),
+                    );
+                }
             }
+            if app.grid.is_some() {
+                tools = tools.child(icon_button("columns", "列配置", "overlay:columns"));
+            }
+            if writable(app) {
+                tools = tools.child(icon_button("arrow-up", "导入", "overlay:import"));
+            }
+            tools = tools.child(icon_button("download", "导出", "overlay:export"));
+            let value_copy_label = crate::i18n::tr("复制原始 value（不含草稿）").into_owned();
+            tools = tools.child(
+                ui::button("")
+                    .variant(ui::ButtonVariant::Quiet)
+                    .size(ui::ButtonSize::Sm)
+                    .icon("copy")
+                    .key("copy-value")
+                    .title(value_copy_label.clone())
+                    .aria(value_copy_label)
+                    .on_click(Msg::CopyRedisValue),
+            );
             body = body.child(tools);
         } else {
-            let mut nav = html::div().class("subnav");
-            for (label, action) in [
-                ("数据", "section:data"),
-                ("结构", "section:structure"),
-                ("DDL", "section:ddl"),
-            ] {
-                nav = nav.child(button(label, action));
-            }
-            body = body.child(nav);
+            let nav = ui::tabs()
+                .active(app.workbench.section.clone())
+                .tab("data", crate::i18n::tr("数据").into_owned())
+                .tab("structure", crate::i18n::tr("结构").into_owned())
+                .tab("ddl", "DDL")
+                .on_select(|value| Msg::Action(format!("section:{value}")));
+            let resource = app
+                .target
+                .as_ref()
+                .map(
+                    |target| match target.database.as_deref().or(app.database.as_deref()) {
+                        Some(database) => format!("{database}.{}", target.name),
+                        None => target.name.clone(),
+                    },
+                )
+                .unwrap_or_default();
+            content = content.child(
+                html::div()
+                    .class("resource-nav")
+                    .child(nav)
+                    .child(html::span("").class("spacer"))
+                    .child(
+                        html::span(resource.clone())
+                            .class("resource-identity")
+                            .prop("title", resource),
+                    ),
+            );
         }
-        if !redis && app.target.is_some() && app.browse_result && app.workbench.section != "data" {
+        if !redis
+            && let Some(target) = &app.target
+            && app.browse_result
+            && app.workbench.section != "data"
+        {
             if app.workbench.section == "ddl" {
-                body = body.child(
-                    html::pre(
-                        app.schema
-                            .as_ref()
-                            .and_then(|s| s.get("ddl"))
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    )
-                    .class("preview"),
+                let ddl = app
+                    .schema
+                    .as_ref()
+                    .and_then(|s| s.get("ddl"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let mut toolbar = html::div()
+                    .class("toolbar")
+                    .child(html::span(format!("DDL · {}", target.name)).class("muted"))
+                    .child(html::span("").class("spacer"));
+                if !ddl.is_empty() {
+                    toolbar = toolbar.child(
+                        ui::button("")
+                            .variant(ui::ButtonVariant::Quiet)
+                            .size(ui::ButtonSize::Sm)
+                            .icon("copy")
+                            .title(crate::i18n::tr("复制 DDL").into_owned())
+                            .aria(crate::i18n::tr("复制 DDL").into_owned())
+                            .on_click(Msg::CopyText(ddl.to_owned())),
+                    );
+                }
+                body = body.child(toolbar).child(
+                    html::div()
+                        .class("ddl-code")
+                        .child(ui::code(ddl).lang("sql").numbers(true)),
                 );
             } else {
                 body = body.child(schema_panel(app));
             }
-        } else if redis && app.target.is_none() {
+        } else if (redis && app.target.is_none())
+            || (!redis && !app.browse_result && app.workbench.query_ui.results_hidden)
+        {
         } else {
-            let mut tools = html::div()
-                .class("toolbar")
-                .child(button("上一页", "previous"))
-                .child(button("下一页", "next"));
-            if app.grid.is_some() {
-                tools = tools
-                    .child(button("列配置", "overlay:columns"))
-                    .child(button("读取单元格", "open-cell"))
-                    .child(button("单元格详情", "overlay:cell"))
-                    .child(field(app, "row_search", "筛选本页"));
-            }
-            if !redis && app.target.is_some() && app.browse_result {
-                tools = tools.child(button("过滤", "overlay:filters"));
-            }
-            if writable(app) && !redis && app.grid.as_ref().is_some_and(|g| g.editable) {
-                tools = tools
-                    .child(button("编辑单元格", "inline-begin"))
-                    .child(button("行操作", "overlay:row"));
-            }
-            tools = tools.child(button("导入 / 导出", "overlay:transfer"));
-            body = body.child(tools);
-            for (i, id) in app.results.iter().enumerate() {
-                body = body.child(
-                    html::button(format!("结果 {}", i + 1))
-                        .class("button")
-                        .key(format!("result{id}"))
-                        .on_click(Msg::ResultSet(id.clone())),
+            if !redis
+                && let Some(target) = &app.target
+                && app.browse_result
+            {
+                let mut tools = html::div().class("toolbar").child(
+                    html::span(
+                        crate::i18n::tr(if target.kind == "table" {
+                            "基表"
+                        } else {
+                            "视图"
+                        })
+                        .into_owned(),
+                    )
+                    .class("tag"),
                 );
+                if let Some(columns) = app
+                    .schema
+                    .as_ref()
+                    .and_then(|s| s.get("columns"))
+                    .and_then(Value::as_array)
+                {
+                    let primary = columns
+                        .iter()
+                        .filter(|column| {
+                            column.get("primary_key").and_then(Value::as_bool) == Some(true)
+                        })
+                        .filter_map(|column| column.get("name").and_then(Value::as_str))
+                        .collect::<Vec<_>>();
+                    if !primary.is_empty() {
+                        tools = tools.child(
+                            html::span(crate::i18n::format_message(
+                                "主键 {columns}",
+                                &[("columns", &primary.join(", "))],
+                            ))
+                            .class("tag"),
+                        );
+                    }
+                }
+                tools = tools
+                    .child(row_search(app))
+                    .child(icon_button("funnel", "过滤与排序", "overlay:filters"))
+                    .child(icon_button("columns", "列配置", "overlay:columns"))
+                    .child(html::span("").class("spacer"));
+                if writable(app) && app.grid.as_ref().is_some_and(|g| g.editable) {
+                    tools = tools.child(icon_button("plus", "新增行", "overlay:row"));
+                }
+                tools = tools.child(icon_button("download", "导出", "overlay:export"));
+                if writable(app)
+                    && app
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.kind == "table")
+                {
+                    tools = tools.child(icon_button("arrow-up", "导入", "overlay:import"));
+                }
+                tools = tools.child(icon_button("repeat", "刷新", "browse"));
+                content = content.child(tools);
+            } else if !redis && app.workbench.query_ui.executed {
+                let mut result_tabs = html::div()
+                    .class("result-tabs")
+                    .child(html::span(crate::i18n::tr("结果").into_owned()).class("active"));
+                if app.results.len() > 1 {
+                    for (i, id) in app.results.iter().enumerate() {
+                        result_tabs = result_tabs.child(
+                            ui::button(crate::i18n::format_message(
+                                "结果 {number}",
+                                &[("number", &(i + 1).to_string())],
+                            ))
+                            .variant(ui::ButtonVariant::Quiet)
+                            .key(format!("result{id}"))
+                            .on_click(Msg::ResultSet(id.clone())),
+                        );
+                    }
+                }
+                let results = html::div()
+                    .class("sql-results-head")
+                    .child(result_tabs)
+                    .child(row_search(app))
+                    .child(icon_button("columns", "列配置", "overlay:columns"))
+                    .child(icon_button("download", "导出", "overlay:export"))
+                    .child(icon_button("x", "关闭结果", "query-result-close"));
+                body = body.child(results);
+                if app.grid.is_none() {
+                    body = body.child(
+                        html::div()
+                            .class("query-result-status")
+                            .child(html::span(app.status.render().into_owned())),
+                    );
+                }
             }
             if redis && app.target.as_ref().is_some_and(|t| t.kind == "string") {
                 body = body.child(string_value(app));
             } else if let Some(table) = grid(app) {
                 body = body.child(table);
             }
+            if let Some(grid) = &app.grid {
+                let mut footer = html::div().class("table-footer").child(
+                    html::span(crate::i18n::format_message(
+                        "本页 {page} 行 · 共 {total} 行",
+                        &[
+                            ("page", &grid.page.rows.len().to_string()),
+                            ("total", &grid.page.result.row_count.to_string()),
+                        ],
+                    ))
+                    .class("muted"),
+                );
+                if grid.selected_row_count() > 0 {
+                    footer = footer.child(
+                        html::span(crate::i18n::format_message(
+                            "已选 {count} 行",
+                            &[("count", &grid.selected_row_count().to_string())],
+                        ))
+                        .class("selected-count"),
+                    );
+                }
+                footer = footer.child(html::span("").class("spacer"));
+                if app.browse_result
+                    && (!redis
+                        || app
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target.kind != "string"))
+                {
+                    footer = footer.child(
+                        html::span(crate::i18n::format_message(
+                            if redis {
+                                "单击选行 · Shift 连选 · {modifier} 增选"
+                            } else {
+                                "行号选行 · Shift 连选 · {modifier} 增选 · 双击单元格编辑"
+                            },
+                            &[("modifier", crate::i18n::modifier_label())],
+                        ))
+                        .class("selection-hint muted"),
+                    );
+                }
+                if !redis && !app.browse_result {
+                    footer = footer.child(
+                        html::span(crate::i18n::tr("查询结果只读").into_owned()).class("muted"),
+                    );
+                }
+                footer = footer
+                    .child(page_button(
+                        "arrow-left",
+                        "上一页",
+                        "previous",
+                        grid.page.start > 0,
+                    ))
+                    .child(
+                        html::span(crate::i18n::format_message(
+                            "第 {number} 页",
+                            &[("number", &(app.page_history.len() + 1).to_string())],
+                        ))
+                        .class("page-indicator"),
+                    )
+                    .child(page_button(
+                        "arrow-right",
+                        "下一页",
+                        "next",
+                        grid.page.start + (grid.page.rows.len() as u64)
+                            < grid.page.result.row_count,
+                    ));
+                footer = footer.child(
+                    ui::button("")
+                        .variant(ui::ButtonVariant::Quiet)
+                        .size(ui::ButtonSize::Md)
+                        .icon("copy")
+                        .title(crate::i18n::tr("复制选区").into_owned())
+                        .prop("aria-label", crate::i18n::tr("复制选区").into_owned())
+                        .disabled(grid.focus.is_none())
+                        .on_click(Msg::CopyGrid),
+                );
+                if !redis {
+                    footer = footer.child(
+                        flat_action("info", "单元格详情", "overlay:cell").class("status-action"),
+                    );
+                }
+                body = body.child(footer);
+            }
+            if redis {
+                let hint = match app.target.as_ref().map(|target| target.kind.as_str()) {
+                    Some("string") => "文本、JSON、HEX 是同一内容的展示方式，切换不改写字节。",
+                    Some("hash") => "Field 唯一，新增与删除进入变更草稿。",
+                    Some("list") => "索引从 0 开始；提交时校验编辑基线。",
+                    Some("set") => "Member 唯一且无序，列表顺序仅供浏览。",
+                    Some("zset") => "Member 唯一，Score 可重复。",
+                    _ => "",
+                };
+                if !hint.is_empty() {
+                    body = body.child(
+                        html::div()
+                            .class("value-hint")
+                            .child(html::span(crate::i18n::tr(hint).into_owned())),
+                    );
+                }
+            }
+        }
+        if app.redis_key_delete_opening() {
+            body = body.child(
+                html::div()
+                    .class("draftbar")
+                    .child(html::span(
+                        crate::i18n::tr("正在建立 Redis 删除基线…").into_owned(),
+                    ))
+                    .child(button("取消", "redis-key-delete-cancel")),
+            );
         }
         let changes = app.pending_rows.len()
             + app.redis_changes.len()
-            + app.grid.as_ref().map_or(0, |g| g.edits().len());
+            + app.grid.as_ref().map_or(0, |g| g.edits().len())
+            + app.pending_key_delete_count();
         if changes > 0 {
             let mut bar = html::div()
                 .class("draftbar")
-                .child(html::span(format!("{changes} 项待提交变更")))
+                .child(html::span(crate::i18n::format_message(
+                    "{count} 项待提交变更",
+                    &[("count", &changes.to_string())],
+                )))
                 .child(button("预览", "overlay:preview"));
             if redis {
                 bar = bar.child(button("撤销", "redis-undo"));
@@ -1446,7 +1188,7 @@ pub fn render(app: &App) -> View<Msg> {
             body = body.child(
                 html::div()
                     .class("draftbar")
-                    .child(html::span("已保存的编辑意图"))
+                    .child(html::span(crate::i18n::tr("已保存的编辑意图").into_owned()))
                     .child(button("恢复编辑意图", "restore-pending"))
                     .child(button("丢弃", "discard")),
             );
@@ -1455,7 +1197,7 @@ pub fn render(app: &App) -> View<Msg> {
             content = content
                 .child(
                     html::div()
-                        .class("split")
+                        .class("body redis-layout")
                         .child(redis_browser(app))
                         .child(body),
                 )
@@ -1464,9 +1206,16 @@ pub fn render(app: &App) -> View<Msg> {
             content = if redis {
                 content.child(
                     html::div()
-                        .class("split")
+                        .class("body redis-layout")
                         .child(redis_browser(app))
                         .child(body),
+                )
+            } else if app.workbench.overlay.as_deref() == Some("cell") {
+                content.child(
+                    html::div()
+                        .class("split")
+                        .child(body)
+                        .child(cell_drawer(app)),
                 )
             } else {
                 content.child(body)
@@ -1474,25 +1223,38 @@ pub fn render(app: &App) -> View<Msg> {
         }
     }
     let mut status = html::div()
-        .class(if app.workbench.dark {
-            "status"
-        } else {
-            "status light"
-        })
-        .child(html::span(app.status.clone()));
-    if !app.detail.is_empty() {
-        status = status.child(button("详情", "overlay:diagnostics"));
+        .class("status")
+        .child(html::span(app.status.render().into_owned()));
+    if app.navigation_drop_running() {
+        status = status.child(button("停止等待", "cancel"));
     }
     status = status.child(html::span("").class("spacer"));
-    if redis {
-        status = status.child(button("CLI", "cli-toggle"));
+    if !app.detail.is_empty() {
+        status =
+            status.child(flat_action("info", "详情", "overlay:diagnostics").class("status-action"));
     }
+    if redis && !app.tabs.is_empty() {
+        status = status.child(
+            flat_action("terminal", "CLI", "cli-toggle")
+                .class(if app.workbench.cli {
+                    "status-action active"
+                } else {
+                    "status-action"
+                })
+                .attr("aria-expanded", app.workbench.cli),
+        );
+    }
+    content = content.child(status);
     let layout = html::div()
-        .class(if app.workbench.dark {
-            "layout"
-        } else {
-            "layout light"
-        })
+        .class(format!(
+            "layout {}{}",
+            app.viewport_class(),
+            if app.viewport_width > 0 && app.viewport_width <= 760 && !app.navigation_compact() {
+                " navigation-overlay"
+            } else {
+                ""
+            }
+        ))
         .key("layout")
         .child(resource_panel(app))
         .child(content);
@@ -1500,42 +1262,12 @@ pub fn render(app: &App) -> View<Msg> {
         .workbench
         .overlay
         .as_deref()
-        .map(|kind| {
-            vec![Node::from(
-                html::div()
-                    .class(if app.workbench.dark {
-                        "overlay-layer"
-                    } else {
-                        "overlay-layer light"
-                    })
-                    .child(overlay(app, kind)),
-            )]
-        })
+        .filter(|kind| redis || *kind != "cell")
+        .map(|kind| vec![overlay(app, kind)])
         .unwrap_or_default();
-    View::new()
-        .main(vec![Node::from(layout)])
-        .dock(vec![Node::from(status)])
-        .layer(layer)
+    View::new().main(vec![Node::from(layout)]).layer(layer)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use datapier_core::model::Value as V;
-
-    #[test]
-    fn cli_reply_preserves_unicode_binary_and_large_integer() {
-        let reply = V::Json(json!([
-            {"type":"bytes","value":STANDARD.encode("中文😀")},
-            {"type":"bytes","value":STANDARD.encode([0xff, 0x00])},
-            {"type":"integer","value":"9223372036854775807"},
-            {"type":"missing"}
-        ]));
-        assert_eq!(
-            value_text(&reply, true),
-            "1) 中文😀\n2) base64:/wA=\n3) 9223372036854775807\n4) (nil)"
-        );
-    }
-}
+#[path = "../tests/unit/views.rs"]
+mod tests;

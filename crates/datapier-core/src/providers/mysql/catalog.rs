@@ -6,7 +6,7 @@ use serde_json::{Value as Json, json};
 use sqlx::{Arguments, Row, mysql::MySqlArguments};
 use tokio_util::sync::CancellationToken;
 
-use super::{MysqlSession, quote_ident, stream_query};
+use super::{MysqlSession, quote_ident, results::stream_query};
 use crate::{
     ExecutionSink,
     model::{
@@ -15,20 +15,55 @@ use crate::{
     },
 };
 
-async fn database(s: &mut MysqlSession, requested: Option<String>) -> Result<String> {
+// EXTRA 中 DEFAULT_GENERATED 仅描述默认值，不能当作生成列。
+fn column_flags(extra: &str, expression: Option<&str>) -> (bool, bool) {
+    let mut auto_increment = false;
+    let mut generated = expression.is_some_and(|value| !value.is_empty());
+    for part in extra.split_ascii_whitespace() {
+        auto_increment |= part.eq_ignore_ascii_case("auto_increment");
+        generated |= part.eq_ignore_ascii_case("generated");
+    }
+    (auto_increment, generated)
+}
+
+async fn database(
+    s: &mut MysqlSession,
+    requested: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    ensure_not_cancelled(cancel)?;
     if let Some(name) = requested.or_else(|| s.profile.database.clone()) {
         if name.is_empty() {
             return Err(AppError::invalid("数据库名不能为空"));
         }
         return Ok(name);
     }
-    let current: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
-        .fetch_one(s.connection()?)
-        .await?;
+    // 中断共享连接上的查询后不能继续复用其协议状态；丢弃该连接而非污染后续命令。
+    let current: Option<String> = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            s.connection.take();
+            return Err(AppError::cancelled());
+        }
+        result = sqlx::query_scalar("SELECT DATABASE()").fetch_one(s.connection()?) => result?,
+    };
     current.ok_or_else(|| AppError::invalid("请选择数据库"))
 }
 
-pub(super) async fn list(s: &mut MysqlSession, params: Json) -> Result<Json> {
+pub(super) async fn list(
+    s: &mut MysqlSession,
+    params: Json,
+    cancel: &CancellationToken,
+) -> Result<Json> {
+    // 独立连接只用于读取；取消时直接丢弃 future 和连接，释放会话锁。
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(AppError::cancelled()),
+        result = list_inner(s, params) => result,
+    }
+}
+
+async fn list_inner(s: &mut MysqlSession, params: Json) -> Result<Json> {
     let requested = match params.get("database") {
         None | Some(Json::Null) => None,
         Some(v) => Some(serde_json::from_value::<String>(v.clone())?),
@@ -77,16 +112,33 @@ pub(super) async fn list(s: &mut MysqlSession, params: Json) -> Result<Json> {
     })?)
 }
 
-pub(super) async fn describe(s: &mut MysqlSession, params: Json) -> Result<Json> {
+pub(super) async fn describe(
+    s: &mut MysqlSession,
+    params: Json,
+    cancel: &CancellationToken,
+) -> Result<Json> {
     let target = param(&params, "target")?;
-    Ok(serde_json::to_value(schema(s, target).await?)?)
+    Ok(serde_json::to_value(schema(s, target, cancel).await?)?)
 }
 
 pub(super) async fn schema(
     s: &mut MysqlSession,
     mut target: ResourceTarget,
+    cancel: &CancellationToken,
 ) -> Result<TableSchema> {
-    let db = database(s, target.database.take()).await?;
+    let db = database(s, target.database.take(), cancel).await?;
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(AppError::cancelled()),
+        result = schema_inner(s, target, db) => result,
+    }
+}
+
+async fn schema_inner(
+    s: &mut MysqlSession,
+    mut target: ResourceTarget,
+    db: String,
+) -> Result<TableSchema> {
     if target.name.is_empty() {
         return Err(AppError::invalid("表名不能为空"));
     }
@@ -103,26 +155,35 @@ pub(super) async fn schema(
     target.name = name.clone();
     target.kind = if is_view { "view" } else { "table" }.into();
 
-    let rows = sqlx::query("SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA, GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION")
+    let rows = sqlx::query("SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT, EXTRA, GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION")
         .bind(&db).bind(&name).fetch_all(&mut conn).await?;
     let mut columns = Vec::with_capacity(rows.len());
     for row in rows {
         let extra: String = row.try_get("EXTRA")?;
         let expression: Option<String> = row.try_get("GENERATION_EXPRESSION")?;
         let key: String = row.try_get("COLUMN_KEY")?;
+        let (auto_increment, generated) = column_flags(&extra, expression.as_deref());
         columns.push(Column {
             name: row.try_get("COLUMN_NAME")?,
             type_name: row.try_get("COLUMN_TYPE")?,
             nullable: row.try_get::<String, _>("IS_NULLABLE")? == "YES",
-            generated: extra.to_ascii_lowercase().contains("generated")
-                && !extra.to_ascii_lowercase().contains("default_generated")
-                || expression.is_some_and(|v| !v.is_empty()),
+            generated,
+            auto_increment,
             primary_key: key == "PRI",
             default_value: row.try_get("COLUMN_DEFAULT")?,
+            comment: Some(row.try_get("COLUMN_COMMENT")?),
         });
     }
-    let rows = sqlx::query("SELECT INDEX_NAME, CAST(NON_UNIQUE AS SIGNED) AS NON_UNIQUE, CAST(SEQ_IN_INDEX AS SIGNED) AS SEQ_IN_INDEX, COLUMN_NAME, CAST(SUB_PART AS SIGNED) AS SUB_PART, EXPRESSION, INDEX_TYPE, COLLATION FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY (INDEX_NAME = 'PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX")
-        .bind(&db).bind(&name).fetch_all(&mut conn).await?;
+    let index_sql = if s.has_index_expression {
+        "SELECT INDEX_NAME, CAST(NON_UNIQUE AS SIGNED) AS NON_UNIQUE, CAST(SEQ_IN_INDEX AS SIGNED) AS SEQ_IN_INDEX, COLUMN_NAME, CAST(SUB_PART AS SIGNED) AS SUB_PART, EXPRESSION, INDEX_TYPE, COLLATION FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY (INDEX_NAME = 'PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX"
+    } else {
+        "SELECT INDEX_NAME, CAST(NON_UNIQUE AS SIGNED) AS NON_UNIQUE, CAST(SEQ_IN_INDEX AS SIGNED) AS SEQ_IN_INDEX, COLUMN_NAME, CAST(SUB_PART AS SIGNED) AS SUB_PART, NULL AS EXPRESSION, INDEX_TYPE, COLLATION FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY (INDEX_NAME = 'PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX"
+    };
+    let rows = sqlx::query(index_sql)
+        .bind(&db)
+        .bind(&name)
+        .fetch_all(&mut conn)
+        .await?;
     let nullable: HashMap<&str, bool> = columns
         .iter()
         .map(|c| (c.name.as_str(), c.nullable))
@@ -248,18 +309,25 @@ pub(super) async fn browse(
 ) -> Result<Json> {
     ensure_not_cancelled(cancel)?;
     let target: ResourceTarget = param(&params, "target")?;
-    let table = schema(s, target).await?;
+    let table = schema(s, target, cancel).await?;
     ensure_not_cancelled(cancel)?;
     let db = table
         .target
         .database
         .as_deref()
         .ok_or_else(|| AppError::invalid("缺少数据库"))?;
-    let mut sql = format!(
-        "SELECT * FROM {}.{}",
-        quote_ident(db)?,
-        quote_ident(&table.target.name)?
-    );
+    // 显式投影 catalog 的列，包含 MySQL 8 的 INVISIBLE 列，保持数据与结构顺序一致。
+    let mut sql = String::from("SELECT ");
+    for (index, column) in table.columns.iter().enumerate() {
+        if index != 0 {
+            sql.push(',');
+        }
+        sql.push_str(&quote_ident(&column.name)?);
+    }
+    sql.push_str(" FROM ");
+    sql.push_str(&quote_ident(db)?);
+    sql.push('.');
+    sql.push_str(&quote_ident(&table.target.name)?);
     let columns: HashSet<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
     let mut args = MySqlArguments::default();
     let filters = match params.get("filters") {
@@ -356,6 +424,18 @@ pub(super) async fn browse(
         sql.push_str(" ORDER BY ");
         sql.push_str(&orders.join(", "));
     }
+    let end = sql.floor_char_boundary(sql.len().min(65536));
+    sink.store
+        .append_execution_text(
+            sink.execution_id,
+            &format!("构造的 SQL:\n{}\n", &sql[..end]),
+            end < sql.len(),
+        )
+        .await?;
     let mut conn = s.new_connection().await?;
-    stream_query(&mut conn, &sql, args, sink, cancel).await
+    stream_query(&mut conn, &sql, args, table.columns, sink, cancel).await
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/mysql/catalog.rs"]
+mod column_flag_tests;

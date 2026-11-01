@@ -13,6 +13,10 @@ pub(super) fn mysql_error(e: sqlx::Error) -> AppError {
             })
         });
     let mut result = AppError::from(e);
+    if details.as_ref().and_then(|d| d["mysql_errno"].as_u64()) == Some(3159) {
+        result.code = "tls_required".into();
+        result.message = format!("服务器要求启用 TLS: {}", result.message);
+    }
     if let Some(details) = details {
         result.details = Box::new(details);
     }

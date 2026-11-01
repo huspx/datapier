@@ -1,0 +1,19 @@
+{
+  "library": "devicons/devicon",
+  "commit": "32fe1d3b3f36ad11f90ab94f7db59738139c2bf6",
+  "license": "MIT",
+  "files": {
+    "mysql.svg": {
+      "source": "icons/mysql/mysql-original.svg",
+      "sourceSha256": "f73fa5d6b9da33fbf540ff96f5360c24b6d29d883ecfe6fcaecf89a8d3456067",
+      "sha256": "e72d671b242f368476ff9456fe71e03d391986b399a5a70ffd897763765b9c88",
+      "adaptation": "内嵌完整 MIT 版权与许可声明，使其随原生二进制分发"
+    },
+    "redis.svg": {
+      "source": "icons/redis/redis-original.svg",
+      "sourceSha256": "4707378b190878f36f7e6e1c01fa3ee7e7884c76101809d191dddd943a2e6bdb",
+      "sha256": "7825e88622fbab5d9c8fa37a51787e5d7ebd0d6451d814c46b9288d1d48f7000",
+      "adaptation": "将唯一 ellipse 无损转换为 SVG 椭圆弧 path，避免 TSP SVG sanitizer 删除椭圆；内嵌完整 MIT 版权与许可声明"
+    }
+  }
+}

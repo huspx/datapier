@@ -1,0 +1,108 @@
+use super::*;
+#[test]
+fn quoted_delimiters_and_comments() {
+    let (first, rest) = next_statement("SELECT '中;😀', `x;y` /* ; */; SELECT 2", "").unwrap();
+    assert_eq!(first, "SELECT '中;😀', `x;y` /* ; */");
+    assert_eq!(rest.trim(), "SELECT 2");
+    assert!(next_statement("SELECT 'unterminated", "").is_err());
+}
+#[test]
+fn program_definitions_keep_the_full_input() {
+    for sql in [
+        "/* intro */ CREATE\nPROCEDURE p() BEGIN SELECT 1; SELECT 2; END;",
+        "-- intro\nCREATE DEFINER=CURRENT_USER PROCEDURE p() BEGIN SELECT 1; END;",
+        "# intro\rCREATE DEFINER = CURRENT_USER() FUNCTION f() RETURNS INT BEGIN RETURN 1; END;",
+        "CREATE /*!50017 DEFINER=`root`@`localhost`*/ TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET @x=1; END;",
+        "/*!50000 CREATE */ DEFINER='root'@'%' EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1; END;",
+        "CREATE DEFINER = root @ db.example EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1; END;",
+    ] {
+        assert_eq!(next_statement(sql, "").unwrap(), (sql, ""), "{sql}");
+    }
+    let (first, rest) =
+        next_statement("/* intro */ CREATE TABLE t (id INT); SELECT 2", "").unwrap();
+    assert_eq!(first, "/* intro */ CREATE TABLE t (id INT)");
+    assert_eq!(rest.trim(), "SELECT 2");
+    assert!(next_statement("/* intro */ DELIMITER $$", "").is_err());
+}
+#[test]
+fn dynamic_detection_skips_comments_but_reads_executable_sql() {
+    for sql in [
+        "/* report */ CALL p()",
+        "-- report\nexecute stmt",
+        "# report\rCALL p()",
+        "/*!50000 CALL p() */",
+        "/* report */ /*!50000 EXECUTE stmt */",
+    ] {
+        assert!(is_dynamic(sql), "{sql}");
+    }
+    for sql in [
+        "/* CALL p() */ SELECT 1",
+        "/*!50000 SELECT 1 */ CALL p()",
+        "CALLER p()",
+        "'CALL'",
+        "/* unfinished",
+    ] {
+        assert!(!is_dynamic(sql), "{sql}");
+    }
+    assert_eq!(
+        first_keyword("/* report */ begin"),
+        Some("BEGIN".to_owned())
+    );
+    assert_eq!(first_keyword("# only a comment"), None);
+}
+#[test]
+fn readonly_rejects_side_effects() {
+    assert!(readonly("SELECT count(*) FROM t WHERE id = 1"));
+    assert!(!readonly("SELECT secret_function()"));
+    assert!(!readonly("SELECT 1 INTO OUTFILE '/tmp/a'"));
+    assert!(!readonly("SELECT /*!50000 SLEEP(1) */ 1"));
+    assert!(!readonly("SELECT @x := 1"));
+}
+#[test]
+fn readonly_metadata_whitelist() {
+    for sql in [
+        "SHOW DATABASES",
+        "SHOW SCHEMAS LIKE 'app%'",
+        "SHOW FULL TABLES FROM app",
+        "SHOW COLUMNS FROM app.users",
+        "SHOW CREATE TABLE app.users",
+        "SHOW CREATE VIEW `app`.`users`",
+        "SHOW SESSION VARIABLES LIKE 'sql_mode'",
+        "SHOW STATUS",
+        "SHOW COLLATION",
+        "SHOW CHARACTER SET",
+        "SHOW PROCESSLIST",
+        "DESCRIBE app.users",
+        "DESC `app`.`users`",
+        "EXPLAIN app.users",
+        "EXPLAIN SELECT count(*) FROM users",
+        "EXPLAIN ANALYZE SELECT 1",
+    ] {
+        assert!(readonly(sql), "should allow: {sql}");
+    }
+    for sql in [
+        "SHOW CREATE PROCEDURE p",
+        "SHOW CREATE FUNCTION f",
+        "SHOW CREATE TABLE f()",
+        "SHOW TABLES FROM db LIMIT 1",
+        "SHOW COLUMNS",
+        "SHOW TABLES WHERE SLEEP(1)",
+        "SHOW VARIABLES WHERE secret_function()",
+        "SHOW VARIABLES WHERE @x := 1",
+        "SHOW GRANTS FOR CURRENT_USER",
+        "SHOW TABLES; DELETE FROM users",
+        "SHOW TABLES /*!50000 INTO OUTFILE '/tmp/a' */",
+        "DESCRIBE f()",
+        "DESCRIBE app.users extra",
+        "EXPLAIN ANALYZE users",
+        "EXPLAIN UPDATE users SET x = 1",
+        "EXPLAIN ANALYZE DELETE FROM users",
+        "EXPLAIN SELECT secret_function()",
+        "EXPLAIN ANALYZE SELECT SLEEP(1)",
+        "EXPLAIN SELECT /*!50000 SLEEP(1) */ 1",
+        "EXPLAIN SELECT 1; DELETE FROM users",
+        "EXPLAIN SELECT 1 INTO OUTFILE '/tmp/a'",
+    ] {
+        assert!(!readonly(sql), "should reject: {sql}");
+    }
+}

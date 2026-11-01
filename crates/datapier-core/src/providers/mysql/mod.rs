@@ -1,18 +1,18 @@
-//! MySQL 会话、查询执行和结果解码；目录浏览及行变更由子模块负责。
+//! MySQL 会话和查询执行；结果处理、目录浏览及行变更由子模块负责。
 
 mod catalog;
 mod changes;
 mod errors;
+mod results;
 mod sql;
 
-pub(crate) use changes::validate_import_value;
+pub use changes::validate_import_value;
 
 use crate::{ExecutionSink, model::*};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::TryStreamExt;
+use results::execute_statement;
 use serde_json::{Value as Json, json};
-use sqlx::mysql::{MySqlArguments, MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
-use sqlx::{Column as _, Connection, Executor, Row, SqlSafeStr, Statement, TypeInfo, ValueRef};
+use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlSslMode};
+use sqlx::{Connection, Row};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -23,6 +23,7 @@ pub struct MysqlSession {
     profile: Profile,
     connection: Option<MySqlConnection>,
     options: MySqlConnectOptions,
+    has_index_expression: bool,
     edits: HashMap<Uuid, ResourceTarget>,
 }
 
@@ -69,11 +70,17 @@ impl MysqlSession {
         if let Some(path) = &tls.client_key_path {
             options = options.ssl_client_key(path);
         }
-        let connection = connect_initialized(&options, profile.access_mode).await?;
+        let mut connection = connect_initialized(&options, profile.access_mode).await?;
+        // 5.7 没有表达式索引列；按实际元数据探测，避免误判兼容服务端的版本号。
+        let has_index_expression: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'information_schema' AND TABLE_NAME = 'STATISTICS' AND COLUMN_NAME = 'EXPRESSION'")
+            .fetch_one(&mut connection)
+            .await
+            .map_err(errors::mysql_error)?;
         Ok(Self {
             profile,
             connection: Some(connection),
             options,
+            has_index_expression: has_index_expression != 0,
             edits: HashMap::new(),
         })
     }
@@ -125,11 +132,12 @@ impl MysqlSession {
                     json!({"server_version": row.try_get::<String,_>("version")?, "database": row.try_get::<Option<String>,_>("db")?, "sql_mode": row.try_get::<String,_>("sql_mode")?}),
                 )
             }
-            "resource.list" => catalog::list(self, params).await,
-            "resource.describe" => catalog::describe(self, params).await,
+            "resource.list" => catalog::list(self, params, cancel).await,
+            "resource.describe" => catalog::describe(self, params, cancel).await,
             "resource.browse" => catalog::browse(self, params, sink, cancel).await,
-            "change.open" => changes::open(self, params).await,
+            "change.open" => changes::open(self, params, cancel).await,
             "change.discard" => changes::discard(self, params).await,
+            "change.preview" => changes::preview(self, params, sink, cancel).await,
             "change.submit" => {
                 self.profile.ensure_write()?;
                 changes::submit(self, params, sink, cancel).await
@@ -153,15 +161,25 @@ impl MysqlSession {
         let mut results = Vec::new();
         let mut affected = 0u64;
         let mut statements = Vec::new();
+        let mut context_recorded = false;
         while !remaining.trim().is_empty() {
             // 前一条语句可能改变 sql_mode，因此每次切分都查询当前连接的模式。
             let parsed = async {
                 ensure_not_cancelled(cancel)?;
-                let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode")
-                    .fetch_one(self.connection()?)
-                    .await
-                    .map_err(errors::mysql_error)?;
-                sql::next_statement(remaining, &mode)
+                // DATABASE() 在预处理语句中绑定 prepare 时的库；元数据必须走当前连接的非缓存查询。
+                let state =
+                    sqlx::raw_sql("SELECT @@SESSION.sql_mode AS sql_mode, DATABASE() AS db")
+                        .fetch_one(self.connection()?)
+                        .await
+                        .map_err(errors::mysql_error)?;
+                if !context_recorded {
+                    let database: Option<String> = state.try_get("db")?;
+                    sink.store
+                        .record_task_database(sink.execution_id, database.as_deref())
+                        .await?;
+                    context_recorded = true;
+                }
+                sql::next_statement(remaining, &state.try_get::<String, _>("sql_mode")?)
             }
             .await;
             let (statement, rest) = match parsed {
@@ -328,303 +346,6 @@ pub(super) fn quote_ident(name: &str) -> Result<String> {
     Ok(format!("`{}`", name.replace('`', "``")))
 }
 
-fn columns(cols: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
-    cols.iter()
-        .map(|c| Column::new(c.name(), c.type_info().name()))
-        .collect()
-}
-
-// 按原生类型解码：大整数和 DECIMAL 用字符串保留精度，二进制用 Base64
-// 可逆传递；未知类型显式报错，不能退回可能有损的显示文本。
-pub(super) fn decode_row(row: &MySqlRow) -> Result<Vec<Value>> {
-    row.columns()
-        .iter()
-        .enumerate()
-        .map(|(i, col)| {
-            if row.try_get_raw(i)?.is_null() {
-                return Ok(Value::Null);
-            }
-            let ty = col.type_info().name();
-            let value = match ty {
-                "BOOLEAN" | "TINYINT" => {
-                    Value::Integer(row.try_get_unchecked::<i8, _>(i)?.to_string())
-                }
-                "SMALLINT" => Value::Integer(row.try_get_unchecked::<i16, _>(i)?.to_string()),
-                "INT" | "MEDIUMINT" => {
-                    Value::Integer(row.try_get_unchecked::<i32, _>(i)?.to_string())
-                }
-                "BIGINT" => Value::Integer(row.try_get_unchecked::<i64, _>(i)?.to_string()),
-                "TINYINT UNSIGNED" => {
-                    Value::Unsigned(row.try_get_unchecked::<u8, _>(i)?.to_string())
-                }
-                "SMALLINT UNSIGNED" | "YEAR" => {
-                    Value::Unsigned(row.try_get_unchecked::<u16, _>(i)?.to_string())
-                }
-                "INT UNSIGNED" | "MEDIUMINT UNSIGNED" => {
-                    Value::Unsigned(row.try_get_unchecked::<u32, _>(i)?.to_string())
-                }
-                "BIGINT UNSIGNED" => {
-                    Value::Unsigned(row.try_get_unchecked::<u64, _>(i)?.to_string())
-                }
-                "DECIMAL" => Value::Decimal(
-                    row.try_get_unchecked::<bigdecimal::BigDecimal, _>(i)?
-                        .to_string(),
-                ),
-                "FLOAT" => Value::Float(row.try_get_unchecked::<f32, _>(i)?.to_string()),
-                "DOUBLE" => Value::Float(row.try_get_unchecked::<f64, _>(i)?.to_string()),
-                "DATE" => Value::Date(
-                    row.try_get_unchecked::<chrono::NaiveDate, _>(i)?
-                        .to_string(),
-                ),
-                "DATETIME" | "TIMESTAMP" => Value::DateTime(
-                    row.try_get_unchecked::<chrono::NaiveDateTime, _>(i)?
-                        .to_string(),
-                ),
-                "TIME" => Value::Time(
-                    row.try_get_unchecked::<sqlx::mysql::types::MySqlTime, _>(i)?
-                        .to_string(),
-                ),
-                "JSON" => Value::Json(row.try_get_unchecked::<Json, _>(i)?),
-                "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB"
-                | "BIT" | "GEOMETRY" => {
-                    Value::Bytes(STANDARD.encode(row.try_get_unchecked::<Vec<u8>, _>(i)?))
-                }
-                "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM"
-                | "SET" => Value::Text(row.try_get_unchecked::<String, _>(i)?),
-                _ => {
-                    return Err(AppError::new(
-                        "unsupported_type",
-                        format!("不支持无损读取 MySQL 类型 {ty}"),
-                    ));
-                }
-            };
-            Ok(value)
-        })
-        .collect()
-}
-
-pub(super) async fn stream_query(
-    conn: &mut MySqlConnection,
-    sql: &str,
-    args: MySqlArguments,
-    sink: &ExecutionSink,
-    cancel: &CancellationToken,
-) -> Result<Json> {
-    ensure_not_cancelled(cancel)?;
-    // 先 prepare 取得列定义，保证零行结果也能建立带列信息的结果集。
-    let stmt = conn
-        .prepare(sqlx::AssertSqlSafe(sql).into_sql_str())
-        .await?;
-    let metadata = columns(stmt.columns());
-    let id = sink.start(metadata, "rows").await?;
-    let mut stream = stmt.query_with(args).fetch(&mut *conn);
-    let mut rows = Vec::with_capacity(128);
-    let mut count = 0u64;
-    loop {
-        let row = tokio::select! { row = stream.try_next() => row?, _ = cancel.cancelled() => return Err(AppError::cancelled()) };
-        let Some(row) = row else { break };
-        rows.push(decode_row(&row)?);
-        count += 1;
-        if rows.len() == 128 {
-            sink.append(id, std::mem::take(&mut rows)).await?;
-        }
-    }
-    if !rows.is_empty() {
-        sink.append(id, rows).await?;
-    }
-    sink.finish(id, json!({"row_count":count})).await?;
-    Ok(json!({"results":[id],"row_count":count}))
-}
-
-async fn execute_statement(
-    conn: &mut MySqlConnection,
-    text: &str,
-    sink: &ExecutionSink,
-) -> Result<(Vec<Uuid>, u64)> {
-    // 普通语句的 prepare 元数据用于保留空结果的列；prepare 失败时仍执行。
-    // CALL／EXECUTE 的结果由运行时决定，SQLx 不暴露空动态结果元数据，
-    // 且边界事件也可能是命令 OK 包，不能据此伪造列或断言存在结果集。
-    let dynamic = sql::is_dynamic(text);
-    let initial = conn
-        .prepare(sqlx::AssertSqlSafe(text).into_sql_str())
-        .await
-        .ok()
-        .map(|stmt| columns(stmt.columns()));
-    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(text.to_owned())).fetch_many(&mut *conn);
-    let mut results = Vec::new();
-    let mut id = None;
-    let mut pending = if dynamic { None } else { initial };
-    let mut rows = Vec::with_capacity(128);
-    let mut count = 0u64;
-    let mut affected = 0u64;
-    loop {
-        let item = match stream.try_next().await {
-            Ok(Some(item)) => item,
-            Ok(None) => break,
-            Err(error) => {
-                let mut error = errors::mysql_error(error);
-                let mut details = match error.details.as_ref() {
-                    Json::Object(map) => map.clone(),
-                    _ => serde_json::Map::new(),
-                };
-                details.insert("current_affected_rows".into(), json!(affected));
-                details.insert("current_results".into(), json!(results));
-                error.details = Box::new(Json::Object(details));
-                return Err(error);
-            }
-        };
-        match item {
-            sqlx::Either::Right(row) => {
-                if id.is_none() {
-                    let meta = pending
-                        .take()
-                        .filter(|m| !m.is_empty())
-                        .unwrap_or_else(|| columns(row.columns()));
-                    let result = sink.start(meta, "rows").await?;
-                    results.push(result);
-                    id = Some(result);
-                }
-                rows.push(decode_row(&row)?);
-                count += 1;
-                if rows.len() == 128 {
-                    sink.append(id.unwrap(), std::mem::take(&mut rows)).await?;
-                }
-            }
-            sqlx::Either::Left(done) => {
-                affected = affected.saturating_add(done.rows_affected());
-                if id.is_none() && pending.as_ref().is_some_and(|c| !c.is_empty()) {
-                    let result = sink.start(pending.take().unwrap(), "rows").await?;
-                    results.push(result);
-                    id = Some(result);
-                }
-                if id.is_none() && dynamic {
-                    let result = sink.start(Vec::new(), "columns_unknown").await?;
-                    results.push(result);
-                    sink.finish(result, json!({"columns_known":false,"result_set_presence":"unknown","reason":"driver_does_not_expose_empty_dynamic_result_metadata"})).await?;
-                }
-                if let Some(result) = id.take() {
-                    if !rows.is_empty() {
-                        sink.append(result, std::mem::take(&mut rows)).await?;
-                    }
-                    sink.finish(result, json!({"row_count":count})).await?;
-                    count = 0;
-                }
-                pending = None;
-            }
-        }
-    }
-    if let Some(result) = id {
-        if !rows.is_empty() {
-            sink.append(result, rows).await?;
-        }
-        sink.finish(result, json!({"row_count":count})).await?;
-    }
-    Ok((results, affected))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn script_errors_preserve_completed_and_unexecuted_work() {
-        let id = Uuid::new_v4();
-        let done = vec![
-            json!({"index":0,"status":"executed","affected_rows":1,"results":[id],"transaction_state":"unknown"}),
-        ];
-        let error =
-            AppError::new("database", "table missing").with_details(json!({"mysql_errno":1146}));
-        let error = script_error(
-            error,
-            &done,
-            &[id],
-            1,
-            "INSERT INTO t VALUES (2)",
-            Some(("SELECT * FROM missing", "failed")),
-        );
-        assert_eq!(error.details["mysql_errno"], 1146);
-        assert_eq!(error.details["statements"][0]["status"], "executed");
-        assert_eq!(error.details["statements"][1]["status"], "failed");
-        assert_eq!(error.details["affected_rows"], 1);
-        assert_eq!(error.details["results"][0], id.to_string());
-        assert_eq!(error.details["unexecuted_sql"], "INSERT INTO t VALUES (2)");
-    }
-
-    fn fixture_profile(mode: AccessMode) -> (Profile, Option<String>) {
-        (
-            Profile {
-                id: Uuid::new_v4(),
-                name: "mysql-fixture".into(),
-                provider: ProviderKind::Mysql,
-                host: "127.0.0.1".into(),
-                port: std::env::var("DATAPIER_TEST_MYSQL_PORT")
-                    .unwrap()
-                    .parse()
-                    .unwrap(),
-                username: "datapier".into(),
-                database: Some("datapier_fixture".into()),
-                redis_db: 0,
-                access_mode: mode,
-                tls: TlsConfig::default(),
-            },
-            Some(std::env::var("DATAPIER_TEST_MYSQL_SECRET").unwrap()),
-        )
-    }
-
-    #[tokio::test]
-    #[ignore = "需要隔离 MySQL 8.0 或 8.4 实例"]
-    async fn every_readonly_physical_connection_uses_server_constraint() {
-        let (profile, secret) = fixture_profile(AccessMode::ReadOnly);
-        let mut session = MysqlSession::connect(profile, secret).await.unwrap();
-        let mut browse = session.new_connection().await.unwrap();
-        let readonly: i64 = sqlx::query_scalar("SELECT @@SESSION.transaction_read_only")
-            .fetch_one(&mut browse)
-            .await
-            .unwrap();
-        assert_eq!(readonly, 1);
-        browse.close().await.unwrap();
-        session.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "需要隔离 MySQL 8.0 或 8.4 实例"]
-    async fn failed_script_preserves_completed_work_and_remaining_sql() {
-        let root = std::env::temp_dir().join(format!("datapier-mysql-script-{}", Uuid::new_v4()));
-        let store = crate::Store::open(&root).await.unwrap();
-        let task = store
-            .create_task(Uuid::new_v4(), "test", "execution.run", json!({}), true)
-            .await
-            .unwrap();
-        let sink = ExecutionSink::new(store.clone(), task.id);
-        let (profile, secret) = fixture_profile(AccessMode::ReadWrite);
-        let mut session = MysqlSession::connect(profile, secret).await.unwrap();
-        let text = "CREATE TEMPORARY TABLE dp_script_progress(id INT); INSERT INTO dp_script_progress VALUES (7); SELECT * FROM dp_table_does_not_exist; INSERT INTO dp_script_progress VALUES (8)";
-        let error = session
-            .call(
-                "execution.run",
-                json!({"text":text}),
-                &sink,
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.details["statements"][1]["status"], "executed");
-        assert_eq!(error.details["statements"][2]["status"], "failed");
-        assert_eq!(error.details["affected_rows"], 1);
-        assert!(
-            error.details["unexecuted_sql"]
-                .as_str()
-                .unwrap()
-                .contains("VALUES (8)")
-        );
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dp_script_progress")
-            .fetch_one(session.connection().unwrap())
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
-        session.close().await.unwrap();
-        store.pool.close().await;
-        store.cache.close().await;
-        tokio::fs::remove_dir_all(root).await.unwrap();
-    }
-}
+#[path = "../../../tests/unit/mysql/session.rs"]
+mod tests;

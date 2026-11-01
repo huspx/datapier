@@ -26,3 +26,9 @@ CREATE TABLE executions (
     updated_at REAL NOT NULL DEFAULT (unixepoch('subsec'))
 );
 CREATE INDEX executions_workspace ON executions(workspace_id, created_at);
+CREATE TABLE app_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    payload TEXT NOT NULL
+);
+INSERT INTO app_settings(id, payload)
+VALUES (1, '{"language":"system"}');

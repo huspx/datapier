@@ -91,3 +91,98 @@ fn closing_input_saves_a_copy_after_a_conflict() {
     assert!(!app.saving);
     assert!(!app.dirty);
 }
+
+#[test]
+fn batch_close_preflights_every_tab_and_uses_clicked_identity() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("batch".into());
+    app.action("new-tab", &backend);
+    app.action("new-tab", &backend);
+    let ids: Vec<_> = app.tabs.iter().map(|tab| tab.id).collect();
+    app.tabs[0].pending = json!({"restored": true});
+    app.action(&format!("tab-close-left:{}", ids[2]), &backend);
+    assert_eq!(app.tabs.len(), 3);
+    assert!(requests.try_recv().is_err());
+    app.tabs[0].pending = Value::Null;
+    app.action(&format!("tab-close-right:{}", ids[0]), &backend);
+    assert_eq!(
+        app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    app.action(&format!("tab-close-all:{}", ids[0]), &backend);
+    assert!(app.tabs.is_empty());
+    assert!(app.session.is_none());
+    assert!(app.workspace_snapshot().unwrap().tabs.is_empty());
+    app.action("new-tab", &backend);
+    assert_eq!(app.tabs.len(), 1);
+}
+
+#[test]
+fn close_waits_for_ack_and_ignores_late_session_response() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("ack".into());
+    let id = app.tabs[0].id;
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.close_tab(id, &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(app.tabs.len(), 1);
+    app.routed_response(
+        Response {
+            tag: format!("{id}:{}:resource.list", app.generation),
+            result: Ok(json!({"resources":[],"cursor":null})),
+        },
+        &backend,
+    );
+    assert_eq!(app.tabs.len(), 1);
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("failed", "close failed")),
+        },
+        &backend,
+    );
+    assert_eq!(app.tabs.len(), 1);
+    assert!(app.session.is_some());
+    app.close_tab(id, &backend);
+    let request = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("not_found", "gone")),
+        },
+        &backend,
+    );
+    assert!(app.tabs.is_empty());
+    app.routed_response(
+        Response {
+            tag: format!("{id}:0:connection.open"),
+            result: Ok(json!({})),
+        },
+        &backend,
+    );
+    assert!(app.session.is_none());
+}
+
+#[test]
+fn empty_workspace_round_trips_and_profile_can_open() {
+    let (backend, _requests, _) = Backend::scripted();
+    let mut app = App::new("empty".into());
+    let id = app.tabs[0].id;
+    app.close_tab(id, &backend);
+    let state = serde_json::to_value(app.workspace_snapshot().unwrap()).unwrap();
+    let mut restored = App::new("empty".into());
+    restored.response(
+        Response {
+            tag: "workspace.load".into(),
+            result: Ok(json!({"revision":1,"state":state})),
+        },
+        &backend,
+    );
+    assert!(restored.tabs.is_empty());
+    restored.profile_form(None);
+    let profile = restored.form_profile().unwrap();
+    restored.profiles.push(profile);
+    restored.workbench.overlay = None;
+    restored.select_profile(0, &backend);
+    assert_eq!(restored.tabs.len(), 1);
+}
