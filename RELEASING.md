@@ -57,6 +57,8 @@
 
 独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、运行 `--version` smoke、调用单目标组包脚本并上传 `datapier-<target>` Actions artifact。默认测试与版本 smoke 不等于上面的真实运行验收。随后 bundle job 下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact；该产物仍需人工发布。
 
+官方 Actions 使用 Node.js 24 运行时：`actions/checkout@v7`、`actions/upload-artifact@v7` 和 `actions/download-artifact@v8`。升级时核对官方运行时声明、runner 要求及产物参数兼容性；当前使用 GitHub 托管 runner。
+
 也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `$Target` 替换为上表中的实际目标，构建后仍须完成相应运行验收。六个归档与 sidecar 必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
 
 ```powershell

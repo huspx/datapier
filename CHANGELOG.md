@@ -42,6 +42,7 @@
 - 配置库和结果缓存各使用完整的 0.1.0 初始 schema，基线版本为 1；打开时拒绝不完整或较新基线。
 - 按职责拆分 provider 操作、Engine 会话处理、TSP 动作／响应与视图模块；所有测试实现统一放到各 crate 的 `tests/`，私有单元测试通过 `cfg(test)` 与相对模块路径加载，不扩大公开 API。README 提供实际 Tern 操作 GIF。
 - 原生 CI 的 macOS arm64 使用 `macos-15`，避免已退役 macOS 14 镜像的停机窗口；外置文件清理回归按跨平台的逻辑释放及恢复重试结果验收，不依赖操作系统对缺失子文件的错误分类。
+- 官方 GitHub Actions 升级至 Node.js 24 运行时：`checkout@v7`、`upload-artifact@v7`、`download-artifact@v8`，保留六目标原生构建、归档与汇总流程。
 
 ### 兼容性与限制
 

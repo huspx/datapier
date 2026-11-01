@@ -10,7 +10,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -65,7 +65,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -92,7 +92,7 @@ jobs:
       - name: Package binary
         shell: pwsh
         run: ./scripts/package-target.ps1 -Target '${{ matrix.target }}'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: datapier-${{ matrix.target }}
           path: dist/*
@@ -101,8 +101,8 @@ jobs:
     needs: native
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: datapier-*
           path: dist
@@ -110,7 +110,7 @@ jobs:
       - name: Assemble plugin and checksums
         shell: pwsh
         run: ./scripts/assemble-release.ps1 -Artifacts dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: datapier-0.1.0-release
           path: dist/*
