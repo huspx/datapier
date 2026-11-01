@@ -218,7 +218,7 @@ cargo test -p datapier-core --test tls -- --ignored
 
 `huspx` 保留仅在 PR 内绕过规则的权限，仍须通过 PR 合并，不能直接推送 `main`。PR 作者不能批准自己的 PR；维护者本人发起的 PR 若无其他有效审批人，只能显式使用该 PR 内绕过权限合并，不能记作已获得 code owner 批准。完整配置以 GitHub ruleset 为准。
 
-PR 说明变更内容、实际验证及限制。现有原生构建工作流在 push、pull request 和手动触发时执行；当前 ruleset 未配置 required status checks。具体发布检查见[发布指南](RELEASING.md)。
+PR 说明变更内容、实际验证及限制。现有原生构建工作流仅在目标为 `main` 的 pull request、`main` 的 push 和手动触发时执行；普通工作分支和 tag 的 push 不自动触发。PR 的分支过滤按目标分支匹配，保留合并前检查；合并后的 `main` push 另行检查最终提交。当前 ruleset 未配置 required status checks。具体发布检查见[发布指南](RELEASING.md)。
 
 ## 文档与交付
 

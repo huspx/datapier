@@ -2,7 +2,7 @@
 
 ## 当前发布方式与边界
 
-0.1.0 已于 2026-11-01 在 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.1.0) 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源，正式发布仍由维护者执行。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
+0.1.0 已于 2026-11-01 在 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.1.0) 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 仅在目标为 `main` 的 pull request、`main` 的 push 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；普通工作分支和 tag 的 push 不自动触发。它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源，正式发布仍由维护者执行。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
 
 [技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成完整原生验收。0.1.0 经维护者明确接受已披露的验收范围后公开，例外与限制保留在对应 Release 说明中；该次授权不代表其余平台已验收，也不自动放宽后续版本的发布要求。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
