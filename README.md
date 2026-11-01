@@ -4,7 +4,7 @@
 
 0.1.0 实现 **MySQL 与 Redis**，通过 **Rust TSP（Tern Surface Protocol）应用＋[Tern](https://docs.stencil.so/tern/) 启动 plugin** 交付。
 
-> 当前为未发布的 0.1.0 实现。已有 macOS arm64 的真实 Tern、数据库与系统凭据运行记录；另外五个原生目标尚未完成运行验收，六平台发布验收仍须针对候选版本完成。
+> 0.1.0 的完整交互运行证据集中于 macOS arm64。其他平台的原生构建与默认测试状态见 [GitHub Actions](https://github.com/huspx/datapier/actions)；完整交互、安装和系统凭据验收仍须分别完成。
 
 ## 0.1.0 功能
 
@@ -19,6 +19,16 @@
 - **数据交换**：单文件 CSV／JSON 导入导出，列映射、类型转换和失败记录；格式直接选择，映射与转义等高级选项按需展开；完整结果增量落盘，大字段按需读取。
 
 0.1.0 按直连 MySQL 和 Redis 单节点设计。视图与任意 SQL 结果提供只读浏览；读写连接仍可显式执行写 SQL。Redis Cluster／Sentinel、鼠标拖拽列宽、鼠标框选和连续虚拟滚动不在该版范围内。
+
+## 安装
+
+需要单独安装 Tern，当前运行基线为 0.9.9。从 [GitHub Releases](https://github.com/huspx/datapier/releases) 下载 `datapier-plugin-0.1.0.zip`，解压后在解压目录执行：
+
+```sh
+tern plugin install ./datapier
+```
+
+在 Tern 命令面板选择 `New Datapier block`。启动入口自动下载匹配本机 OS／CPU 架构的程序，验证归档及程序 SHA-256，并复用版本化缓存；无需安装 Rust。开发构建方式见[贡献指南](CONTRIBUTING.md#开发环境)。
 
 ## 操作演示
 

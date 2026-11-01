@@ -1,6 +1,6 @@
 # 变更记录
 
-## 0.1.0（未发布）
+## 0.1.0
 
 首个版本提供 MySQL／Redis 数据库工作台。平台与数据库的实际验收范围见 [README](README.md) 和[技术方案](docs/technical-design-0.1.0.md#11-实现与运行记录)。
 

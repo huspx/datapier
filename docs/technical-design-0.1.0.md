@@ -273,7 +273,7 @@ MySQL 表导出开启新的只读读取任务；查询结果导出使用原结�
 
 ## 11. 实现与运行记录
 
-0.1.0 尚未发布。当前源码包含四个 crate、共享 Engine、MySQL／Redis provider、TSP 工作台、CSV／JSON 交换、启动 plugin、安装器及六目标 CI 配置。以下为既有 macOS arm64 运行证据，开发基线为 Tern 0.9.9、registry tern-sdk 0.2.0；这些记录不代表本轮重跑，也不能代替候选提交的验收。
+当前 0.1.0 源码包含四个 crate、共享 Engine、MySQL／Redis provider、TSP 工作台、CSV／JSON 交换、启动 plugin、安装器及六目标 CI 配置。以下为既有 macOS arm64 运行证据，开发基线为 Tern 0.9.9、registry tern-sdk 0.2.0；这些记录不代表本轮重跑，也不能代替候选提交的验收。
 
 | 场景 | 既有运行证据 |
 |---|---|
@@ -295,4 +295,4 @@ MySQL 表导出开启新的只读读取任务；查询结果导出使用原结�
 - **界面与演示**：实际 Tern 验证资源浏览、SQL 结果、任务详情、Redis DB 选择和 Hash 字段；浏览器设计稿验证矩形复制、选区外目标和显示文本复制，无页面脚本错误。README 的 8 帧、12.6 秒 GIF 来自实际原生操作。
 
 
-其余五个目标尚未完成原生验收，Windows ConPTY／权限及 Linux 凭据服务尚未实际验证；六个真实产物尚未集齐，完整启动包尚未组装成功。正式发布仍须按第 8、9 节及[发布指南](../RELEASING.md)验证候选提交、各平台和实际产物；既有结果不能代替相应运行证据。
+macOS arm64 以外的五个目标尚未完成完整原生交互验收，Windows ConPTY／权限及 Linux 凭据服务尚未实际验证；六目标产物和组包状态以[构建记录](https://github.com/huspx/datapier/actions/workflows/native-release.yml)中的候选提交为准。正式发布仍须按第 8、9 节及[发布指南](../RELEASING.md)验证候选提交、各平台和实际产物；既有结果不能代替相应运行证据。

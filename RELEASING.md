@@ -2,7 +2,7 @@
 
 ## 当前发布方式与边界
 
-当前实现版本为 0.1.0，尚未发布。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源。正式分发需要在验收完成后人工创建 GitHub Release 并上传组包产物。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
+当前版本为 0.1.0，正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源。正式分发需要在验收完成后人工创建 GitHub Release 并上传组包产物。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
 
 [技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成原生验收。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
