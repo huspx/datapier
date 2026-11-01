@@ -1,7 +1,11 @@
 name: Native builds and release bundles
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
 permissions:
   contents: read
@@ -90,14 +94,17 @@ jobs:
           $versionOutput = & $nativeBinary --version
           if ($LASTEXITCODE -ne 0 -or $versionOutput -cne 'datapier 0.1.0') { throw 'Native CLI smoke failed' }
       - name: Package binary
+        if: github.ref == 'refs/heads/main'
         shell: pwsh
         run: ./scripts/package-target.ps1 -Target '${{ matrix.target }}'
       - uses: actions/upload-artifact@v7
+        if: github.ref == 'refs/heads/main'
         with:
           name: datapier-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
   bundle:
+    if: github.ref == 'refs/heads/main'
     needs: native
     runs-on: ubuntu-24.04
     steps:
