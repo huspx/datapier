@@ -7,7 +7,7 @@ PLUGIN_DIR=$(dirname "$SCRIPT_DIR")
 CACHE=${DATAPIER_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME:-}/.cache}/datapier}
 TMP=
 json_string() {
-    printf '%s' "$1" | awk 'BEGIN { ORS=""; printf "\"" } { if (NR>1) printf "\\n"; for(i=1;i<=length($0);i++) { c=substr($0,i,1); if(c=="\\") printf "\\\\"; else if(c=="\"") printf "\\\""; else if(c=="\r") printf "\\r"; else if(c=="\t") printf "\\t"; else printf "%s",c } } END { printf "\"" }'
+    printf '%s' "$1" | awk 'BEGIN { ORS=""; for(i=1;i<32;i++) escapes[sprintf("%c",i)]=sprintf("\\u%04x",i); printf "\"" } { if (NR>1) printf "\\n"; for(i=1;i<=length($0);i++) { c=substr($0,i,1); if(c=="\\") printf "\\\\"; else if(c=="\"") printf "\\\""; else if(c in escapes) printf "%s",escapes[c]; else printf "%s",c } } END { printf "\"" }'
 }
 REPORTED=0
 fail() {

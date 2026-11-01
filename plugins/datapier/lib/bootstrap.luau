@@ -34,7 +34,7 @@ function M.start(cx)
             end
             -- 异步回调使用 fresh 上下文；原生程序通过 cwd + 固定 shell 命令启动，
             -- Launch 的 block args 不能当作进程 argv，用户输入也不能拼入命令。
-            local command = if os == "windows" then ".\\datapier.exe ui" else "./datapier ui"
+            local command = if os == "windows" then ".\\datapier.exe tui" else "./datapier tui"
             local started, failure = pcall(function()
                 fresh.hosts:terminal("local", { cwd = data.cwd, command = command })
             end)
