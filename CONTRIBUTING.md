@@ -210,10 +210,18 @@ cargo test -p datapier-core --test tls -- --ignored
 
 ## 分支与 PR
 
-按实际目标分支提交变更，PR 说明变更内容、实际验证及限制；不假定固定分支命名、默认远端或合并方式。现有原生构建工作流在 push、pull request 和手动触发时执行，具体发布检查见[发布指南](RELEASING.md)。
+`main` 由 GitHub 的 [protect-main ruleset](https://github.com/huspx/datapier/rules/26316200) 保护，变更必须从工作分支提交 PR 后合并，禁止直接推送、强制推送和删除 `main`；不额外约定工作分支命名。
+
+仓库通过 [.github/CODEOWNERS](.github/CODEOWNERS) 将所有文件（包括 CODEOWNERS 自身）的 code owner 指定为 `@huspx`。GitHub 使用 PR 目标分支上的 CODEOWNERS；本文件必须先合入 `main`，才会对后续以 `main` 为目标的 PR 生效。
+
+常规 PR 至少需要一个批准，并要求 code owner 批准；新提交会撤销过期批准，所有 review 讨论必须解决。无人工协作者的 Copilot PR 需要额外一个批准。仅允许 Merge commit，不要求最后一次推送必须由其他人单独批准。
+
+`huspx` 保留仅在 PR 内绕过规则的权限，仍须通过 PR 合并，不能直接推送 `main`。PR 作者不能批准自己的 PR；维护者本人发起的 PR 若无其他有效审批人，只能显式使用该 PR 内绕过权限合并，不能记作已获得 code owner 批准。完整配置以 GitHub ruleset 为准。
+
+PR 说明变更内容、实际验证及限制。现有原生构建工作流在 push、pull request 和手动触发时执行；当前 ruleset 未配置 required status checks。具体发布检查见[发布指南](RELEASING.md)。
 
 ## 文档与交付
 
-功能变更同步 README、设计说明及根目录 [CHANGELOG](CHANGELOG.md) 中适用的未发布变更记录；发布时由维护者将相关记录整理到对应版本，并按[发布指南](RELEASING.md#发布说明与-changelog)人工编写发布说明。README 的安装命令、平台支持及功能状态必须与实际实现和发布产物一致。最终交付说明具体改动、实际验证和限制。
+功能变更同步 README、设计说明及根目录 [CHANGELOG](CHANGELOG.md) 中适用的未发布变更记录；发布准备时由维护者将相关记录整理到对应版本。CHANGELOG 记录版本内容，正式发布状态以 GitHub Release 的状态与实际资源为准；内容归档、发布失败和重试按[发布指南](RELEASING.md#发布说明与-changelog)处理。README 的安装命令、平台支持及功能状态必须与实际实现和发布产物一致。最终交付说明具体改动、实际验证和限制。
 
 遵循 [MIT License](LICENSE)，保留第三方分发要求。真实凭据、私有连接、生产数据、生成产物与本地索引不入库；测试样本使用可公开数据。

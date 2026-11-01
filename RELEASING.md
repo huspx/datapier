@@ -2,11 +2,13 @@
 
 ## 当前发布方式与边界
 
-当前版本为 0.1.0，正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源。正式分发需要在验收完成后人工创建 GitHub Release 并上传组包产物。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
+0.1.0 已于 2026-11-01 在 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.1.0) 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。现有工作流 `.github/workflows/native-release.yml` 在 push、pull request 或手动触发时执行独立格式检查，并为六个原生目标构建和生成 Actions artifact；它的权限为 `contents: read`，不会创建 GitHub Release 或上传 Release 资源，正式发布仍由维护者执行。现有配置没有自动发布到 registry、商店、crates.io 或 npm 的渠道。
 
-[技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成原生验收。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
+[技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成完整原生验收。0.1.0 经维护者明确接受已披露的验收范围后公开，例外与限制保留在对应 Release 说明中；该次授权不代表其余平台已验收，也不自动放宽后续版本的发布要求。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
 本指南描述发布步骤，不代表已完成这些操作，也不构成提交、推送、合并、创建 tag 或发布的授权。工作区有文件不代表目标提交或分发仓库包含它们；正式发布前必须确保实际源码、Cargo 配置和锁文件、plugin、安装器、组包脚本及工作流都已进入目标提交，不能依赖未跟踪或被忽略的本地文件。
+
+调整为 Actions 内发布时，应复用已通过格式检查、六目标构建和汇总组包的固定提交产物，校验 tag、workflow run 的成功状态及提交 SHA 一致，再由发布 job 上传原文件，无需经维护者本机中转或为发布再次编译。仅发布 job 授予 `contents: write`，PR 检查和普通构建保持只读；发布仍须满足验收与操作授权。跨 job／workflow 使用 artifact 传递，同一 job 已有完整 `dist` 时可直接上传 Release；GitHub 不支持用 artifact ID 直接替代 Release asset 上传。当前工作流尚未实现这段自动发布。
 
 ## 版本号与关联文件
 
@@ -21,7 +23,15 @@
 
 ## 发布说明与 CHANGELOG
 
-根目录 [CHANGELOG.md](CHANGELOG.md) 由贡献者人工维护，功能变更记入适用的未发布条目，发布时整理到对应版本；当前没有自动生成发布说明的机制。维护者结合变更记录、[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)及该版本真实验收记录人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。
+根目录 [CHANGELOG.md](CHANGELOG.md) 由贡献者人工维护，记录变更内容；当前没有自动生成发布说明或回写发布状态的机制。版本章节存在、CI 成功、artifact 上传完成、tag 创建或 Release 草稿创建，都不等于正式发布完成。
+
+- 日常新变更记入顶部的“未发布（Unreleased）”章节；首次有下一版变更时再创建该章节，不把新功能追加到已经发布的版本章节。
+- 发布准备 PR 将待发布条目整理为对应版本章节，并同步版本号、安装器和组包配置。版本章节是该提交的内容快照，不使用“已发布／未发布”标记推断线上状态，也不预填实际发布日期。
+- 对外发布状态以 GitHub Release 为准：`draft=true` 为草稿，`draft=false` 且 `prerelease=true` 为预发布，`draft=false` 且 `prerelease=false` 为正式公开；实际发布时间使用 `published_at`。资源完整性、摘要及安装验证仍须另行核对，不能只看这些字段。
+- 发布失败时保留草稿和诊断记录，不声称已发布；重试应优先复用同一提交、同一已验证 workflow 的完整产物。产物过期、校验失败或源码改变时，重新完成对应构建和验证，不混用旧文件，不移动已经公开的版本 tag。
+- 发布成功后不再自动提交一次“改为已发布”的 CHANGELOG 更新，不改写已验证 tag；发布时间、正式下载验证和验收范围写入 GitHub Release 说明。已发布的 0.1.0 保留在其版本章节，后续变更归入未发布章节。
+
+维护者结合变更记录、[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)及该版本真实验收记录人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。
 
 ## 发布前检查
 
@@ -36,7 +46,7 @@
 
 ## PR 与合并
 
-现有配置和历史未约定固定发布分支、分支命名、PR 审批数量或合并方式，本指南不新增这些要求。如使用 PR，将版本同步、发布说明及所需源码和配置纳入候选变更，按仓库实际目标分支提交并检查对应工作流结果。合并不代表发布完成；最终提交可能与候选提交不同，应在最终提交重跑或核对对应 workflow，并使用该提交的六目标产物完成必要的重新验收与组包。记录产物对应的提交和 workflow run，不把不同提交的文件混作一个版本。
+`main` 必须通过 PR 合并，CODEOWNERS、审批、Merge commit 和仅限 PR 的绕过要求见[贡献指南的分支与 PR](CONTRIBUTING.md#分支与-pr)。将版本同步、CHANGELOG 版本内容、发布说明及所需源码和配置纳入发布准备 PR，检查对应工作流结果；CODEOWNERS 的审批分配以 PR 目标分支已有定义为准。合并不代表发布完成；最终提交可能与候选提交不同，应在最终提交重跑或核对对应 workflow，并使用该提交的六目标产物完成必要的重新验收与组包。记录产物对应的提交和 workflow run，不把不同提交的文件混作一个版本。
 
 ## tag 与目标提交
 
