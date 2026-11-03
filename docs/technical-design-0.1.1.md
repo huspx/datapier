@@ -104,9 +104,9 @@ reqwest v0.13.5 的公开 manifest 声明最低 Rust 1.85.0，低于当前 works
 
 开发与发布脚本采用 Python 3.15，仅使用标准库；CI 通过 `actions/setup-python@v7` 配置 `python-version: '3.15'`，跟随该分支补丁版本，解释器架构跟随原生 runner。迁移作为独立 PR 随 0.1.1 交付，不单独发布产品版本，与原生 UI 对齐分别审查和验证。
 
-`scripts/version.py`、`scripts/sync-version.py`、`scripts/package-target.py`、`scripts/assemble-release.py` 分别负责共享版本逻辑、源码 plugin 同步、单目标组包和六目标汇总；旧开发发布 `.ps1` 已移除。workflow 的版本读取、原生架构检查及二进制版本 smoke 统一调用 Python。根 `Cargo.toml` 继续作为唯一产品版本来源，保留只读检查、显式版本一致性校验和临时 plugin 副本同步。
+`scripts/version.py`、`scripts/sync-version.py`、`scripts/package-target.py` 和 `scripts/assemble-release.py` 分别负责共享版本逻辑、源码 plugin 同步、单目标组包和六目标汇总；`scripts/draft_release.py` 负责草稿 Release 的准备、目标资源直传和汇总。旧开发发布 `.ps1` 已移除。workflow 的版本读取、原生架构检查及二进制版本 smoke 统一调用 Python。根 `Cargo.toml` 继续作为唯一产品版本来源，保留只读检查、显式版本一致性校验和临时 plugin 副本同步。
 
-沿用六目标原生构建、归档命名与内容、归档及程序摘要、缓存和下载地址契约，以及 PR 只验证、main 才组包的现有边界。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，保留源码 UTF-8 BOM 与 stdout 无 BOM UTF-8 JSON；macOS／Linux 安装器继续使用 `/bin/sh`，安装和运行 Datapier 无需 Python。
+沿用六目标原生构建、归档命名与内容、归档及程序摘要、缓存和下载地址契约。PR 与非 main 手动运行在 runner 内打包验证，不上传资源；main 将单目标归档直传同一版本草稿 Release，并从草稿完成六目标汇总，全程不使用 Actions artifact，草稿仍需维护者验收后发布。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，保留源码 UTF-8 BOM 与 stdout 无 BOM UTF-8 JSON；macOS／Linux 安装器继续使用 `/bin/sh`，安装和运行 Datapier 无需 Python。
 
 Python 脚本与 workflow 已切换；贡献指南和 `dprint.json` 定义 Python 开发环境、Ruff Wasm 格式化与标准库回归入口。实际命令和组包步骤见[发布指南](../RELEASING.md#python-315-工具环境)，运行结果及尚未验证的平台范围见第 12 节。
 
@@ -706,7 +706,7 @@ tern -e "$PWD/target/debug/datapier" tui
 
 ### 11.1 版本和回退
 
-当前开发版本的 workspace／锁文件本地包、TSP／plugin、安装器、组包 guard、workflow smoke 和 artifact 名同步为 0.1.1；这不代表正式发布。历史 0.1.0 文档与验收记录保留。
+当前开发版本的 workspace／锁文件本地包、TSP／plugin、安装器、组包 guard、workflow smoke 和 Release 资源名同步为 0.1.1；这不代表正式发布。历史 0.1.0 文档与验收记录保留。
 
 配置 schema 2 不能由仅支持 schema 1 的 0.1.0 原地打开。升级前在 Engine 全部关闭且 SQLite 一致时备份完整用户数据目录，不在 WAL 写入时只复制主文件。回退前保留完整目标目录及密码、TOTP 的新增凭据追踪；需要清理时使用支持对应条目的版本，不能因恢复旧目录丢失种子条目的管理依据。
 

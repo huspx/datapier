@@ -23,6 +23,7 @@
 ### 开发与分发
 
 - 版本同步、组包及 CI 脚本改用 Python 3.15 标准库，开发环境不再要求 `pwsh`；Python 格式化沿用 dprint 的 Ruff Wasm 插件。Windows 用户安装器继续使用系统自带 PowerShell 5.1，安装和运行 Datapier 无需 Python。
+- 原生 CI 在 PR 中完成六目标打包验证；main 将归档直接上传版本草稿 Release，并从同一草稿汇总 plugin 包与校验清单，全程不使用 Actions artifact。草稿保留人工说明，仍由维护者验收后发布。
 - SQL、Shell、Luau 和 Python 统一使用 2 空格缩进，按 dprint 配置格式化既有源码；Rust 继续使用原生 rustfmt。
 
 ### 兼容性与限制

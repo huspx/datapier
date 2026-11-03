@@ -66,7 +66,7 @@ tern plugin install ./datapier
 | Linux | x86-64、arm64 | GNU／glibc |
 | Windows | x86-64、arm64 | MSVC |
 
-六种组合作为实现与构建目标保留。0.1.1 原生运行仅验收 macOS arm64，其他目标在 PR 阶段通过现有 CI 验证编译、默认测试和版本 smoke；编译结果与实际运行记录分别报告。CI 使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
+六种组合作为实现与构建目标保留。0.1.1 原生运行仅验收 macOS arm64，其他目标在 PR 阶段通过现有 CI 验证编译、默认测试、版本 smoke 和打包；编译结果与实际运行记录分别报告。CI 使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
 
 当前开发基线为 **Tern 0.9.9 与 tern-sdk 0.2.0**；直连数据库验收范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点。数据库服务可以运行在独立服务器上；[0.1.0 既有记录](docs/technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)分别说明实际验证范围。
 
@@ -119,7 +119,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 - [变更记录](CHANGELOG.md)：人工维护的版本变化与未发布变更。
 - [Agent 工作入口](AGENTS.md)：必读文档、执行授权和交付约束。
 
-本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南的开发环境](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。版本同步和组包使用 Python，命令及发布准备见[发布指南](RELEASING.md)；Actions 构建产物不等于正式发布。
+本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。
 
 已执行与待完成的验收见[0.1.1 技术方案运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
 
