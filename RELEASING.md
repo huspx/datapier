@@ -12,20 +12,32 @@
 
 ## 版本号与关联文件
 
-发布前逐项核对版本一致；目前以下位置均为 `0.1.0`：
+根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本。四个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本；修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本，不手工编辑锁文件。组包当前支持无前导零的三段数字版本，不支持预发布后缀。
 
-- 根 `Cargo.toml` 的 `workspace.package.version`；四个 crate 的 `Cargo.toml` 通过 `version.workspace = true` 继承，`Cargo.lock` 中四个本地包版本应同步。CLI 的 clap `version` 继承 crate 版本。
-- TSP 应用版本、`plugins/datapier/plugin.toml` 的 plugin 版本，以及 `plugins/datapier/install/unix.sh` 和 `plugins/datapier/install/windows.ps1` 的安装器版本。
-- `scripts/package-target.ps1` 和 `scripts/assemble-release.ps1` 的默认版本；前者只接受数字三段版本，不接受预发布后缀，后者目前有仅接受 `0.1.0` 的硬编码 guard。发布其他版本须先同步修改相关版本和 guard，不能仅传 `-Version`。
-- `.github/workflows/native-release.yml` 的 CLI smoke 期望输出 `datapier 0.1.0` 和汇总 artifact 名 `datapier-0.1.0-release`；新版本也要同步这些硬编码。
+修改根版本后，从仓库根目录运行以下命令同步源码 plugin，再用只读检查确认一致；源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。CI 同样运行 `--check`，版本缺失、重复、无效或不一致时失败。
+
+```sh
+python3 scripts/sync-version.py
+python3 scripts/sync-version.py --check
+```
+
+安装器从随插件提供的 `plugin.toml` 读取版本并校验程序版本。组包脚本和 CI 从根 manifest 读取版本，显式传入 `--version` 时必须与根版本一致；汇总时只同步临时插件副本，不改源码。Windows 用户安装器使用系统自带的 Windows PowerShell 5.1，须保留其 UTF-8 BOM。
 
 产品规划和技术方案中作为历史记录的版本标题不需要机械改写。版本调整需与实际发布内容和验证记录一致。
+
+### Python 3.15 工具环境
+
+开发发布脚本使用 Python 3.15，仅依赖标准库。CI 通过 `actions/setup-python@v7` 配置 `python-version: '3.15'`，跟随该分支补丁版本，架构随原生 runner；短命令使用 Bash，架构检查和二进制 smoke 直接使用 Python。开发环境、格式化与回归命令见[贡献指南](CONTRIBUTING.md#开发环境)。
+
+版本读取与校验共用 `scripts/version.py`；同步、单目标组包和六目标汇总分别使用 `sync-version.py`、`package-target.py` 和 `assemble-release.py`。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，Unix 安装器使用 `/bin/sh`；安装与运行 Datapier 无需 Python，开发与组包无需 `pwsh`。
+
+脚本回归覆盖版本同步、只读检查不写文件、无效或重复版本及显式版本不一致拒绝，以及缺失／无效 sidecar 拒绝和汇总不改源码 plugin。实际组包须使用本机真实二进制，解包核对内容、归档与程序摘要；完整汇总必须收齐同一提交的六目标原生产物。脚本测试和本机组包不能代替六目标 CI 或完整原生运行验收。
 
 ## 发布说明与 CHANGELOG
 
 根目录 [CHANGELOG.md](CHANGELOG.md) 由贡献者人工维护，记录变更内容；当前没有自动生成发布说明或回写发布状态的机制。版本章节存在、CI 成功、artifact 上传完成、tag 创建或 Release 草稿创建，都不等于正式发布完成。
 
-- 日常新变更记入顶部的“未发布（Unreleased）”章节；首次有下一版变更时再创建该章节，不把新功能追加到已经发布的版本章节。
+- 日常新变更记入顶部的“未发布（Unreleased）”章节，不把新功能追加到已经发布的版本章节。
 - 发布准备 PR 将待发布条目整理为对应版本章节，并同步版本号、安装器和组包配置。版本章节是该提交的内容快照，不使用“已发布／未发布”标记推断线上状态，也不预填实际发布日期。
 - 对外发布状态以 GitHub Release 为准：`draft=true` 为草稿，`draft=false` 且 `prerelease=true` 为预发布，`draft=false` 且 `prerelease=false` 为正式公开；实际发布时间使用 `published_at`。资源完整性、摘要及安装验证仍须另行核对，不能只看这些字段。
 - 发布失败时保留草稿和诊断记录，不声称已发布；重试应优先复用同一提交、同一已验证 workflow 的完整产物。产物过期、校验失败或源码改变时，重新完成对应构建和验证，不混用旧文件，不移动已经公开的版本 tag。
@@ -50,7 +62,7 @@
 
 ## tag 与目标提交
 
-在六目标产物、完整组包和运行验收均已完成且最终提交确定后，发布操作获授权时，将 `v<Version>` tag 指向实际验证并用于组包的最终提交。`v` 前缀来自组包脚本生成的下载地址 `https://github.com/$Repository/releases/download/v$Version`；务必让 tag、Release、plugin 内下载地址和上传文件一致。现有配置不要求特定 tag 签名或注释形式。
+在六目标产物、完整组包和运行验收均已完成且最终提交确定后，发布操作获授权时，将 `v<Version>` tag 指向实际验证并用于组包的最终提交。`v` 前缀来自组包脚本生成的下载地址 `https://github.com/<owner>/<repo>/releases/download/v<version>`；务必让 tag、Release、plugin 内下载地址和上传文件一致。现有配置不要求特定 tag 签名或注释形式。
 
 ## 构建与组包
 
@@ -65,28 +77,26 @@
 | windows-2022 | x86_64-pc-windows-msvc |
 | windows-11-arm | aarch64-pc-windows-msvc |
 
-独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件并运行 `--version` smoke。PR 到此完成验证，不执行单目标组包、不上传 artifact，runner 内临时二进制随 job 清理。只有运行 ref 为 `refs/heads/main` 时，才调用单目标组包脚本并上传 `datapier-<target>` Actions artifact；bundle job 同样仅在 main 运行，下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact。手动选择 main 时生成交付物，选择其他分支时仅验证。默认测试、版本 smoke 和交付物生成不等于完整原生运行验收；正式发布仍按后文人工核对。
+独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并检查源码 plugin 版本。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件并运行 `--version` smoke。PR 到此完成验证，不执行单目标组包、不上传 artifact，runner 内临时二进制随 job 清理。只有运行 ref 为 `refs/heads/main` 时，才调用单目标组包脚本并上传 `datapier-<version>-<target>` Actions artifact；bundle job 同样仅在 main 运行，下载并合并六个 artifact，组装启动包和校验清单，上传汇总 Actions artifact。手动选择 main 时生成交付物，选择其他分支时仅验证。默认测试、版本 smoke 和交付物生成不等于完整原生运行验收；正式发布仍按后文人工核对。
 
 官方 Actions 使用 Node.js 24 运行时：`actions/checkout@v7`、`actions/upload-artifact@v7` 和 `actions/download-artifact@v8`。升级时核对官方运行时声明、runner 要求及产物参数兼容性；当前使用 GitHub 托管 runner。
 
-也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `$Target` 替换为上表中的实际目标，构建后仍须完成相应运行验收。六个归档与 sidecar 必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
+也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `target` 替换为上表中的实际目标，运行验收范围按[发布前检查](#发布前检查)执行。六个归档与 sidecar 必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
 
-```powershell
-$Version = '0.1.0'
-$Target = 'aarch64-apple-darwin'
-cargo build --release --package datapier --target $Target --locked
-pwsh -File ./scripts/package-target.ps1 -Target $Target -Version $Version -Output dist
+```sh
+target='aarch64-apple-darwin'
+cargo build --release --package datapier --target "$target" --locked
+python3 scripts/package-target.py --target "$target" --output dist
 ```
 
-收集六个目标的归档及对应 `.binary-sha256` 文件到同一个干净 `dist` 后，在相同提交的仓库根目录运行下列命令。`OWNER/REPO` 必须替换为实际 GitHub 发布仓库的 owner 和 repository；也可不传 `-Repository`，由实际环境的 `GITHUB_REPOSITORY` 提供。不要猜测仓库地址。
+收集六个目标的归档及对应 `.binary-sha256` 文件到同一个干净 `dist` 后，在相同提交的仓库根目录运行下列命令。`OWNER/REPO` 必须替换为实际 GitHub 发布仓库的 owner 和 repository；也可不传 `--repository`，由实际环境的 `GITHUB_REPOSITORY` 提供。不要猜测仓库地址。
 
-```powershell
-$Version = '0.1.0'
-$Repository = 'OWNER/REPO'
-pwsh -File ./scripts/assemble-release.ps1 -Artifacts dist -Version $Version -Repository $Repository
+```sh
+repository='OWNER/REPO'
+python3 scripts/assemble-release.py --artifacts dist --repository "$repository"
 ```
 
-单目标脚本读取 `target/<target>/release/datapier`（Windows 为 `datapier.exe`），生成 `datapier-<version>-<target>.tar.gz`（Windows 为 `.zip`）及该可执行文件的 `datapier-<version>-<target>.binary-sha256` sidecar。汇总脚本要求六个归档和六个有效 sidecar，生成 `SHA256SUMS` 与 `datapier-plugin-<version>.zip`。`SHA256SUMS` 仅包含六个二进制归档的摘要，不包含 plugin zip；sidecar 用于生成 plugin 内的二进制摘要清单。核对 plugin zip 的 `datapier/` 目录内含 plugin 源文件、`LICENSE`、`release-url.txt`、`release-sha256.txt` 和 `release-bin-sha256.txt`，下载地址指向实际发布仓库和版本；并核对归档及解压后二进制分别匹配相应清单。
+单目标脚本读取 `target/<target>/release/datapier`（Windows 为 `datapier.exe`），运行该程序的 `--version` 并拒绝与根版本不一致的二进制，再生成 `datapier-<version>-<target>.tar.gz`（Windows 为 `.zip`）及该可执行文件的 `datapier-<version>-<target>.binary-sha256` sidecar，因此应在对应目标的原生机器运行。汇总脚本要求六个归档和六个有效 sidecar，生成 `SHA256SUMS` 与 `datapier-plugin-<version>.zip`。`SHA256SUMS` 仅包含六个二进制归档的摘要，不包含 plugin zip；sidecar 用于生成 plugin 内的二进制摘要清单。核对 plugin zip 的 `datapier/` 目录内含 plugin 源文件、`LICENSE`、`release-url.txt`、`release-sha256.txt` 和 `release-bin-sha256.txt`，下载地址指向实际发布仓库和版本；并核对归档及解压后二进制分别匹配相应清单。
 
 发布安装无需 Rust：安装器校验归档及程序摘要后复用版本化缓存。`DATAPIER_RELEASE_URL` 仅覆盖已打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录；发布核对时应同时确认默认下载地址和缓存行为。
 

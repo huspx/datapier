@@ -1,5 +1,12 @@
 # 变更记录
 
+## 未发布（Unreleased）
+
+### 开发与分发
+
+- 版本同步、组包及 CI 脚本改用 Python 3.15 标准库，开发环境不再要求 `pwsh`；Python 格式化沿用 dprint 的 Ruff Wasm 插件。Windows 用户安装器继续使用系统自带 PowerShell 5.1，安装和运行 Datapier 无需 Python。
+- SQL、Shell、Luau 和 Python 统一使用 2 空格缩进，按 dprint 配置格式化既有源码；Rust 继续使用原生 rustfmt。
+
 ## 0.1.0
 
 首个版本提供 MySQL／Redis 数据库工作台。平台与数据库的实际验收范围见 [README](README.md) 和[技术方案](docs/technical-design-0.1.0.md#11-实现与运行记录)。

@@ -108,7 +108,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 - [变更记录](CHANGELOG.md)：人工维护的版本变化与未发布变更。
 - [Agent 工作入口](AGENTS.md)：必读文档、执行授权和交付约束。
 
-本地构建、Tern 启动及 plugin 开发方式见[贡献指南的开发环境](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。发布准备和组包以发布指南为准，Actions 构建产物不等于正式发布。
+本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南的开发环境](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。版本同步和组包使用 Python，命令及发布准备见[发布指南](RELEASING.md)；Actions 构建产物不等于正式发布。
 
 已执行与待完成的验收见[技术方案中的运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)。
 

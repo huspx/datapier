@@ -2,11 +2,18 @@
 $ErrorActionPreference = 'Stop'
 # 宿主按 UTF-8 解码 JSON，不能沿用 Windows PowerShell 的代码页输出。
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$version = '0.1.0'
 $lock = $null
 $tmp = $null
 
 try {
+    $plugin = Split-Path $PSScriptRoot -Parent
+    $pluginText = [System.IO.File]::ReadAllText((Join-Path $plugin 'plugin.toml'))
+    $firstTable = [regex]::Match($pluginText, '(?m)^[ \t]*\[')
+    $top = if ($firstTable.Success) { $pluginText.Substring(0, $firstTable.Index) } else { $pluginText }
+    $keys = [regex]::Matches($top, '(?m)^[ \t]*version[ \t]*=')
+    $values = [regex]::Matches($top, '(?m)^[ \t]*version[ \t]*=[ \t]*"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"[ \t]*(?:#.*)?\r?$')
+    if ($keys.Count -ne 1 -or $values.Count -ne 1) { throw '插件版本缺失、重复或无效' }
+    $version = $values[0].Groups[1].Value
     # GetNativeSystemInfo 取得硬件架构，避免在 ARM Windows 的兼容进程中误选 x86 包。
     Add-Type -TypeDefinition @'
 using System;
@@ -85,7 +92,6 @@ public static class DatapierNative
             $tmp = $null
         }
     } else {
-        $plugin = Split-Path $PSScriptRoot -Parent
         $manifest = Join-Path $plugin 'release-sha256.txt'
         $binaryManifest = Join-Path $plugin 'release-bin-sha256.txt'
         if (!(Test-Path -LiteralPath $manifest -PathType Leaf) -or !(Test-Path -LiteralPath $binaryManifest -PathType Leaf)) {

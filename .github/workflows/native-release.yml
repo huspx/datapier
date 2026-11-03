@@ -9,6 +9,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 jobs:
   format:
     name: Formatting
@@ -17,6 +20,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      - name: Check plugin version synchronization
+        run: python scripts/sync-version.py --check
+      - name: Test release scripts
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -70,6 +80,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      - name: Read product version
+        id: product-version
+        shell: bash
+        run: |
+          version=$(python scripts/version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -77,30 +96,37 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev
       - name: Verify native runner architecture
-        shell: pwsh
+        shell: python
         run: |
-          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-          $expected = if ('${{ matrix.target }}'.StartsWith('aarch64-')) { 'Arm64' } else { 'X64' }
-          if ($arch -ne $expected) { throw "Expected native $expected runner, got $arch" }
+          import platform
+          machine = platform.machine().lower()
+          expected = 'arm64' if '${{ matrix.target }}'.startswith('aarch64-') else 'x64'
+          actual = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'x64', 'amd64': 'x64'}.get(machine, machine)
+          if actual != expected:
+              raise RuntimeError(f'Expected native {expected} runner, got {machine}')
       - name: Run native unit tests
         run: cargo test --workspace --target ${{ matrix.target }} --locked
       - name: Build native executable
         run: cargo build --release --package datapier --target ${{ matrix.target }} --locked
       - name: Smoke native executable
-        shell: pwsh
+        shell: python
         run: |
-          $extension = if ($IsWindows) { '.exe' } else { '' }
-          $nativeBinary = Join-Path $PWD "target/${{ matrix.target }}/release/datapier$extension"
-          $versionOutput = & $nativeBinary --version
-          if ($LASTEXITCODE -ne 0 -or $versionOutput -cne 'datapier 0.1.0') { throw 'Native CLI smoke failed' }
+          import pathlib
+          import subprocess
+          import sys
+          extension = '.exe' if sys.platform == 'win32' else ''
+          binary = pathlib.Path('target/${{ matrix.target }}/release') / ('datapier' + extension)
+          result = subprocess.run([str(binary), '--version'], capture_output=True, text=True, check=True)
+          if result.stdout.strip() != 'datapier ${{ steps.product-version.outputs.version }}':
+              raise RuntimeError('Native CLI smoke failed')
       - name: Package binary
         if: github.ref == 'refs/heads/main'
-        shell: pwsh
-        run: ./scripts/package-target.ps1 -Target '${{ matrix.target }}'
+        shell: bash
+        run: python scripts/package-target.py --target '${{ matrix.target }}'
       - uses: actions/upload-artifact@v7
         if: github.ref == 'refs/heads/main'
         with:
-          name: datapier-${{ matrix.target }}
+          name: datapier-${{ steps.product-version.outputs.version }}-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
   bundle:
@@ -109,16 +135,24 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      - name: Read product version
+        id: product-version
+        shell: bash
+        run: |
+          version=$(python scripts/version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8
         with:
           pattern: datapier-*
           path: dist
           merge-multiple: true
       - name: Assemble plugin and checksums
-        shell: pwsh
-        run: ./scripts/assemble-release.ps1 -Artifacts dist
+        run: python scripts/assemble-release.py --artifacts dist
       - uses: actions/upload-artifact@v7
         with:
-          name: datapier-0.1.0-release
+          name: datapier-${{ steps.product-version.outputs.version }}-release
           path: dist/*
           if-no-files-found: error

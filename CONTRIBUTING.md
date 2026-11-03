@@ -26,6 +26,8 @@ tern -e "$PWD/target/debug/datapier" tui
 
 ```sh
 tern plugin link "$PWD/plugins/datapier"
+- 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
+- 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 ```
 
@@ -81,12 +83,12 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 | 当前文件范围 | Formatter 与边界 |
 |---|---|
 | Rust | 原生 `cargo fmt`／rustfmt，沿用 workspace edition 和当前 stable toolchain，不通过 dprint 调用 |
-| HTML、内嵌 JavaScript／CSS、独立 CSS | dprint；TypeScript 插件仅为现有 HTML 的内嵌 JavaScript 提供格式化，不启用独立 TypeScript 文件 |
+| HTML、JavaScript、CSS（含 HTML 内嵌脚本与样式） | dprint；JavaScript 沿用 TypeScript Wasm 插件，不引入 TypeScript 构建 |
 | JSON／JSONC 配置、YAML、TOML（含 Cargo manifest 与 plugin 配置） | dprint |
 | 独立 SQL | dprint，dialect 为 SQLite；当前文件是本地持久化 migration，不按 MySQL provider 选择方言 |
 | POSIX Shell、Luau | dprint 的 Wasm 插件，无须另装 shfmt 或 StyLua CLI |
 
-当前没有 Java、XML 或 Python 源文件，不预装相应插件；PowerShell 不接入格式化。Markdown 不属于当前 dprint 范围。新增语言前核对[官方插件目录](https://dprint.dev/plugins/)的实际支持并更新项目配置，不假定 XML 能格式化 MyBatis SQL，或原生语言 Formatter 能处理字符串中的 SQL。
+当前没有 Java 或 XML 源文件，不预装相应插件；保留的 Windows PowerShell 安装器不接入格式化。Markdown 不属于当前 dprint 范围。新增语言前核对[官方插件目录](https://dprint.dev/plugins/)的实际支持并更新项目配置，不假定 XML 能格式化 MyBatis SQL，或原生语言 Formatter 能处理字符串中的 SQL。
 
 Windows 安装器由 Windows PowerShell 5.1 读取，源码保留 UTF-8 BOM，以正确识别中文；交给启动 plugin 的 stdout JSON 则固定为无 BOM 的 UTF-8。
 
@@ -100,6 +102,7 @@ dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录
 dprint fmt --config ./dprint.json --config-discovery=false -- path/to/changed-file
 dprint check --config ./dprint.json --config-discovery=false -- path/to/changed-file
 ```
+| Python 开发发布脚本及回归 | dprint 的 Ruff Wasm 插件，无须另装 Ruff CLI；参数与目标版本以 `dprint.json` 为准 |
 
 Rust 单文件使用同一套原生 rustfmt，避免递归改写未变更的子模块；全 workspace 使用现有 `cargo fmt` 做只读检查：
 
@@ -179,7 +182,7 @@ MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支
 
 ## 测试与验证
 
-测试文件统一放在各 crate 的 `tests/`：集成测试放在该目录根部，需访问私有实现的单元测试放在 `tests/unit/`，可按源码职责建立子目录。源码以 `#[cfg(test)]` 和相对路径 `#[path = "..."]` 引入对应测试模块；不在 `src/` 内存放测试文件或内联测试模块，也不为测试扩大公开 API。
+Rust 测试文件统一放在各 crate 的 `tests/`：集成测试放在该目录根部，需访问私有实现的单元测试放在 `tests/unit/`，可按源码职责建立子目录。源码以 `#[cfg(test)]` 和相对路径 `#[path = "..."]` 引入对应测试模块；不在 `src/` 内存放测试文件或内联测试模块，也不为测试扩大公开 API。
 
 Rust 改动按影响范围运行 `cargo check --locked`／`cargo test --locked`；格式检查按[代码格式化](#代码格式化)执行。静态检查与 workspace 默认测试命令为：
 
@@ -205,6 +208,12 @@ cargo test -p datapier-core --test tls -- --ignored
 普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
 
 按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-验收要求)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。发布前六目标原生验收见[发布前检查](RELEASING.md#发布前检查)。
+
+Python 开发发布回归放在 `scripts/tests/`，使用标准库 `unittest`，覆盖版本和归档契约、错误及边界；实际组包还须按发布指南使用本机真实二进制验证。执行：
+
+```sh
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
 
 只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。历史验收和剩余发布阻塞统一查阅[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)，不将其视为本次重新验证。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
 
