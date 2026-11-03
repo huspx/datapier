@@ -1,0 +1,222 @@
+.sql-workbench {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.sql-editor-wrap {
+  display: flex;
+  flex: 1;
+  min-height: 180px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+}
+.has-sql-results .sql-editor-wrap {
+  flex: 0 0 55%;
+}
+.sql-gutter {
+  width: 76px;
+  flex: none;
+  padding: 14px 4px;
+  background: var(--panel);
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  user-select: none;
+}
+.gutter-line {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font: 11px/24px var(--mono);
+  color: var(--muted);
+}
+.gutter-line.current {
+  color: var(--accent);
+}
+.gutter-number {
+  width: 27px;
+  text-align: right;
+}
+.gutter-run, .gutter-gap {
+  width: 22px;
+  height: 22px;
+  padding: 4px;
+  flex: none;
+}
+.gutter-run, .cli-run {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.gutter-run svg {
+  width: 12px;
+  height: 12px;
+}
+.gutter-run:hover, .gutter-line.current .gutter-run, .cli-run:hover {
+  color: var(--accent);
+}
+.sql-input-surface {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+.query-editor, .sql-highlight {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 0;
+  font: 12px/24px var(--mono);
+  letter-spacing: normal;
+  tab-size: 2;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.sql-highlight {
+  overflow: hidden;
+  pointer-events: none;
+}
+.query-editor {
+  resize: none;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--fg);
+  overflow: auto;
+}
+.query-editor::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.query-editor:focus-visible {
+  outline: none;
+}
+.sql-editor-wrap:focus-within {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.sql-keyword {
+  color: var(--accent);
+  font-weight: 600;
+}
+.sql-string {
+  color: var(--success);
+}
+.sql-number {
+  color: var(--warning);
+}
+.sql-comment {
+  color: var(--muted);
+  font-style: italic;
+}
+.sql-identifier {
+  color: var(--fg);
+}
+.sql-editor-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 16px;
+  min-height: 30px;
+  color: var(--muted);
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.sql-results {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 100px;
+  overflow: auto;
+}
+.sql-results-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.sql-execution-text {
+  margin: 0;
+  padding: 12px 16px;
+  font: 12px/24px var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sql-readonly {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.ddl-gutter {
+  min-width: 50px;
+  padding: 16px 12px;
+  background: var(--panel);
+  color: var(--muted);
+  font: 11px/24px var(--mono);
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+}
+.ddl-code {
+  padding: 16px;
+  margin: 0;
+  font: 12px/24px var(--mono);
+  white-space: pre;
+}
+.provider-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.provider-field legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.provider-options {
+  display: flex;
+  gap: 8px;
+}
+.provider-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-color: var(--border);
+  text-align: left;
+}
+.provider-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.provider-option[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--selected);
+}
+.empty {
+  flex: 1;
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+.empty-workspace {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}

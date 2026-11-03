@@ -27,7 +27,7 @@ impl App {
         self.profile
             .as_ref()
             .filter(|_| self.is_redis())
-            .map(|p| (p.id, p.redis_db))
+            .map(|p| (p.id, p.redis_db()))
     }
 
     fn redis_visible_key_indices(&self) -> Vec<usize> {
@@ -102,7 +102,7 @@ impl App {
                     database: r
                         .database
                         .clone()
-                        .or_else(|| self.profile.as_ref().map(|p| p.redis_db.to_string())),
+                        .or_else(|| self.profile.as_ref().map(|p| p.redis_db().to_string())),
                     name: r.name.clone(),
                     key_b64: Some(key.clone()),
                     kind: r.kind.clone(),

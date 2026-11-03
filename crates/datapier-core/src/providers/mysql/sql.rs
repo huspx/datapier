@@ -1,12 +1,14 @@
 use crate::model::{AppError, Result};
 use sqlparser::{
     ast::{
-        ObjectName, ObjectNamePart, ShowCreateObject, ShowStatementFilter,
-        ShowStatementFilterPosition, ShowStatementOptions, Statement,
+        Expr, ObjectName, ObjectNamePart, Query, Select, SetExpr, ShowCreateObject,
+        ShowStatementFilter, ShowStatementFilterPosition, ShowStatementOptions, Statement,
+        TableFactor, Visit, Visitor,
     },
     dialect::MySqlDialect,
     parser::Parser,
 };
+use std::ops::ControlFlow;
 
 #[derive(Clone, Copy)]
 enum Token<'a> {
@@ -235,24 +237,165 @@ pub(super) fn next_statement<'a>(input: &'a str, mode: &str) -> Result<(&'a str,
     Ok((input, ""))
 }
 
+// 只在字符串或反引号之外识别注释、变量和模式敏感的双引号。
+// 反斜线始终拒绝，避免 NO_BACKSLASH_ESCAPES 对分词的影响。
+fn stateless_lexically_safe(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let (mut i, mut quote) = (0, 0);
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' {
+            return false;
+        }
+        if quote != 0 {
+            if c == quote {
+                if bytes.get(i + 1) == Some(&quote) {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+        } else {
+            match c {
+                b'\'' | b'`' => quote = c,
+                b'"' | b'#' | b'@' => return false,
+                b'-' if bytes.get(i + 1) == Some(&b'-') => return false,
+                b'/' if bytes.get(i + 1) == Some(&b'*') => return false,
+                b':' if bytes.get(i + 1) == Some(&b'=') => return false,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    quote == 0
+}
+
+/// 按与 MySQL sql_mode 无关的共同子集返回语句的 UTF-8 字节范围。
+pub fn stateless_statement_ranges(text: &str) -> Result<Vec<(usize, usize)>> {
+    if !stateless_lexically_safe(text) {
+        return Err(AppError::invalid(
+            "无状态 SQL 不支持模式敏感的引号、转义或注释",
+        ));
+    }
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        if is_program(&mut Tokens::new(&text[offset..], true, false)) {
+            return Err(AppError::invalid("无状态 SQL 不支持存储程序定义"));
+        }
+        let (part, rest) = next_statement(&text[offset..], "")?;
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            let start = offset + part.len() - part.trim_start().len();
+            ranges.push((start, start + trimmed.len()));
+        }
+        if rest.is_empty() {
+            break;
+        }
+        offset = text.len() - rest.len();
+    }
+    Ok(ranges)
+}
+
+/// 返回无状态语句原文，拒绝依赖会话模式的输入。
+pub fn stateless_statements(text: &str) -> Result<Vec<String>> {
+    Ok(stateless_statement_ranges(text)?
+        .into_iter()
+        .map(|(start, end)| text[start..end].to_owned())
+        .collect())
+}
+
+/// 验证整批语句均属于可证明只读的 SQL 子集。
+pub fn validate_readonly(text: &str) -> Result<()> {
+    let statements = stateless_statements(text)?;
+    if statements.is_empty() || statements.iter().any(|statement| !readonly(statement)) {
+        return Err(AppError::new(
+            "permission_denied",
+            "SQL 不属于允许的只读语句",
+        ));
+    }
+    Ok(())
+}
+
+fn readonly_function(name: &str) -> bool {
+    [
+        "COUNT",
+        "SUM",
+        "MIN",
+        "MAX",
+        "AVG",
+        "ABS",
+        "COALESCE",
+        "IFNULL",
+        "NULLIF",
+        "LOWER",
+        "UPPER",
+        "LENGTH",
+        "CHAR_LENGTH",
+        "CONCAT",
+        "SUBSTRING",
+        "TRIM",
+        "ROUND",
+        "FLOOR",
+        "CEIL",
+        "DATE",
+        "YEAR",
+        "MONTH",
+        "DAY",
+        "JSON_EXTRACT",
+        "ROW_NUMBER",
+        "RANK",
+        "DENSE_RANK",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+// 未知 IGNORE_SPACE 时，COUNT (1)、TRIM (1) 等可能绑定到同名存储函数。
+// 保留原 SQL，只接受紧邻左括号的内置调用；字符串与反引号由现有词法器跳过。
+fn unambiguous_calls(input: &str) -> bool {
+    let mut tokens = Tokens::new(input, true, false);
+    while let Some(token) = tokens.next() {
+        let Token::Word(name) = token else { continue };
+        let rest = &input[tokens.pos..];
+        if rest.as_bytes().first().is_some_and(u8::is_ascii_whitespace)
+            && rest.trim_start().starts_with('(')
+            && (readonly_function(name)
+                || ["CAST", "CONVERT", "EXTRACT"]
+                    .iter()
+                    .any(|candidate| name.eq_ignore_ascii_case(candidate)))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 // 解析成功不足以证明无副作用：同时限制语法和可调用名称，拒绝效果依赖
 // 服务端状态的特性。无法证明安全时返回 false，由调用方按可能写入处理。
 pub(super) fn readonly(input: &str) -> bool {
-    if input.contains("/*")
-        || input.contains("--")
-        || input.contains('#')
-        || input.contains('@')
-        || input.contains(":=")
-        || input.contains('\\')
-    {
+    if !stateless_lexically_safe(input) || !unambiguous_calls(input) {
         return false;
+    }
+    // sqlparser 0.62 尚不解析 MySQL SHOW INDEX；仅允许受控表名形式。
+    if let Some((show, rest)) = take_word(input.trim_start())
+        && show.eq_ignore_ascii_case("SHOW")
+        && let Some((index, rest)) = take_word(rest.trim_start())
+        && matches!(
+            index.to_ascii_uppercase().as_str(),
+            "INDEX" | "INDEXES" | "KEYS"
+        )
+        && let Some((from, rest)) = take_word(rest.trim_start())
+        && (from.eq_ignore_ascii_case("FROM") || from.eq_ignore_ascii_case("IN"))
+    {
+        return describe_target(&format!("DESCRIBE {}", rest.trim_start()));
     }
     let ast = match Parser::parse_sql(&MySqlDialect {}, input) {
         Ok(ast) if ast.len() == 1 => ast,
         _ => return false,
     };
     match &ast[0] {
-        Statement::Query(_) => readonly_query(input),
+        Statement::Query(query) => readonly_query(query),
         Statement::Explain { statement, .. }
             if matches!(statement.as_ref(), Statement::Query(_)) =>
         {
@@ -303,140 +446,103 @@ pub(super) fn readonly(input: &str) -> bool {
     }
 }
 
-fn readonly_query(input: &str) -> bool {
-    let b = input.as_bytes();
-    let mut words: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'\'' | b'"' | b'`' => {
-                let q = b[i];
-                i += 1;
-                while i < b.len() {
-                    if b[i] == q {
-                        i += 1;
-                        if b.get(i) == Some(&q) {
-                            i += 1;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        i += 1;
-                    }
-                }
-                // Quoted callable identifiers may refer to a stored function.
-                let j = skip_space(b, i);
-                if q == b'`' && b.get(j) == Some(&b'(') {
-                    return false;
-                }
-            }
-            b'#' => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'-' if b.get(i + 1) == Some(&b'-')
-                && b.get(i + 2).is_some_and(|c| c.is_ascii_whitespace()) =>
-            {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                i += 2;
-                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
-                    i += 1;
-                }
-                i = (i + 2).min(b.len());
-            }
-            c if c.is_ascii_alphabetic() || c == b'_' => {
-                let start = i;
-                i += 1;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$')
-                {
-                    i += 1;
-                }
-                let word = input[start..i].to_ascii_uppercase();
-                if matches!(
-                    word.as_str(),
-                    "INTO"
-                        | "OUTFILE"
-                        | "DUMPFILE"
-                        | "FOR"
-                        | "LOCK"
-                        | "PROCEDURE"
-                        | "FUNCTION"
-                        | "SLEEP"
-                        | "BENCHMARK"
-                        | "GET_LOCK"
-                        | "RELEASE_LOCK"
-                        | "LOAD_FILE"
-                        | "SQL_CALC_FOUND_ROWS"
-                        | "UPDATE"
-                        | "DELETE"
-                        | "INSERT"
-                        | "REPLACE"
-                        | "SET"
-                        | "CALL"
-                        | "DO"
-                ) {
-                    return false;
-                }
-                let next = skip_space(b, i);
-                if b.get(next) == Some(&b'(')
-                    && (input[..start].trim_end().ends_with('.')
-                        || !matches!(
-                            word.as_str(),
-                            "IN" | "EXISTS"
-                                | "AS"
-                                | "OVER"
-                                | "PARTITION"
-                                | "WITH"
-                                | "SELECT"
-                                | "FROM"
-                                | "WHERE"
-                                | "ON"
-                                | "AND"
-                                | "OR"
-                                | "NOT"
-                                | "COUNT"
-                                | "SUM"
-                                | "MIN"
-                                | "MAX"
-                                | "AVG"
-                                | "ABS"
-                                | "COALESCE"
-                                | "IFNULL"
-                                | "NULLIF"
-                                | "LOWER"
-                                | "UPPER"
-                                | "LENGTH"
-                                | "CHAR_LENGTH"
-                                | "CONCAT"
-                                | "SUBSTRING"
-                                | "TRIM"
-                                | "ROUND"
-                                | "FLOOR"
-                                | "CEIL"
-                                | "CAST"
-                                | "DATE"
-                                | "YEAR"
-                                | "MONTH"
-                                | "DAY"
-                                | "JSON_EXTRACT"
-                                | "ROW_NUMBER"
-                                | "RANK"
-                                | "DENSE_RANK"
-                        ))
-                {
-                    return false;
-                }
-                words.push(word);
-            }
-            _ => i += 1,
+fn readonly_query(query: &Query) -> bool {
+    query.visit(&mut ReadonlyVisitor).is_continue()
+}
+
+fn readonly_set(set: &SetExpr) -> bool {
+    match set {
+        SetExpr::Select(_) | SetExpr::Query(_) => true,
+        SetExpr::SetOperation { left, right, .. } => readonly_set(left) && readonly_set(right),
+        _ => false,
+    }
+}
+
+struct ReadonlyVisitor;
+impl Visitor for ReadonlyVisitor {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+        if readonly_set(&query.body)
+            && query.locks.is_empty()
+            && query.for_clause.is_none()
+            && query.settings.is_none()
+            && query.format_clause.is_none()
+            && query.pipe_operators.is_empty()
+        {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
         }
     }
-    matches!(words.first().map(String::as_str), Some("SELECT" | "WITH"))
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<()> {
+        if select.into.is_none()
+            && select.optimizer_hints.is_empty()
+            && select.select_modifiers.is_none()
+        {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+        match factor {
+            TableFactor::Table { args: None, .. }
+            | TableFactor::Derived { .. }
+            | TableFactor::NestedJoin { .. } => ControlFlow::Continue(()),
+            _ => ControlFlow::Break(()),
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        let safe = match expr {
+            Expr::Function(function) => matches!(function.name.0.as_slice(),
+                [ObjectNamePart::Identifier(name)] if name.quote_style.is_none() && readonly_function(&name.value)),
+            Expr::Identifier(_)
+            | Expr::CompoundIdentifier(_)
+            | Expr::Value(_)
+            | Expr::Nested(_)
+            | Expr::BinaryOp { .. }
+            | Expr::UnaryOp { .. }
+            | Expr::IsFalse(_)
+            | Expr::IsNotFalse(_)
+            | Expr::IsTrue(_)
+            | Expr::IsNotTrue(_)
+            | Expr::IsNull(_)
+            | Expr::IsNotNull(_)
+            | Expr::IsUnknown(_)
+            | Expr::IsNotUnknown(_)
+            | Expr::IsDistinctFrom(_, _)
+            | Expr::IsNotDistinctFrom(_, _)
+            | Expr::InList { .. }
+            | Expr::InSubquery { .. }
+            | Expr::Between { .. }
+            | Expr::Like { .. }
+            | Expr::RLike { .. }
+            | Expr::Cast { .. }
+            | Expr::Convert { .. }
+            | Expr::Extract { .. }
+            | Expr::Ceil { .. }
+            | Expr::Floor { .. }
+            | Expr::Substring { .. }
+            | Expr::Trim { .. }
+            | Expr::Collate { .. }
+            | Expr::Case { .. }
+            | Expr::Exists { .. }
+            | Expr::Subquery(_)
+            | Expr::Tuple(_)
+            | Expr::Wildcard(_)
+            | Expr::QualifiedWildcard(_, _) => true,
+            _ => false,
+        };
+        if safe {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
 }
 
 fn safe_name(name: &ObjectName, max_parts: usize) -> bool {
@@ -550,10 +656,10 @@ fn explain_query(input: &str) -> bool {
         return false;
     }
     let mut rest = rest.trim_start();
-    if let Some((word, next)) = take_word(rest)
+    if let Some((word, _)) = take_word(rest)
         && word.eq_ignore_ascii_case("ANALYZE")
     {
-        rest = next.trim_start();
+        return false;
     }
     if let Some((word, next)) = take_word(rest)
         && word.eq_ignore_ascii_case("FORMAT")
@@ -573,12 +679,6 @@ fn explain_query(input: &str) -> bool {
         rest = next.trim_start();
     }
     readonly(rest)
-}
-fn skip_space(b: &[u8], mut i: usize) -> usize {
-    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
-        i += 1;
-    }
-    i
 }
 
 #[cfg(test)]

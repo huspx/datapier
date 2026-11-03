@@ -127,46 +127,338 @@ pub struct AppSettings {
     pub language: LanguagePreference,
 }
 
-/// 不含密码的连接配置；凭据由存储层单独管理。
+/// 不含密码的连接配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub id: Uuid,
     pub name: String,
     pub provider: ProviderKind,
+    #[serde(default)]
+    pub access_mode: AccessMode,
+    pub connection: ConnectionConfig,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConnectionConfig {
+    Direct(DirectConnection),
+    Archery(ArcheryConnection),
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectConnection {
     pub host: String,
     pub port: u16,
     #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub database: Option<String>,
-    /// None 显示全部可访问数据库，空列表表示全部隐藏。
     #[serde(default)]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
     pub redis_db: u32,
     #[serde(default)]
-    pub access_mode: AccessMode,
-    #[serde(default)]
     pub tls: TlsConfig,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArcheryConnection {
+    pub server_id: Uuid,
+    pub instance_id: i64,
+    pub instance_name: String,
+    pub databases: Vec<String>,
+    pub default_database: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct HttpTls {
+    #[serde(default)]
+    pub ca_path: Option<String>,
+}
+/// 验证码由用户输入，或由本机保存的 TOTP 配置生成。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TotpMode {
+    #[default]
+    Manual,
+    Automatic,
+}
+
+/// 独立凭据的明确更新意图；保留和清除不接受额外字段。
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CredentialUpdate {
+    #[default]
+    Keep,
+    Replace {
+        value: String,
+        persist: bool,
+    },
+    Clear,
+}
+
+impl<'de> Deserialize<'de> for CredentialUpdate {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // 空结构体变体也必须执行未知字段检查，避免 unit 变体忽略多余参数。
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Keep {},
+            Replace { value: String, persist: bool },
+            Clear {},
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Keep {} => Self::Keep,
+            Wire::Replace { value, persist } => Self::Replace { value, persist },
+            Wire::Clear {} => Self::Clear,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArcheryServer {
+    pub id: Uuid,
+    pub name: String,
+    pub base_url: String,
+    pub username: String,
+    #[serde(default)]
+    pub http_tls: HttpTls,
+    #[serde(default)]
+    pub totp_mode: TotpMode,
+    pub revision: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArcheryInstance {
+    pub id: i64,
+    pub name: String,
+    pub provider: ProviderKind,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialMode {
+    Unknown,
+    Session,
+    Keyring,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArcheryServerInfo {
+    #[serde(flatten)]
+    pub server: ArcheryServer,
+    pub credential_mode: CredentialMode,
+    pub totp_credential_mode: CredentialMode,
+    pub totp_configured: bool,
+    pub connection_count: u64,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityState {
+    Unsupported,
+    Unknown,
+    Available,
+    Denied,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Capability {
+    pub state: CapabilityState,
+    pub reason: Option<String>,
+}
+impl Capability {
+    pub fn is_supported(&self) -> bool {
+        self.state != CapabilityState::Unsupported
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Capabilities {
+    pub query: Capability,
+    pub browse: Capability,
+    pub structure: Capability,
+    pub edit: Capability,
+    pub import: Capability,
+    pub result_export: Capability,
+    pub database_export: Capability,
+    pub transactions: Capability,
+    pub platform_history: Capability,
+    pub sql_check: Capability,
+    pub stop_waiting: Capability,
+    pub server_cancel: Capability,
+}
+impl Capabilities {
+    pub fn ensure_method(&self, method: &str, params: &Json) -> Result<()> {
+        let c = match method {
+            "execution.start" | "execution.run" => &self.query,
+            "resource.list" | "resource.browse" => &self.browse,
+            "resource.describe" => &self.structure,
+            "transfer.export" if params.get("result_id").is_some_and(|v| !v.is_null()) => {
+                &self.result_export
+            }
+            "transfer.export" => &self.database_export,
+            "transfer.import" | "transfer.preview" => &self.import,
+            "archery.query_history" => &self.platform_history,
+            "archery.sql_check" => &self.sql_check,
+            m if m.starts_with("change.") => &self.edit,
+            m if m.starts_with("transaction.") => &self.transactions,
+            _ => return Ok(()),
+        };
+        if c.is_supported() {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "capability_unavailable",
+                c.reason
+                    .clone()
+                    .unwrap_or_else(|| "此连接不支持该操作".into()),
+            ))
+        }
+    }
+    /// 仅记录已观察结果；拒绝后仍允许用户显式重试，不能把本地错误当平台拒绝。
+    pub fn observe(&mut self, method: &str, result: &Result<Json>) {
+        let capability = match method {
+            "execution.start" | "execution.run" => &mut self.query,
+            "resource.list" | "resource.browse" => &mut self.browse,
+            "resource.describe" => &mut self.structure,
+            "archery.sql_check" => &mut self.sql_check,
+            "archery.query_history" => &mut self.platform_history,
+            _ => return,
+        };
+        match result {
+            Ok(_) => {
+                capability.state = CapabilityState::Available;
+                capability.reason = None;
+            }
+            Err(error)
+                if error.code == "permission_denied"
+                    && error
+                        .details
+                        .get("http_status")
+                        .or_else(|| error.details.pointer("/cause/http_status"))
+                        .and_then(Json::as_u64)
+                        == Some(403) =>
+            {
+                capability.state = CapabilityState::Denied;
+                capability.reason = Some(error.message.clone());
+            }
+            _ => (),
+        }
+    }
 }
 impl Profile {
     /// 只读连接返回权限错误，供写操作入口统一调用。
     pub fn ensure_write(&self) -> Result<()> {
-        if self.access_mode == AccessMode::ReadOnly {
+        if self.is_archery() || self.access_mode == AccessMode::ReadOnly {
             Err(AppError::new("permission_denied", "连接为只读模式"))
         } else {
             Ok(())
         }
     }
-    /// 校验连接名称、主机及非零端口；不验证网络连通性。
+    pub fn direct(&self) -> Result<&DirectConnection> {
+        match &self.connection {
+            ConnectionConfig::Direct(d) => Ok(d),
+            _ => Err(AppError::invalid("连接不是直连")),
+        }
+    }
+    pub fn direct_mut(&mut self) -> Result<&mut DirectConnection> {
+        match &mut self.connection {
+            ConnectionConfig::Direct(d) => Ok(d),
+            _ => Err(AppError::invalid("连接不是直连")),
+        }
+    }
+    pub fn archery(&self) -> Option<&ArcheryConnection> {
+        match &self.connection {
+            ConnectionConfig::Archery(a) => Some(a),
+            _ => None,
+        }
+    }
+    pub fn is_archery(&self) -> bool {
+        self.archery().is_some()
+    }
+    pub fn default_database(&self) -> Option<&str> {
+        match &self.connection {
+            ConnectionConfig::Direct(d) => d.database.as_deref(),
+            ConnectionConfig::Archery(a) => Some(&a.default_database),
+        }
+    }
+    pub fn redis_db(&self) -> u32 {
+        match &self.connection {
+            ConnectionConfig::Direct(d) => d.redis_db,
+            ConnectionConfig::Archery(a) => a.default_database.parse().unwrap_or(0),
+        }
+    }
+    pub fn capabilities(&self) -> Capabilities {
+        let cap = |state| Capability {
+            state,
+            reason: None,
+        };
+        let a = self.is_archery();
+        let yes = cap(CapabilityState::Available);
+        let remote = cap(CapabilityState::Unknown);
+        let no = cap(CapabilityState::Unsupported);
+        let read = if a { remote.clone() } else { yes.clone() };
+        let write = if a || self.access_mode == AccessMode::ReadOnly {
+            no.clone()
+        } else {
+            yes.clone()
+        };
+        Capabilities {
+            query: read.clone(),
+            browse: if a && self.provider == ProviderKind::Redis {
+                no.clone()
+            } else {
+                read.clone()
+            },
+            structure: if a && self.provider == ProviderKind::Redis {
+                no.clone()
+            } else {
+                read
+            },
+            edit: write.clone(),
+            import: write,
+            result_export: yes.clone(),
+            database_export: if a { no.clone() } else { yes.clone() },
+            transactions: if a { no.clone() } else { yes.clone() },
+            platform_history: if a { remote.clone() } else { no.clone() },
+            sql_check: if a && self.provider == ProviderKind::Mysql {
+                remote
+            } else {
+                no.clone()
+            },
+            stop_waiting: yes.clone(),
+            server_cancel: if !a && self.provider == ProviderKind::Mysql {
+                yes
+            } else {
+                no
+            },
+        }
+    }
+    /// 校验来源对应的配置及选定目标。
     pub fn validate(&self) -> Result<()> {
-        if self.host.trim().is_empty() || self.name.trim().is_empty() || self.port == 0 {
-            return Err(AppError::invalid("连接名称、地址和端口不可为空"));
+        if self.name.trim().is_empty() {
+            return Err(AppError::invalid("连接名称不能为空"));
+        }
+        let d = match &self.connection {
+            ConnectionConfig::Direct(d) => d,
+            ConnectionConfig::Archery(a) => {
+                let mut seen = std::collections::HashSet::new();
+                if self.access_mode != AccessMode::ReadOnly
+                    || a.instance_name.trim().is_empty()
+                    || a.databases.is_empty()
+                    || !a.databases.contains(&a.default_database)
+                    || a.databases.iter().any(|db| {
+                        db.trim().is_empty()
+                            || !seen.insert(db)
+                            || (self.provider == ProviderKind::Redis
+                                && db.parse::<u32>().ok().is_none_or(|n| n.to_string() != *db))
+                    })
+                {
+                    return Err(AppError::invalid("Archery 连接或数据库选择无效"));
+                }
+                return Ok(());
+            }
+        };
+        if d.host.trim().is_empty() || d.port == 0 {
+            return Err(AppError::invalid("连接地址和端口不可为空"));
         }
         let paths = [
-            &self.tls.ca_path,
-            &self.tls.client_cert_path,
-            &self.tls.client_key_path,
+            &d.tls.ca_path,
+            &d.tls.client_cert_path,
+            &d.tls.client_key_path,
         ];
         if paths
             .iter()
@@ -174,10 +466,10 @@ impl Profile {
         {
             return Err(AppError::invalid("TLS 证书路径不能为空白"));
         }
-        if !self.tls.enabled && paths.iter().any(|p| p.is_some()) {
+        if !d.tls.enabled && paths.iter().any(|p| p.is_some()) {
             return Err(AppError::invalid("关闭 TLS 时不能提供证书路径"));
         }
-        if self.tls.client_cert_path.is_some() != self.tls.client_key_path.is_some() {
+        if d.tls.client_cert_path.is_some() != d.tls.client_key_path.is_some() {
             return Err(AppError::invalid("TLS 客户端证书与私钥必须成对提供"));
         }
         Ok(())
@@ -339,6 +631,14 @@ pub struct ResultMeta {
     #[serde(default)]
     pub summary: Json,
 }
+/// 当前缓存行按指定预算划分的页起点及完成状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultPagination {
+    pub starts: Vec<u64>,
+    pub row_count: u64,
+    pub complete: bool,
+    pub page_size: u64,
+}
 /// 缓存结果的一页；`next` 是下一页起始行，缺省表示当前无后续行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultPage {
@@ -356,6 +656,12 @@ pub struct TaskContext {
     pub redis_db: Option<u32>,
     #[serde(default)]
     pub targets: Vec<ResourceTarget>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub server_id: Option<Uuid>,
+    #[serde(default)]
+    pub instance_id: Option<i64>,
 }
 
 /// 任务关联结果的轻量状态，不包含列定义或行数据。

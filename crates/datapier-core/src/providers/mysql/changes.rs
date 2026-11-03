@@ -121,18 +121,45 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
     let unsigned = ty
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|part| matches!(part, "unsigned" | "zerofill"));
+    let validation_error = |message: String, validation: &str| {
+        AppError::invalid(message).with_details(json!({
+            "validation": validation, "column": column.name, "type": column.type_name
+        }))
+    };
+    // 严格模式仍允许截去超出 CHAR/VARCHAR 长度的尾随空格，必须在发送前拒绝。
+    if let Value::Text(text) = value
+        && matches!(base, "char" | "varchar")
+        && let Some(length) = ty
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .and_then(|(length, _)| length.parse::<usize>().ok())
+        && text.chars().count() > length
+    {
+        return Err(AppError::invalid(format!(
+            "列 {} 超过字符长度 {}",
+            column.name, length
+        )).with_details(json!({"validation":"character_length", "column":column.name, "type":column.type_name, "limit":length})));
+    }
     let valid = match value {
         Value::Null if column.nullable => return Ok(Bind::Null),
-        Value::Null => return Err(AppError::invalid(format!("列 {} 不允许 NULL", column.name))),
+        Value::Null => {
+            return Err(validation_error(
+                format!("列 {} 不允许 NULL", column.name),
+                "null_not_allowed",
+            ));
+        }
         Value::Bytes(v) if base == "bit" => {
             let bytes = STANDARD
                 .decode(v)
-                .map_err(|_| AppError::invalid("无效的 Base64 二进制值"))?;
+                .map_err(|_| validation_error("无效的 Base64 二进制值".into(), "invalid_base64"))?;
             if !bit_width(&ty).is_some_and(|width| bit_bytes_fit(&bytes, width)) {
-                return Err(AppError::invalid(format!(
-                    "列 {} ({}) 的二进制值超出位宽或类型无效",
-                    column.name, column.type_name
-                )));
+                return Err(validation_error(
+                    format!(
+                        "列 {} ({}) 的二进制值超出位宽或类型无效",
+                        column.name, column.type_name
+                    ),
+                    "bit_width",
+                ));
             }
             return Ok(Bind::Bytes(bytes));
         }
@@ -175,10 +202,17 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
         } else {
             "值类型不受支持或不匹配"
         };
-        return Err(AppError::invalid(format!(
-            "列 {} ({})：{}",
-            column.name, column.type_name, reason
-        )));
+        return Err(validation_error(
+            format!("列 {} ({})：{}", column.name, column.type_name, reason),
+            if matches!(
+                value,
+                Value::Integer(_) | Value::Unsigned(_) | Value::Decimal(_)
+            ) {
+                "numeric_range"
+            } else {
+                "type_mismatch"
+            },
+        ));
     }
     Ok(match value {
         // BIT 接收二进制字符串时按字节值解释，绑定十进制文本会写入 ASCII 字节。
@@ -186,15 +220,16 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
         Value::Unsigned(v) if base == "bit" => {
             let n = v
                 .parse::<u64>()
-                .map_err(|_| AppError::invalid("无效的位值"))?;
-            let width = bit_width(&ty).ok_or_else(|| AppError::invalid("无效的位宽"))?;
+                .map_err(|_| validation_error("无效的位值".into(), "bit_width"))?;
+            let width =
+                bit_width(&ty).ok_or_else(|| validation_error("无效的位宽".into(), "bit_width"))?;
             let bytes = n.to_be_bytes();
             Bind::Bytes(bytes[8 - width.div_ceil(8) as usize..].to_vec())
         }
         // MySQL 将字符串 '0' 当作 2000 年，整数 0 才表示零年。
         Value::Integer(v) | Value::Unsigned(v) if base == "year" => Bind::Year(
             v.parse::<u16>()
-                .map_err(|_| AppError::invalid("无效的年份"))?,
+                .map_err(|_| validation_error("无效的年份".into(), "numeric_range"))?,
         ),
         Value::Bool(v) => Bind::Text(if *v { "1" } else { "0" }.into()),
         Value::Integer(v)
@@ -207,20 +242,20 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
         Value::Float(v) if base == "float" => {
             let n = v
                 .parse::<f32>()
-                .map_err(|_| AppError::invalid("无效的单精度浮点数"))?;
+                .map_err(|_| validation_error("无效的单精度浮点数".into(), "numeric_range"))?;
             if !n.is_finite() {
-                return Err(AppError::invalid("浮点数超出范围"));
+                return Err(validation_error("浮点数超出范围".into(), "numeric_range"));
             }
             Bind::Float32(n)
         }
         Value::Float(v) => Bind::Float64(
             v.parse::<f64>()
-                .map_err(|_| AppError::invalid("无效的浮点数"))?,
+                .map_err(|_| validation_error("无效的浮点数".into(), "numeric_range"))?,
         ),
         Value::Bytes(v) => Bind::Bytes(
             STANDARD
                 .decode(v)
-                .map_err(|_| AppError::invalid("无效的 Base64 二进制值"))?,
+                .map_err(|_| validation_error("无效的 Base64 二进制值".into(), "invalid_base64"))?,
         ),
         Value::Json(v) => Bind::Text(serde_json::to_string(v)?),
         _ => unreachable!(),
@@ -230,7 +265,7 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
 /// 表单和导入预检复用写入绑定规则；生成列、类型不匹配和无法无损表示的值返回错误。
 pub fn validate_import_value(value: &Value, column: &Column) -> Result<()> {
     if column.generated {
-        return Err(AppError::invalid(format!("生成列不可写: {}", column.name)));
+        return Err(AppError::invalid(format!("生成列不可写: {}", column.name)).with_details(json!({"validation":"generated_column", "column":column.name, "type":column.type_name})));
     }
     bind_value(value, column).map(|_| ())
 }
@@ -617,6 +652,11 @@ async fn execute_batch(
     // 只有 InnoDB 批次使用事务；其他引擎逐条生效，后续失败不代表前项回滚。
     let transactional = schema.engine.eq_ignore_ascii_case("innodb");
     let mut conn = s.new_connection().await?;
+    // STRICT_ALL_TABLES 在非事务表也拒绝有损转换；独立连接不改变查询标签的 SQL 模式。
+    sqlx::raw_sql("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, IF(@@SESSION.sql_mode = '', '', ','), 'STRICT_ALL_TABLES')")
+        .execute(&mut conn)
+        .await
+        .map_err(super::errors::mysql_error)?;
     if transactional {
         sqlx::raw_sql("START TRANSACTION")
             .execute(&mut conn)

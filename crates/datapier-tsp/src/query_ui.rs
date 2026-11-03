@@ -2,14 +2,238 @@ use super::*;
 use crate::i18n::{UiMessage, tr};
 
 /// 查询编辑器的临时 UI 状态，随所属 tab 一起切换。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct QueryUiState {
     pub menu_open: bool,
     pub results_hidden: bool,
     pub executed: bool,
+    pub request_limit: u64,
+    pub result_info: Option<String>,
+    pub pagination: std::collections::HashMap<String, ResultPaginationState>,
 }
 
-fn plan_text(query: &editor::Editor, mode: editor::MysqlMode) -> std::result::Result<&str, String> {
+#[derive(Clone)]
+pub struct ResultPaginationState {
+    pub page_size: u64,
+    pub starts: Vec<u64>,
+    pub token: Option<Uuid>,
+    pub start: u64,
+    pub complete: Option<bool>,
+    pub row_count: Option<u64>,
+}
+
+impl Default for ResultPaginationState {
+    fn default() -> Self {
+        Self {
+            page_size: 20,
+            starts: Vec::new(),
+            token: None,
+            start: 0,
+            complete: None,
+            row_count: None,
+        }
+    }
+}
+
+impl Default for QueryUiState {
+    fn default() -> Self {
+        Self {
+            menu_open: false,
+            results_hidden: false,
+            executed: false,
+            request_limit: 100,
+            result_info: None,
+            pagination: Default::default(),
+        }
+    }
+}
+
+impl App {
+    pub(super) fn close_result_info(&mut self, restore_focus: bool) {
+        if self.workbench.query_ui.result_info.take().is_some() && restore_focus {
+            self.focus = "result_info".into();
+            self.workbench.focus_request = Some("result-info".into());
+        }
+    }
+    pub(super) fn result_saved_start(&self, id: &str) -> u64 {
+        self.workbench
+            .query_ui
+            .pagination
+            .get(id)
+            .map_or(0, |state| state.start)
+    }
+
+    pub(super) fn remember_result_start(&mut self, page: &ResultPage) {
+        self.workbench
+            .query_ui
+            .pagination
+            .entry(page.result.id.to_string())
+            .or_default()
+            .start = page.start;
+    }
+    pub(super) fn refresh_changed_result_plan(&mut self, backend: &Backend, page: &ResultPage) {
+        let id = page.result.id.to_string();
+        let changed = self
+            .workbench
+            .query_ui
+            .pagination
+            .get(&id)
+            .is_some_and(|state| {
+                state.token.is_none()
+                    && (state
+                        .row_count
+                        .is_some_and(|count| count != page.result.row_count)
+                        || state
+                            .complete
+                            .is_some_and(|complete| complete != page.result.complete))
+            });
+        if changed {
+            if let Some(state) = self.workbench.query_ui.pagination.get_mut(&id) {
+                state.starts.clear();
+            }
+            self.request_result_pagination(backend, &id);
+        }
+    }
+
+    pub(super) fn result_page_size(&self, id: &str) -> u64 {
+        self.workbench
+            .query_ui
+            .pagination
+            .get(id)
+            .map_or(20, |state| state.page_size)
+    }
+
+    // 页计划可能外置超宽行；取得稳定边界后才能读取对应页面。
+    pub(super) fn prepare_result_page(&mut self, backend: &Backend, id: &str, start: u64) -> bool {
+        let state = self
+            .workbench
+            .query_ui
+            .pagination
+            .entry(id.to_owned())
+            .or_default();
+        state.start = start;
+        if !state.starts.is_empty() && state.token.is_none() {
+            return true;
+        }
+        if state.token.is_none() {
+            self.request_result_pagination(backend, id);
+        }
+        false
+    }
+
+    pub(super) fn request_result_pagination(&mut self, backend: &Backend, id: &str) {
+        let token = Uuid::new_v4();
+        let state = self
+            .workbench
+            .query_ui
+            .pagination
+            .entry(id.to_owned())
+            .or_default();
+        state.token = Some(token);
+        let size = state.page_size;
+        let tag = format!(
+            "{}:{}:result.pagination/{token}/{id}",
+            self.tabs[self.active].id, self.generation
+        );
+        if let Err(error) = backend.request(
+            tag,
+            "result.pagination",
+            json!({"result_id":id,"page_size":size,"max_bytes":1048576}),
+        ) {
+            self.workbench
+                .query_ui
+                .pagination
+                .get_mut(id)
+                .unwrap()
+                .token = None;
+            self.status = UiMessage::raw(error.to_string());
+        }
+    }
+
+    pub(super) fn accept_result_pagination(&mut self, tag: &str, value: Value, backend: &Backend) {
+        let Some((token, id)) = tag
+            .strip_prefix("result.pagination/")
+            .and_then(|s| s.split_once('/'))
+        else {
+            return;
+        };
+        let Some(state) = self.workbench.query_ui.pagination.get_mut(id) else {
+            return;
+        };
+        if Uuid::parse_str(token).ok() != state.token || state.token.is_none() {
+            return;
+        }
+        state.token = None;
+        let Some(size) = value.get("page_size").and_then(Value::as_u64) else {
+            return;
+        };
+        let Some(complete) = value.get("complete").and_then(Value::as_bool) else {
+            return;
+        };
+        let Some(row_count) = value.get("row_count").and_then(Value::as_u64) else {
+            return;
+        };
+        if size != state.page_size {
+            return;
+        }
+        let Some(starts) = value
+            .get("starts")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().map(Value::as_u64).collect::<Option<Vec<_>>>())
+        else {
+            return;
+        };
+        if starts.first() != Some(&0) || !starts.windows(2).all(|pair| pair[0] < pair[1]) {
+            return;
+        }
+        state.starts = starts;
+        state.complete = Some(complete);
+        state.row_count = Some(row_count);
+        let start = state
+            .starts
+            .iter()
+            .rev()
+            .find(|start| **start <= state.start)
+            .copied()
+            .unwrap_or(0);
+        state.start = start;
+        if self.result_id.as_deref() == Some(id) {
+            self.page(backend, start);
+        } else if self.workbench.cli_result_id.as_deref() == Some(id) {
+            self.workbench_cli_page(backend, start);
+        }
+    }
+}
+
+pub(super) fn request_limit_picker(app: &App) -> Node<Msg> {
+    let mut select = ui::select()
+        .key("archery-request-limit")
+        .value(app.workbench.query_ui.request_limit.to_string())
+        .disabled(app.operation_pending || app.task.is_some() || app.workbench.cli_running)
+        .open(app.workbench.generic_select.as_deref() == Some("archery-request-limit"))
+        .on_toggle(|collapsed| {
+            Msg::Action(format!("select-open:archery-request-limit:{}", !collapsed))
+        })
+        .on_change(|change| {
+            Msg::Action(format!(
+                "archery-request-limit:{}",
+                change.value.as_str().unwrap_or_default()
+            ))
+        });
+    for size in [100, 500, 1000] {
+        select = select.option(ui::SelectOption::new(size.to_string(), size.to_string()));
+    }
+    html::div()
+        .class("request-limit")
+        .child(html::span(tr("最多返回").into_owned()))
+        .child(select)
+        .into()
+}
+
+fn plan_text(
+    query: &editor::Editor,
+    context: editor::SqlContext,
+) -> std::result::Result<&str, String> {
     let selected = query.selected_text();
     if query.anchor != query.cursor && selected.is_none() {
         return Err("光标不在有效的 UTF-16 字符边界".into());
@@ -17,12 +241,12 @@ fn plan_text(query: &editor::Editor, mode: editor::MysqlMode) -> std::result::Re
     let target = if let Some(text) = selected.filter(|text| !text.trim().is_empty()) {
         text
     } else {
-        let range = editor::current_statement(&query.text, query.cursor, mode)?;
+        let range = editor::current_statement_in(&query.text, query.cursor, context)?;
         let start = editor::utf16_to_byte(&query.text, range.start).ok_or("无效的语句范围")?;
         let end = editor::utf16_to_byte(&query.text, range.end).ok_or("无效的语句范围")?;
         &query.text[start..end]
     };
-    editor::validate_explain_selection(target, mode)?;
+    editor::validate_explain_selection_in(target, context)?;
     Ok(target)
 }
 
@@ -36,13 +260,25 @@ fn plan_request(app: &App) -> std::result::Result<&str, String> {
     if app.has_live_drafts() {
         return Err("请先提交或丢弃待提交变更与粘贴预览".into());
     }
-    let mode = app
-        .workbench
-        .sql_mode
-        .ok_or("数据库未返回 sql_mode，无法安全定位当前语句")?;
-    plan_text(&app.tabs[app.active].query, mode)
+    plan_text(&app.tabs[app.active].query, app.sql_context()?)
 }
 
+impl App {
+    pub(super) fn sql_context(&self) -> std::result::Result<editor::SqlContext, String> {
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.is_archery())
+        {
+            Ok(editor::SqlContext::Stateless)
+        } else {
+            self.workbench
+                .sql_mode
+                .map(editor::SqlContext::Session)
+                .ok_or_else(|| "数据库未返回 sql_mode，无法安全定位当前语句".to_owned())
+        }
+    }
+}
 pub(super) fn toolbar(app: &App) -> Node<Msg> {
     let selected = app.tabs[app.active]
         .query
@@ -58,39 +294,89 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
     if let Err(reason) = plan_request(app) {
         plan = plan.disabled(tr(&reason).into_owned());
     }
-    let mut cancel = ui::button(tr("取消执行").into_owned())
+    let archery = app
+        .profile
+        .as_ref()
+        .is_some_and(|profile| profile.is_archery());
+    let cancel_label = tr(if archery {
+        "停止等待"
+    } else {
+        "取消执行"
+    })
+    .into_owned();
+    let mut cancel = ui::button("")
+        .variant(ui::ButtonVariant::Quiet)
+        .size(ui::ButtonSize::Md)
+        .title(cancel_label.clone())
+        .aria(cancel_label)
         .icon("stop")
         .on_click(Msg::Action("cancel".into()));
     if app.task.is_none() {
         cancel = cancel.disabled(true);
     }
-    html::div()
+    let enabled = app.session_id().is_some() && !app.operation_pending && app.task.is_none();
+    if !enabled {
+        selection = selection.disabled(true);
+    }
+    let mut toolbar = html::div()
         .class("toolbar query-toolbar")
         .child(
             ui::button(tr("执行全部").into_owned())
                 .variant(ui::ButtonVariant::Primary)
                 .icon("play")
+                .disabled(!enabled)
                 .on_click(Msg::Action("run".into())),
         )
         .child(selection)
-        .child(ui::button(tr("当前语句").into_owned()).on_click(Msg::Action("current".into())))
-        .child(plan)
-        .child(cancel)
-        .child(html::span("").class("spacer"))
         .child(
-            ui::button(tr("查询文件").into_owned())
-                .variant(ui::ButtonVariant::Quiet)
-                .icon("file")
-                .on_click(Msg::Action("overlay:file".into())),
+            ui::button(tr("当前语句").into_owned())
+                .disabled(!enabled)
+                .on_click(Msg::Action("current".into())),
         )
-        .child(
-            ui::button(tr("历史").into_owned())
+        .child(plan);
+    if archery
+        && app
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.capabilities().sql_check.is_supported())
+    {
+        let label = tr("检查上线 SQL（不执行）").into_owned();
+        toolbar = toolbar.child(
+            html::button("")
+                .class("query-check-icon")
+                .title(label.clone())
+                .attr("aria-label", label)
+                .disabled(!enabled)
+                .child(ui::icon("file"))
+                .child(
+                    html::span("")
+                        .class("query-check-search")
+                        .child(ui::icon("search")),
+                )
+                .on_click(Msg::Action("archery-sql-check".into())),
+        );
+    }
+    toolbar = toolbar.child(cancel);
+    if archery {
+        toolbar = toolbar.child(request_limit_picker(app));
+    }
+    toolbar = toolbar.child(html::span("").class("spacer"));
+    for (icon, label, action) in [
+        ("file", "查询文件", "overlay:file"),
+        ("history", "历史", "history"),
+    ] {
+        let label = tr(label).into_owned();
+        toolbar = toolbar.child(
+            ui::button("")
                 .variant(ui::ButtonVariant::Quiet)
-                .icon("history")
-                .on_click(Msg::Action("history".into())),
-        )
-        .child(html::span(tr("SQL 结果只读").into_owned()).class("tag"))
-        .into()
+                .size(ui::ButtonSize::Md)
+                .icon(icon)
+                .title(label.clone())
+                .aria(label)
+                .on_click(Msg::Action(action.into())),
+        );
+    }
+    toolbar.into()
 }
 
 /// 原生编辑器和行号共用外层滚动容器；编辑器本身不设置行数上限。
@@ -100,10 +386,8 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
     let statements = if query.text.trim().is_empty() {
         Ok(Vec::new())
     } else {
-        app.workbench
-            .sql_mode
-            .ok_or_else(|| "数据库未返回 sql_mode，无法安全定位当前语句".to_owned())
-            .and_then(|mode| editor::statements(&query.text, mode))
+        app.sql_context()
+            .and_then(|context| editor::statements_in(&query.text, context))
     };
     let mut gutter = html::div().class("query-gutter");
     for line in 1..=query.text.bytes().filter(|byte| *byte == b'\n').count() + 1 {
@@ -139,6 +423,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         gutter = gutter.child(row);
     }
     let mut input = ui::editor()
+        .aria(tr("SQL 查询").into_owned())
         .key("query-editor")
         .text(query.text.clone())
         .cursor(query.cursor)
@@ -166,8 +451,8 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         let mut actions = ui::Actions::new().menu(
             ui::MenuItem::new("query-selection", tr("执行选中 SQL").into_owned()).icon("play"),
         );
-        if let Some(mode) = app.workbench.sql_mode {
-            if editor::validate_explain_selection(text, mode).is_ok() {
+        if let Ok(context) = app.sql_context() {
+            if editor::validate_explain_selection_in(text, context).is_ok() {
                 actions = actions.menu(
                     ui::MenuItem::new("query-explain", tr("查看执行计划").into_owned())
                         .icon("chart"),
@@ -303,10 +588,8 @@ impl App {
         {
             let query = &self.tabs[self.active].query;
             let result = self
-                .workbench
-                .sql_mode
-                .ok_or_else(|| "数据库未返回 sql_mode，无法安全定位当前语句".to_owned())
-                .and_then(|mode| editor::statements(&query.text, mode))
+                .sql_context()
+                .and_then(|context| editor::statements_in(&query.text, context))
                 .and_then(|items| {
                     items
                         .get(index)
@@ -348,17 +631,13 @@ impl App {
                     self.execute_query_text(text, backend);
                     return true;
                 }
-                let result = self
-                    .workbench
-                    .sql_mode
-                    .ok_or_else(|| "数据库未返回 sql_mode，无法安全处理选区".to_owned())
-                    .and_then(|mode| {
-                        if name == "query-explain" {
-                            editor::explain_selection(&text, mode)
-                        } else {
-                            editor::format_range(&query.text, query.selection(), mode)
-                        }
-                    });
+                let result = self.sql_context().and_then(|context| {
+                    if name == "query-explain" {
+                        editor::explain_selection_in(&text, context)
+                    } else {
+                        editor::format_range_in(&query.text, query.selection(), context)
+                    }
+                });
                 match result {
                     Ok(text) if name == "query-explain" => self.execute_query_text(text, backend),
                     Ok(text) => {

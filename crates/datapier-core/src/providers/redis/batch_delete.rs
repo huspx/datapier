@@ -72,7 +72,7 @@ impl RedisSession {
                 .database
                 .as_deref()
                 .and_then(|db| db.parse::<u32>().ok())
-                != Some(self.profile.redis_db)
+                != Some(self.profile.redis_db())
             {
                 return Err(AppError::invalid("目标数据库与连接不一致"));
             }

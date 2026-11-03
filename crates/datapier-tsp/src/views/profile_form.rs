@@ -1,40 +1,71 @@
 use super::*;
 
+pub(super) fn connection_type_cards(app: &App, archery: bool) -> html::El<Msg> {
+    let mut cards = html::div()
+        .class("provider-cards")
+        .attr("role", "radiogroup")
+        .attr("aria-label", crate::i18n::tr("数据库类型").into_owned());
+    let disabled = app.connection_form_busy()
+        || app.connection_form_is_editing()
+        || (archery && app.archery.preview);
+    for (value, name) in [
+        ("mysql", "MySQL"),
+        ("redis", "Redis"),
+        ("archery", "Archery"),
+    ] {
+        let selected = if archery {
+            value == "archery"
+        } else {
+            app.field("provider") == value
+        };
+        let icon = if value == "archery" {
+            archery_icon(app)
+        } else {
+            provider_icon(app, value == "redis")
+        };
+        let mut card = html::button("")
+            .class(match (selected, disabled) {
+                (true, true) => "provider-card selected disabled",
+                (true, false) => "provider-card selected",
+                (false, true) => "provider-card disabled",
+                (false, false) => "provider-card",
+            })
+            .key(format!("input-provider-{value}"))
+            .attr("role", "radio")
+            .attr("aria-checked", selected)
+            .attr("aria-disabled", disabled)
+            .attr("tabindex", if disabled { -1 } else { 0 })
+            .disabled(disabled)
+            .child(icon)
+            .child(html::span(name));
+        if !disabled {
+            let action = if value == "archery" {
+                "archery-open".to_owned()
+            } else {
+                format!("field:provider:{value}")
+            };
+            card = card
+                .on_focus(Msg::Focus(format!("provider-{value}")))
+                .on_click(Msg::Action(action));
+        }
+        cards = cards.child(card);
+    }
+    html::div()
+        .class("provider-choice")
+        .child(html::span(crate::i18n::tr("数据库类型").into_owned()).class("label"))
+        .child(cards)
+}
+
 pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
+    if app.archery.open {
+        return archery::wizard(app);
+    }
     let mut panel = html::div().class("modal-body");
     let footer;
     let mut form = html::div()
         .class("profile-form")
         .key(format!("profile-form-{:?}", app.form_id))
-        .child({
-            let mut cards = html::div()
-                .class("provider-cards")
-                .attr("role", "radiogroup")
-                .attr("aria-label", crate::i18n::tr("数据库类型").into_owned());
-            for (value, name) in [("mysql", "MySQL"), ("redis", "Redis")] {
-                let selected = app.field("provider") == value;
-                cards = cards.child(
-                    html::button("")
-                        .class(if selected {
-                            "provider-card selected"
-                        } else {
-                            "provider-card"
-                        })
-                        .key(format!("input-provider-{value}"))
-                        .attr("role", "radio")
-                        .attr("aria-checked", selected)
-                        .disabled(app.connection_form_busy())
-                        .on_focus(Msg::Focus(format!("provider-{value}")))
-                        .on_click(Msg::Action(format!("field:provider:{value}")))
-                        .child(provider_icon(app, value == "redis"))
-                        .child(html::span(name)),
-                );
-            }
-            html::div()
-                .class("provider-choice")
-                .child(html::span(crate::i18n::tr("数据库类型").into_owned()).class("label"))
-                .child(cards)
-        })
+        .child(connection_type_cards(app, false))
         .child(field(app, "name", "连接名称"))
         .child(
             html::div()

@@ -1,5 +1,6 @@
 //! 应用级设置和查询／标签操作；不重建数据库会话或工作区编辑状态。
 use super::*;
+use crate::i18n::UiMessage;
 
 pub(super) fn mysql_mode(value: &Value) -> Option<editor::MysqlMode> {
     let mode = value.get("sql_mode")?.as_str()?;
@@ -11,6 +12,28 @@ pub(super) fn mysql_mode(value: &Value) -> Option<editor::MysqlMode> {
             .split(',')
             .any(|s| s.eq_ignore_ascii_case("ANSI_QUOTES")),
     })
+}
+
+/// 当前历史页及其冻结的查询目标；草稿条件与已提交条件分离。
+#[derive(Clone, Default)]
+pub(super) struct ArcheryHistory {
+    pub items: Vec<Value>,
+    pub selected: Option<usize>,
+    pub pending: Option<Uuid>,
+    pub text_pending: Option<(Uuid, String)>,
+    pub full_text: Option<String>,
+    pub text_error: Option<String>,
+    pub session: Option<Value>,
+    pub error: Option<String>,
+    pub auth_required: bool,
+    pub offset: u64,
+    pub limit: u64,
+    pub total: u64,
+    pub visible: bool,
+    pub applied_search: String,
+    pub tab: Option<Uuid>,
+    pub profile: Option<Uuid>,
+    pub database: Option<String>,
 }
 
 impl App {
@@ -97,6 +120,157 @@ impl App {
     }
 
     pub(super) fn application_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if name == "archery-sql-check" {
+            if !self.profile.as_ref().is_some_and(|profile| {
+                profile.is_archery()
+                    && profile.provider == datapier_core::model::ProviderKind::Mysql
+            }) {
+                return true;
+            }
+            let Some(session) = self.session_id() else {
+                self.status = i18n::UiMessage::key("请先连接数据库");
+                return true;
+            };
+            let Some(database) = self.database.clone() else {
+                self.status = i18n::UiMessage::key("请先选择数据库");
+                return true;
+            };
+            if !self
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.archery())
+                .is_some_and(|source| source.databases.contains(&database))
+            {
+                self.status = i18n::UiMessage::key("请先选择数据库");
+                return true;
+            }
+            if self.operation_pending || self.task.is_some() || self.has_live_drafts() {
+                self.status = i18n::UiMessage::key("该 tab 已有正在执行的任务");
+                return true;
+            }
+            let query = &self.tabs[self.active].query;
+            let text = query
+                .selected_text()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&query.text)
+                .to_owned();
+            if text.trim().is_empty() {
+                self.status = i18n::UiMessage::key("没有可执行的文本");
+                return true;
+            }
+            self.generation = self.generation.wrapping_add(1);
+            self.workbench.query_ui.executed = true;
+            self.workbench.query_ui.results_hidden = false;
+            self.browse_result = false;
+            self.grid = None;
+            self.result_id = None;
+            self.results.clear();
+            self.request(backend, "archery.sql_check", "archery.sql_check",
+                json!({"session_id":session,"workspace_id":self.workspace_id,"database":database,"text":text}));
+            return true;
+        }
+        if matches!(
+            name,
+            "history-search"
+                | "history-prev"
+                | "history-next"
+                | "history-size:20"
+                | "history-size:50"
+                | "history-size:100"
+        ) {
+            let draft = self.field("history_filter").to_owned();
+            let history = &mut self.workbench.archery_history;
+            match name {
+                "history-search" => {
+                    history.applied_search = draft;
+                    history.offset = 0;
+                }
+                "history-prev" => history.offset = history.offset.saturating_sub(history.limit),
+                "history-next" => {
+                    if history.offset.saturating_add(history.limit) >= history.total {
+                        return true;
+                    }
+                    history.offset += history.limit;
+                }
+                _ => {
+                    history.limit = name[13..].parse().unwrap_or(20);
+                    history.offset = 0;
+                }
+            }
+            self.request_history(backend);
+            return true;
+        }
+        if name == "archery-history-reauth" {
+            if let Some(server_id) = self
+                .profile
+                .as_ref()
+                .and_then(|p| p.archery())
+                .map(|s| s.server_id)
+            {
+                self.archery_reauthenticate(server_id, backend);
+            }
+            return true;
+        }
+        if let Some(index) = name.strip_prefix("history-select:") {
+            let history = &mut self.workbench.archery_history;
+            history.selected = index
+                .parse::<usize>()
+                .ok()
+                .filter(|i| *i < history.items.len());
+            self.load_history_text(backend);
+            return true;
+        }
+        if name == "history-open" {
+            let text = self.history_selected_text().map(str::to_owned);
+            let Some(text) = text else {
+                return true;
+            };
+            if self.tabs.get(self.active).is_none() {
+                self.status = UiMessage::key("请先连接数据库");
+                return true;
+            }
+            if self.workbench.inline.is_some()
+                || self.has_live_drafts()
+                || !self.tabs[self.active].pending.is_null()
+            {
+                self.status = UiMessage::key("请先提交或丢弃当前草稿");
+                return true;
+            }
+            if self.task.is_some() || self.operation_pending || self.workbench.cli_running {
+                self.status = UiMessage::key("请等待或取消当前任务");
+                return true;
+            }
+            if self.is_redis() {
+                self.field_set("cli_text", text);
+                self.workbench.overlay = None;
+                self.workbench.cli = true;
+                self.view = "data".into();
+                self.focus = "cli_text".into();
+                self.workbench.focus_request = Some("input-cli_text".into());
+            } else {
+                if self.browse_result && self.target.is_some() {
+                    self.view = "data".into();
+                    self.open_query_tab(backend);
+                } else {
+                    self.generation = self.generation.wrapping_add(1);
+                }
+                self.tabs[self.active].query = Editor::new(text);
+                self.results.clear();
+                self.result_id = None;
+                self.grid = None;
+                self.page_history.clear();
+                self.page_token = None;
+                self.large = None;
+                self.browse_result = false;
+                self.workbench.query_ui.executed = false;
+                self.workbench.overlay = None;
+                self.view = "query".into();
+                self.focus = "query".into();
+                self.workbench.focus_request = Some("query-editor".into());
+            }
+            self.dirty = true;
+            return true;
+        }
         if let Some(id) = name
             .strip_prefix("profile-settings:")
             .and_then(|id| Uuid::parse_str(id).ok())
@@ -137,9 +311,22 @@ impl App {
                 return true;
             }
         }
+        if name == "server-new" {
+            self.archery_manage_server(None, backend);
+            return true;
+        }
+        if let Some((action, id)) = name.split_once(':')
+            && matches!(action, "server-edit" | "server-delete")
+            && let Ok(id) = Uuid::parse_str(id)
+        {
+            self.archery_manage_server(Some(id), backend);
+            self.archery.delete_confirm = action == "server-delete";
+            return true;
+        }
         if name == "app-settings" {
             if self.finish_inline(true) {
                 self.workbench.overlay = Some("settings".into());
+                self.refresh_archery_servers(backend);
             }
             return true;
         }
@@ -174,6 +361,10 @@ impl App {
 
     pub(super) fn refresh_query_mode(&mut self, backend: &Backend) {
         if !self.is_redis()
+            && !self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.is_archery())
             && let Some(session) = self.session_id()
         {
             self.request(
@@ -205,6 +396,16 @@ impl App {
             self.status = i18n::UiMessage::key("请先连接数据库");
             return;
         };
+        if let Some(source) = self.profile.as_ref().and_then(|profile| profile.archery())
+            && !self
+                .database
+                .as_ref()
+                .is_some_and(|database| source.databases.contains(database))
+        {
+            self.status = i18n::UiMessage::key("请先选择数据库");
+            return;
+        }
+        self.close_result_info(false);
         // SQL 可修改会话 sql_mode；旧模式与旧结果响应均不能用于新执行。
         self.generation = self.generation.wrapping_add(1);
         self.workbench.sql_mode = None;
@@ -222,13 +423,239 @@ impl App {
         self.page_history.clear();
         self.large = None;
         self.view = "query".into();
-        self.request(
-            backend,
-            "execution.start",
-            "execution.start",
-            json!({"session_id":session,"workspace_id":self.workspace_id,"text":text}),
-        );
+        let mut params = json!({"session_id":session,"workspace_id":self.workspace_id,"database":self.database,"text":text});
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.is_archery())
+        {
+            params["limit"] = json!(self.workbench.query_ui.request_limit);
+        }
+        self.request(backend, "execution.start", "execution.start", params);
     }
+    pub(super) fn open_history(&mut self, backend: &Backend) {
+        self.invalidate_history(backend);
+        self.field_set("history_filter", "");
+        let visible = self.profile.as_ref().is_some_and(|p| p.is_archery());
+        self.workbench.archery_history = ArcheryHistory {
+            limit: 20,
+            visible,
+            ..Default::default()
+        };
+        self.workbench.overlay = Some("history".into());
+        self.workbench.focus_request = Some("input-history_filter".into());
+        self.request_history(backend);
+    }
+
+    pub(super) fn invalidate_history(&mut self, backend: &Backend) {
+        let history = &mut self.workbench.archery_history;
+        history.text_pending = None;
+        history.full_text = None;
+        history.text_error = None;
+        if let Some(operation) = history.pending.take()
+            && history.visible
+        {
+            let _ = backend.request(
+                "archery.history.cancel",
+                "archery.operation.cancel",
+                json!({"operation_id":operation}),
+            );
+        }
+    }
+
+    fn request_history(&mut self, backend: &Backend) {
+        self.invalidate_history(backend);
+        let operation = Uuid::new_v4();
+        let session = self.session_id();
+        let history = &mut self.workbench.archery_history;
+        history.items.clear();
+        history.selected = None;
+        history.total = 0;
+        history.error = None;
+        history.auth_required = false;
+        history.session = session.clone();
+        history.tab = self.tabs.get(self.active).map(|tab| tab.id);
+        history.profile = self.profile.as_ref().map(|profile| profile.id);
+        history.database = self.database.clone();
+        if history.visible && session.is_none() {
+            history.error = Some(i18n::tr("请先连接数据库").into_owned());
+            return;
+        }
+        history.pending = Some(operation);
+        let (method, params) = if history.visible {
+            (
+                "archery.query_history",
+                json!({"operation_id":operation,"session_id":session,"offset":history.offset,"limit":history.limit,"search":history.applied_search}),
+            )
+        } else {
+            let needle = history.applied_search.to_lowercase();
+            let search_states: Vec<_> = [
+                "queued",
+                "running",
+                "cancelling",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "wait_stopped",
+                "outcome_unknown",
+            ]
+            .into_iter()
+            .filter(|state| {
+                !needle.is_empty()
+                    && crate::views::task_state_text(state)
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .collect();
+            (
+                "history.list",
+                json!({"workspace_id":self.workspace_id,"offset":history.offset,"limit":history.limit,"search":history.applied_search,"search_states":search_states}),
+            )
+        };
+        if let Err(error) = backend.request(format!("history.page/{operation}"), method, params) {
+            history.pending = None;
+            history.error = Some(error.to_string());
+        }
+    }
+
+    pub(super) fn history_response(
+        &mut self,
+        token: &str,
+        result: &Result<Value>,
+        backend: &Backend,
+    ) {
+        let Ok(operation) = Uuid::parse_str(token) else {
+            return;
+        };
+        let history = &self.workbench.archery_history;
+        if Some(operation) != history.pending
+            || history.tab != self.tabs.get(self.active).map(|tab| tab.id)
+            || history.profile != self.profile.as_ref().map(|profile| profile.id)
+            || history.database != self.database
+            || (history.visible && history.session != self.session_id())
+            || self.workbench.overlay.as_deref() != Some("history")
+        {
+            return;
+        }
+        let history = &mut self.workbench.archery_history;
+        history.pending = None;
+        match result {
+            Ok(value) => {
+                let key = if history.visible { "rows" } else { "items" };
+                match (
+                    value.get(key).and_then(Value::as_array),
+                    value.get("total").and_then(Value::as_u64),
+                    value.get("offset").and_then(Value::as_u64),
+                    value.get("limit").and_then(Value::as_u64),
+                ) {
+                    (Some(items), Some(total), Some(offset), Some(limit))
+                        if offset == history.offset && limit == history.limit =>
+                    {
+                        if total > 0 && offset >= total {
+                            history.offset = (total - 1) / limit.max(1) * limit.max(1);
+                            self.request_history(backend);
+                            return;
+                        }
+                        history.items = items.clone();
+                        history.total = total;
+                        history.selected = (!items.is_empty()).then_some(0);
+                    }
+                    _ => history.error = Some(i18n::tr("历史响应格式无效").into_owned()),
+                }
+            }
+            Err(error) => {
+                history.auth_required = error.code == "auth_required";
+                history.error = Some(error.to_string());
+            }
+        }
+        self.load_history_text(backend);
+    }
+
+    pub(super) fn history_selected_text(&self) -> Option<&str> {
+        let history = &self.workbench.archery_history;
+        if history.pending.is_some()
+            || history.text_pending.is_some()
+            || history.text_error.is_some()
+        {
+            return None;
+        }
+        let item = history
+            .selected
+            .and_then(|index| history.items.get(index))?;
+        if item.get("text_truncated").and_then(Value::as_bool) == Some(true) {
+            history.full_text.as_deref()
+        } else {
+            archery_history_text(item)
+        }
+    }
+
+    fn load_history_text(&mut self, backend: &Backend) {
+        let history = &mut self.workbench.archery_history;
+        history.text_pending = None;
+        history.full_text = None;
+        history.text_error = None;
+        let Some(item) = history.selected.and_then(|index| history.items.get(index)) else {
+            return;
+        };
+        if history.visible || item.get("text_truncated").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            history.text_error = Some(i18n::tr("历史响应格式无效").into_owned());
+            return;
+        };
+        let operation = Uuid::new_v4();
+        history.text_pending = Some((operation, id.to_owned()));
+        if let Err(error) = backend.request(
+            format!("history.text/{operation}"),
+            "execution.get",
+            json!({"task_id":id,"include_text":true}),
+        ) {
+            history.text_pending = None;
+            history.text_error = Some(error.to_string());
+        }
+    }
+
+    pub(super) fn history_text_response(&mut self, token: &str, result: &Result<Value>) {
+        let history = &self.workbench.archery_history;
+        let Some((operation, id)) = &history.text_pending else {
+            return;
+        };
+        if Uuid::parse_str(token).ok() != Some(*operation)
+            || history.tab != self.tabs.get(self.active).map(|tab| tab.id)
+            || history.profile != self.profile.as_ref().map(|profile| profile.id)
+            || history.database != self.database
+            || self.workbench.overlay.as_deref() != Some("history")
+            || history
+                .selected
+                .and_then(|index| history.items.get(index))
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+                != Some(id.as_str())
+        {
+            return;
+        }
+        let id = id.clone();
+        let history = &mut self.workbench.archery_history;
+        history.text_pending = None;
+        match result {
+            Ok(value) if value.get("id").and_then(Value::as_str) == Some(id.as_str()) => {
+                if let Some(text) = value.get("text").and_then(Value::as_str) {
+                    history.full_text = Some(text.to_owned());
+                } else {
+                    history.text_error = Some(i18n::tr("历史响应格式无效").into_owned());
+                }
+            }
+            Ok(_) => history.text_error = Some(i18n::tr("历史响应格式无效").into_owned()),
+            Err(error) => history.text_error = Some(error.to_string()),
+        }
+    }
+}
+
+pub(super) fn archery_history_text(item: &Value) -> Option<&str> {
+    ["sqllog", "sql_content", "sql", "text", "full_sql"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str))
 }
 
 #[cfg(test)]

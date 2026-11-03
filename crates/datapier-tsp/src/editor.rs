@@ -240,6 +240,13 @@ pub struct MysqlMode {
     pub ansi_quotes: bool,
 }
 
+/// 无状态查询只接受语句边界不依赖 sql_mode 的共同子集。
+#[derive(Clone, Copy, Debug)]
+pub enum SqlContext {
+    Session(MysqlMode),
+    Stateless,
+}
+
 /// SQL tokenizer 识别出的高亮类别。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HighlightKind {
@@ -492,6 +499,121 @@ pub fn statements(sql: &str, mode: MysqlMode) -> Result<Vec<StatementRange>, Str
     Ok(result)
 }
 
+/// Map Core's UTF-8 statement ranges to the editor's UTF-16 coordinates.
+pub fn statements_in(sql: &str, context: SqlContext) -> Result<Vec<StatementRange>, String> {
+    match context {
+        SqlContext::Session(mode) => statements(sql, mode),
+        SqlContext::Stateless => {
+            let ranges = datapier_core::providers::mysql::stateless_statement_ranges(sql)
+                .map_err(|error| error.message)?;
+            ranges
+                .into_iter()
+                .map(|(start, end)| {
+                    let fragment = sql.get(start..end).ok_or("无效的语句范围")?;
+                    let tokens = tokenize(fragment, MysqlMode::default())?;
+                    let first = tokens
+                        .iter()
+                        .find(|token| token.kind != Some(HighlightKind::Comment))
+                        .ok_or("无效的语句范围")?;
+                    Ok(StatementRange {
+                        range: byte_to_utf16(sql, start).ok_or("无效的语句范围")?
+                            ..byte_to_utf16(sql, end).ok_or("无效的语句范围")?,
+                        first_line: sql[..start + first.start]
+                            .bytes()
+                            .filter(|b| *b == b'\n')
+                            .count()
+                            + 1,
+                        last_line: sql[..end].bytes().filter(|b| *b == b'\n').count() + 1,
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+pub fn current_statement_in(
+    sql: &str,
+    cursor: usize,
+    context: SqlContext,
+) -> Result<Range<usize>, String> {
+    if let SqlContext::Session(mode) = context {
+        return current_statement(sql, cursor, mode);
+    }
+    let byte = utf16_to_byte(sql, cursor).ok_or("光标不在有效的 UTF-16 字符边界")?;
+    let ranges = datapier_core::providers::mysql::stateless_statement_ranges(sql)
+        .map_err(|error| error.message)?;
+    let tokens = tokenize(sql, MysqlMode::default())?;
+    let mut start = 0;
+    let mut end = sql.len();
+    for token in tokens
+        .iter()
+        .filter(|token| token.kind.is_none() && &sql[token.start..token.end] == ";")
+    {
+        if token.start < byte {
+            start = token.end;
+        } else {
+            end = token.start;
+            break;
+        }
+    }
+    let (left, right) = ranges
+        .into_iter()
+        .find(|(left, right)| *left >= start && *right <= end)
+        .ok_or("光标处没有可执行的 SQL 语句")?;
+    Ok(byte_to_utf16(sql, left).ok_or("无效的语句范围")?
+        ..byte_to_utf16(sql, right).ok_or("无效的语句范围")?)
+}
+
+pub fn validate_explain_selection_in(sql: &str, context: SqlContext) -> Result<(), String> {
+    match context {
+        SqlContext::Session(mode) => validate_explain_selection(sql, mode),
+        SqlContext::Stateless => {
+            let statements = datapier_core::providers::mysql::stateless_statements(sql)
+                .map_err(|error| error.message)?;
+            if statements.len() != 1 {
+                return Err("执行计划只支持单条 SQL".into());
+            }
+            validate_explain_ast(&statements[0])
+        }
+    }
+}
+
+pub fn explain_selection_in(sql: &str, context: SqlContext) -> Result<String, String> {
+    validate_explain_selection_in(sql, context)?;
+    Ok(format!("EXPLAIN FORMAT=JSON {sql}"))
+}
+
+pub fn format_range_in(
+    text: &str,
+    range: Range<usize>,
+    context: SqlContext,
+) -> Result<String, String> {
+    match context {
+        SqlContext::Session(mode) => format_range(text, range, mode),
+        SqlContext::Stateless => {
+            // Validate the complete surrounding text as well as the selected output.
+            datapier_core::providers::mysql::stateless_statement_ranges(text)
+                .map_err(|error| error.message)?;
+            let start = utf16_to_byte(text, range.start).ok_or("SQL 选区无效")?;
+            let end = utf16_to_byte(text, range.end).ok_or("SQL 选区无效")?;
+            let selected = text.get(start..end).ok_or("SQL 选区无效")?;
+            if datapier_core::providers::mysql::stateless_statements(selected)
+                .map_err(|error| error.message)?
+                .is_empty()
+            {
+                return Err("选区没有完整的 SQL 语句".into());
+            }
+            // Core has proved that quote and escape rules are mode independent.
+            let mode = MysqlMode::default();
+            let formatted = format_checked_selection(selected, mode)?;
+            let formatted = format_checked_range(text, start, end, formatted, mode)?;
+            datapier_core::providers::mysql::stateless_statements(&formatted)
+                .map_err(|error| error.message)?;
+            Ok(formatted)
+        }
+    }
+}
+
 /// 验证单条可解释语句；用于控件状态时不构造执行文本。
 pub fn validate_explain_selection(sql: &str, mode: MysqlMode) -> Result<(), String> {
     if mode.ansi_quotes || mode.no_backslash_escapes {
@@ -500,6 +622,10 @@ pub fn validate_explain_selection(sql: &str, mode: MysqlMode) -> Result<(), Stri
     if statements(sql, mode)?.len() != 1 {
         return Err("执行计划只支持单条 SQL".into());
     }
+    validate_explain_ast(sql)
+}
+
+fn validate_explain_ast(sql: &str) -> Result<(), String> {
     let parsed = sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, sql)
         .map_err(|_| "无法安全解析选中的 SQL")?;
     if parsed.len() != 1
@@ -516,12 +642,6 @@ pub fn validate_explain_selection(sql: &str, mode: MysqlMode) -> Result<(), Stri
     Ok(())
 }
 
-/// 验证后生成普通 EXPLAIN；不会执行目标语句或加入 ANALYZE。
-pub fn explain_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
-    validate_explain_selection(sql, mode)?;
-    Ok(format!("EXPLAIN FORMAT=JSON {sql}"))
-}
-
 /// 仅接受格式化前后词法与 AST 均一致的结果，避免改写注释、占位符和 SQL 语义。
 pub fn format_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
     if mode.ansi_quotes || mode.no_backslash_escapes {
@@ -530,6 +650,10 @@ pub fn format_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
     if statements(sql, mode)?.is_empty() {
         return Err("选区没有完整的 SQL 语句".into());
     }
+    format_checked_selection(sql, mode)
+}
+
+fn format_checked_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
     let before = tokenize(sql, mode)?;
     // sqlformat 将任意 -- 视为注释；MySQL 要求后接空白或控制字符。
     if before.windows(2).any(|pair| {
@@ -611,6 +735,17 @@ pub fn format_range(text: &str, range: Range<usize>, mode: MysqlMode) -> Result<
     let end = utf16_to_byte(text, range.end).ok_or("SQL 选区无效")?;
     let selected = text.get(start..end).ok_or("SQL 选区无效")?;
     let formatted = format_selection(selected, mode)?;
+    format_checked_range(text, start, end, formatted, mode)
+}
+
+fn format_checked_range(
+    text: &str,
+    start: usize,
+    end: usize,
+    formatted: String,
+    mode: MysqlMode,
+) -> Result<String, String> {
+    let selected = &text[start..end];
     let original = tokenize(text, mode)?;
     let mut combined = String::with_capacity(text.len() - selected.len() + formatted.len());
     combined.push_str(&text[..start]);

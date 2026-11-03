@@ -1,22 +1,135 @@
 use super::*;
 
 impl App {
+    pub(super) fn archery_auth_required(
+        &mut self,
+        code: Option<&str>,
+        details: &Value,
+        backend: &Backend,
+    ) {
+        if code != Some("auth_required") {
+            return;
+        }
+        let server_id = details
+            .get("server_id")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .or_else(|| {
+                self.profile
+                    .as_ref()
+                    .and_then(|profile| profile.archery())
+                    .map(|source| source.server_id)
+            });
+        if let Some(server_id) = server_id {
+            self.archery_reauthenticate(server_id, backend);
+        }
+    }
+
     pub(super) fn page(&mut self, backend: &Backend, start: u64) {
         if let Some(id) = self.result_id.clone() {
+            let archery = self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.is_archery());
+            let size = if archery {
+                self.result_page_size(&id)
+            } else {
+                200
+            };
+            if archery && !self.prepare_result_page(backend, &id, start) {
+                return;
+            }
             let token = Uuid::new_v4();
             self.page_token = Some(token);
             self.request(
                 backend,
                 &format!("result.page/{token}"),
                 "result.page",
-                json!({"result_id":id,"start":start,"max_rows":200,"max_bytes":1048576}),
+                json!({"result_id":id,"start":start,"max_rows":size,"max_bytes":1048576}),
             );
         }
     }
+    pub(super) fn execute_current_statement(
+        &mut self,
+        query: &editor::Editor,
+        context: editor::SqlContext,
+        backend: &Backend,
+    ) {
+        match editor::current_statement_in(&query.text, query.cursor, context) {
+            Ok(range) => {
+                if let (Some(start), Some(end)) = (
+                    editor::utf16_to_byte(&query.text, range.start),
+                    editor::utf16_to_byte(&query.text, range.end),
+                ) {
+                    self.execute_query_text(query.text[start..end].to_owned(), backend);
+                }
+            }
+            Err(error) => self.status = i18n::UiMessage::local(error),
+        }
+    }
     pub(super) fn response(&mut self, response: Response, backend: &Backend) {
+        // 认证句柄释放属于内部清理，其 ACK 不能覆盖登录状态或结果详情。
+        if response.tag == "archery-release" {
+            return;
+        }
+        if response.result.is_err()
+            && response.tag.starts_with("large.value/")
+            && !self.large.as_ref().is_some_and(|load| {
+                response.tag == format!("large.value/{}/{}", load.id, load.offset)
+            })
+        {
+            return;
+        }
+        let open = if response.tag == "connection.open"
+            && self
+                .archery
+                .open_capture
+                .as_ref()
+                .is_some_and(|open| self.archery_open_context_matches(open))
+        {
+            self.archery.open_capture.take()
+        } else {
+            None
+        };
         let value = match response.result {
             Ok(v) => v,
             Err(e) => {
+                self.archery_auth_required(Some(&e.code), &e.details, backend);
+                if response.tag == "connection.open"
+                    && e.code == "auth_required"
+                    && let Some(profile) = self.profile.as_ref().filter(|p| {
+                        p.archery()
+                            .is_some_and(|a| Some(a.server_id) == self.archery.reauth_server)
+                    })
+                {
+                    self.archery.connection_auth_error =
+                        Some((self.tabs[self.active].id, self.generation, profile.id));
+                }
+                if e.code == "auth_required"
+                    && let Some(open) = open.filter(|open| self.archery_open_context_matches(open))
+                    && self.archery.reauth_server
+                        == self
+                            .profile
+                            .as_ref()
+                            .and_then(|p| p.archery())
+                            .map(|source| source.server_id)
+                    && self.archery.reauth_server.is_some()
+                {
+                    self.archery.open_continuation = Some(open);
+                }
+                if let Some((token, id)) = response
+                    .tag
+                    .strip_prefix("result.pagination/")
+                    .and_then(|s| s.split_once('/'))
+                {
+                    if let Some(state) = self.workbench.query_ui.pagination.get_mut(id)
+                        && Uuid::parse_str(token).ok() == state.token
+                    {
+                        state.token = None;
+                        self.status = i18n::UiMessage::raw(e.to_string());
+                    }
+                    return;
+                }
                 if response.tag == "change.submit" {
                     self.redis_key_delete_submit_failed();
                 }
@@ -60,6 +173,7 @@ impl App {
                     response.tag.as_str(),
                     "connection.open"
                         | "execution.start"
+                        | "archery.sql_check"
                         | "resource.browse"
                         | "change.submit"
                         | "transfer.import"
@@ -70,6 +184,10 @@ impl App {
                 return;
             }
         };
+        if response.tag.starts_with("result.pagination/") {
+            self.accept_result_pagination(&response.tag, value, backend);
+            return;
+        }
         if response.tag.starts_with("cli.")
             || (self.workbench.cli_running && response.tag == "execution.get")
         {
@@ -87,6 +205,20 @@ impl App {
                     self.refresh_settings(backend);
                     return;
                 }
+                if value.get("kind").and_then(Value::as_str) == Some("connections.changed") {
+                    self.request(backend, "profile.list", "profile.list", json!({}));
+                    self.refresh_archery_servers(backend);
+                    return;
+                }
+                if value.get("kind").and_then(Value::as_str) == Some("archery.auth.changed") {
+                    if let Some(server_id) = value["payload"]["server_id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                    {
+                        self.archery_auth_changed(server_id, backend);
+                    }
+                    return;
+                }
                 if value.get("kind").and_then(Value::as_str) == Some("execution.state")
                     && let Some(task) = value.get("task_id").and_then(Value::as_str)
                     && self.task.as_deref() == Some(task)
@@ -102,6 +234,7 @@ impl App {
             "connect" => {
                 self.status = "已连接 Engine".into();
                 self.refresh_settings(backend);
+                self.refresh_archery_servers(backend);
                 self.request(backend, "profile.list", "profile.list", json!({}));
                 self.request(
                     backend,
@@ -114,6 +247,7 @@ impl App {
                 self.profiles =
                     serde_json::from_value(value.get("profiles").cloned().unwrap_or_default())
                         .unwrap_or_default();
+                self.restore_empty_context(true);
                 self.migrate_cli_queries();
                 if self.profile.is_none() {
                     self.profile = self
@@ -144,6 +278,7 @@ impl App {
                     serde_json::from_value::<Workspace>(value["state"].clone())
                 {
                     self.navigation.expanded = state.navigation_expanded;
+                    self.empty_context = state.empty_context;
                     self.tabs = state.tabs;
                     self.active = state.active.min(self.tabs.len().saturating_sub(1));
                     self.migrate_cli_queries();
@@ -165,6 +300,7 @@ impl App {
                             self.set_recovery_detail_context();
                         }
                     }
+                    self.restore_empty_context(false);
                 }
                 self.workspace_loaded = true;
             }
@@ -196,25 +332,57 @@ impl App {
                     Ok(profile) => {
                         self.workbench.connection_error = None;
                         self.tabs[self.active].profile_id = Some(profile.id);
-                        if profile.provider == datapier_core::model::ProviderKind::Redis {
-                            self.tabs[self.active].browse.redis_db = Some(profile.redis_db);
+                        let redis = profile.provider == datapier_core::model::ProviderKind::Redis;
+                        let archery_redis = redis && profile.is_archery();
+                        if redis {
+                            let db = value
+                                .get("redis_db")
+                                .and_then(Value::as_u64)
+                                .and_then(|db| u32::try_from(db).ok())
+                                .unwrap_or_else(|| profile.redis_db());
+                            self.tabs[self.active].browse.redis_db = Some(db);
+                            self.database = Some(db.to_string());
+                        } else {
+                            self.database = value
+                                .get("database")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .or_else(|| profile.default_database().map(str::to_owned));
                         }
-                        self.database = profile.database.clone();
                         self.profile = Some(profile);
                         self.session = Some(value);
+                        self.workbench.cli_database = None;
                         self.workbench.sql_mode = None;
                         self.status = "数据库连接已打开".into();
-                        if let Some(target) = self.workbench.queued_target.take() {
-                            if target.kind == "database" {
-                                self.database = (!target.name.is_empty()).then_some(target.name);
-                            } else {
-                                self.load_target(target, backend);
+                        if archery_redis {
+                            self.workbench.queued_target = None;
+                            self.target = None;
+                            self.workbench.cli = true;
+                            self.view = "data".into();
+                            self.focus = "cli_text".into();
+                            self.workbench.focus_request = Some("input-cli_text".into());
+                        } else {
+                            if let Some(target) = self.workbench.queued_target.take() {
+                                if target.kind == "database" {
+                                    if self
+                                        .session
+                                        .as_ref()
+                                        .and_then(|session| session.get("database"))
+                                        .and_then(Value::as_str)
+                                        .is_none()
+                                    {
+                                        self.database =
+                                            (!target.name.is_empty()).then_some(target.name);
+                                    }
+                                } else {
+                                    self.load_target(target, backend);
+                                }
                             }
+                            self.navigation_apply_queued_section();
+                            self.action("list", backend);
+                            self.refresh_query_mode(backend);
+                            self.navigation_load_tree(backend, false);
                         }
-                        self.navigation_apply_queued_section();
-                        self.action("list", backend);
-                        self.refresh_query_mode(backend);
-                        self.navigation_load_tree(backend, false);
                     }
                     Err(e) => {
                         let error = format!("数据库会话缺少有效连接信息: {e}");
@@ -241,20 +409,6 @@ impl App {
                 }
                 Err(e) => self.status = i18n::UiMessage::raw(e.to_string()),
             },
-            "history.list" => {
-                self.workbench.history = value
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                self.workbench.history_selected = if self.field("history_filter").is_empty()
-                    && !self.workbench.history.is_empty()
-                {
-                    Some(0)
-                } else {
-                    None
-                };
-            }
             "transfer.preview" => {
                 let valid = value
                     .get("errors")
@@ -275,6 +429,30 @@ impl App {
                 };
             }
             "resource.describe" => {
+                if let (Some(target), Some(remote)) = (self.target.as_mut(), value.get("target")) {
+                    let same = remote.get("name").and_then(Value::as_str)
+                        == Some(target.name.as_str())
+                        && remote.get("database").and_then(Value::as_str)
+                            == target.database.as_deref()
+                        && remote.get("key_b64").and_then(Value::as_str)
+                            == target.key_b64.as_deref();
+                    if same {
+                        let kind = remote
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .filter(|kind| matches!(*kind, "table" | "view"))
+                            .or_else(|| {
+                                value
+                                    .get("details")
+                                    .and_then(|d| d.get("relation_kind"))
+                                    .and_then(Value::as_str)
+                                    .filter(|kind| matches!(*kind, "table" | "view"))
+                            });
+                        if let Some(kind) = kind {
+                            target.kind = kind.to_owned();
+                        }
+                    }
+                }
                 self.schema = Some(value.clone());
                 self.detail = value.to_string();
                 self.set_detail_context("资源详情");
@@ -305,18 +483,11 @@ impl App {
                     let Some((_, query)) = self.current_pending.take() else {
                         return;
                     };
-                    match editor::current_statement(&query.text, query.cursor, settings) {
-                        Ok(range) => {
-                            if let (Some(start), Some(end)) = (
-                                editor::utf16_to_byte(&query.text, range.start),
-                                editor::utf16_to_byte(&query.text, range.end),
-                            ) {
-                                let text = query.text[start..end].to_string();
-                                self.execute_query_text(text, backend);
-                            }
-                        }
-                        Err(e) => self.status = i18n::UiMessage::local(e),
-                    }
+                    self.execute_current_statement(
+                        &query,
+                        editor::SqlContext::Session(settings),
+                        backend,
+                    );
                 } else {
                     self.current_pending = None;
                     self.status = "数据库未返回 sql_mode，无法安全定位当前语句".into();
@@ -356,8 +527,8 @@ impl App {
                 self.workbench.load_resource = true;
                 self.action("describe", backend);
             }
-            "execution.start" | "resource.browse" | "change.submit" | "transfer.import"
-            | "transfer.export" => {
+            "execution.start" | "archery.sql_check" | "resource.browse" | "change.submit"
+            | "transfer.import" | "transfer.export" => {
                 self.operation_pending = false;
                 self.large = None;
                 self.task = value
@@ -378,6 +549,7 @@ impl App {
                     Some("succeeded") => i18n::UiArg::Key("已完成"),
                     Some("failed") => i18n::UiArg::Key("失败"),
                     Some("cancelled") => i18n::UiArg::Key("已取消"),
+                    Some("wait_stopped") => i18n::UiArg::Key("已结束等待，远端完成状态未知"),
                     Some("outcome_unknown") => i18n::UiArg::Key("结果待确认"),
                     _ => i18n::UiArg::Raw(value["state"].to_string()),
                 };
@@ -472,10 +644,17 @@ impl App {
                         self.result_id = Some(id);
                         self.page(backend, 0);
                     }
+                    self.archery_auth_required(
+                        value["error"]["code"].as_str(),
+                        &value["error"]["details"],
+                        backend,
+                    );
                 }
             }
             "result.page" => match serde_json::from_value::<ResultPage>(value) {
                 Ok(mut page) => {
+                    self.remember_result_start(&page);
+                    self.refresh_changed_result_plan(backend, &page);
                     if let Some(g) = &mut self.grid
                         && g.page.result.id == page.result.id
                     {
@@ -543,6 +722,7 @@ impl App {
                     self.changed_field("query");
                 }
             }
+            "archery.history.cancel" => {}
             _ => {
                 self.detail = value.to_string();
                 self.detail_context = DetailContext::default();

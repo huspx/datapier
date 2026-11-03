@@ -1,0 +1,234 @@
+.connection-icon {
+  position: relative;
+  background: transparent;
+}
+.connection-dot {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  box-sizing: border-box;
+  display: flex;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--card);
+  border-radius: 50%;
+}
+.connection-dot-mark {
+  box-sizing: border-box;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--t3);
+  border-radius: 50%;
+  color: var(--card);
+  font-size: 6px;
+  line-height: 3px;
+  text-align: center;
+}
+.connection-dot.connected .connection-dot-mark {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.connection-dot.connecting .connection-dot-mark {
+  border-color: var(--t2);
+  border-right-color: transparent;
+}
+.connection-dot.failed .connection-dot-mark {
+  border-color: var(--bad);
+  background: var(--bad);
+}
+.connection.active .connection-dot {
+  border-color: var(--tv-sel);
+}
+.connection.active .connection-dot-mark {
+  color: var(--tv-sel);
+}
+.connection-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.connection-name strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-footer {
+  margin-top: auto;
+}
+.provider-choice {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.database-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-start;
+  text-align: left;
+}
+.tree-object {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding-left: 35px;
+}
+.tab {
+  gap: 3px;
+  padding: 0 6px 0 12px;
+}
+.tab-title, .tab-close {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+.tab-title {
+  padding: 0;
+}
+.tab:hover {
+  background: var(--tv-sel);
+}
+.tab .tab-title:hover,
+.tab .tab-close:hover,
+.tab .tab-title:active,
+.tab .tab-close:active {
+  background: transparent;
+}
+.tab-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tab-title > * {
+  pointer-events: none;
+}
+.tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 4px;
+}
+.tab-close * {
+  pointer-events: none;
+}
+.rownum.selected {
+  background: var(--tv-sel);
+  color: var(--t1);
+}
+.profile-databases {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.profile-databases .toolbar {
+  padding: 0;
+}
+.database-choice {
+  text-align: left;
+}
+.cli-prompt {
+  flex: none;
+  min-height: 38px;
+  margin: 0;
+  padding: 4px 12px;
+  border-top: 1px solid var(--l2);
+}
+.cli-prompt .sf-editor {
+  flex: 1;
+  min-width: 0;
+  max-height: 32px;
+}
+.cli-history {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.query-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.query-gutter {
+  flex: none;
+  padding-top: 6px;
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+.query-gutter-line {
+  display: flex;
+  align-items: center;
+  height: var(--sf-lh);
+  line-height: var(--sf-lh);
+}
+.query-line-number {
+  min-width: 30px;
+  text-align: right;
+  color: var(--t3);
+}
+.query-line-run,
+.cli-run {
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+}
+.query-boundary-hint {
+  color: var(--t3);
+  padding: 4px 10px;
+}
+.bp-small .sidebar:not(.compact) {
+  top: 0;
+}
+.cli-head {
+  gap: 5px;
+}
+.diagnostic-row {
+  display: flex;
+  gap: 12px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--l2);
+}
+.diagnostic-row > span:first-child {
+  flex: 0 0 132px;
+  overflow-wrap: anywhere;
+}
+.diagnostic-row > span:last-child {
+  overflow-wrap: anywhere;
+}
+.shortcuts-help {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.shortcut-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0;
+}
+.shortcut-keys {
+  width: 230px;
+  font-family: var(--mono);
+  color: var(--accent);
+}
+.shortcut-label {
+  flex: 1;
+  min-width: 160px;
+}
+.profile-form .form-grid {
+  align-items: flex-start;
+}
+.database-candidates {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-height: 120px;
+  overflow: auto;
+}

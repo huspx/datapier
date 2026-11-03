@@ -120,3 +120,28 @@ fn bit_width_is_checked_for_import_and_write() {
     }
     assert_consumers("bit(8)", Value::Bytes("invalid!".into()), false);
 }
+
+#[test]
+fn import_validation_exposes_localizable_details() {
+    let text = Column::new("title", "varchar(2)");
+    let error = validate_import_value(&Value::Text("字字 ".into()), &text).unwrap_err();
+    assert_eq!(
+        *error.details,
+        json!({"validation":"character_length", "column":"title", "type":"varchar(2)", "limit":2})
+    );
+    let numeric = Column::new("amount", "tinyint");
+    let error = validate_import_value(&Value::Integer("128".into()), &numeric).unwrap_err();
+    assert_eq!(
+        *error.details,
+        json!({"validation":"numeric_range", "column":"amount", "type":"tinyint"})
+    );
+    let error = validate_import_value(&Value::Text("bad".into()), &numeric).unwrap_err();
+    assert_eq!(error.details["validation"], "type_mismatch");
+    let bit = Column::new("flags", "bit(1)");
+    let error = validate_import_value(&Value::Bytes(STANDARD.encode([2])), &bit).unwrap_err();
+    assert_eq!(error.details["validation"], "bit_width");
+    let mut generated = text;
+    generated.generated = true;
+    let error = validate_import_value(&Value::Text("ok".into()), &generated).unwrap_err();
+    assert_eq!(error.details["validation"], "generated_column");
+}

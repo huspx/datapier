@@ -85,19 +85,45 @@ impl PendingGridCopy {
             })
     }
 }
+
+struct PendingCliCopy {
+    tag: String,
+    tab: Uuid,
+    generation: u64,
+    records: Vec<Uuid>,
+}
+impl PendingCliCopy {
+    fn matches(&self, app: &App) -> bool {
+        app.is_redis()
+            && app
+                .tabs
+                .get(app.active)
+                .is_some_and(|tab| tab.id == self.tab)
+            && app.generation == self.generation
+            && app
+                .workbench
+                .cli_history
+                .iter()
+                .map(|record| record.id)
+                .eq(self.records.iter().copied())
+    }
+}
 enum CopyContext {
     Redis(PendingRedisCopy),
     Grid(PendingGridCopy),
+    Cli(PendingCliCopy),
 }
 impl CopyContext {
     fn matches(&self, app: &App) -> bool {
         match self {
             Self::Redis(context) => context.matches(app),
             Self::Grid(context) => context.matches(app),
+            Self::Cli(context) => context.matches(app),
         }
     }
 }
 const GRID_COPY_TAG: &str = "clipboard.grid/";
+const CLI_COPY_TAG: &str = "clipboard.cli/";
 
 const REDIS_COPY_TAG: &str = "clipboard.redis.value/";
 // 每轮最多编码 64 KiB，先让事件循环处理输入，再继续下一批。
@@ -147,6 +173,7 @@ pub(super) struct Clipboard {
     copy: Option<(Uuid, Instant)>,
     redis: Option<PendingRedisCopy>,
     grid: Option<PendingGridCopy>,
+    cli: Option<PendingCliCopy>,
     redis_write: Option<RedisWrite>,
 }
 
@@ -154,6 +181,7 @@ impl Clipboard {
     pub(super) fn copy_grid(&mut self, app: &mut App, backend: &Backend) {
         self.redis = None;
         self.grid = None;
+        self.cli = None;
         self.redis_write = None;
         if self.cut.is_some() || self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
@@ -207,6 +235,7 @@ impl Clipboard {
         self.grid = None;
         self.redis = None;
         self.redis_write = None;
+        self.cli = None;
         if self.cut.is_some() || self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return;
@@ -263,6 +292,7 @@ impl Clipboard {
         self.grid = None;
         self.redis = None;
         self.redis_write = None;
+        self.cli = None;
         if self.cut.is_some() || self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return;
@@ -328,6 +358,62 @@ impl Clipboard {
         }
     }
 
+    pub(super) fn copy_cli(&mut self, app: &mut App, backend: &Backend) {
+        self.grid = None;
+        self.redis = None;
+        self.cli = None;
+        self.redis_write = None;
+        if self.cut.is_some() || self.copy.is_some() {
+            app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
+            return;
+        }
+        if !app.is_redis()
+            || app.workbench.cli_running
+            || app.operation_pending
+            || app.workbench.cli_history.is_empty()
+        {
+            return;
+        }
+        let Some(tab) = app.tabs.get(app.active) else {
+            return;
+        };
+        let pending = PendingCliCopy {
+            tag: format!("{CLI_COPY_TAG}{}", Uuid::new_v4()),
+            tab: tab.id,
+            generation: app.generation,
+            records: app
+                .workbench
+                .cli_history
+                .iter()
+                .map(|record| record.id)
+                .collect(),
+        };
+        let records: Vec<_> = app
+            .workbench
+            .cli_history
+            .iter()
+            .map(|record| crate::backend::CliCopyRecord {
+                instance: record.instance.clone(),
+                database: record.database.clone(),
+                command: record.command.clone(),
+                state: record.state.render().into_owned(),
+                error: record.error.render().into_owned(),
+                results: record.results.clone(),
+            })
+            .collect();
+        match backend.request(
+            pending.tag.clone(),
+            "local.cli.copy",
+            json!({"records":records,"empty":i18n::tr("没有结果")}),
+        ) {
+            Ok(()) => {
+                self.cli = Some(pending);
+                app.status = i18n::UiMessage::key("正在读取完整数据…");
+            }
+            Err(error) => app.status = i18n::UiMessage::raw(error.to_string()),
+        }
+    }
+
     /// 每次用户事件和普通响应后调用，离开上下文即作废，切回也不能恢复。
     pub(super) fn observe_redis_context(&mut self, app: &App) {
         if self
@@ -336,6 +422,13 @@ impl Clipboard {
             .is_some_and(|pending| !pending.matches(app))
         {
             self.grid = None;
+        }
+        if self
+            .cli
+            .as_ref()
+            .is_some_and(|pending| !pending.matches(app))
+        {
+            self.cli = None;
         }
         if self
             .redis
@@ -360,6 +453,34 @@ impl Clipboard {
         _session: &mut Session<Msg>,
         response: &mut Response,
     ) -> Result<bool> {
+        if response.tag.starts_with(CLI_COPY_TAG) {
+            if self
+                .cli
+                .as_ref()
+                .is_none_or(|pending| pending.tag != response.tag)
+            {
+                return Ok(true);
+            }
+            let pending = self.cli.take().expect("matched CLI copy request");
+            if !pending.matches(app) {
+                return Ok(true);
+            }
+            match &mut response.result {
+                Ok(Value::String(text)) => {
+                    self.redis_write = Some(RedisWrite {
+                        context: CopyContext::Cli(pending),
+                        id: Uuid::new_v4(),
+                        text: std::mem::take(text),
+                        offset: 0,
+                        started: false,
+                    });
+                    app.status = i18n::UiMessage::key("正在写入剪贴板");
+                }
+                Ok(_) => app.status = i18n::UiMessage::raw("复制结果无效"),
+                Err(error) => app.status = i18n::UiMessage::raw(error.to_string()),
+            }
+            return Ok(true);
+        }
         if response.tag.starts_with(GRID_COPY_TAG) {
             if self
                 .grid
@@ -447,6 +568,7 @@ impl Clipboard {
         self.grid = None;
         self.redis = None;
         self.redis_write = None;
+        self.cli = None;
         if self.cut.is_some() || self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return Ok(());
@@ -469,6 +591,7 @@ impl Clipboard {
         self.grid = None;
         self.redis = None;
         self.redis_write = None;
+        self.cli = None;
         if self.cut.is_some() || self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return Ok(());

@@ -1,0 +1,315 @@
+/* Flat workbench rows and compact action surfaces. */
+.connection,
+.tree-line,
+.key,
+.key-folder,
+.sidebar-settings,
+.tab-label,
+.tab .icon-button,
+.statusbar button,
+.context-menu button {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  justify-content: flex-start;
+  text-align: left;
+}
+.connection:hover,
+.tree-line:hover,
+.key:hover,
+.key-folder:hover,
+.sidebar-settings:hover,
+.tab:hover,
+.statusbar button:hover,
+.context-menu button:hover {
+  background: var(--hover);
+}
+.connection.active, .tree-line.active, .key.active {
+  background: var(--selected);
+}
+.connection {
+  min-height: 44px;
+  padding: 4px 8px;
+}
+.provider-icon {
+  background: transparent;
+  border-radius: 0;
+}
+.tree-line, .key-folder {
+  min-height: 27px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+.key {
+  height: 34px;
+}
+.tab {
+  background: transparent;
+}
+.tab.active {
+  background: transparent;
+}
+.tab-label {
+  min-height: 32px;
+}
+.tab .icon-button {
+  justify-content: center;
+}
+.tab:hover .tab-label, .tab:hover .icon-button {
+  background: transparent;
+}
+.tab-scroll {
+  margin-right: auto;
+}
+.cli {
+  min-height: 0;
+  overflow: hidden;
+}
+.table-footer {
+  justify-content: flex-end;
+}
+.icon-button {
+  border: 0;
+  background: transparent;
+}
+.brand, .connection-copy, .db-select {
+  text-align: left;
+}
+.tab:hover {
+  background: var(--hover);
+}
+.provider-option {
+  justify-content: flex-start;
+  text-align: left;
+}
+:root[data-theme="light"] .tab:hover {
+  background: var(--hover);
+}
+:root[data-theme="light"] .icon-button {
+  background: transparent;
+}
+th.row-number {
+  text-align: center;
+  vertical-align: middle;
+}
+.key-details thead th {
+  vertical-align: middle;
+}
+.context-menu {
+  min-width: 210px;
+  border-radius: 8px;
+}
+.context-menu button {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+.statusbar button {
+  min-height: 24px;
+}
+.fields details.wide, .fields details.wide summary, .tls-fields {
+  text-align: left;
+  justify-items: stretch;
+}
+.fields details.wide summary {
+  display: list-item;
+}
+.tls-fields {
+  margin-top: 8px;
+}
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.preview-bindings {
+  margin: 8px 0 14px;
+  table-layout: fixed;
+  font: 11px var(--mono);
+}
+.preview-bindings th, .preview-bindings td {
+  height: auto;
+  padding: 5px 8px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.preview-bindings th {
+  position: static;
+}
+.preview-bindings th:first-child {
+  width: 48px;
+}
+.preview-bindings th:nth-child(2), .preview-bindings th:nth-child(3) {
+  width: 76px;
+}
+.preview-code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font: 12px/1.6 var(--mono);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f8f8f8;
+  --panel: #fff;
+  --card: #fff;
+  --hover: rgba(59, 59, 59, 0.05);
+  --fg: #3b3b3b;
+  --muted: #6c6c6c;
+  --border: rgba(59, 59, 59, 0.09);
+  --accent: #5a8080;
+  --surface: #fff;
+  --success: #588458;
+  --warning: #9a7326;
+  --error: #aa5555;
+  --selected: rgba(90, 128, 128, 0.22);
+}
+:root[data-theme="light"] button {
+  background: var(--card);
+}
+:root[data-theme="light"] .connection,
+:root[data-theme="light"] .tree-line,
+:root[data-theme="light"] .key,
+:root[data-theme="light"] .key-folder,
+:root[data-theme="light"] .sidebar-settings,
+:root[data-theme="light"] .tab-label,
+:root[data-theme="light"] .tab .icon-button,
+:root[data-theme="light"] .statusbar button,
+:root[data-theme="light"] .context-menu button {
+  background: transparent;
+}
+:root[data-theme="light"] .connection.active,
+:root[data-theme="light"] .tree-line.active,
+:root[data-theme="light"] .key.active {
+  background: var(--selected);
+}
+.history-layout {
+  display: flex;
+  flex-direction: column;
+  height: min(60vh, 500px);
+  min-height: 250px;
+}
+.history-columns {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.history-list {
+  width: 44%;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+}
+.history-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px;
+}
+.history-list button.active {
+  background: var(--selected);
+}
+.history-preview {
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  overflow: auto;
+}
+.history-preview pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.field-error {
+  color: var(--error);
+  font-size: 11px;
+}
+[aria-invalid="true"] {
+  border-color: var(--error) !important;
+}
+.required-mark {
+  color: var(--error);
+}
+.management-steps {
+  display: flex;
+  gap: 24px;
+  margin: 16px 0;
+}
+.management-step {
+  padding-bottom: 6px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+.management-step[aria-current="step"] {
+  color: var(--fg);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.management-delete {
+  border-color: var(--error);
+}
+.management-delete > strong {
+  color: var(--error);
+}
+.icon-button.danger {
+  color: inherit;
+}
+.icon-button.danger svg {
+  color: var(--error);
+}
+.icon-button.active, :root[data-theme="light"] .icon-button.active {
+  background: var(--selected);
+  color: var(--fg);
+}
+#mysql-grid {
+  table-layout: fixed;
+  width: max-content;
+}
+#mysql-grid td, #mysql-grid th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#mysql-grid td.cell-selected, #redis-grid td.cell-selected {
+  background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+#result-grid {
+  table-layout: fixed;
+  width: max-content;
+}
+#result-grid td, #result-grid th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#result-grid td.cell-selected {
+  background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+:root[data-theme="light"] button.primary {
+  background: var(--accent);
+  color: #fff;
+}
+:root[data-theme="light"] button.primary.danger {
+  background: transparent;
+  color: var(--error);
+}
+:root[data-theme="light"] .icon-button:hover {
+  background: var(--hover);
+}
+@media (max-width: 760px) {
+  .history-columns {
+    flex-direction: column;
+  }
+  .history-list {
+    width: 100%;
+    max-height: 45%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}

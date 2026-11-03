@@ -32,22 +32,24 @@ async fn exercise(kind: ProviderKind) {
         id: Uuid::new_v4(),
         name: "tls-fixture".into(),
         provider: kind,
-        host: "127.0.0.1".into(),
-        port: port.parse().unwrap(),
-        username: if kind == ProviderKind::Mysql {
-            "root".into()
-        } else {
-            String::new()
-        },
-        database: None,
-        redis_db: 0,
         access_mode: AccessMode::ReadWrite,
-        tls: TlsConfig {
-            enabled: true,
-            ca_path: Some(env("DATAPIER_TLS_CA")),
-            ..Default::default()
-        },
-        visible_databases: None,
+        connection: ConnectionConfig::Direct(DirectConnection {
+            host: "127.0.0.1".into(),
+            port: port.parse().unwrap(),
+            username: if kind == ProviderKind::Mysql {
+                "root".into()
+            } else {
+                String::new()
+            },
+            database: None,
+            redis_db: 0,
+            tls: TlsConfig {
+                enabled: true,
+                ca_path: Some(env("DATAPIER_TLS_CA")),
+                ..Default::default()
+            },
+            visible_databases: None,
+        }),
     };
     let root =
         TempStore(std::env::temp_dir().join(format!("datapier-tls-test-{}", Uuid::new_v4())));
@@ -99,7 +101,7 @@ async fn exercise(kind: ProviderKind) {
         );
     }
     session.close().await.unwrap();
-    profile.tls.ca_path = Some(env("DATAPIER_TLS_WRONG_CA"));
+    profile.direct_mut().unwrap().tls.ca_path = Some(env("DATAPIER_TLS_WRONG_CA"));
     let err = match ProviderSession::connect(profile.clone(), secret.clone()).await {
         Ok(_) => panic!("wrong CA accepted"),
         Err(e) => e,
@@ -113,8 +115,9 @@ async fn exercise(kind: ProviderKind) {
         message.contains("cert") || message.contains("issuer") || message.contains("tls"),
         "wrong CA failed for unrelated reason: {err}"
     );
-    profile.tls.ca_path = Some(env("DATAPIER_TLS_CA"));
-    profile.host = std::env::var("DATAPIER_TLS_BAD_HOST").unwrap_or_else(|_| "127.1".into());
+    profile.direct_mut().unwrap().tls.ca_path = Some(env("DATAPIER_TLS_CA"));
+    profile.direct_mut().unwrap().host =
+        std::env::var("DATAPIER_TLS_BAD_HOST").unwrap_or_else(|_| "127.1".into());
     let err = match ProviderSession::connect(profile, secret).await {
         Ok(_) => panic!("wrong server identity accepted"),
         Err(e) => e,
@@ -148,14 +151,16 @@ async fn mysql_57_secure_transport_requires_and_negotiates_tls() {
         id: Uuid::new_v4(),
         name: "mysql-57-secure-transport".into(),
         provider: ProviderKind::Mysql,
-        host: "127.0.0.1".into(),
-        port: env("DATAPIER_TLS_MYSQL_PORT").parse().unwrap(),
-        username: "root".into(),
-        database: None,
-        redis_db: 0,
         access_mode: AccessMode::ReadWrite,
-        tls: TlsConfig::default(),
-        visible_databases: None,
+        connection: ConnectionConfig::Direct(DirectConnection {
+            host: "127.0.0.1".into(),
+            port: env("DATAPIER_TLS_MYSQL_PORT").parse().unwrap(),
+            username: "root".into(),
+            database: None,
+            redis_db: 0,
+            tls: TlsConfig::default(),
+            visible_databases: None,
+        }),
     };
     let secret = Some(env("DATAPIER_TLS_MYSQL_SECRET"));
     let err = match ProviderSession::connect(profile.clone(), secret.clone()).await {
@@ -171,7 +176,7 @@ async fn mysql_57_secure_transport_requires_and_negotiates_tls() {
         "original cause missing: {err}"
     );
 
-    profile.tls.enabled = true;
+    profile.direct_mut().unwrap().tls.enabled = true;
     let mut session = ProviderSession::connect(profile, secret).await.unwrap();
     let root =
         TempStore(std::env::temp_dir().join(format!("datapier-tls-test-{}", Uuid::new_v4())));

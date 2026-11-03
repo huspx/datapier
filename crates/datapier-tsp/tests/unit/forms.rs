@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn filter_value_control_tracks_operator_and_uses_visible_label() {
+    fn value_input(node: &Node<Msg>) -> Option<&Node<Msg>> {
+        if node.kind() == "input"
+            && node.props().get("aria").and_then(Value::as_str)
+                == Some(
+                    crate::i18n::format_message(
+                        "{label}（必填）",
+                        &[("label", crate::i18n::tr("值").as_ref())],
+                    )
+                    .as_str(),
+                )
+        {
+            return Some(node);
+        }
+        node.child_nodes().iter().find_map(value_input)
+    }
+
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("filter-accessibility".into());
+    app.schema = Some(json!({"columns":[Column::new("name", "text")]}));
+    app.init_sql_form("filters");
+    app.sql_form_action("sql-filter-select:0", &backend);
+    let (body, _) = crate::forms::filter_form(&app);
+    assert!(value_input(&body).is_some());
+    app.sql_form_action("sql-op-select:8", &backend);
+    let (body, _) = crate::forms::filter_form(&app);
+    assert!(value_input(&body).is_none());
+    app.sql_form_action("sql-op-select:0", &backend);
+    let (body, _) = crate::forms::filter_form(&app);
+    assert!(value_input(&body).is_some());
+}
+
+#[test]
 fn advanced_filter_accepts_empty_arrays_and_null_operator_without_value() {
     let (backend, _, _) = Backend::scripted();
     let mut app = App::new("filter-validation".into());
@@ -34,6 +67,49 @@ fn typed_insert_values_follow_mysql_write_rules() {
         let values = BTreeMap::from([("value".into(), value)]);
         assert_eq!(validate_row(&values, &[column]).is_ok(), valid, "{kind}");
     }
+}
+
+#[test]
+fn mysql_form_errors_keep_column_type_and_length_when_rendered() {
+    for (kind, value, expected) in [
+        (
+            "varchar(2)",
+            DataValue::Text("中文文".into()),
+            "列 {name} 超过字符长度 {limit}",
+        ),
+        (
+            "tinyint unsigned",
+            DataValue::Unsigned("256".into()),
+            "列 {name} ({type})：数值无效、超出范围或无法按目标精度和标度无损表示",
+        ),
+        (
+            "decimal(4,2)",
+            DataValue::Decimal("1.234".into()),
+            "列 {name} ({type})：数值无效、超出范围或无法按目标精度和标度无损表示",
+        ),
+    ] {
+        let column = Column::new("商品", kind);
+        let values = BTreeMap::from([("商品".into(), value)]);
+        let message = validate_row(&values, &[column])
+            .unwrap_err()
+            .render()
+            .into_owned();
+        let reason = crate::i18n::format_message(
+            expected,
+            &[("name", "商品"), ("type", kind), ("limit", "2")],
+        );
+        assert!(message.contains(&reason), "{message}");
+    }
+}
+
+#[test]
+fn database_diagnostics_remain_untranslated_even_with_validation_details() {
+    let column = Column::new("amount", "decimal(4,2)");
+    let mut error = AppError::invalid("database diagnostic")
+        .with_details(json!({"validation":"numeric_range"}));
+    error.database_code = Some("1234".into());
+    let message = form_validation_error("列 {name}: {error}", &column, error);
+    assert!(message.render().contains("database diagnostic"));
 }
 
 #[test]

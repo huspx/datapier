@@ -5,6 +5,18 @@ impl App {
         if self.tab_close.is_some() {
             return;
         }
+        if self.empty_context_action(name, backend) {
+            return;
+        }
+        if name == "overlay-close" && self.workbench.overlay.as_deref() == Some("history") {
+            self.invalidate_history(backend);
+        }
+        if self.archery_action(name, backend) {
+            return;
+        }
+        if name.starts_with("field:provider:") && self.archery.open {
+            self.archery_action("archery-direct", backend);
+        }
         if self.redis_selection_action(backend, name) {
             return;
         }
@@ -49,10 +61,21 @@ impl App {
         {
             return;
         }
+        // 帮助属于全局动作，空工作区也必须能进入共用 overlay 路径。
+        if name == "overlay:shortcuts" {
+            self.workbench_action(name, backend);
+            return;
+        }
         if self.tabs.is_empty()
             && !matches!(
                 name,
-                "new-tab" | "new-profile" | "save-profile" | "test-profile" | "workspace-copy"
+                "new-tab"
+                    | "view-query"
+                    | "navigation-toggle"
+                    | "new-profile"
+                    | "save-profile"
+                    | "test-profile"
+                    | "workspace-copy"
             )
             && self.workbench.overlay.is_none()
         {
@@ -128,7 +151,7 @@ impl App {
                     let id = p.id;
                     let redis_profile_db = (p.provider
                         == datapier_core::model::ProviderKind::Redis)
-                        .then_some(p.redis_db);
+                        .then_some(p.redis_db());
                     if self.task.is_some() || self.operation_pending {
                         self.status = "请等待或取消当前任务".into();
                     } else if self.has_live_drafts() {
@@ -155,6 +178,17 @@ impl App {
                                 .or(self.tabs[self.active].browse.redis_db)
                                 .unwrap_or(default_db)
                         });
+                        let database = self
+                            .workbench
+                            .queued_target
+                            .as_ref()
+                            .and_then(|target| {
+                                target.database.clone().or_else(|| {
+                                    (target.kind == "database" && !target.name.is_empty())
+                                        .then(|| target.name.clone())
+                                })
+                            })
+                            .or_else(|| self.database.clone());
                         self.edit_token = None;
                         self.schema = None;
                         self.grid = None;
@@ -169,7 +203,7 @@ impl App {
                             backend,
                             "connection.open",
                             "connection.open",
-                            json!({"profile_id":id,"redis_db":redis_db,"secret":null}),
+                            json!({"profile_id":id,"database":database,"redis_db":redis_db,"secret":null}),
                         );
                     }
                 }
@@ -240,6 +274,15 @@ impl App {
                         .as_ref()
                         .is_some_and(|p| p.provider == datapier_core::model::ProviderKind::Mysql)
                     {
+                        if self.profile.as_ref().is_some_and(|p| p.is_archery()) {
+                            let query = self.tabs[self.active].query.clone();
+                            self.execute_current_statement(
+                                &query,
+                                editor::SqlContext::Stateless,
+                                backend,
+                            );
+                            return;
+                        }
                         let token = Uuid::new_v4();
                         self.current_pending = Some((token, self.tabs[self.active].query.clone()));
                         self.request(
@@ -263,6 +306,28 @@ impl App {
                     );
                 }
             }
+            "next" | "previous" if self.profile.as_ref().is_some_and(|p| p.is_archery()) => {
+                if self.paste_preview.is_some() || self.page_token.is_some() {
+                    return;
+                }
+                let target = self
+                    .result_id
+                    .as_ref()
+                    .and_then(|id| self.workbench.query_ui.pagination.get(id))
+                    .and_then(|state| {
+                        let current = self.grid.as_ref()?.page.start;
+                        let index = state.starts.iter().position(|start| *start == current)?;
+                        let index = if name == "next" {
+                            index.checked_add(1)?
+                        } else {
+                            index.checked_sub(1)?
+                        };
+                        state.starts.get(index).copied()
+                    });
+                if let Some(start) = target {
+                    self.page(backend, start);
+                }
+            }
             "next" => {
                 if self.paste_preview.is_some() {
                     self.status = "请先确认或丢弃粘贴预览".into();
@@ -281,46 +346,13 @@ impl App {
                     self.page(backend, start);
                 }
             }
-            "new-tab" => {
-                self.tabs.push(Tab {
-                    title: format!("查询 {}", self.tabs.len() + 1),
-                    query: Editor::new(""),
-                    cli_query: Editor::default(),
-                    profile_id: self.profile.as_ref().map(|p| p.id),
-                    id: Uuid::new_v4(),
-                    layout: Vec::new(),
-                    browse: BrowseSettings {
-                        redis_db: self
-                            .profile
-                            .as_ref()
-                            .filter(|p| p.provider == datapier_core::model::ProviderKind::Redis)
-                            .map(|p| p.redis_db),
-                        ..BrowseSettings::default()
-                    },
-                    pending: Value::Null,
-                    pending_live: false,
-                    runtime: TabRuntime::default(),
-                });
-                self.tabs.last_mut().unwrap().runtime.profile = self.profile.clone();
-                self.switch_tab(self.tabs.len() - 1);
-                self.focus_current_tab();
-                self.dirty = true;
-            }
+            "new-tab" => self.create_query_tab(),
             "close-tab" => {
                 if let Some(tab) = self.tabs.get(self.active) {
                     self.close_tab(tab.id, backend);
                 }
             }
-            "history" => {
-                self.workbench.overlay = Some("history".into());
-                self.workbench.focus_request = Some("input-history_filter".into());
-                self.request(
-                    backend,
-                    "history.list",
-                    "history.list",
-                    json!({"workspace_id":self.workspace_id}),
-                );
-            }
+            "history" => self.open_history(backend),
             "file-open" | "file-save" => {
                 if self.field("path").trim().is_empty() {
                     self.field_error("path", i18n::UiMessage::key("请填写路径"));
@@ -417,16 +449,26 @@ impl App {
                             p.provider == datapier_core::model::ProviderKind::Redis
                         })
                     {
-                        params["target"] = json!({"name":"","database":self.profile.as_ref().map(|p|p.redis_db.to_string()),"kind":"database"});
+                        params["target"] = json!({"name":"","database":self.profile.as_ref().map(|p|p.redis_db().to_string()),"kind":"database"});
                     }
-                    if params.get("target").is_none()
-                        && (name != "export" || self.result_id.is_none())
+                    let archery = self.profile.as_ref().is_some_and(|p| p.is_archery());
+                    let result_id = if self.workbench.cli_export
+                        || (archery && self.is_redis() && self.workbench.cli)
                     {
+                        self.workbench.cli_result_id.clone()
+                    } else {
+                        self.result_id.clone()
+                    };
+                    if name == "export" && archery && result_id.is_none() {
+                        self.status = i18n::UiMessage::key("请先选择导入或导出目标");
+                        return;
+                    }
+                    if params.get("target").is_none() && (name != "export" || result_id.is_none()) {
                         self.status = i18n::UiMessage::key("请先选择导入或导出目标");
                         return;
                     }
                     if name == "export" {
-                        if let Some(id) = self.result_id.clone() {
+                        if let Some(id) = result_id {
                             params["result_id"] = json!(id);
                         }
                         self.request(backend, "transfer.export", "transfer.export", params);

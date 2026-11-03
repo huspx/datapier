@@ -140,6 +140,7 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
                     ui::input()
                         .variant(ui::InputVariant::Field)
                         .key("input-pattern")
+                        .aria(crate::i18n::tr("Key pattern，例如 user:*").into_owned())
                         .text(pattern.text.clone())
                         .cursor(pattern.cursor)
                         .anchor(pattern.anchor)
@@ -217,7 +218,7 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
             &app.workbench.redis_expansion,
             app.profile
                 .as_ref()
-                .map(|profile| (profile.id, profile.redis_db)),
+                .map(|profile| (profile.id, profile.redis_db())),
         )
     });
     let count = tree_rows.as_ref().map_or(app.resources.len(), Vec::len);

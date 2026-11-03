@@ -1,5 +1,8 @@
 use super::*;
-use datapier_core::model::{AccessMode, ProviderKind, TlsConfig};
+use datapier_core::model::{
+    AccessMode, ConnectionConfig, DirectConnection, ProviderKind, TlsConfig,
+};
+pub(super) mod archery;
 
 /// 新建表单与应用初始值共用同一份默认值；重开时同时丢弃旧字段的撤销历史。
 pub(super) const PROFILE_DEFAULTS: &[(&str, &str)] = &[
@@ -22,6 +25,16 @@ impl App {
     pub(super) fn connection_form_busy(&self) -> bool {
         self.form_id
             .is_some_and(|id| self.profile_saves.contains(&id))
+            || (self.archery.open
+                && self.archery.pending.as_ref().is_some_and(|(_, method)| {
+                    matches!(
+                        method.as_str(),
+                        "archery.server.save"
+                            | "archery.profile.apply_batch"
+                            | "archery.server.delete"
+                            | "archery.auth.close"
+                    )
+                }))
     }
 
     pub(super) fn connection_form_is_editing(&self) -> bool {
@@ -41,17 +54,34 @@ impl App {
         self.workbench.profile_error = None;
         self.workbench.field_error = None;
         self.form_editing = profile.is_some();
+        self.archery.state.clear();
+        self.archery.error = None;
+        self.archery.epoch = Uuid::new_v4();
+        self.field_set("archery_otp", "");
         self.form_id = Some(profile.as_ref().map_or_else(Uuid::new_v4, |p| p.id));
         for &(name, value) in PROFILE_DEFAULTS {
             self.field_set(name, value);
         }
         if let Some(profile) = profile {
-            self.field_set("name", profile.name);
-            self.field_set("host", profile.host);
-            self.field_set("port", profile.port.to_string());
-            self.field_set("user", profile.username);
-            self.field_set("database", profile.database.unwrap_or_default());
-            self.field_set("redis_db", profile.redis_db.to_string());
+            if profile.archery().is_some() {
+                self.workbench.profile_error =
+                    Some(i18n::tr("请通过 Archery 服务管理修改连接").into_owned());
+                self.workbench.overlay = Some("profile".into());
+                self.workbench.focus_request = Some("input-name".into());
+                return;
+            }
+            self.field_set("name", profile.name.clone());
+            let Ok(direct) = profile.direct() else {
+                self.workbench.profile_error =
+                    Some(i18n::tr("请通过 Archery 服务管理修改连接").into_owned());
+                self.workbench.overlay = Some("profile".into());
+                return;
+            };
+            self.field_set("host", direct.host.clone());
+            self.field_set("port", direct.port.to_string());
+            self.field_set("user", direct.username.clone());
+            self.field_set("database", direct.database.clone().unwrap_or_default());
+            self.field_set("redis_db", direct.redis_db.to_string());
             self.field_set(
                 "provider",
                 match profile.provider {
@@ -66,10 +96,16 @@ impl App {
                     AccessMode::ReadWrite => "read_write",
                 },
             );
-            self.field_set("tls", profile.tls.enabled.to_string());
-            self.field_set("ca", profile.tls.ca_path.unwrap_or_default());
-            self.field_set("cert", profile.tls.client_cert_path.unwrap_or_default());
-            self.field_set("key", profile.tls.client_key_path.unwrap_or_default());
+            self.field_set("tls", direct.tls.enabled.to_string());
+            self.field_set("ca", direct.tls.ca_path.clone().unwrap_or_default());
+            self.field_set(
+                "cert",
+                direct.tls.client_cert_path.clone().unwrap_or_default(),
+            );
+            self.field_set(
+                "key",
+                direct.tls.client_key_path.clone().unwrap_or_default(),
+            );
         }
         self.workbench.profile_tls_details = self.field("tls") == "true";
         self.workbench.overlay = Some("profile".into());
@@ -84,18 +120,29 @@ impl App {
         Ok(Profile {
             id: self.form_id.ok_or("请先新建或编辑连接")?,
             name: self.field("name").to_owned(),
-            host: self.field("host").to_owned(),
-            port: self
-                .field("port")
-                .parse::<u16>()
-                .map_err(|e| e.to_string())?,
-            username: self.field("user").to_owned(),
-            database: optional("database"),
-            visible_databases: self.navigation_form_selection(),
-            redis_db: self
-                .field("redis_db")
-                .parse::<u32>()
-                .map_err(|e| e.to_string())?,
+            connection: ConnectionConfig::Direct(DirectConnection {
+                host: self.field("host").to_owned(),
+                port: self
+                    .field("port")
+                    .parse::<u16>()
+                    .map_err(|e| e.to_string())?,
+                username: self.field("user").to_owned(),
+                database: optional("database"),
+                visible_databases: self.navigation_form_selection(),
+                redis_db: self
+                    .field("redis_db")
+                    .parse::<u32>()
+                    .map_err(|e| e.to_string())?,
+                tls: TlsConfig {
+                    enabled: self
+                        .field("tls")
+                        .parse::<bool>()
+                        .map_err(|e| e.to_string())?,
+                    ca_path: optional("ca"),
+                    client_cert_path: optional("cert"),
+                    client_key_path: optional("key"),
+                },
+            }),
             provider: match self.field("provider") {
                 "mysql" => ProviderKind::Mysql,
                 "redis" => ProviderKind::Redis,
@@ -105,15 +152,6 @@ impl App {
                 "read_only" => AccessMode::ReadOnly,
                 "read_write" => AccessMode::ReadWrite,
                 _ => return Err("无效访问模式".into()),
-            },
-            tls: TlsConfig {
-                enabled: self
-                    .field("tls")
-                    .parse::<bool>()
-                    .map_err(|e| e.to_string())?,
-                ca_path: optional("ca"),
-                client_cert_path: optional("cert"),
-                client_key_path: optional("key"),
             },
         })
     }

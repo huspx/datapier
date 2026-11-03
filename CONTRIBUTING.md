@@ -2,7 +2,22 @@
 
 ## 文档职责与阅读顺序
 
-修改代码前，先读 [README](README.md)、[产品规划](docs/product-plan.md)和 [0.1.0 技术方案](docs/technical-design-0.1.0.md)的相关部分。本指南是开发规范入口；[AGENTS](AGENTS.md) 是 agent 的阅读入口、授权与交付说明；[发布指南](RELEASING.md) 负责发布流程。README 是产品和快速入口，产品规划定义范围与版本，技术方案定义设计约束并汇总运行证据。以实际文件确认实现状态，规划路径不能当作已存在的模块。
+修改前先读 [README](README.md)，再按任务阅读对应设计与规则。本文是文档职责和开发规范的权威入口；各文档引用本节，不再各自维护一份职责规则。以实际文件和运行证据确认实现状态，规划路径不能当作已存在的模块。
+
+| 文档 | 负责内容 | 不负责内容 |
+|---|---|---|
+| [README](README.md) | 当前能力、安装使用入口、支持范围和主要限制 | 完整开发规则、发布步骤或验收流水 |
+| 本贡献指南 | 开发环境、编码与模块边界、验证要求、文档职责 | 版本发布操作细节 |
+| [发布指南](RELEASING.md) | 产品版本派生、组包、发布流程及发布前后核对 | 逐条功能说明和开发排查日志 |
+| [CHANGELOG](CHANGELOG.md) | 相对已发布版本的用户可见功能、改进、修复和兼容性变化 | 新功能发布前的内部修正、代码重构、设计稿同步或每轮验证结果 |
+| [产品规划](docs/product-plan.md) | 产品目标、交付范围、路线和验收方向 | 控件尺寸、文案、字段级交互及源码实现细节 |
+| [0.1.0 技术方案](docs/technical-design-0.1.0.md)、[0.1.1 技术方案](docs/technical-design-0.1.1.md) | 对应版本的架构、数据与接口契约、决策理由、迁移、验收要求及简洁结果摘要 | 每轮修复和候选构建的流水账 |
+| [UI 设计说明](docs/ui-redesign.md) | 交互和视觉规则，包括图标、角标、布局、状态和操作语义 | 平台接口契约、发布规则或运行日志 |
+| [HTML 设计稿](docs/ui-redesign.html) | 与 UI 说明一致的可交互示例 | 真实数据库执行、持久化或原生验收证据 |
+| [Archery 调研](docs/archery-integration-research.md) | 上游能力、版本差异和可追溯的源码依据 | 本地实现的实时完成状态 |
+| [AGENTS](AGENTS.md) | Agent 阅读入口、执行授权和交付约束 | 重复上述工程与文档规则 |
+
+Changelog 按最后一个已发布版本比较：新功能在首次发布前的修正合并到最终功能描述；只有修复已发布行为的问题才进入“修复”。混合条目应拆分，兼容性变化独立说明。详细排查与开发验证留在 PR、提交或 CI 日志；技术方案只汇总必要的候选、范围、结果、限制和证据索引，不接收从 Changelog 搬来的逐轮修复清单。
 
 用户的新要求优先于历史方案；范围或架构变化时同步相关文档。功能任务按完整可运行路径交付，不留下空壳、假结果或未接线接口。仅涉及文档的任务不顺带创建 workspace、plugin 或数据库。
 
@@ -11,6 +26,8 @@
 - 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，四个 crate 统一继承 `rust-version = 1.94`，与锁定的 SQLx 0.9 最低要求一致。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
 - 应用程序的 `Cargo.lock` 固定依赖并随源码提交；官方 `tern-sdk` 使用 registry 的 `0.2.0`，版本在 workspace 中精确固定。六种目标使用一致的锁定依赖。
+- 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
+- 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 - 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
 - 当前开发基线为 Tern 0.9.9 与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
@@ -26,8 +43,6 @@ tern -e "$PWD/target/debug/datapier" tui
 
 ```sh
 tern plugin link "$PWD/plugins/datapier"
-- 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
-- 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 ```
 
@@ -87,6 +102,7 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 | JSON／JSONC 配置、YAML、TOML（含 Cargo manifest 与 plugin 配置） | dprint |
 | 独立 SQL | dprint，dialect 为 SQLite；当前文件是本地持久化 migration，不按 MySQL provider 选择方言 |
 | POSIX Shell、Luau | dprint 的 Wasm 插件，无须另装 shfmt 或 StyLua CLI |
+| Python 开发发布脚本及回归 | dprint 的 Ruff Wasm 插件，无须另装 Ruff CLI；参数与目标版本以 `dprint.json` 为准 |
 
 当前没有 Java 或 XML 源文件，不预装相应插件；保留的 Windows PowerShell 安装器不接入格式化。Markdown 不属于当前 dprint 范围。新增语言前核对[官方插件目录](https://dprint.dev/plugins/)的实际支持并更新项目配置，不假定 XML 能格式化 MyBatis SQL，或原生语言 Formatter 能处理字符串中的 SQL。
 
@@ -102,7 +118,6 @@ dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录
 dprint fmt --config ./dprint.json --config-discovery=false -- path/to/changed-file
 dprint check --config ./dprint.json --config-discovery=false -- path/to/changed-file
 ```
-| Python 开发发布脚本及回归 | dprint 的 Ruff Wasm 插件，无须另装 Ruff CLI；参数与目标版本以 `dprint.json` 为准 |
 
 Rust 单文件使用同一套原生 rustfmt，避免递归改写未变更的子模块；全 workspace 使用现有 `cargo fmt` 做只读检查：
 
@@ -136,6 +151,9 @@ Formatter 仅负责格式，不替代 Clippy、类型／编译检查或行为验
 MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支持需有类型、交互和真实运行证据，不能仅注册驱动就声明支持。首版不实现动态库加载或外部 provider 进程。
 
 四个 crate 按运行边界划分，当前不再拆包。单个 crate 内优先按功能维护私有模块；入口只保留分派和状态组合，纯计算逻辑可独立为私有模块（如编辑器、grid、Redis key 树）。只有出现独立消费者、明确依赖隔离或独立版本需求时再评估新 crate，不按文件行数拆包。
+
+TSP 的 `lib.rs` 组合共享状态与私有模块，`app` 管理初始化和字段，`workspace` 管理快照及标签运行态，`requests` 管理请求路由；`workbench`、`navigation`、`grid` 和视图按功能细分子模块。Engine 的 `server` 将 RPC、任务执行和 Archery 认证分开，仍共用唯一运行状态；Core 的 `storage` 与 `transfer` 分别按存储职责、导入导出路径组织。测试沿相应职责归类，共用 fixture 与构造器留在测试父模块。
+HTML 设计稿保留 `docs/ui-redesign.html` 为唯一入口，静态资源维护在 `docs/assets/ui-redesign/`，按既定顺序加载经典脚本和样式，支持直接打开与 HTTP 预览，不引入打包步骤。
 
 ## 不可破坏的行为
 
@@ -191,6 +209,12 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+Python 开发发布回归放在 `scripts/tests/`，使用标准库 `unittest`，覆盖版本和归档契约、错误及边界；实际组包还须按发布指南使用本机真实二进制验证。执行：
+
+```sh
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
 真实数据库回归默认忽略，必须显式提供隔离实例。MySQL 使用 `DATAPIER_TEST_MYSQL_PORT`、`DATAPIER_TEST_MYSQL_SECRET`，账户 `datapier`、库 `datapier_fixture`；Redis 使用 `DATAPIER_TEST_REDIS_PORT` 与 DB 15。测试仅创建 UUID 隔离的表／key，并清理自身资源；存储函数用例要求测试库允许创建函数，开启 binlog 时需由测试实例管理员设置 `log_bin_trust_function_creators=1`。
 
 ```sh
@@ -207,15 +231,9 @@ cargo test -p datapier-core --test tls -- --ignored
 
 普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
 
-按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-验收要求)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。发布前六目标原生验收见[发布前检查](RELEASING.md#发布前检查)。
+按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-验收要求)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。0.1.1 原生运行验收仅覆盖 macOS arm64，其他五个目标保留实现，在 PR 阶段验证编译；具体门禁见[发布前检查](RELEASING.md#发布前检查)。
 
-Python 开发发布回归放在 `scripts/tests/`，使用标准库 `unittest`，覆盖版本和归档契约、错误及边界；实际组包还须按发布指南使用本机真实二进制验证。执行：
-
-```sh
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
-```
-
-只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。历史验收和剩余发布阻塞统一查阅[技术方案运行记录](docs/technical-design-0.1.0.md#11-实现与运行记录)，不将其视为本次重新验证。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
+只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。[0.1.0 历史验收](docs/technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 候选运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)分别查阅，不将历史证据视为当前候选重新验证；发布门禁以[发布前检查](RELEASING.md#发布前检查)为准。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
 
 ## 分支与 PR
 
@@ -231,6 +249,8 @@ PR 说明变更内容、实际验证及限制。现有原生构建工作流仅�
 
 ## 文档与交付
 
-功能变更同步 README、设计说明及根目录 [CHANGELOG](CHANGELOG.md) 中适用的未发布变更记录；发布准备时由维护者将相关记录整理到对应版本。CHANGELOG 记录版本内容，正式发布状态以 GitHub Release 的状态与实际资源为准；内容归档、发布失败和重试按[发布指南](RELEASING.md#发布说明与-changelog)处理。README 的安装命令、平台支持及功能状态必须与实际实现和发布产物一致。最终交付说明具体改动、实际验证和限制。
+按[文档职责与阅读顺序](#文档职责与阅读顺序)同步受影响文档。产品能力、设计或兼容性变化更新对应说明；只有符合 Changelog 口径的变化才写入未发布章节，不因一次开发修正机械追加条目。发布准备时按[发布指南](RELEASING.md#发布说明与-changelog)整理版本内容；正式发布状态以 GitHub Release 和实际资源为准。README 的安装、功能和平台描述必须与实现和发布产物一致，交付报告只说明实际改动、验证与限制。
 
 遵循 [MIT License](LICENSE)，保留第三方分发要求。真实凭据、私有连接、生产数据、生成产物与本地索引不入库；测试样本使用可公开数据。
+
+截图仅用于本地验证，不提交到 Git，也不在设计文档中引用。演示资源仅保留 README 使用的 `docs/assets/datapier-demo.gif`；品牌、数据库图标等非截图资源按现有约定维护。

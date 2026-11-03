@@ -24,22 +24,24 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
         id: Uuid::new_v4(),
         name: "isolated-fixture".into(),
         provider: kind,
-        host: "127.0.0.1".into(),
-        port: port.parse().unwrap(),
-        username: if kind == ProviderKind::Mysql {
-            "datapier".into()
-        } else {
-            String::new()
-        },
-        database: if kind == ProviderKind::Mysql {
-            Some("datapier_fixture".into())
-        } else {
-            None
-        },
-        redis_db: 15,
         access_mode: AccessMode::ReadWrite,
-        tls: TlsConfig::default(),
-        visible_databases: None,
+        connection: ConnectionConfig::Direct(DirectConnection {
+            host: "127.0.0.1".into(),
+            port: port.parse().unwrap(),
+            username: if kind == ProviderKind::Mysql {
+                "datapier".into()
+            } else {
+                String::new()
+            },
+            database: if kind == ProviderKind::Mysql {
+                Some("datapier_fixture".into())
+            } else {
+                None
+            },
+            redis_db: 15,
+            tls: TlsConfig::default(),
+            visible_databases: None,
+        }),
     };
     (store, profile, secret)
 }

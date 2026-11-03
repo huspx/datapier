@@ -7,6 +7,7 @@ mod results;
 mod sql;
 
 pub use changes::validate_import_value;
+pub use sql::{stateless_statement_ranges, stateless_statements, validate_readonly};
 
 use crate::{ExecutionSink, model::*};
 use results::execute_statement;
@@ -35,7 +36,8 @@ impl MysqlSession {
         if profile.provider != ProviderKind::Mysql {
             return Err(AppError::invalid("非 MySQL 连接"));
         }
-        let tls = &profile.tls;
+        let direct = profile.direct()?;
+        let tls = &direct.tls;
         if tls.client_cert_path.is_some() != tls.client_key_path.is_some() {
             return Err(AppError::invalid("客户端证书和私钥必须同时提供"));
         }
@@ -43,22 +45,18 @@ impl MysqlSession {
             return Err(AppError::invalid("证书需要启用 TLS"));
         }
         let mut options = MySqlConnectOptions::new()
-            .host(&profile.host)
-            .port(profile.port)
-            .username(&profile.username)
+            .host(&direct.host)
+            .port(direct.port)
+            .username(&direct.username)
             .ssl_mode(if tls.enabled {
-                if tls.ca_path.is_some() {
-                    MySqlSslMode::VerifyIdentity
-                } else {
-                    MySqlSslMode::Required
-                }
+                MySqlSslMode::VerifyIdentity
             } else {
                 MySqlSslMode::Disabled
             });
         if let Some(secret) = secret.as_deref() {
             options = options.password(secret);
         }
-        if let Some(db) = profile.database.as_deref() {
+        if let Some(db) = direct.database.as_deref() {
             options = options.database(db);
         }
         if let Some(path) = &tls.ca_path {
@@ -267,9 +265,10 @@ impl MysqlSession {
         sink.mark_sent(may_write).await?;
         *sent = true;
         let options = self.options.clone();
-        let future = execute_statement(self.connection()?, statement, sink);
-        tokio::pin!(future);
-        tokio::select! {
+        let outcome = {
+            let future = execute_statement(self.connection()?, statement, sink);
+            tokio::pin!(future);
+            tokio::select! {
             biased;
             result = &mut future => result,
             _ = cancel.cancelled() => {
@@ -286,13 +285,33 @@ impl MysqlSession {
                 match (killed, final_result) {
                     (Ok(_), Err(mut e)) if e.details.get("mysql_errno").and_then(Json::as_u64) == Some(1317) && !may_write => { e.code = "cancelled".into(); Err(e) },
                     (Ok(_), Err(mut e)) if may_write && e.details.get("mysql_errno").and_then(Json::as_u64) == Some(1317) => { e.code = "outcome_unknown".into(); e.message = format!("写入被中断，可能部分生效: {}", e.message); Err(e) },
-                    (_, Err(e)) if may_write && e.database_code.is_none() => Err(AppError::unknown("取消后写入结果无法确认")),
+                    (_, Err(e)) if may_write && e.database_code.is_none() && e.code != "outcome_unknown" => Err(AppError::unknown("取消后写入结果无法确认")),
                     (Err(_), Ok(result)) => Ok(result),
                     (Err(e), Err(mut result)) => { result.details["cancel_failure"] = json!(e.to_string()); Err(result) },
                     (_, result) => result,
                 }
             }
-        }.map_err(|e| if may_write && e.code == "database" && e.database_code.is_none() { AppError::unknown(format!("写入结果无法确认: {}", e.message)) } else { e })
+        }.map_err(|mut e| {
+            if may_write && e.code == "database" && e.database_code.is_none() {
+                e.code = "outcome_unknown".into();
+                e.message = format!("写入结果无法确认: {}", e.message);
+            }
+            e
+        })
+        };
+        if outcome.as_ref().is_err_and(|error| {
+            error
+                .details
+                .get("result_stream_incomplete")
+                .and_then(Json::as_bool)
+                == Some(true)
+        }) {
+            // 本地缓存失败会提前结束结果流；SQLx 不能保证该连接已消费服务端终态。
+            // 丢弃物理连接及其编辑令牌，避免下一条请求等待不存在的协议边界。
+            self.connection = None;
+            self.edits.clear();
+        }
+        outcome
     }
 }
 

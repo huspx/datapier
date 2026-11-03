@@ -1,7 +1,7 @@
 schema = 1
 id = "datapier"
 name = "Datapier"
-version = "0.1.0"
+version = "0.1.1"
 description = "Launch the Datapier database workbench."
 icon = "database"
 window = "window.luau"

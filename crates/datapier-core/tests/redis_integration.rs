@@ -31,14 +31,16 @@ impl Fixture {
             id: Uuid::new_v4(),
             name: "redis-integration".into(),
             provider: ProviderKind::Redis,
-            host: "127.0.0.1".into(),
-            port,
-            username: String::new(),
-            database: None,
-            redis_db: 15,
             access_mode: AccessMode::ReadWrite,
-            tls: TlsConfig::default(),
-            visible_databases: None,
+            connection: ConnectionConfig::Direct(DirectConnection {
+                host: "127.0.0.1".into(),
+                port,
+                username: String::new(),
+                database: None,
+                redis_db: 15,
+                tls: TlsConfig::default(),
+                visible_databases: None,
+            }),
         };
         let client = Client::open(format!("redis://127.0.0.1:{port}/15")).unwrap();
         let raw = client.get_multiplexed_async_connection().await.unwrap();
@@ -1304,5 +1306,54 @@ async fn empty_key_field_and_member_are_valid_identities() {
         .await
         .unwrap();
     assert_eq!(remaining, 0);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance; pauses the server"]
+async fn cancelled_read_discards_connection_and_next_read_reconnects() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"cancel-read", "string");
+    let _: () = redis::cmd("SET")
+        .arg(raw_key(&target))
+        .arg("alive")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(f.rows(&target).await, vec![vec![binary(b"alive")]]);
+    let _: () = redis::cmd("CLIENT")
+        .arg("PAUSE")
+        .arg(600)
+        .arg("ALL")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let sink = f.sink().await;
+    let cancel = CancellationToken::new();
+    let signal = cancel.clone();
+    let (result, ()) = tokio::join!(
+        f.session.call(
+            "resource.describe",
+            json!({"target":target}),
+            &sink,
+            &cancel
+        ),
+        async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            signal.cancel();
+        }
+    );
+    assert_eq!(result.unwrap_err().code, "cancelled");
+    // 先解除故障再验证重连；仍被暂停的服务可能超过驱动的响应超时。
+    f.raw.set_response_timeout(Duration::from_secs(2));
+    let _: () = redis::cmd("CLIENT")
+        .arg("UNPAUSE")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let rows = tokio::time::timeout(Duration::from_secs(2), f.rows(&target))
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![vec![binary(b"alive")]]);
     f.close().await;
 }

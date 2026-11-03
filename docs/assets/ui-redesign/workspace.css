@@ -1,0 +1,259 @@
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.context {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.context strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.breadcrumb {
+  color: var(--muted);
+  font: 11px var(--mono);
+}
+.db-select {
+  min-width: 106px;
+  font: 11px var(--mono);
+  padding: 5px 8px;
+}
+.tabs {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  min-height: 39px;
+  padding: 0 8px;
+  gap: 4px;
+  flex: none;
+}
+.tab-scroll {
+  display: flex;
+  overflow: auto;
+  scrollbar-width: thin;
+  min-width: 0;
+  flex: 1;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 3px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  flex: none;
+}
+.tab.active {
+  color: var(--fg);
+  background: var(--bg);
+  border-bottom-color: var(--accent);
+}
+.tab-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  max-width: 200px;
+}
+.tab-label span {
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.tab .icon-button {
+  width: 22px;
+  height: 24px;
+  padding: 4px;
+  color: var(--muted);
+}
+.tab .icon-button svg {
+  width: 12px;
+  height: 12px;
+}
+.tabs > .icon-button {
+  align-self: center;
+}
+.workarea {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.subnav {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 0 18px;
+  min-height: 28px;
+  height: 28px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.subnav button {
+  height: 27px;
+  min-height: 0;
+  padding: 3px 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  line-height: 17px;
+  color: var(--muted);
+}
+.subnav button.active {
+  color: var(--fg);
+  border-bottom: 2px solid var(--accent);
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  min-height: 46px;
+  flex-wrap: wrap;
+  flex: none;
+}
+.toolbar input[type="search"] {
+  width: 210px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.table-wrap {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+th {
+  height: 42px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+th, td {
+  padding: 0 13px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+th:last-child, td:last-child {
+  border-right: 0;
+}
+th small {
+  display: block;
+  font: 9px var(--mono);
+  color: var(--muted);
+  margin-top: 2px;
+}
+td {
+  height: 35px;
+  font: 11px var(--mono);
+}
+tbody tr:hover {
+  background: var(--card);
+}
+tr.selected {
+  background: var(--selected);
+}
+.number {
+  text-align: right;
+}
+.row-number {
+  text-align: right;
+  width: 36px;
+  padding: 0 8px;
+  color: var(--muted);
+  user-select: none;
+  cursor: pointer;
+}
+#mysql-grid td[data-cell] {
+  cursor: cell;
+}
+#mysql-grid td[data-cell]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+#mysql-grid td.modified {
+  box-shadow: inset 3px 0 var(--warning);
+}
+.schema-preview td:last-child {
+  min-width: 200px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.key-folder {
+  width: 100%;
+  color: var(--muted);
+  text-align: left;
+}
+.key-children {
+  margin-left: 12px;
+  border-left: 1px solid var(--border);
+}
+#mysql-grid td.editing {
+  padding: 0;
+}
+.cell-editor {
+  width: 100%;
+  min-width: 70px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.null {
+  color: var(--muted);
+  font-style: italic;
+}
+.table-footer {
+  padding: 5px 16px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  flex: none;
+}
+.selection-count {
+  color: var(--accent);
+}
+.statusbar {
+  min-height: 29px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+  flex: none;
+}
+.statusbar button {
+  font-size: 10px;
+  padding: 1px 5px;
+}

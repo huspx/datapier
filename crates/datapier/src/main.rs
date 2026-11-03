@@ -29,6 +29,9 @@ fn main() {
     }
 }
 fn run() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| datapier_core::AppError::new("tls", "无法安装 Rustls ring 加密提供者"))?;
     let args = Arguments::parse();
     let root = match args.data_dir {
         Some(path) => path,

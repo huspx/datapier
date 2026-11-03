@@ -30,17 +30,19 @@ fn fixture_profile(mode: AccessMode) -> (Profile, Option<String>) {
             id: Uuid::new_v4(),
             name: "mysql-fixture".into(),
             provider: ProviderKind::Mysql,
-            host: "127.0.0.1".into(),
-            port: std::env::var("DATAPIER_TEST_MYSQL_PORT")
-                .unwrap()
-                .parse()
-                .unwrap(),
-            username: "datapier".into(),
-            database: Some("datapier_fixture".into()),
-            redis_db: 0,
             access_mode: mode,
-            tls: TlsConfig::default(),
-            visible_databases: None,
+            connection: ConnectionConfig::Direct(DirectConnection {
+                host: "127.0.0.1".into(),
+                port: std::env::var("DATAPIER_TEST_MYSQL_PORT")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                username: "datapier".into(),
+                database: Some("datapier_fixture".into()),
+                redis_db: 0,
+                tls: TlsConfig::default(),
+                visible_databases: None,
+            }),
         },
         Some(std::env::var("DATAPIER_TEST_MYSQL_SECRET").unwrap()),
     )
@@ -116,9 +118,9 @@ async fn cancelled_current_database_query_discards_shared_connection_and_unlocks
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let (mut profile, secret) = fixture_profile(AccessMode::ReadWrite);
-    let upstream = profile.port;
+    let upstream = profile.direct().unwrap().port;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    profile.port = listener.local_addr().unwrap().port();
+    profile.direct_mut().unwrap().port = listener.local_addr().unwrap().port();
     let blocked = Arc::new(AtomicBool::new(false));
     let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     let proxy = {
@@ -152,7 +154,7 @@ async fn cancelled_current_database_query_discards_shared_connection_and_unlocks
         })
     };
     let mut session = MysqlSession::connect(profile, secret).await.unwrap();
-    session.profile.database = None;
+    session.profile.direct_mut().unwrap().database = None;
     let session = Arc::new(tokio::sync::Mutex::new(session));
     blocked.store(true, Ordering::Release);
     let cancel = CancellationToken::new();

@@ -1,11 +1,12 @@
 use super::*;
+use crate::{input::focus_node_id, workspace::finish_after_input_closed};
 use tern_sdk::{Input, Options, Session, SurfaceOptions};
 /// 在调用线程运行同步 TSP 界面，Session 始终由该线程独占。
 /// Engine IPC 在独立 Tokio 线程运行；终端不可用、保存未确认或 TSP 失败时返回错误。
 pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
     let options = Options::new()
         .app("Datapier")
-        .version("0.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .feature("edit")
         .feature("undo");
     let mut session = Session::<Msg>::connect(options)
@@ -41,6 +42,18 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         redis: session
             .blob(
                 include_bytes!("../../../docs/assets/providers/redis.svg").to_vec(),
+                Some("image/svg+xml"),
+            )
+            .map_err(tsp_error)?,
+        archery: session
+            .blob(
+                include_bytes!("../../../docs/assets/archery.svg").to_vec(),
+                Some("image/svg+xml"),
+            )
+            .map_err(tsp_error)?,
+        archery_badge: session
+            .blob(
+                include_bytes!("../../../docs/assets/archery-badge.svg").to_vec(),
                 Some("image/svg+xml"),
             )
             .map_err(tsp_error)?,
@@ -143,6 +156,14 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             let tab_id = reveal
                 .then(|| focus_node_id(&view, &format!("tab{}", app.active)))
                 .flatten();
+            let cli_entry = if std::mem::take(&mut app.workbench.cli_reveal) {
+                app.workbench
+                    .cli_history
+                    .last()
+                    .and_then(|record| focus_node_id(&view, &format!("cli-entry-{}", record.id)))
+            } else {
+                None
+            };
             session.render(surface, view).map_err(tsp_error)?;
             if let Some(id) = focus {
                 session.focus(surface, id.as_deref()).map_err(tsp_error)?;
@@ -150,6 +171,11 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             if let Some(id) = tab_id {
                 session
                     .reveal(surface, &id, tern_sdk::wire::RevealAt::Nearest)
+                    .map_err(tsp_error)?;
+            }
+            if let Some(id) = cli_entry {
+                session
+                    .reveal(surface, &id, tern_sdk::wire::RevealAt::End)
                     .map_err(tsp_error)?;
             }
             revealed_tab = tab_layout;
@@ -170,6 +196,12 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 }
                 if !matches!(message, Msg::Focus(_)) {
                     app.restore_focus_pending = false;
+                }
+                let result_info_action = matches!(&message, Msg::Action(name)
+                    if name.starts_with("result-info-toggle:")
+                        || matches!(name.as_str(), "result-info-close" | "result-info-dismiss" | "result-info-keep"));
+                if !result_info_action {
+                    app.close_result_info(false);
                 }
                 app.sync_grid_visible_rows();
                 match message {
@@ -203,7 +235,11 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             clipboard.copy(&mut app, &mut session, &text)?;
                         }
                     }
+                    Msg::Action(name) if name == "cli-copy" => {
+                        clipboard.copy_cli(&mut app, &backend)
+                    }
                     Msg::Action(name) => app.action(&name, &backend),
+                    Msg::CliResize(share) => app.resize_cli(share),
                     Msg::CopyText(text) => clipboard.copy(&mut app, &mut session, &text)?,
                     Msg::CopyRedisValue => clipboard.copy_redis_value(&mut app, &backend),
                     Msg::CopyGrid => {
@@ -255,7 +291,10 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     Msg::Focus(name) => {
                         if app.modal_allows_field(&name) {
                             app.focus = name;
-                            if let tern_sdk::Event::Focus(f) = event {
+                            if app.focus == "cli_height" {
+                                // split 的键盘由程序处理，先清除宿主输入字段的 native editing。
+                                app.workbench.focus_request = Some(String::new());
+                            } else if let tern_sdk::Event::Focus(f) = event {
                                 session.focus(surface, Some(&f.id)).map_err(tsp_error)?;
                             }
                         }
@@ -268,7 +307,12 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             app.select_profile(index, &backend);
                         }
                     }
-                    Msg::Tab(index) => app.select_tab(index),
+                    Msg::Tab(index) => {
+                        if index != app.active && index < app.tabs.len() {
+                            app.invalidate_history(&backend);
+                        }
+                        app.select_tab(index);
+                    }
                     Msg::ResultSet(id) => {
                         if !app.finish_inline(true) {
                             changed = true;
@@ -277,18 +321,19 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         if app.has_live_drafts() {
                             app.status = "请先提交或丢弃待提交变更与粘贴预览".into();
                         } else {
+                            let start = app.result_saved_start(&id);
                             app.large = None;
                             app.result_id = Some(id);
                             app.page_history.clear();
                             app.grid = None;
-                            app.page(&backend, 0);
+                            app.page(&backend, start);
                         }
                     }
                     Msg::Complete(text, start, end) => {
                         if let Some(tab) = app.tabs.get_mut(app.active)
                             && tab.query.edit(start..end, &text)
                         {
-                            app.dirty = true;
+                            app.changed_field("query");
                         }
                     }
                     Msg::Cell(row, column, extend) => {
@@ -346,12 +391,25 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 if app.tab_close.is_some() {
                     continue;
                 }
+                if key.is("escape") && app.workbench.query_ui.result_info.is_some() {
+                    app.close_result_info(true);
+                    changed = true;
+                    continue;
+                }
                 if !app.workspace_loaded {
                     app.workspace_interacted = true;
                 }
                 app.restore_focus_pending = false;
                 if key.is("ctrl+q") {
                     quitting = app.request_quit(&backend);
+                    changed = true;
+                    continue;
+                }
+                if app.workbench.overlay.as_deref() == Some("history")
+                    && app.focus == "history_filter"
+                    && key.is("enter")
+                {
+                    app.action("history-search", &backend);
                     changed = true;
                     continue;
                 }

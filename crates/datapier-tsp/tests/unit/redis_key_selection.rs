@@ -33,7 +33,7 @@ fn selection_uses_raw_identity_and_prunes_invisible_keys() {
     assert_eq!(app.redis_key_action_index(&old_event), None);
     app.redis_prune_key_selection();
     assert_eq!(app.selected_redis_key_count(), 2);
-    app.profile.as_mut().unwrap().redis_db = 1;
+    app.profile.as_mut().unwrap().direct_mut().unwrap().redis_db = 1;
     app.redis_prune_key_selection();
     assert_eq!(app.selected_redis_key_count(), 0);
 }

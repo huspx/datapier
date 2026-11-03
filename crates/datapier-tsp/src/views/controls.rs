@@ -51,7 +51,8 @@ pub(super) fn icon_button(icon: &str, label: &str, action: &str) -> Node<Msg> {
                     | "redis-op:list_delete"
                     | "redis-op:set_remove"
                     | "redis-op:zset_remove"
-            ) {
+            ) || action.starts_with("server-delete:")
+            {
                 ui::ButtonVariant::Danger
             } else {
                 ui::ButtonVariant::Quiet
@@ -69,7 +70,7 @@ pub(super) fn page_button(icon: &str, label: &str, action: &str, enabled: bool) 
     let label = crate::i18n::tr(label).into_owned();
     ui::button("")
         .variant(ui::ButtonVariant::Quiet)
-        .size(ui::ButtonSize::Sm)
+        .size(ui::ButtonSize::Md)
         .icon(icon.to_owned())
         .disabled(!enabled)
         .title(label.clone())
@@ -77,6 +78,7 @@ pub(super) fn page_button(icon: &str, label: &str, action: &str, enabled: bool) 
         .on_click(Msg::Action(action.into()))
         .into()
 }
+
 pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
     let ed = if name == "cli_text" {
         &app.tabs[app.active].cli_query
@@ -90,24 +92,57 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
     let u = f.clone();
     let n = f.clone();
     let required = matches!(name, "name" | "host" | "port" | "path" | "column")
+        || matches!(name, "archery_name" | "archery_url" | "archery_user")
+        || name.starts_with("archery_profile_name_")
+        || (name == "password"
+            && app.workbench.overlay.as_deref() == Some("archery-auth")
+            && (!app.archery.saved
+                || matches!(app.archery.state.as_str(), "auth_required" | "auth_failed")
+                || (app.archery.server_only && app.archery_password_policy_changed())))
+        || name == "archery_otp"
+        || (name == "archery_totp_uri"
+            && ((app.archery.totp_automatic
+                && (app.archery.clear_totp
+                    || app
+                        .archery
+                        .server
+                        .as_ref()
+                        .is_none_or(|server| server["totp_configured"] != true)))
+                || (app.archery.server_only && app.archery_totp_policy_changed())))
         || (name == "width" && app.workbench.overlay.as_deref() == Some("columns"))
         || (name == "redis_score" && app.field("operation") == "zset_set")
         || (name == "redis_ttl"
             && app.workbench.ttl_policy == crate::workbench::RedisTtlPolicy::Set)
         || (name == "cert" && !app.field("key").is_empty())
         || (name == "key" && !app.field("cert").is_empty());
-    let label = crate::i18n::tr(label).into_owned();
-    let control: Node<Msg> = if name == "cell"
-        || name == "redis_value"
-        || name == "cli_text"
-        || (name == "redis_member" && matches!(app.field("operation"), "set_add" | "set_remove"))
+    let accessible_label = crate::i18n::tr(if name == "cli_text" && label.is_empty() {
+        "Redis CLI"
+    } else {
+        label
+    })
+    .into_owned();
+    let accessible_label = if required {
+        crate::i18n::format_message("{label}（必填）", &[("label", &accessible_label)])
+    } else {
+        accessible_label
+    };
+    let mut control = ui::field(crate::i18n::tr(label).into_owned())
+        .required(required)
+        .key(name.to_string())
+        .role("datapier.form-field");
+    if let Some(error) = app
+        .workbench
+        .field_error
+        .as_ref()
+        .filter(|error| error.field == name)
     {
-        ui::field(label.clone())
-            .required(required)
-            .key(name.to_string())
-            .role("datapier.form-field")
+        control = control.error(error.message.render().into_owned());
+    }
+    if matches!(name, "cell" | "redis_value" | "redis_member" | "cli_text") {
+        control
             .child(
                 ui::editor()
+                    .aria(accessible_label)
                     .readonly(app.connection_form_busy())
                     .key(format!("input-{name}"))
                     .text(display)
@@ -122,15 +157,16 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
             )
             .into()
     } else {
-        ui::field(label)
-            .required(required)
-            .key(name.to_string())
-            .role("datapier.form-field")
+        control
             .child(
                 ui::input()
+                    .aria(accessible_label)
                     .variant(ui::InputVariant::Field)
                     .readonly(app.connection_form_busy())
-                    .secret(name == "password")
+                    .secret(matches!(
+                        name,
+                        "password" | "archery_otp" | "archery_totp_uri"
+                    ))
                     .key(format!("input-{name}"))
                     .text(display)
                     .cursor(ed.cursor)
@@ -142,19 +178,6 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
                     }),
             )
             .into()
-    };
-    if let Some(error) = app
-        .workbench
-        .field_error
-        .as_ref()
-        .filter(|error| error.field == name)
-    {
-        html::div()
-            .child(control)
-            .child(html::span(error.message.render().into_owned()).class("field-error"))
-            .into()
-    } else {
-        control
     }
 }
 pub(super) fn choices(
@@ -181,12 +204,9 @@ pub(super) fn choices(
             crate::i18n::tr(title).into_owned(),
         ));
     }
-    let label = if field_name == "format" {
-        format!("{} *", crate::i18n::tr(label))
-    } else {
-        crate::i18n::tr(label).into_owned()
-    };
+    let label = crate::i18n::tr(label).into_owned();
     let control: Node<Msg> = ui::field(label)
+        .required(field_name == "format")
         .child(select.on_change(move |change| {
             Msg::Action(format!(
                 "field:{}:{}",

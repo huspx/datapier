@@ -1,5 +1,10 @@
 use super::*;
 
+#[path = "workbench/cli.rs"]
+mod cli;
+#[path = "workbench/sql_edit.rs"]
+mod sql_edit;
+
 #[test]
 fn redis_editor_preserves_binary_member_identity() {
     let bytes = vec![0, 0xff, b'\\', b'\n', b'a'];
@@ -68,6 +73,31 @@ fn key_type_picker_consumes_enter_before_cli_and_escape_only_closes_picker() {
     let request = requests.try_recv().unwrap();
     assert_eq!(request.method, "execution.start");
     assert_eq!(request.params["text"], "PING");
+}
+
+#[test]
+fn redis_database_picker_does_not_send_navigation_keys_to_cli() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.workbench.cli = true;
+    app.focus = "cli_text".into();
+    app.field_set("cli_text", "PING\nGET key");
+    app.navigation.redis_db_menu = true;
+    let before = (
+        app.tabs[app.active].cli_query.cursor,
+        app.tabs[app.active].cli_query.anchor,
+    );
+    for name in ["up", "down", "home", "end"] {
+        assert!(app.workbench_key(&key(name, false), &backend));
+    }
+    assert_eq!(
+        (
+            app.tabs[app.active].cli_query.cursor,
+            app.tabs[app.active].cli_query.anchor
+        ),
+        before
+    );
+    assert_eq!(app.field("cli_text"), "PING\nGET key");
 }
 
 #[test]
@@ -144,7 +174,7 @@ fn redis_tree_toggle_preserves_current_work() {
     assert!(
         app.workbench
             .redis_expansion
-            .contains(profile.id, profile.redis_db, b"a:")
+            .contains(profile.id, profile.redis_db(), b"a:")
     );
     assert_eq!(serde_json::to_value(&app.target).unwrap(), target);
     assert_eq!(app.tabs[app.active].pending, json!({"draft": "kept"}));
@@ -216,28 +246,6 @@ fn app_for(provider: &str, kind: &str, page: ResultPage) -> App {
     app.grid = Some(GridState::new(page, provider != "redis"));
     app.focus = "grid".into();
     app
-}
-
-#[test]
-fn history_selection_clears_only_when_filter_text_changes() {
-    let mut app = App::new("history-filter".into());
-    app.workbench.overlay = Some("history".into());
-    app.workbench.history = vec![json!({"text":"SELECT 1"})];
-    app.workbench.history_selected = Some(0);
-    app.dispatch_editor_message(Msg::Edit(
-        "history_filter".into(),
-        0,
-        0,
-        "select".into(),
-        6,
-        0,
-    ));
-    assert_eq!(app.workbench.history_selected, None);
-    app.workbench.history_selected = Some(0);
-    app.field_set("history_filter", "select");
-    assert_eq!(app.workbench.history_selected, Some(0));
-    app.field_set("history_filter", "other");
-    assert_eq!(app.workbench.history_selected, None);
 }
 
 #[test]
@@ -319,271 +327,6 @@ fn redis_empty_member_is_data_but_invalid_score_is_rejected() {
     app.workbench_action("redis-stage", &backend);
     assert_eq!(app.redis_changes.len(), 1);
     assert_eq!(app.redis_changes[0]["member"]["value"], "");
-}
-
-fn mysql_rows() -> App {
-    let mut page = page(
-        &["a", "b"],
-        vec![
-            vec![DataValue::Text("1".into()), DataValue::Text("first".into())],
-            vec![
-                DataValue::Text("2".into()),
-                DataValue::Text("second".into()),
-            ],
-            vec![DataValue::Text("3".into()), DataValue::Text("third".into())],
-        ],
-    );
-    page.result.columns[0].primary_key = true;
-    page.result.columns[0].auto_increment = true;
-    let result_id = page.result.id.to_string();
-    let columns = page.result.columns.clone();
-    let mut app = app_for("mysql", "table", page);
-    app.database = Some("db".into());
-    app.result_id = Some(result_id);
-    app.schema = Some(json!({"keys":[["a"]],"engine":"InnoDB","columns":columns}));
-    let grid = app.grid.as_mut().unwrap();
-    grid.select_row(0, 0, false, false).unwrap();
-    grid.select_row(2, 0, false, true).unwrap();
-    app
-}
-
-#[test]
-fn mysql_menu_copy_and_insert_preserve_selected_rows() {
-    use crate::menus::GridMenuAction;
-    let (backend, _, _) = Backend::scripted();
-    let mut app = mysql_rows();
-    let cell = Cell { row: 0, column: 1 };
-    assert_eq!(app.grid_menu_row_count(cell), 2);
-    assert_eq!(
-        app.grid_menu(cell, GridMenuAction::CopyRows, &backend)
-            .unwrap(),
-        "1\tfirst\n3\tthird\n"
-    );
-    for (action, expected) in [
-        (GridMenuAction::CopyInsert, vec!["1", "first", "3", "third"]),
-        (
-            GridMenuAction::CopyInsertWithoutAutoPrimary,
-            vec!["first", "third"],
-        ),
-    ] {
-        let text = app.grid_menu(cell, action, &backend).unwrap();
-        let dialect = sqlparser::dialect::MySqlDialect {};
-        let statements = sqlparser::parser::Parser::parse_sql(&dialect, &text).unwrap();
-        assert!(
-            statements
-                .iter()
-                .all(|statement| matches!(statement, sqlparser::ast::Statement::Insert(_)))
-        );
-        let values: Vec<String> = sqlparser::tokenizer::Tokenizer::new(&dialect, &text)
-            .tokenize()
-            .unwrap()
-            .into_iter()
-            .filter_map(|token| match token {
-                sqlparser::tokenizer::Token::HexStringLiteral(hex) => {
-                    let bytes: Vec<_> = hex
-                        .as_bytes()
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|pair| {
-                            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
-                        })
-                        .collect();
-                    Some(String::from_utf8(bytes).unwrap())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(values, expected);
-        assert_eq!(app.grid.as_ref().unwrap().selected_rows(), vec![0, 2]);
-    }
-    app.grid.as_mut().unwrap().settings[1].hidden = true;
-    assert_eq!(
-        app.grid_menu(
-            Cell { row: 0, column: 0 },
-            GridMenuAction::CopyRows,
-            &backend
-        )
-        .unwrap(),
-        "1\tfirst\n3\tthird\n"
-    );
-    app.grid.as_mut().unwrap().settings[1].hidden = false;
-    let other = Cell { row: 1, column: 0 };
-    assert_eq!(app.grid_menu_row_count(other), 1);
-    assert_eq!(
-        app.grid_menu(other, GridMenuAction::CopyRows, &backend)
-            .as_deref(),
-        Some("2\tsecond\n")
-    );
-    assert_eq!(app.grid.as_ref().unwrap().selected_rows(), vec![1]);
-    let cell = Cell { row: 1, column: 1 };
-    app.grid.as_mut().unwrap().select(cell, false).unwrap();
-    assert_eq!(
-        app.grid_menu(cell, GridMenuAction::CopyCells, &backend)
-            .as_deref(),
-        Some("second\n")
-    );
-}
-
-#[test]
-fn row_menus_work_when_every_column_is_hidden() {
-    use crate::menus::GridMenuAction;
-    let (backend, _, _) = Backend::scripted();
-    let mut app = mysql_rows();
-    let cell = Cell { row: 1, column: 0 };
-    let expected: Vec<_> = [
-        GridMenuAction::CopyRows,
-        GridMenuAction::CopyInsert,
-        GridMenuAction::CopyInsertWithoutAutoPrimary,
-    ]
-    .into_iter()
-    .map(|action| app.grid_menu(cell, action, &backend).unwrap())
-    .collect();
-    assert_eq!(expected[0], "2\tsecond\n");
-    let grid = app.grid.as_mut().unwrap();
-    grid.select_row(0, 0, false, false).unwrap();
-    for setting in &mut grid.settings {
-        setting.hidden = true;
-    }
-    for (action, expected) in [
-        GridMenuAction::CopyRows,
-        GridMenuAction::CopyInsert,
-        GridMenuAction::CopyInsertWithoutAutoPrimary,
-    ]
-    .into_iter()
-    .zip(expected)
-    {
-        assert_eq!(
-            app.grid_menu(cell, action, &backend).as_deref(),
-            Some(expected.as_str())
-        );
-        assert_eq!(app.grid.as_ref().unwrap().selected_rows(), vec![1]);
-    }
-    app.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    assert_eq!(app.delete_rows_count(), 1);
-    app.workbench_action("delete-rows-confirm", &backend);
-    assert_eq!(app.pending_rows.len(), 1);
-    assert_eq!(app.pending_rows[0].key["a"], DataValue::Text("2".into()));
-    assert_eq!(
-        app.pending_rows[0].before["b"],
-        DataValue::Text("second".into())
-    );
-}
-
-#[test]
-fn deleted_identity_blocks_inline_drawer_and_entire_paste() {
-    use crate::menus::GridMenuAction;
-    let (backend, _, _) = Backend::scripted();
-    let mut app = mysql_rows();
-    let deleted = Cell { row: 2, column: 1 };
-    app.grid_menu(deleted, GridMenuAction::DeleteRows, &backend);
-    app.workbench_action("delete-rows-confirm", &backend);
-    assert_eq!(app.pending_rows.len(), 2);
-
-    app.grid.as_mut().unwrap().select(deleted, false).unwrap();
-    app.begin_inline(&backend);
-    assert!(app.workbench.inline.is_none());
-    app.open_cell(&backend);
-    app.workbench.cell_editor = Editor::new("changed");
-    app.action("set-cell", &backend);
-    assert!(app.grid.as_ref().unwrap().edits().is_empty());
-
-    app.workbench.overlay = None;
-    app.grid
-        .as_mut()
-        .unwrap()
-        .select(Cell { row: 1, column: 1 }, false)
-        .unwrap();
-    let preview = app
-        .grid
-        .as_ref()
-        .unwrap()
-        .preview_paste("safe\nblocked")
-        .unwrap();
-    assert!(
-        app.check_rows_not_deleted(preview.edits.iter().map(|edit| edit.cell.row))
-            .is_err()
-    );
-    app.paste_preview = Some(preview);
-    app.action("paste-confirm", &backend);
-    assert!(app.grid.as_ref().unwrap().edits().is_empty());
-
-    // 不同结果行号指向同一个可靠键时也必须拒绝。
-    app.grid.as_mut().unwrap().page.rows[1][0] = DataValue::Text("3".into());
-    assert!(app.check_rows_not_deleted([1]).is_err());
-    assert_eq!(app.pending_rows.len(), 2);
-}
-
-#[test]
-fn delete_confirmation_cancel_and_confirm_are_atomic() {
-    use crate::menus::GridMenuAction;
-    let (backend, _, _) = Backend::scripted();
-    let mut app = mysql_rows();
-    let cell = Cell { row: 0, column: 0 };
-    app.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    assert_eq!(app.delete_rows_count(), 2);
-    assert!(app.pending_rows.is_empty());
-    app.workbench_action("overlay-close", &backend);
-    assert_eq!(app.delete_rows_count(), 0);
-    assert!(app.pending_rows.is_empty());
-    app.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    assert!(app.workbench_key(&key("escape", false), &backend));
-    assert!(app.pending_rows.is_empty());
-    assert_eq!(app.delete_rows_count(), 0);
-    app.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    app.workbench_action("delete-rows-confirm", &backend);
-    assert_eq!(app.pending_rows.len(), 2);
-    assert_eq!(app.pending_rows[0].key["a"], DataValue::Text("1".into()));
-    assert_eq!(app.pending_rows[1].key["a"], DataValue::Text("3".into()));
-    assert_eq!(
-        app.pending_rows[0].before["b"],
-        DataValue::Text("first".into())
-    );
-    assert!(app.pending_rows.iter().all(|row| row.operation == "delete"));
-    app.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    app.workbench_action("delete-rows-confirm", &backend);
-    assert_eq!(app.pending_rows.len(), 2);
-}
-
-#[test]
-fn delete_rejects_permissions_keys_stale_context_and_draft_conflicts() {
-    use crate::menus::GridMenuAction;
-    let (backend, _, _) = Backend::scripted();
-    let cell = Cell { row: 0, column: 0 };
-    let mut readonly = mysql_rows();
-    readonly.profile.as_mut().unwrap().access_mode = AccessMode::ReadOnly;
-    readonly.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    assert_eq!(readonly.delete_rows_count(), 0);
-    let mut no_key = mysql_rows();
-    no_key.schema.as_mut().unwrap()["keys"] = json!([]);
-    no_key.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    assert_eq!(no_key.delete_rows_count(), 0);
-    let mut stale = mysql_rows();
-    stale.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    stale.edit_token = Some(json!(Uuid::new_v4()));
-    stale.workbench_action("delete-rows-confirm", &backend);
-    assert!(stale.pending_rows.is_empty());
-    let mut changed_row = mysql_rows();
-    changed_row.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    changed_row.grid.as_mut().unwrap().page.rows[2][1] = DataValue::Text("different".into());
-    changed_row.workbench_action("delete-rows-confirm", &backend);
-    assert!(changed_row.pending_rows.is_empty());
-    let mut draft = mysql_rows();
-    draft
-        .grid
-        .as_mut()
-        .unwrap()
-        .edit(Cell { row: 2, column: 1 }, DataValue::Text("draft".into()))
-        .unwrap();
-    draft.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    draft.workbench_action("delete-rows-confirm", &backend);
-    assert!(draft.pending_rows.is_empty());
-    assert_eq!(draft.grid.as_ref().unwrap().edits().len(), 1);
-    let mut invalid_key = mysql_rows();
-    invalid_key.grid.as_mut().unwrap().page.rows[2][0] = DataValue::Null;
-    invalid_key.grid_menu(cell, GridMenuAction::DeleteRows, &backend);
-    invalid_key.workbench_action("delete-rows-confirm", &backend);
-    assert!(invalid_key.pending_rows.is_empty());
 }
 
 fn key(name: &str, shift: bool) -> tern_sdk::Key {
@@ -789,73 +532,6 @@ fn redis_list_duplicate_values_keep_selected_index_and_zset_rejects_nan() {
 }
 
 #[test]
-fn cli_pages_do_not_replace_key_grid_or_baseline() {
-    let (backend, mut requests, _) = Backend::scripted();
-    let mut app = app_for(
-        "redis",
-        "string",
-        page(
-            &["value"],
-            vec![vec![DataValue::Bytes(STANDARD.encode("original"))]],
-        ),
-    );
-    let key_id = app.grid.as_ref().unwrap().page.result.id;
-    let baseline = app.edit_token.clone();
-    app.workbench.cli = true;
-    app.field_set("cli_text", "PING");
-    app.workbench_action("cli-run", &backend);
-    let start = requests.try_recv().unwrap();
-    assert_eq!(start.method, "execution.start");
-    app.field_set("cli_text", "GET another-key");
-    fn command_text(node: &Node<Msg>) -> Option<&str> {
-        if node.props().get("class").and_then(Value::as_str) == Some("cli-command") {
-            return node.props().get("text").and_then(Value::as_str);
-        }
-        node.child_nodes().iter().find_map(command_text)
-    }
-    let view = crate::views::render(&app);
-    assert_eq!(
-        view.regions().into_iter().flatten().find_map(command_text),
-        Some("PING")
-    );
-    app.workbench.history.push(json!({"text":"INFO"}));
-    app.workbench_action("history-open:0", &backend);
-    assert_eq!(app.field("cli_text"), "INFO");
-    let view = crate::views::render(&app);
-    assert_eq!(
-        view.regions().into_iter().flatten().find_map(command_text),
-        Some("PING")
-    );
-    app.workbench_response("cli.start", json!({"task_id":"task"}), &backend);
-    let result = page(&["reply"], vec![vec![DataValue::Text("PONG".into())]]);
-    let second = page(&["reply"], vec![vec![DataValue::Text("SECOND".into())]]);
-    app.workbench_response(
-        "execution.get",
-        json!({"state":"succeeded","results":[result.result.id, second.result.id]}),
-        &backend,
-    );
-    let request = requests.try_recv().unwrap();
-    assert_eq!(request.method, "result.page");
-    let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(tag, serde_json::to_value(result).unwrap(), &backend);
-    app.workbench_action("cli-result:1", &backend);
-    let request = requests.try_recv().unwrap();
-    let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(tag, serde_json::to_value(second).unwrap(), &backend);
-    let view = crate::views::render(&app);
-    assert_eq!(
-        view.regions().into_iter().flatten().find_map(command_text),
-        Some("PING")
-    );
-    assert_eq!(app.grid.as_ref().unwrap().page.result.id, key_id);
-    assert_eq!(app.edit_token, baseline);
-    assert_eq!(
-        app.workbench.cli_grid.as_ref().unwrap().page.rows[0][0],
-        DataValue::Text("SECOND".into())
-    );
-}
-
-#[test]
 fn history_from_table_opens_query_and_keeps_table_baseline() {
     let (backend, _requests, _) = Backend::scripted();
     let mut app = app_for(
@@ -867,17 +543,21 @@ fn history_from_table_opens_query_and_keeps_table_baseline() {
     app.result_id = Some("old-result".into());
     let original_result = app.grid.as_ref().unwrap().page.result.id;
     let original_token = app.edit_token.clone();
-    app.workbench.history.push(json!({"text":"SELECT 2"}));
+    app.workbench
+        .archery_history
+        .items
+        .push(json!({"text":"SELECT 2"}));
+    app.workbench.archery_history.selected = Some(0);
     app.grid
         .as_mut()
         .unwrap()
         .edit(Cell { row: 0, column: 0 }, DataValue::Text("draft".into()))
         .unwrap();
-    app.workbench_action("history-open:0", &backend);
+    app.application_action("history-open", &backend);
     assert_eq!(app.tabs[0].query.text, "");
     assert!(app.grid.is_some());
     app.grid.as_mut().unwrap().discard();
-    app.workbench_action("history-open:0", &backend);
+    app.application_action("history-open", &backend);
     assert_eq!(app.tabs[app.active].query.text, "SELECT 2");
     assert!(app.grid.is_none() && app.result_id.is_none() && app.results.is_empty());
     assert!(app.target.is_none());
@@ -949,81 +629,6 @@ fn list_staged_edits_follow_original_rows_and_undo() {
 }
 
 #[test]
-fn cli_failure_keeps_partial_results_and_chunked_value_separate() {
-    let (backend, mut requests, _) = Backend::scripted();
-    let mut app = app_for(
-        "redis",
-        "string",
-        page(
-            &["value"],
-            vec![vec![DataValue::Bytes(STANDARD.encode("key"))]],
-        ),
-    );
-    let key_id = app.grid.as_ref().unwrap().page.result.id;
-    app.field_set("cli_text", "PING\nGET x");
-    app.workbench_action("cli-run", &backend);
-    requests.try_recv().unwrap();
-    app.workbench_response("cli.start", json!({"task_id":"t"}), &backend);
-    let full = DataValue::Text("完整😀".into());
-    let bytes = serde_json::to_vec(&full).unwrap();
-    let id = Uuid::new_v4();
-    let result = page(
-        &["reply"],
-        vec![
-            vec![DataValue::Text("PONG".into())],
-            vec![DataValue::Large {
-                id,
-                original_type: "text".into(),
-                bytes: bytes.len() as u64,
-                preview: "...".into(),
-            }],
-        ],
-    );
-    app.workbench_response(
-        "execution.get",
-        json!({"state":"failed","error":"bad command","results":[result.result.id]}),
-        &backend,
-    );
-    let request = requests.try_recv().unwrap();
-    let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(tag, serde_json::to_value(result).unwrap(), &backend);
-    assert_eq!(
-        app.workbench.cli_grid.as_ref().unwrap().page.rows[0][0],
-        DataValue::Text("PONG".into())
-    );
-    assert!(app.workbench.cli_error.render().contains("bad command"));
-    app.workbench_action("cli-open:1:0", &backend);
-    let request = requests.try_recv().unwrap();
-    let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    let stale_tag = tag.to_owned();
-    app.workbench_action("overlay-close", &backend);
-    app.workbench_action("cli-open:1:0", &backend);
-    let request = requests.try_recv().unwrap();
-    let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(
-        &stale_tag,
-        json!({"bytes_b64":STANDARD.encode(&bytes),"offset":0,"next":null,"total":bytes.len()}),
-        &backend,
-    );
-    assert_eq!(app.workbench.cli_large.as_ref().unwrap().offset, 0);
-    let split = bytes.len() / 2;
-    app.workbench_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total":bytes.len()}), &backend);
-    let request = requests.try_recv().unwrap();
-    let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total":bytes.len()}), &backend);
-    assert_eq!(
-        app.workbench
-            .cli_grid
-            .as_ref()
-            .unwrap()
-            .value(Cell { row: 1, column: 0 }),
-        Some(&full)
-    );
-    assert_eq!(app.grid.as_ref().unwrap().page.result.id, key_id);
-    assert!(app.workbench.cli_error.render().contains("bad command"));
-}
-
-#[test]
 fn redis_history_opens_persistent_cli_without_touching_drafts() {
     let (backend, _, _) = Backend::scripted();
     let mut app = app_for(
@@ -1037,13 +642,15 @@ fn redis_history_opens_persistent_cli_without_touching_drafts() {
     let key_id = app.grid.as_ref().unwrap().page.result.id;
     app.redis_changes
         .push(json!({"operation":"set_string","value":{"type":"text","value":"draft"}}));
-    app.workbench.history.push(json!({"text":"PING"}));
+    app.workbench
+        .archery_history
+        .items
+        .push(json!({"text":"PING"}));
+    app.workbench.archery_history.selected = Some(0);
     app.workbench.cli_results.push("old".into());
-    app.workbench_action("history-open:0", &backend);
-    assert_eq!(app.field("cli_text"), "PING");
-    assert_eq!(app.tabs[app.active].cli_query.text, "PING");
-    assert!(app.workbench.cli && app.workbench.cli_results == ["old"]);
-    assert_eq!(app.view, "data");
+    app.application_action("history-open", &backend);
+    assert_ne!(app.field("cli_text"), "PING");
+    assert_eq!(app.workbench.cli_results, ["old"]);
     assert_eq!(app.grid.as_ref().unwrap().page.result.id, key_id);
     assert_eq!(app.redis_changes.len(), 1);
 }
@@ -1106,4 +713,112 @@ fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
     app.workbench_action("keys-next", &backend);
     app.workbench_action("redis-tree:YTo=", &backend);
     assert_eq!(app.workbench.key_page, 0);
+}
+
+#[test]
+fn cli_height_keyboard_preserves_input_and_workspace_preference() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.workbench.cli = true;
+    app.field_set("cli_text", "GET retained");
+    app.resize_cli(0.62);
+    app.focus = "cli_text".into();
+
+    assert!(app.workbench_key(&key("tab", false), &backend));
+    assert_eq!(app.focus, "cli_height");
+    assert!(app.workbench_key(&key("up", false), &backend));
+    assert!((app.cli_share - 0.67).abs() < 1e-12);
+    assert!(app.workbench_key(&key("end", false), &backend));
+    assert!(app.workbench_key(&key("up", false), &backend));
+    assert_eq!(app.cli_share, 0.85);
+    assert!(app.workbench_key(&key("home", false), &backend));
+    assert!(app.workbench_key(&key("down", false), &backend));
+    assert_eq!(app.cli_share, 0.15);
+    assert_eq!(app.field("cli_text"), "GET retained");
+    assert!(requests.try_recv().is_err());
+
+    app.resize_cli(0.62);
+    app.workbench_action("cli-toggle", &backend);
+    app.resize_cli(0.3);
+    app.workbench_action("cli-toggle", &backend);
+    assert_eq!(app.cli_share, 0.62);
+    app.resize_cli(f64::NAN);
+    assert_eq!(app.cli_share, 0.62);
+
+    let mut other = app.tabs[0].clone();
+    other.id = Uuid::new_v4();
+    app.tabs.push(other);
+    app.switch_tab(1);
+    assert_eq!(app.cli_share, 0.62);
+    app.switch_tab(0);
+    assert_eq!(app.cli_share, 0.62);
+    app.focus = "cli_height".into();
+    assert!(app.workbench_key(&key("enter", false), &backend));
+    assert_eq!(app.focus, "cli_text");
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn readonly_redis_large_values_load_in_chunks_without_edit_baseline() {
+    for kind in ["string", "hash"] {
+        let (backend, mut requests, _) = Backend::scripted();
+        let full = DataValue::Bytes(STANDARD.encode(br#"{"a":1}"#));
+        let bytes = serde_json::to_vec(&full).unwrap();
+        let id = Uuid::new_v4();
+        let large = DataValue::Large {
+            id,
+            original_type: "bytes".into(),
+            bytes: bytes.len() as u64,
+            preview: "preview".into(),
+        };
+        let mut app = app_for("redis", kind, page(&["value"], vec![vec![large]]));
+        app.profile.as_mut().unwrap().access_mode = AccessMode::ReadOnly;
+        app.edit_token = None;
+        app.grid.as_mut().unwrap().focus = Some(Cell { row: 0, column: 0 });
+        app.action(
+            if kind == "string" {
+                "redis-view-string"
+            } else {
+                "overlay:cell"
+            },
+            &backend,
+        );
+        let request = requests.try_recv().unwrap();
+        assert_eq!(request.method, "result.value");
+        let tag = request.tag.splitn(3, ':').nth(2).unwrap();
+        let split = bytes.len() / 2;
+        app.large_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total":bytes.len()}), &backend);
+        let request = requests.try_recv().unwrap();
+        assert_eq!(request.params["offset"], split);
+        let tag = request.tag.splitn(3, ':').nth(2).unwrap();
+        app.large_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total":bytes.len()}), &backend);
+        assert_eq!(
+            app.grid.as_ref().unwrap().value(Cell { row: 0, column: 0 }),
+            Some(&full)
+        );
+        assert_eq!(app.workbench.overlay.as_deref(), Some("cell"));
+        assert!(app.edit_token.is_none());
+        assert!(app.redis_changes.is_empty());
+        if kind == "string" {
+            fn content(node: &Node<Msg>) -> Option<&str> {
+                if node.props().get("class").and_then(Value::as_str) == Some("value-content") {
+                    return node.props().get("text").and_then(Value::as_str);
+                }
+                node.child_nodes().iter().find_map(content)
+            }
+            app.action("overlay-close", &backend);
+            for (format, expected) in [
+                ("text", "{\"a\":1}"),
+                ("json", "{\n  \"a\": 1\n}"),
+                ("hex", "7B 22 61 22 3A 31 7D"),
+            ] {
+                app.workbench_action(&format!("format:{format}"), &backend);
+                let view = crate::views::render(&app);
+                assert_eq!(
+                    view.regions().into_iter().flatten().find_map(content),
+                    Some(expected)
+                );
+            }
+        }
+    }
 }
