@@ -1,5 +1,6 @@
 """读取并同步发布工具使用的产品版本。"""
 
+import argparse
 import re
 import tomllib
 from pathlib import Path
@@ -57,5 +58,55 @@ def set_plugin_version(path, version, check=False):
     path.write_bytes(updated.encode("utf-8"))
 
 
+def check_release():
+  """只读核对交付版本与变更归档；线上发布状态仍由 GitHub Release 管理。"""
+  version = product_version()
+  set_plugin_version(ROOT / "plugins/datapier/plugin.toml", version, check=True)
+  text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+  text = re.sub(r"<!--.*?(?:-->|\Z)", "", text, flags=re.DOTALL)
+  titles = []
+  changed_sections = set()
+  fence = None
+  # 文档中的示例和注释不能冒充版本章节或实际变更条目。
+  for line in text.splitlines():
+    if fence is not None:
+      if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line):
+        fence = None
+      continue
+    marker = re.match(r" {0,3}(`{3,}|~{3,})", line)
+    if marker:
+      fence = marker.group(1)
+      continue
+    heading = re.fullmatch(r"##[ \t]+(.+?)[ \t]*", line)
+    if heading:
+      titles.append(heading.group(1))
+    elif titles and re.match(r"[-*+][ \t]+\S", line):
+      changed_sections.add(len(titles) - 1)
+  versions = [title for title in titles if re.fullmatch(VERSION_PATTERN, title)]
+  if len(versions) != len(set(versions)):
+    raise ValueError("Duplicate version sections in CHANGELOG.md")
+  if not titles or titles[0] != version:
+    raise ValueError(f"First CHANGELOG.md section must be ## {version}")
+  if 0 not in changed_sections:
+    raise ValueError(f"CHANGELOG.md ## {version} must contain change entries")
+  return version
+
+
 if __name__ == "__main__":
-  print(product_version())
+  parser = argparse.ArgumentParser(description=__doc__)
+  actions = parser.add_mutually_exclusive_group()
+  actions.add_argument(
+    "--sync",
+    action="store_true",
+    help="sync the source plugin manifest to the workspace version",
+  )
+  actions.add_argument(
+    "--check-release",
+    action="store_true",
+    help="check plugin and changelog without changing files",
+  )
+  args = parser.parse_args()
+  version = check_release() if args.check_release else product_version()
+  if args.sync:
+    set_plugin_version(ROOT / "plugins/datapier/plugin.toml", version)
+  print(version)

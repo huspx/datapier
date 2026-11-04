@@ -14,12 +14,14 @@
 
 根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前开发版本为 `0.1.1`，不代表已正式发布。四个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本；修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本，不手工编辑锁文件。组包当前支持无前导零的三段数字版本，不支持预发布后缀。
 
-修改根版本后，从仓库根目录运行以下命令同步源码 plugin，再用只读检查确认一致；源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。CI 同样运行 `--check`，版本缺失、重复、无效或不一致时失败。
+修改根版本后，先同步源码 plugin，再更新 CHANGELOG 对应版本章节并运行只读发布检查。源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。PR 与 main 的 CI 均执行同一检查，草稿准备、上传和汇总入口也会在访问 GitHub 前检查；plugin 版本不一致、CHANGELOG 首个章节不匹配根版本、版本章节重复或当前章节缺少实际变更条目时失败。检查不会修改文件，也不查询或推断线上发布状态。
 
 ```sh
-python3 scripts/sync-version.py
-python3 scripts/sync-version.py --check
+python3 scripts/version.py --sync
+python3 scripts/version.py --check-release
 ```
+
+`python3 scripts/version.py` 默认只输出根产品版本；`--sync` 仅同步源码 plugin，`--check-release` 只读检查 plugin 与 CHANGELOG。同步与检查参数互斥，读取和检查都不会隐式修改文件。
 
 安装器从随插件提供的 `plugin.toml` 读取版本并校验程序版本。组包脚本和 CI 从根 manifest 读取版本，显式传入 `--version` 时必须与根版本一致；汇总时只同步临时插件副本，不改源码。Windows 用户安装器使用系统自带的 Windows PowerShell 5.1，须保留其 UTF-8 BOM。
 
@@ -29,19 +31,19 @@ python3 scripts/sync-version.py --check
 
 开发发布脚本使用 Python 3.15，仅依赖标准库。CI 通过 `actions/setup-python@v7` 配置 `python-version: '3.15'`，跟随该分支补丁版本，架构随原生 runner；短命令使用 Bash，架构检查和二进制 smoke 直接使用 Python。开发环境、格式化与回归命令见[贡献指南](CONTRIBUTING.md#开发环境)，工具契约见[0.1.1 技术方案](docs/technical-design-0.1.1.md#24-开发与发布工具)。
 
-版本读取与校验共用 `scripts/version.py`；同步、单目标组包和六目标汇总分别使用 `sync-version.py`、`package-target.py` 和 `assemble-release.py`。`draft_release.py` 负责准备草稿、原生 job 直接上传及从草稿资源汇总，使用 Python 标准库调用 GitHub REST API。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，Unix 安装器使用 `/bin/sh`；安装与运行 Datapier 无需 Python，开发与组包无需 `pwsh`。
+版本读取、源码 plugin 同步及只读发布检查统一由 `scripts/version.py` 提供；单目标组包和六目标汇总分别使用 `package-target.py` 和 `assemble-release.py`。`draft_release.py` 负责准备草稿、原生 job 直接上传及从草稿资源汇总，使用 Python 标准库调用 GitHub REST API。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，Unix 安装器使用 `/bin/sh`；安装与运行 Datapier 无需 Python，开发与组包无需 `pwsh`。
 
-脚本回归覆盖版本同步、只读检查不写文件、无效或重复版本及显式版本不一致拒绝，以及缺失／无效 sidecar 拒绝和汇总不改源码 plugin。实际组包须使用本机真实二进制，解包核对内容、归档与程序摘要；完整汇总必须收齐同一提交的六目标原生产物。脚本测试和本机组包不能代替六目标 CI 或完整原生运行验收。
+脚本回归覆盖版本同步、只读检查不写文件、无效或重复版本及显式版本不一致拒绝、CHANGELOG 章节不匹配／重复／缺少实际条目拒绝，以及缺失／无效 sidecar 拒绝和汇总不改源码 plugin。实际组包须使用本机真实二进制，解包核对内容、归档及程序摘要；完整汇总必须收齐同一提交的六目标原生产物。脚本测试和本机组包不能代替六目标 CI 或完整原生运行验收。
 
 ## 发布说明与 CHANGELOG
 
 根目录 [CHANGELOG.md](CHANGELOG.md) 由贡献者人工维护，记录变更内容；文档职责与分类口径见[贡献指南的文档职责与阅读顺序](CONTRIBUTING.md#文档职责与阅读顺序)。新功能尚未发布期间的内部修正不逐条记入“修复”。工作流只维护草稿中的构建身份和完成状态，保留人工说明，不自动生成正式发布说明或回写发布状态。版本章节存在、CI 成功、tag 或 Release 草稿存在，都不等于正式发布完成。
 
-- 日常新变更记入顶部的“未发布（Unreleased）”章节，不把新功能追加到已经发布的版本章节。
-- 发布准备 PR 将待发布条目整理为对应版本章节，并同步版本号、安装器和组包配置。版本章节是该提交的内容快照，不使用“已发布／未发布”标记推断线上状态，也不预填实际发布日期。
-- 对外发布状态以 GitHub Release 为准：`draft=true` 为草稿，`draft=false` 且 `prerelease=true` 为预发布，`draft=false` 且 `prerelease=false` 为正式公开；实际发布时间使用 `published_at`。资源完整性、摘要及安装验证仍须另行核对，不能只看这些字段。
+- 日常变更直接记入根产品版本对应的章节，例如 `## 0.1.1`；当前版本必须是首个二级章节，至少包含一条实际变更，不再使用独立的 Unreleased 暂存章节。版本号提升时新增下一版本章节，既有历史章节保留。
+- 发布准备 PR 核对该版本内容，并同步版本号、安装器和组包配置。版本章节是该提交的内容快照，不加“待发布／已发布”标记，也不预填实际发布日期。
+- 维护者在 GitHub 发布草稿时改变实际发布状态：`draft=true` 为草稿，`draft=false` 且 `prerelease=true` 为预发布，`draft=false` 且 `prerelease=false` 为正式公开；实际发布时间使用 `published_at`。CHANGELOG 不回写状态，资源完整性、摘要及安装验证仍须另行核对。
 - 构建或上传失败时保留草稿和诊断，不声称组包完成。需要重跑时选择整个工作流，使六目标使用同一个新的 attempt；旧 attempt 或其他提交的任务不能向当前草稿续传。源码改变时重新完成构建和验证，不混用不同提交的资源，不移动已经公开的版本 tag。
-- 发布成功后不再自动提交一次“改为已发布”的 CHANGELOG 更新，不改写已验证 tag；发布时间、正式下载验证和验收范围写入 GitHub Release 说明。已发布的 0.1.0 保留在其版本章节，后续变更归入未发布章节。
+- 发布成功后不再自动提交一次“改为已发布”的 CHANGELOG 更新，不改写已验证 tag；发布时间、正式下载验证和验收范围写入 GitHub Release 说明。开始下一轮开发时提升根产品版本并新增对应 CHANGELOG 章节；保留已发布的历史内容。
 
 维护者结合变更记录、[0.1.1 技术方案运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)及该版本真实验收记录人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。
 
@@ -77,7 +79,7 @@ python3 scripts/sync-version.py --check
 | windows-2022 | x86_64-pc-windows-msvc |
 | windows-11-arm | aarch64-pc-windows-msvc |
 
-独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并检查源码 plugin 版本。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档及 sidecar 随 runner 清理，不上传 Actions artifact 或 Release 资源。
+独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档及 sidecar 随 runner 清理，不上传 Actions artifact 或 Release 资源。
 
 main 的 `prepare-release` 在格式检查成功后创建或刷新 `v<version>` 草稿并清理该版本旧的生成附件；六个 `native-release` job 将各自归档和 `.binary-sha256` 直接上传此草稿。所有目标成功后，`bundle` 从相同草稿鉴权下载十二个文件，验证资源及可用的 SHA-256，使用既有汇总脚本生成并上传 `SHA256SUMS`、`datapier-plugin-<version>.zip`，最后标记构建完成，Release 仍保持草稿。草稿最终包含六个归档、六个 sidecar 和两个汇总文件；失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
 

@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from version import ROOT, product_version
+from version import ROOT, check_release
 
 TARGETS = (
   "x86_64-apple-darwin",
@@ -366,10 +366,11 @@ def main():
     parser.error("--release-id is required and must be numeric")
   if args.command == "upload-target" and not args.target:
     parser.error("--target is required for upload-target")
+  version = check_release()
   token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
   if not token:
     parser.error("GH_TOKEN or GITHUB_TOKEN is required")
-  draft = Draft(GitHub(args.api_url, args.repository, token), args, product_version())
+  draft = Draft(GitHub(args.api_url, args.repository, token), args, version)
   {
     "prepare": draft.prepare,
     "upload-target": draft.upload_target,

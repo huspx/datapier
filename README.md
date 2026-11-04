@@ -116,7 +116,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 - [UI 交互设计稿](docs/ui-redesign.html)及[还原说明](docs/ui-redesign.md)：界面交互、文字约束和视觉对照要求。
 - [贡献指南](CONTRIBUTING.md)：文档职责、开发环境、编码与模块边界、隔离验证及 PR 说明。
 - [发布指南](RELEASING.md)：产品版本来源与派生、发布前检查、原生组包及人工发布核对。
-- [变更记录](CHANGELOG.md)：人工维护的版本变化与未发布变更。
+- [变更记录](CHANGELOG.md)：按版本维护的变更内容；实际发布状态以 GitHub Release 为准。
 - [Agent 工作入口](AGENTS.md)：必读文档、执行授权和交付约束。
 
 本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。

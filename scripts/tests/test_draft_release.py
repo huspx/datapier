@@ -229,9 +229,10 @@ class DraftReleaseTests(unittest.TestCase):
     for name in ("version.py", "assemble-release.py", "draft_release.py"):
       shutil.copy2(SOURCE_ROOT / "scripts" / name, self.root / "scripts" / name)
     (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.3"\n')
+    (self.root / "CHANGELOG.md").write_text("## 1.2.3\n\n- 完成查询能力。\n")
     plugin = self.root / "plugins" / "datapier"
     plugin.mkdir(parents=True)
-    (plugin / "plugin.toml").write_text('name = "datapier"\nversion = "0.0.1"\n')
+    (plugin / "plugin.toml").write_text('name = "datapier"\nversion = "1.2.3"\n')
     (plugin / "content.txt").write_text("fixture plugin\n")
     (self.root / "LICENSE").write_text("fixture license\n")
     self.artifacts = self.root / "dist"
@@ -376,6 +377,23 @@ class DraftReleaseTests(unittest.TestCase):
         "datapier-9.9.9-x86_64-apple-darwin.tar.gz": b"other version",
       },
     )
+
+  def test_invalid_changelog_cannot_refresh_or_upload_to_draft(self):
+    release = self.prepare()
+    self.write_target(TARGETS[0])
+    self.server.add_asset(release["id"], names(TARGETS[0])[0], b"keep")
+    before = copy.deepcopy((self.server.releases, self.server.assets))
+    (self.root / "CHANGELOG.md").write_text("## 未发布（Unreleased）\n\n- 尚未归档。\n")
+    commands = (
+      ("prepare",),
+      ("upload-target", "--release-id", release["id"], "--target", TARGETS[0]),
+      ("assemble", "--release-id", release["id"]),
+    )
+    for command in commands:
+      with self.subTest(command=command[0]):
+        result = self.cli(*command, success=False)
+        self.assertIn("CHANGELOG.md", result.stderr)
+        self.assertEqual((self.server.releases, self.server.assets), before)
 
   def test_published_release_is_not_modified(self):
     release = self.prepare()

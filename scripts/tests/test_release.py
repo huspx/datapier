@@ -30,13 +30,15 @@ class ReleaseScriptsTest(unittest.TestCase):
     scripts.mkdir()
     for name in (
       "version.py",
-      "sync-version.py",
       "package-target.py",
       "assemble-release.py",
     ):
       shutil.copy2(SCRIPTS / name, scripts / name)
     (self.root / "Cargo.toml").write_text(
       '[workspace.package]\nversion = "1.2.3"\n', encoding="utf-8"
+    )
+    (self.root / "CHANGELOG.md").write_text(
+      "## 1.2.3\n\n- 完成查询能力。\n", encoding="utf-8"
     )
     self.plugin = self.root / "plugins/datapier"
     self.plugin.mkdir(parents=True)
@@ -70,11 +72,63 @@ class ReleaseScriptsTest(unittest.TestCase):
 
   def test_check_is_read_only_and_sync_preserves_format(self):
     before = self.manifest.read_bytes()
-    self.assertNotEqual(self.run_script("sync-version.py", "--check").returncode, 0)
+    read = self.run_script("version.py")
+    self.assertEqual(read.returncode, 0, read.stderr)
+    self.assertEqual(read.stdout.strip(), "1.2.3")
     self.assertEqual(self.manifest.read_bytes(), before)
-    self.assertEqual(self.run_script("sync-version.py").returncode, 0)
+    self.assertNotEqual(self.run_script("version.py", "--check-release").returncode, 0)
+    self.assertEqual(self.manifest.read_bytes(), before)
+    self.assertEqual(self.run_script("version.py", "--sync").returncode, 0)
     self.assertEqual(self.manifest.read_bytes(), before.replace(b'"1.0.0"', b'"1.2.3"'))
-    self.assertEqual(self.run_script("sync-version.py", "--check").returncode, 0)
+    self.assertEqual(self.run_script("version.py", "--check-release").returncode, 0)
+    synced = self.manifest.read_bytes()
+    conflict = self.run_script("version.py", "--sync", "--check-release")
+    self.assertNotEqual(conflict.returncode, 0)
+    self.assertEqual(self.manifest.read_bytes(), synced)
+
+  def test_release_check_requires_matching_plugin_and_does_not_change_files(self):
+    changelog = self.root / "CHANGELOG.md"
+    changelog.write_text(
+      "# 变更记录\n\n## 1.2.3\n\n- 支持受控查询。\n\n"
+      "```markdown\n## 1.2.3\n- 示例章节。\n```\n"
+      "<!--\n## 1.2.3\n- 注释章节。\n-->\n\n## 1.2.2\n\n- 历史变更。\n",
+      encoding="utf-8",
+    )
+    before_manifest = self.manifest.read_bytes()
+    mismatch = self.run_script("version.py", "--check-release")
+    self.assertNotEqual(mismatch.returncode, 0)
+    self.assertIn("does not match workspace version", mismatch.stderr)
+    self.assertEqual(self.manifest.read_bytes(), before_manifest)
+    self.assertEqual(self.run_script("version.py", "--sync").returncode, 0)
+    paths = (self.manifest, changelog, self.root / "Cargo.toml")
+    before = {path: path.read_bytes() for path in paths}
+    result = self.run_script("version.py", "--check-release")
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(result.stdout.strip(), "1.2.3")
+    self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+  def test_release_check_rejects_missing_duplicate_or_unarchived_changes(self):
+    self.assertEqual(self.run_script("version.py", "--sync").returncode, 0)
+    changelog = self.root / "CHANGELOG.md"
+    for text in (
+      "## 未发布（Unreleased）\n\n- 新功能。\n",
+      "## 1.2.4\n\n- 其他版本。\n\n## 1.2.3\n\n- 当前变更。\n",
+      "## 1.2.3\n\n- 变更。\n\n## 1.2.3\n\n- 重复章节。\n",
+      "## 1.2.3（已发布）\n\n- 变更。\n",
+      "## 1.2.3\n\n### 功能\n\n<!-- - 仅注释。 -->\n```\n- 仅示例。\n```\n",
+      "```markdown\n## 1.2.3\n- 示例不能冒充版本。\n```\n",
+    ):
+      with self.subTest(changelog=text):
+        changelog.write_text(text, encoding="utf-8")
+        before = changelog.read_bytes()
+        result = self.run_script("version.py", "--check-release")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CHANGELOG.md", result.stderr)
+        self.assertEqual(changelog.read_bytes(), before)
+    changelog.unlink()
+    missing = self.run_script("version.py", "--check-release")
+    self.assertNotEqual(missing.returncode, 0)
+    self.assertIn("CHANGELOG.md", missing.stderr)
 
   def test_invalid_or_duplicate_versions_are_rejected(self):
     for data in (
@@ -83,7 +137,7 @@ class ReleaseScriptsTest(unittest.TestCase):
     ):
       with self.subTest(data=data):
         self.manifest.write_bytes(data)
-        self.assertNotEqual(self.run_script("sync-version.py").returncode, 0)
+        self.assertNotEqual(self.run_script("version.py", "--sync").returncode, 0)
         self.assertEqual(self.manifest.read_bytes(), data)
     (self.root / "Cargo.toml").write_text(
       '[workspace.package]\nversion = "01.2.3"\n', encoding="utf-8"

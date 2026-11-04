@@ -104,7 +104,7 @@ reqwest v0.13.5 的公开 manifest 声明最低 Rust 1.85.0，低于当前 works
 
 开发与发布脚本采用 Python 3.15，仅使用标准库；CI 通过 `actions/setup-python@v7` 配置 `python-version: '3.15'`，跟随该分支补丁版本，解释器架构跟随原生 runner。迁移作为独立 PR 随 0.1.1 交付，不单独发布产品版本，与原生 UI 对齐分别审查和验证。
 
-`scripts/version.py`、`scripts/sync-version.py`、`scripts/package-target.py` 和 `scripts/assemble-release.py` 分别负责共享版本逻辑、源码 plugin 同步、单目标组包和六目标汇总；`scripts/draft_release.py` 负责草稿 Release 的准备、目标资源直传和汇总。旧开发发布 `.ps1` 已移除。workflow 的版本读取、原生架构检查及二进制版本 smoke 统一调用 Python。根 `Cargo.toml` 继续作为唯一产品版本来源，保留只读检查、显式版本一致性校验和临时 plugin 副本同步。
+`scripts/version.py` 统一提供版本读取、源码 plugin 显式同步和只读发布检查；`scripts/package-target.py` 和 `scripts/assemble-release.py` 分别负责单目标组包和六目标汇总，`scripts/draft_release.py` 负责草稿 Release 的准备、目标资源直传和汇总。旧开发发布 `.ps1` 已移除。workflow 的版本读取、原生架构检查及二进制版本 smoke 统一调用 Python。根 `Cargo.toml` 继续作为唯一产品版本来源，保留只读检查、显式版本一致性校验和临时 plugin 副本同步。
 
 沿用六目标原生构建、归档命名与内容、归档及程序摘要、缓存和下载地址契约。PR 与非 main 手动运行在 runner 内打包验证，不上传资源；main 将单目标归档直传同一版本草稿 Release，并从草稿完成六目标汇总，全程不使用 Actions artifact，草稿仍需维护者验收后发布。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，保留源码 UTF-8 BOM 与 stdout 无 BOM UTF-8 JSON；macOS／Linux 安装器继续使用 `/bin/sh`，安装和运行 Datapier 无需 Python。
 
