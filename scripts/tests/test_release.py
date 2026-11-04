@@ -1,11 +1,13 @@
 """验证发布版本和产物汇总对使用者可见的行为。"""
 
 import hashlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -64,11 +66,18 @@ class ReleaseScriptsTest(unittest.TestCase):
 
   def artifacts(self):
     for target in TARGETS:
-      extension = "zip" if target.endswith("-windows-msvc") else "tar.gz"
-      (self.dist / f"datapier-1.2.3-{target}.{extension}").write_bytes(target.encode())
-      (self.dist / f"datapier-1.2.3-{target}.binary-sha256").write_text(
-        "a" * 64 + "\n", encoding="utf-8"
-      )
+      windows = target.endswith("-windows-msvc")
+      extension = "zip" if windows else "tar.gz"
+      path = self.dist / f"datapier-1.2.3-{target}.{extension}"
+      payload = target.encode()
+      if windows:
+        with zipfile.ZipFile(path, "w") as archive:
+          archive.writestr("datapier.exe", payload)
+      else:
+        with tarfile.open(path, "w:gz") as archive:
+          member = tarfile.TarInfo("datapier")
+          member.size = len(payload)
+          archive.addfile(member, io.BytesIO(payload))
 
   def test_check_is_read_only_and_sync_preserves_format(self):
     before = self.manifest.read_bytes()
@@ -155,46 +164,117 @@ class ReleaseScriptsTest(unittest.TestCase):
     self.assertIn("does not match workspace version", result.stderr)
     self.assertEqual(list(self.dist.iterdir()), [])
 
-  def test_assembly_rejects_incomplete_or_invalid_inputs_before_writing(self):
+  @unittest.skipIf(os.name == "nt", "fixture executable requires a POSIX shell")
+  def test_package_produces_only_archive(self):
+    binary = self.root / "target" / TARGETS[0] / "release" / "datapier"
+    binary.parent.mkdir(parents=True)
+    binary.write_text('#!/bin/sh\necho "datapier 1.2.3"\n', encoding="utf-8")
+    binary.chmod(0o755)
+    result = self.run_script("package-target.py", "--target", TARGETS[0])
+    self.assertEqual(result.returncode, 0, result.stderr)
+    archive_path = self.dist / f"datapier-1.2.3-{TARGETS[0]}.tar.gz"
+    self.assertEqual(list(self.dist.iterdir()), [archive_path])
+    with tarfile.open(archive_path, "r:gz") as archive:
+      self.assertEqual(archive.getnames(), ["datapier"])
+      self.assertEqual(archive.extractfile("datapier").read(), binary.read_bytes())
+
+  def test_assembly_rejects_missing_archive_before_writing(self):
     self.artifacts()
-    sidecar = self.dist / f"datapier-1.2.3-{TARGETS[-1]}.binary-sha256"
-    for invalid in (None, "A" * 64):
-      with self.subTest(invalid=invalid):
-        if invalid is None:
-          sidecar.unlink()
-        else:
-          sidecar.write_text(invalid, encoding="utf-8")
-        result = self.run_script("assemble-release.py", "--repository", "owner/repo")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.dist / "SHA256SUMS").exists())
-        self.assertFalse((self.dist / "datapier-plugin-1.2.3.zip").exists())
+    missing = f"datapier-1.2.3-{TARGETS[-1]}.zip"
+    (self.dist / missing).unlink()
+    result = self.run_script("assemble-release.py", "--repository", "owner/repo")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn(missing, result.stderr)
+    self.assertFalse((self.dist / "datapier-plugin-1.2.3.zip").exists())
+
+  def test_assembly_rejects_invalid_archive_members_before_writing(self):
+    self.artifacts()
+    cases = ("wrong-name", "duplicate", "symlink", "invalid-format")
+    for target in (TARGETS[0], TARGETS[-1]):
+      windows = target.endswith("-windows-msvc")
+      extension = "zip" if windows else "tar.gz"
+      path = self.dist / f"datapier-1.2.3-{target}.{extension}"
+      original = path.read_bytes()
+      for case in cases:
+        with self.subTest(target=target, case=case):
+          if case == "invalid-format":
+            path.write_bytes(b"not an archive")
+          elif windows:
+            with zipfile.ZipFile(path, "w") as archive:
+              member = zipfile.ZipInfo(
+                "wrong" if case == "wrong-name" else "datapier.exe"
+              )
+              if case == "symlink":
+                member.create_system = 3
+                member.external_attr = 0o120777 << 16
+              archive.writestr(member, b"binary")
+              if case == "duplicate":
+                archive.writestr("datapier.exe", b"binary")
+          else:
+            with tarfile.open(path, "w:gz") as archive:
+              member = tarfile.TarInfo("wrong" if case == "wrong-name" else "datapier")
+              if case == "symlink":
+                member.type = tarfile.SYMTYPE
+                member.linkname = "elsewhere"
+                archive.addfile(member)
+              else:
+                member.size = 6
+                archive.addfile(member, io.BytesIO(b"binary"))
+              if case == "duplicate":
+                member = tarfile.TarInfo("datapier")
+                archive.addfile(member, io.BytesIO())
+          result = self.run_script("assemble-release.py", "--repository", "owner/repo")
+          self.assertNotEqual(result.returncode, 0)
+          self.assertFalse((self.dist / "datapier-plugin-1.2.3.zip").exists())
+          path.write_bytes(original)
 
   def test_assembly_contains_release_metadata_without_mutating_source(self):
     self.artifacts()
-    before = self.manifest.read_bytes()
+    before = {
+      path.relative_to(self.plugin): path.read_bytes()
+      for path in self.plugin.rglob("*")
+      if path.is_file()
+    }
     result = self.run_script("assemble-release.py", "--repository", "owner/repo")
     self.assertEqual(result.returncode, 0, result.stderr)
-    self.assertEqual(self.manifest.read_bytes(), before)
-    sums = (self.dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
-    self.assertEqual(len(sums), 6)
-    for line in sums:
-      digest, name = line.split("  ")
-      self.assertEqual(
-        digest, hashlib.sha256((self.dist / name).read_bytes()).hexdigest()
-      )
+    self.assertEqual(
+      {
+        path.relative_to(self.plugin): path.read_bytes()
+        for path in self.plugin.rglob("*")
+        if path.is_file()
+      },
+      before,
+    )
+    self.assertEqual(len(list(self.dist.iterdir())), 7)
+    manifest_before = before[Path("plugin.toml")]
     with zipfile.ZipFile(self.dist / "datapier-plugin-1.2.3.zip") as archive:
       self.assertTrue(all(name.startswith("datapier/") for name in archive.namelist()))
       self.assertEqual(
         archive.read("datapier/plugin.toml"),
-        before.replace(b'"1.0.0"', b'"1.2.3"'),
+        manifest_before.replace(b'"1.0.0"', b'"1.2.3"'),
       )
       self.assertEqual(archive.read("datapier/LICENSE"), b"license\n")
-      self.assertEqual(
-        archive.read("datapier/release-sha256.txt").decode().splitlines(), sums
+      sums = archive.read("datapier/release-sha256.txt").decode().splitlines()
+      binary_sums = (
+        archive.read("datapier/release-bin-sha256.txt").decode().splitlines()
       )
-      self.assertEqual(
-        len(archive.read("datapier/release-bin-sha256.txt").splitlines()), 6
-      )
+      self.assertEqual(len(sums), 6)
+      self.assertEqual(len(binary_sums), 6)
+      for target, line, binary_line in zip(TARGETS, sums, binary_sums):
+        digest, name = line.split("  ")
+        binary_digest, binary_target = binary_line.split("  ")
+        self.assertEqual(binary_target, target)
+        extension = "zip" if target.endswith("-windows-msvc") else "tar.gz"
+        self.assertEqual(name, f"datapier-1.2.3-{target}.{extension}")
+        path = self.dist / name
+        self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+        if target.endswith("-windows-msvc"):
+          with zipfile.ZipFile(path) as package:
+            payload = package.read("datapier.exe")
+        else:
+          with tarfile.open(path, "r:gz") as package:
+            payload = package.extractfile("datapier").read()
+        self.assertEqual(binary_digest, hashlib.sha256(payload).hexdigest())
       self.assertEqual(
         archive.read("datapier/release-url.txt"),
         b"https://github.com/owner/repo/releases/download/v1.2.3\n",

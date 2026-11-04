@@ -1,7 +1,6 @@
 """打包在对应原生运行环境中构建并验证的程序。"""
 
 import argparse
-import hashlib
 import shutil
 import subprocess
 import tarfile
@@ -54,11 +53,6 @@ def main():
         output / f"{stem}.tar.gz", "w:gz", format=tarfile.PAX_FORMAT
       ) as archive:
         archive.add(packaged, arcname=name, recursive=False)
-    with packaged.open("rb") as source:
-      digest = hashlib.file_digest(source, "sha256").hexdigest()
-    (output / f"{stem}.binary-sha256").write_text(
-      digest + "\n", encoding="utf-8", newline="\n"
-    )
 
 
 if __name__ == "__main__":

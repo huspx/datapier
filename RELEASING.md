@@ -33,7 +33,7 @@ python3 scripts/version.py --check-release
 
 版本读取、源码 plugin 同步及只读发布检查统一由 `scripts/version.py` 提供；单目标组包和六目标汇总分别使用 `package-target.py` 和 `assemble-release.py`。`draft_release.py` 负责准备草稿、原生 job 直接上传及从草稿资源汇总，使用 Python 标准库调用 GitHub REST API。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，Unix 安装器使用 `/bin/sh`；安装与运行 Datapier 无需 Python，开发与组包无需 `pwsh`。
 
-脚本回归覆盖版本同步、只读检查不写文件、无效或重复版本及显式版本不一致拒绝、CHANGELOG 章节不匹配／重复／缺少实际条目拒绝，以及缺失／无效 sidecar 拒绝和汇总不改源码 plugin。实际组包须使用本机真实二进制，解包核对内容、归档及程序摘要；完整汇总必须收齐同一提交的六目标原生产物。脚本测试和本机组包不能代替六目标 CI 或完整原生运行验收。
+脚本回归覆盖版本同步、只读检查不写文件、无效或重复版本及显式版本不一致拒绝、CHANGELOG 章节不匹配／重复／缺少实际条目拒绝，以及缺失目标归档、非法归档成员和草稿下载摘要不匹配拒绝、本版本生成附件清理、内嵌归档与程序摘要正确及汇总不改源码 plugin。实际组包须使用本机真实二进制，核对归档和程序摘要，并验证启动前拒绝内容变化的缓存；完整汇总必须收齐同一提交的六目标原生产物。脚本测试和本机组包不能代替六目标 CI 或完整原生运行验收。
 
 ## 发布说明与 CHANGELOG
 
@@ -79,13 +79,13 @@ python3 scripts/version.py --check-release
 | windows-2022 | x86_64-pc-windows-msvc |
 | windows-11-arm | aarch64-pc-windows-msvc |
 
-独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档及 sidecar 随 runner 清理，不上传 Actions artifact 或 Release 资源。
+独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档随 runner 清理，不上传 Actions artifact 或 Release 资源。
 
-main 的 `prepare-release` 在格式检查成功后创建或刷新 `v<version>` 草稿并清理该版本旧的生成附件；六个 `native-release` job 将各自归档和 `.binary-sha256` 直接上传此草稿。所有目标成功后，`bundle` 从相同草稿鉴权下载十二个文件，验证资源及可用的 SHA-256，使用既有汇总脚本生成并上传 `SHA256SUMS`、`datapier-plugin-<version>.zip`，最后标记构建完成，Release 仍保持草稿。草稿最终包含六个归档、六个 sidecar 和两个汇总文件；失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
+main 的 `prepare-release` 在格式检查成功后创建或刷新 `v<version>` 草稿，清理该版本的六个目标归档和 plugin 包，保留人工附加附件；六个 `native-release` job 各上传一个目标归档。所有目标成功后，`bundle` 从相同草稿鉴权下载六个归档，验证资源及 GitHub 提供的可用 SHA-256，生成内嵌归档与程序摘要的 `datapier-plugin-<version>.zip` 并上传，最后标记构建完成，Release 仍保持草稿。流程生成六个归档和一个 plugin 包，共七个附件；人工附加附件不计入此集合，失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
 
 官方 Actions 使用 Node.js 24 运行时的 `actions/checkout@v7` 与 `actions/setup-python@v7`；当前流程不再调用 `actions/upload-artifact` 或 `actions/download-artifact`。六目标仍使用 GitHub 托管的原生 runner。
 
-也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `target` 替换为上表中的实际目标，运行验收范围按[发布前检查](#发布前检查)执行。六个归档与 sidecar 必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
+也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `target` 替换为上表中的实际目标，运行验收范围按[发布前检查](#发布前检查)执行。六个归档必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
 
 ```sh
 target='aarch64-apple-darwin'
@@ -93,19 +93,19 @@ cargo build --release --package datapier --target "$target" --locked
 python3 scripts/package-target.py --target "$target" --output dist
 ```
 
-收集六个目标的归档及对应 `.binary-sha256` 文件到同一个干净 `dist` 后，在相同提交的仓库根目录运行下列命令。`OWNER/REPO` 必须替换为实际 GitHub 发布仓库的 owner 和 repository；也可不传 `--repository`，由实际环境的 `GITHUB_REPOSITORY` 提供。不要猜测仓库地址。
+收集六个目标的归档到同一个干净 `dist` 后，在相同提交的仓库根目录运行下列命令。`OWNER/REPO` 必须替换为实际 GitHub 发布仓库的 owner 和 repository；也可不传 `--repository`，由实际环境的 `GITHUB_REPOSITORY` 提供。不要猜测仓库地址。
 
 ```sh
 repository='OWNER/REPO'
 python3 scripts/assemble-release.py --artifacts dist --repository "$repository"
 ```
 
-单目标脚本读取 `target/<target>/release/datapier`（Windows 为 `datapier.exe`），运行该程序的 `--version` 并拒绝与根版本不一致的二进制，再生成 `datapier-<version>-<target>.tar.gz`（Windows 为 `.zip`）及该可执行文件的 `datapier-<version>-<target>.binary-sha256` sidecar，因此应在对应目标的原生机器运行。汇总脚本要求六个归档和六个有效 sidecar，生成 `SHA256SUMS` 与 `datapier-plugin-<version>.zip`。`SHA256SUMS` 仅包含六个二进制归档的摘要，不包含 plugin zip；sidecar 用于生成 plugin 内的二进制摘要清单。核对 plugin zip 的 `datapier/` 目录内含 plugin 源文件、`LICENSE`、`release-url.txt`、`release-sha256.txt` 和 `release-bin-sha256.txt`，下载地址指向实际发布仓库和版本；并核对归档及解压后二进制分别匹配相应清单。
+单目标脚本读取 `target/<target>/release/datapier`（Windows 为 `datapier.exe`），运行该程序的 `--version` 并拒绝与根版本不一致的二进制，再仅生成 `datapier-<version>-<target>.tar.gz`（Windows 为 `.zip`），因此应在对应目标的原生机器运行。汇总脚本要求六个仅含固定程序成员的归档，计算归档摘要并流式读取原程序计算摘要，仅生成 `datapier-plugin-<version>.zip`。公开附件摘要使用 GitHub 自动生成的 digest，不生成外部 `SHA256SUMS` 或独立 `.binary-sha256` 附件。核对 plugin zip 的 `datapier/` 目录内含 plugin 源文件、`LICENSE`、`release-url.txt`、`release-sha256.txt` 和 `release-bin-sha256.txt`；下载地址指向实际发布仓库和版本，两个清单分别记录六个归档文件名和六个 target 对应的 SHA-256。
 
-发布安装无需 Rust：安装器校验归档及程序摘要后复用版本化缓存。`DATAPIER_RELEASE_URL` 仅覆盖已打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录；发布核对时应同时确认默认下载地址和缓存行为。
+发布安装无需 Rust：安装器验证下载归档的 SHA-256 和唯一固定归档成员，解包后先核对程序 SHA-256，再执行版本检查并发布缓存；发布缓存按归档摘要隔离，每次启动前仍先核对程序 SHA-256，再执行 `--version`，摘要不匹配直接拒绝启动。`DATAPIER_BINARY` 本地开发模式按显式配置的源程序内容哈希缓存并校验副本。`DATAPIER_RELEASE_URL` 仅覆盖已打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录；发布核对时应同时确认默认下载地址和缓存行为。
 
 ## 实际发布与发布后核对
 
-main 工作流完成后，维护者核对版本草稿绑定的提交、run、六目标归档、sidecar、`SHA256SUMS` 与 plugin 包，完成所需验收并补充人工发布说明；获得正式发布授权后发布该草稿。无需从 Actions artifact 下载再手动上传，也不因草稿构建完成而自动公开 Release。若采用本地组包，则仍需人工创建草稿并上传相同文件，遵守同一提交和版本约束。
+main 工作流完成后，维护者核对版本草稿绑定的提交、run、六目标归档与 plugin 包，完成所需验收并补充人工发布说明；获得正式发布授权后发布该草稿。无需从 Actions artifact 下载再手动上传，也不因草稿构建完成而自动公开 Release。若采用本地组包，则仍需人工创建草稿并上传相同文件，遵守同一提交和版本约束。
 
-发布后从实际 Release 地址核对所有资源的文件名、下载地址、版本与摘要，确认 plugin 内的地址、归档摘要和二进制摘要与已上传资源一致；在 macOS arm64 验证干净安装、缓存与 Tern 启动，并记录结果。其他目标的构建结果与未实测运行范围分别披露；发现本版要求的校验或验收缺项时如实记录，不将六目标构建描述为六目标完整原生运行验收。
+发布后从实际 Release 地址核对七个附件的文件名、下载地址、版本与 GitHub digest，确认 plugin 内的地址、归档摘要及程序摘要与实际资源一致；在 macOS arm64 验证干净安装、缓存完整性校验与 Tern 启动，并记录结果。其他目标的构建结果与未实测运行范围分别披露；发现本版要求的校验或验收缺项时如实记录，不将六目标构建描述为六目标完整原生运行验收。

@@ -30,10 +30,9 @@ STATUS_BLOCK = re.compile(
 )
 
 
-def target_names(version, target):
-  stem = f"datapier-{version}-{target}"
+def target_name(version, target):
   extension = "zip" if target.endswith("-windows-msvc") else "tar.gz"
-  return (f"{stem}.{extension}", f"{stem}.binary-sha256")
+  return f"datapier-{version}-{target}.{extension}"
 
 
 def managed_body(body, marker, complete):
@@ -206,10 +205,8 @@ class Draft:
     self.version = version
     self.tag = f"v{version}"
     self.marker = f"<!-- datapier-build:{args.commit}:{args.run_id}:{args.attempt} -->"
-    self.target_assets = [
-      name for target in TARGETS for name in target_names(version, target)
-    ]
-    self.final_assets = [f"datapier-plugin-{version}.zip", "SHA256SUMS"]
+    self.target_assets = [target_name(version, target) for target in TARGETS]
+    self.final_assets = [f"datapier-plugin-{version}.zip"]
 
   def verify(self, release_id):
     release = self.api.release(release_id)
@@ -292,7 +289,7 @@ class Draft:
     directory = Path(self.args.artifacts)
     self.upload_files(
       self.args.release_id,
-      [directory / name for name in target_names(self.version, self.args.target)],
+      [directory / target_name(self.version, self.args.target)],
     )
 
   def assemble(self):

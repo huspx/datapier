@@ -32,7 +32,7 @@ Archery SQL 检查取决于平台权限和配置；例如 v1.8.4 需管理员将
 tern plugin install ./datapier
 ```
 
-在 Tern 命令面板选择 `New Datapier block`。启动入口自动下载匹配本机 OS／CPU 架构的程序，验证归档及程序 SHA-256，并复用版本化缓存；无需安装 Rust。开发构建方式见[贡献指南](CONTRIBUTING.md#开发环境)。
+在 Tern 命令面板选择 `New Datapier block`。启动入口自动下载匹配本机 OS／CPU 架构的程序，验证归档 SHA-256；解包后及每次启动前校验程序 SHA-256 和版本，并复用版本化缓存；无需安装 Rust。开发构建方式见[贡献指南](CONTRIBUTING.md#开发环境)。
 
 ## 操作演示
 
