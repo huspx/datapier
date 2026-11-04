@@ -1,10 +1,12 @@
-"""从六个原生产物生成发布校验清单和插件包。"""
+"""从六个原生产物生成带校验清单的插件包。"""
 
 import argparse
 import hashlib
 import os
 import re
 import shutil
+import stat
+import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
@@ -19,6 +21,28 @@ TARGETS = (
   "x86_64-pc-windows-msvc",
   "aarch64-pc-windows-msvc",
 )
+
+
+def binary_digest(artifact, windows):
+  """只接受包内唯一的固定名称普通文件，并流式计算其摘要。"""
+  expected = "datapier.exe" if windows else "datapier"
+  if windows:
+    with zipfile.ZipFile(artifact) as archive:
+      members = archive.infolist()
+      if len(members) != 1 or members[0].filename != expected:
+        raise ValueError(f"Expected one {expected} member in {artifact.name}")
+      member = members[0]
+      mode = member.external_attr >> 16
+      if member.is_dir() or stat.S_IFMT(mode) not in (0, stat.S_IFREG):
+        raise ValueError(f"Expected a regular {expected} file in {artifact.name}")
+      with archive.open(member) as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+  with tarfile.open(artifact, "r:gz") as archive:
+    members = archive.getmembers()
+    if len(members) != 1 or members[0].name != expected or not members[0].isfile():
+      raise ValueError(f"Expected one regular {expected} file in {artifact.name}")
+    with archive.extractfile(members[0]) as source:
+      return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def main():
@@ -38,7 +62,8 @@ def main():
   lines = []
   binary_lines = []
   for target in TARGETS:
-    extension = "zip" if target.endswith("-windows-msvc") else "tar.gz"
+    windows = target.endswith("-windows-msvc")
+    extension = "zip" if windows else "tar.gz"
     name = f"datapier-{version}-{target}.{extension}"
     artifact = directory / name
     if not artifact.is_file():
@@ -46,15 +71,8 @@ def main():
     with artifact.open("rb") as source:
       digest = hashlib.file_digest(source, "sha256").hexdigest()
     lines.append(f"{digest}  {name}")
-    sidecar = directory / f"datapier-{version}-{target}.binary-sha256"
-    if not sidecar.is_file():
-      raise FileNotFoundError(f"Missing binary digest: {target}")
-    digest = sidecar.read_text(encoding="utf-8").strip()
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
-      raise ValueError(f"Invalid binary digest: {target}")
-    binary_lines.append(f"{digest}  {target}")
+    binary_lines.append(f"{binary_digest(artifact, windows)}  {target}")
   manifest = "\n".join(lines) + "\n"
-  (directory / "SHA256SUMS").write_text(manifest, encoding="utf-8", newline="\n")
   with tempfile.TemporaryDirectory(prefix="datapier-release-") as temporary:
     plugin = Path(temporary) / "datapier"
     shutil.copytree(ROOT / "plugins/datapier", plugin)

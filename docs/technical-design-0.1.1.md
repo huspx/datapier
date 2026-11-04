@@ -106,7 +106,7 @@ reqwest v0.13.5 的公开 manifest 声明最低 Rust 1.85.0，低于当前 works
 
 `scripts/version.py` 统一提供版本读取、源码 plugin 显式同步和只读发布检查；`scripts/package-target.py` 和 `scripts/assemble-release.py` 分别负责单目标组包和六目标汇总，`scripts/draft_release.py` 负责草稿 Release 的准备、目标资源直传和汇总。旧开发发布 `.ps1` 已移除。workflow 的版本读取、原生架构检查及二进制版本 smoke 统一调用 Python。根 `Cargo.toml` 继续作为唯一产品版本来源，保留只读检查、显式版本一致性校验和临时 plugin 副本同步。
 
-沿用六目标原生构建、归档命名与内容、归档及程序摘要、缓存和下载地址契约。PR 与非 main 手动运行在 runner 内打包验证，不上传资源；main 将单目标归档直传同一版本草稿 Release，并从草稿完成六目标汇总，全程不使用 Actions artifact，草稿仍需维护者验收后发布。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，保留源码 UTF-8 BOM 与 stdout 无 BOM UTF-8 JSON；macOS／Linux 安装器继续使用 `/bin/sh`，安装和运行 Datapier 无需 Python。
+沿用六目标原生构建、归档命名与内容、版本化缓存和下载地址契约。公开产物仅包含六个程序归档和 plugin 包，附件摘要使用 GitHub digest；不生成外部 `SHA256SUMS` 或独立 `.binary-sha256` 附件。plugin 内保留 `release-sha256.txt` 和 `release-bin-sha256.txt`，分别记录六个归档和六个 target 对应的程序摘要；汇总时流式读取固定归档成员计算原程序 SHA-256，不执行其他平台程序。PR 与非 main 手动运行在 runner 内打包验证，不上传资源；main 将六个目标归档直传同一版本草稿 Release，再汇总 plugin 包，全程不使用 Actions artifact，草稿仍需维护者验收后发布。沿用既有安装器：校验下载归档 SHA-256 和唯一固定成员，解包后及每次启动前先验证程序 SHA-256，再运行版本检查；缓存按归档摘要隔离，`DATAPIER_BINARY` 开发缓存按显式源文件内容哈希校验。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，保留源码 UTF-8 BOM 与 stdout 无 BOM UTF-8 JSON；macOS／Linux 安装器继续使用 `/bin/sh`，安装和运行 Datapier 无需 Python。
 
 Python 脚本与 workflow 已切换；贡献指南和 `dprint.json` 定义 Python 开发环境、Ruff Wasm 格式化与标准库回归入口。实际命令和组包步骤见[发布指南](../RELEASING.md#python-315-工具环境)，运行结果及尚未验证的平台范围见第 12 节。
 
@@ -680,7 +680,7 @@ CLI 执行记录归所属连接／标签会话，冻结每次执行时的命令�
 | Direct 回归 | 连接和事务、可靠键编辑、Redis WATCH／TTL、CSV／JSON 往返、查询多结果及取消竞态 |
 | 全局交互 | 必填星号与标签同一行、字段级条件校验与保留合法空值；无连接／无 tab 和有连接／有 tab 时快捷键帮助均可打开并关闭 overlay |
 | 设计还原 | 品牌入口收展、右上来源角标与右下非纯颜色连接状态、名称旁无重复状态文字；CLI 连续记录与执行目标冻结、切 DB 和切标签恢复、重绘保持阅读位置；直连拖拽／键盘比例调整、最小可用空间与短视口输入可达、收起与切标签恢复比例、窗口缩放按比例重算，Archery CLI 保持全高；在实际 Tern 验证，HTML 仅作设计对照 |
-| 开发与发布工具 | 版本同步及重复执行、只读检查不改文件、无效／重复版本和显式版本不一致拒绝；实际本机二进制的版本 smoke、组包内容及摘要核对，六目标 CI 的 Python 环境、原生架构检查与 smoke；完整汇总要求六目标同提交产物，缺失或无效 sidecar 拒绝，临时 plugin 同步不修改源码；步骤见发布指南 |
+| 开发与发布工具 | 版本同步及重复执行、只读检查不改文件、无效／重复版本和显式版本不一致拒绝；实际本机二进制组包、归档与程序摘要核对，六目标 CI 的 Python 环境、原生架构检查与 smoke；完整汇总要求六目标同提交归档，缺失目标、非法成员或草稿下载摘要不匹配时拒绝，生成七附件，人工附件保留；内嵌双摘要且临时 plugin 同步不修改源码，内容变化的缓存必须在执行前拒绝；步骤见发布指南 |
 
 既有本地 HTTP fixture 位于 `crates/datapier-core/tests/archery.rs` 和 `crates/datapier-core/tests/unit/archery/client.rs`；Engine 回归位于 `crates/datapier-engine/tests/unit/archery.rs` 和 `crates/datapier-engine/tests/unit/archery_boundaries.rs`，实施时按新共享控制契约迁移相关用例。这些测试不替代真实平台验收。手动 OTP 运行时交互输入；自动 TOTP 使用隔离环境的临时种子验证 RFC 参数、前导零和失败转手动，不将种子或验证码写入日志、截图、样本或报告。
 
@@ -751,6 +751,7 @@ README、产品规划、UI 设计说明和 CHANGELOG 记录当前功能及验证
 | 升级与直连 | schema 1 隔离库升级保留 Direct 配置、工作区、历史和缓存，不兼容开发结构安全拒绝；候选 `d640e82427df3890a7d25db9c56047512b0ec33921818a00c20434fa6a6d6525`，证据 `target/archery-011-revision-runtime/migration-evidence.json`。另以 `13c4ed88…` 候选验证 MySQL 5.7.42／8.0.46／8.4.13、Redis 6.2.24／7.2.17／8.0.6 的适用直连用例及十万行导出；5.7 使用 amd64 容器，记录位于 `target/archery-011-direct-matrix/`。 |
 | Tern、IPC 与 UI | 实际 Tern 覆盖连接管理、查询、结果、Redis、历史及窄屏；部分使用真实服务，部分使用 loopback fixture，认证失效不重放及历史目标保持属于 fixture 证据。IPC v2、旧协议拒绝及浏览器交互有独立候选记录。证据包括 `target/archery-011-revision-ui/`、`target/archery-011-goal-audit/evidence.json`、`target/archery-011-task-auth-ui/`、`target/ui-review-011/evidence.json` 和 `target/refresh-button-review/evidence.json`；未构造 Archery 编辑草稿的原生场景。 |
 | 后续交互和分发 | CLI 连续记录、大值复制、目标冻结、比例调整、缓存分页与导出、结果说明和表单在实际 Tern 与本地 fixture 上有候选证据；Python 3.15 脚本及本机组包也有记录。证据为 `target/design-version-review/evidence.json`、`target/python-native315/evidence.json`、`target/result-ui-smoke/evidence.json`、`target/ui-fixes-smoke/evidence.json`；各文件记录对应程序或归档摘要。这些候选未重跑真实平台矩阵或六目标 CI。 |
+| 归档与程序双摘要 | Python 脚本回归 21 项通过；用 `b41e715` 成功 CI 的六目标真实归档验证七附件汇总，归档摘要与 GitHub digest 一致，plugin 内双摘要逐一匹配归档及解包程序；实际本机单目标组包及隔离 GitHub HTTP 服务的准备、六目标上传、汇总通过。沿用原安装器，在 macOS arm64 验证真实 HTTPS 安装、离线缓存复用、解包程序摘要不匹配拒绝，以及伪造相同版本输出的发布／开发缓存均在执行前拒绝，执行标记未产生。Windows 安装器恢复原实现，仅核对包内 BOM，未重新运行 Windows 安装或六目标 CI。证据为 `target/packaging-review/evidence.json`。 |
 
 最低历史实测 Archery 版本为 1.8.4，缺失的 `column_type` 保持 unknown；后续功能修复与结构整理未重跑真实平台矩阵，历史版本和平台结论不自动适用于新的候选。
 

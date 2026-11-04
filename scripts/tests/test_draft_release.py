@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,10 +33,9 @@ TARGETS = (
 TOKEN = "test-token"
 
 
-def names(target):
-  prefix = f"datapier-{VERSION}-{target}"
+def name(target):
   ext = "zip" if target.endswith("windows-msvc") else "tar.gz"
-  return f"{prefix}.{ext}", f"{prefix}.binary-sha256"
+  return f"datapier-{VERSION}-{target}.{ext}"
 
 
 class GitHubServer:
@@ -288,19 +288,25 @@ class DraftReleaseTests(unittest.TestCase):
     return next(iter(self.server.releases.values()))
 
   def write_target(self, target):
-    archive, sidecar = names(target)
-    payload = (f"public fixture archive for {target}\n").encode()
-    binary_digest = hashlib.sha256(("binary " + target).encode()).hexdigest()
-    (self.artifacts / archive).write_bytes(payload)
-    (self.artifacts / sidecar).write_text(binary_digest + "\n")
-    return archive, payload, binary_digest
+    archive = name(target)
+    binary = (f"fixture binary for {target}\n").encode()
+    path = self.artifacts / archive
+    if target.endswith("-windows-msvc"):
+      with zipfile.ZipFile(path, "w") as package:
+        package.writestr("datapier.exe", binary)
+    else:
+      with tarfile.open(path, "w:gz") as package:
+        member = tarfile.TarInfo("datapier")
+        member.size = len(binary)
+        package.addfile(member, io.BytesIO(binary))
+    return archive, path.read_bytes()
 
   def upload_all(self, release):
     expected = {}
     for target in TARGETS:
-      archive, payload, binary_digest = self.write_target(target)
+      archive, payload = self.write_target(target)
       self.cli("upload-target", "--release-id", release["id"], "--target", target)
-      expected[target] = (archive, payload, binary_digest)
+      expected[target] = (archive, payload)
     return expected
 
   def test_prepare_paginates_releases_and_assets(self):
@@ -321,16 +327,16 @@ class DraftReleaseTests(unittest.TestCase):
     )
     for index in range(105):
       self.server.add_asset(release["id"], f"manual-{index}.txt", str(index).encode())
-    self.server.add_asset(release["id"], names(TARGETS[0])[0], b"old")
+    self.server.add_asset(release["id"], name(TARGETS[0]), b"old")
     self.cli("prepare", run="101")
     self.assertEqual(len(self.server.releases), 106)
     self.assertEqual(len(self.server.assets), 105)
-    self.assertNotIn(names(TARGETS[0])[0], self.server.by_name())
+    self.assertNotIn(name(TARGETS[0]), self.server.by_name())
     self.assertEqual(self.server.by_name()["manual-104.txt"], b"104")
 
   def test_upload_rerun_replaces_only_its_own_assets(self):
     release = self.prepare()
-    archive, payload, digest = self.write_target(TARGETS[0])
+    archive, payload = self.write_target(TARGETS[0])
     self.cli("upload-target", "--release-id", release["id"], "--target", TARGETS[0])
     self.server.add_asset(release["id"], "manual.txt", b"keep")
     (self.artifacts / archive).write_bytes(payload + b"updated")
@@ -339,7 +345,6 @@ class DraftReleaseTests(unittest.TestCase):
       self.server.by_name(),
       {
         archive: payload + b"updated",
-        names(TARGETS[0])[1]: (digest + "\n").encode(),
         "manual.txt": b"keep",
       },
     )
@@ -358,10 +363,8 @@ class DraftReleaseTests(unittest.TestCase):
     release = self.prepare()
     release["body"] = "Human release notes\n\n" + release["body"]
     for target in TARGETS:
-      for name in names(target):
-        self.server.add_asset(release["id"], name, b"old")
-    for name in ("SHA256SUMS", f"datapier-plugin-{VERSION}.zip"):
-      self.server.add_asset(release["id"], name, b"old")
+      self.server.add_asset(release["id"], name(target), b"old")
+    self.server.add_asset(release["id"], f"datapier-plugin-{VERSION}.zip", b"old")
     self.server.add_asset(release["id"], "handwritten.txt", b"keep")
     self.server.add_asset(
       release["id"], "datapier-9.9.9-x86_64-apple-darwin.tar.gz", b"other version"
@@ -381,7 +384,7 @@ class DraftReleaseTests(unittest.TestCase):
   def test_invalid_changelog_cannot_refresh_or_upload_to_draft(self):
     release = self.prepare()
     self.write_target(TARGETS[0])
-    self.server.add_asset(release["id"], names(TARGETS[0])[0], b"keep")
+    self.server.add_asset(release["id"], name(TARGETS[0]), b"keep")
     before = copy.deepcopy((self.server.releases, self.server.assets))
     (self.root / "CHANGELOG.md").write_text("## 未发布（Unreleased）\n\n- 尚未归档。\n")
     commands = (
@@ -398,7 +401,7 @@ class DraftReleaseTests(unittest.TestCase):
   def test_published_release_is_not_modified(self):
     release = self.prepare()
     release["draft"] = False
-    self.server.add_asset(release["id"], names(TARGETS[0])[0], b"keep")
+    self.server.add_asset(release["id"], name(TARGETS[0]), b"keep")
     before = copy.deepcopy((self.server.releases, self.server.assets))
     self.cli("prepare", success=False)
     self.assertEqual((self.server.releases, self.server.assets), before)
@@ -434,13 +437,10 @@ class DraftReleaseTests(unittest.TestCase):
 
   def test_assemble_rejects_missing_target_without_final_assets(self):
     release = self.prepare()
-    archive, sidecar = names(TARGETS[0])
-    self.server.add_asset(release["id"], archive, b"archive")
-    self.server.add_asset(release["id"], sidecar, b"0" * 64)
+    self.server.add_asset(release["id"], name(TARGETS[0]), b"archive")
     before = copy.deepcopy((self.server.releases, self.server.assets))
     self.cli("assemble", "--release-id", release["id"], success=False)
     self.assertEqual((self.server.releases, self.server.assets), before)
-    self.assertFalse((self.artifacts / "SHA256SUMS").exists())
     self.assertFalse((self.artifacts / f"datapier-plugin-{VERSION}.zip").exists())
 
   def test_assemble_rejects_corrupt_github_digest_without_final_assets(self):
@@ -450,12 +450,12 @@ class DraftReleaseTests(unittest.TestCase):
     before = copy.deepcopy((self.server.releases, self.server.assets))
     self.cli("assemble", "--release-id", release["id"], success=False)
     self.assertEqual((self.server.releases, self.server.assets), before)
-    self.assertFalse((self.artifacts / "SHA256SUMS").exists())
     self.assertFalse((self.artifacts / f"datapier-plugin-{VERSION}.zip").exists())
 
   def test_complete_release_has_valid_manifest_and_plugin_metadata(self):
     release = self.prepare()
     expected = self.upload_all(release)
+    next(iter(self.server.assets.values()))["digest"] = None
     # 删除本地归档，确保汇总实际下载草稿中的资源。
     for path in self.artifacts.iterdir():
       path.unlink()
@@ -467,21 +467,29 @@ class DraftReleaseTests(unittest.TestCase):
     assets = self.server.by_name()
     manifest = "".join(
       f"{hashlib.sha256(data).hexdigest()}  {name}\n"
-      for name, data, _ in expected.values()
+      for name, data in expected.values()
     )
-    binaries = "".join(
-      f"{digest}  {target}\n" for target, (_, _, digest) in expected.items()
+    self.assertEqual(
+      set(assets),
+      {name for name, _ in expected.values()} | {f"datapier-plugin-{VERSION}.zip"},
     )
-    self.assertEqual(assets["SHA256SUMS"], manifest.encode())
-    for target, (name, data, digest) in expected.items():
+    for name, data in expected.values():
       self.assertEqual(assets[name], data)
-      self.assertEqual(assets[names(target)[1]], (digest + "\n").encode())
     with zipfile.ZipFile(
       io.BytesIO(assets[f"datapier-plugin-{VERSION}.zip"])
     ) as plugin:
       self.assertEqual(plugin.read("datapier/release-sha256.txt"), manifest.encode())
+      binary_manifest = ""
+      for target, (_, data) in expected.items():
+        if target.endswith("-windows-msvc"):
+          with zipfile.ZipFile(io.BytesIO(data)) as package:
+            binary = package.read("datapier.exe")
+        else:
+          with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as package:
+            binary = package.extractfile("datapier").read()
+        binary_manifest += f"{hashlib.sha256(binary).hexdigest()}  {target}\n"
       self.assertEqual(
-        plugin.read("datapier/release-bin-sha256.txt"), binaries.encode()
+        plugin.read("datapier/release-bin-sha256.txt"), binary_manifest.encode()
       )
       self.assertEqual(
         plugin.read("datapier/release-url.txt"),
