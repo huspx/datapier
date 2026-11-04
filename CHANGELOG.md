@@ -24,15 +24,12 @@
 
 ### 开发与分发
 
-- 版本读取、同步及只读发布检查统一由 `scripts/version.py` 提供；组包及 CI 脚本使用 Python 3.15 标准库，开发环境不再要求 `pwsh`。Python 格式化沿用 dprint 的 Ruff Wasm 插件；Windows 用户安装器继续使用系统自带 PowerShell 5.1，安装和运行 Datapier 无需 Python。
-- 原生 CI 在 PR 中完成六目标打包验证；main 将归档直接上传版本草稿 Release，并从同一草稿汇总内嵌校验清单的 plugin 包，全程不使用 Actions artifact。草稿保留人工说明，仍由维护者验收后发布。
-- 公开产物仅保留六个程序归档和 plugin 包，摘要使用 GitHub digest，不生成外部 `SHA256SUMS` 或独立 `.binary-sha256` 附件。plugin 内继续嵌入归档及原程序 SHA-256，保留既有的安装、启动前完整性及版本校验。
-- 发布检查只读核对根版本、plugin 版本与 CHANGELOG 当前版本章节，拒绝重复版本和缺少变更条目的章节；实际发布状态以 GitHub Release 为准。
-- SQL、Shell、Luau 和 Python 统一使用 2 空格缩进，按 dprint 配置格式化既有源码；Rust 继续使用原生 rustfmt。
+- 开发与组包改用 Python 3.15，不再要求 `pwsh`；安装和运行 Datapier 无需 Python，Windows 安装器继续使用系统自带 PowerShell 5.1。
 
 ### 兼容性与限制
 
 - 配置 schema 从 1 单向迁移至 2，缓存 schema 保持 1；IPC 使用 v2，不能与 0.1.0 的 v1 混用。回退需事先备份数据目录并按[升级和回退说明](docs/technical-design-0.1.1.md#111-版本和回退)处理系统凭据。
+- 默认发布附件不再提供独立的 `SHA256SUMS` 或 `.binary-sha256` 文件；手动下载使用 GitHub Release 资源的 digest 校验归档。plugin 继续内嵌归档及程序 SHA-256，保留既有安装和启动前完整性校验。
 - Archery 来源不支持写入、编辑、导入或工单执行；Redis 不提供原始字节保真与完整 key 树。最低实测版本为 Archery 1.8.4，未逐一实测所有历史中间版本。
 - 本地 macOS arm64 已对 Archery 1.8.4／1.12／1.13／1.14 完成 Engine 烟测，并验证实际 Tern 主要交互、OTP、HTTPS 与系统凭据路径；1.8.4 SQL 检查需额外配置 API 白名单及 SQL 提交权限。0.1.1 原生运行验收仅覆盖 macOS arm64，其他五个目标保留实现，在 PR 阶段验证编译，详见[运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
 

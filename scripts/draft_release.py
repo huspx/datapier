@@ -204,6 +204,7 @@ class Draft:
     self.args = args
     self.version = version
     self.tag = f"v{version}"
+    self.name = f"Datapier {version}"
     self.marker = f"<!-- datapier-build:{args.commit}:{args.run_id}:{args.attempt} -->"
     self.target_assets = [target_name(version, target) for target in TARGETS]
     self.final_assets = [f"datapier-plugin-{version}.zip"]
@@ -213,6 +214,7 @@ class Draft:
     markers = BUILD_MARKER.findall(release.get("body") or "")
     if (
       release.get("draft") is not True
+      or release.get("name") != self.name
       or release.get("tag_name") != self.tag
       or release.get("target_commitish") != self.args.commit
       or markers != [self.marker]
@@ -237,18 +239,30 @@ class Draft:
     if tagged is not None and tagged.lower() != self.args.commit.lower():
       raise ValueError(f"Git tag {self.tag} points to a different commit")
     matches = [
-      release for release in self.api.releases() if release.get("tag_name") == self.tag
+      release
+      for release in self.api.releases()
+      if release.get("name") == self.name or release.get("tag_name") == self.tag
     ]
     if len(matches) > 1:
-      raise ValueError(f"Multiple releases found for {self.tag}")
+      ids = ", ".join(str(release["id"]) for release in matches)
+      raise ValueError(f"Multiple releases found for {self.tag}: {ids}")
     if matches:
       current = self.api.release(matches[0]["id"])
-      if current.get("draft") is not True or current.get("tag_name") != self.tag:
+      if current.get("draft") is not True:
         raise ValueError(f"Release {self.tag} is not a draft")
+      current_tag = current.get("tag_name") or ""
+      if current_tag != self.tag and not (
+        current.get("name") == self.name and current_tag.startswith("untagged-")
+      ):
+        raise ValueError(f"Release {current['id']} has a conflicting tag")
+      if len(BUILD_MARKER.findall(current.get("body") or "")) != 1:
+        raise ValueError(f"Release {current['id']} is not managed by Datapier")
       release = self.api.json(
         "PATCH",
         f"{self.api.repo}/releases/{current['id']}",
         {
+          "name": self.name,
+          "tag_name": self.tag,
           "target_commitish": self.args.commit,
           "body": managed_body(current.get("body"), self.marker, False),
         },
@@ -260,7 +274,7 @@ class Draft:
         {
           "tag_name": self.tag,
           "target_commitish": self.args.commit,
-          "name": self.tag,
+          "name": self.name,
           "draft": True,
           "body": managed_body("", self.marker, False),
         },
@@ -329,8 +343,14 @@ class Draft:
     self.api.json(
       "PATCH",
       f"{self.api.repo}/releases/{release_id}",
-      {"body": managed_body(release.get("body"), self.marker, True)},
+      {
+        "name": self.name,
+        "tag_name": self.tag,
+        "target_commitish": self.args.commit,
+        "body": managed_body(release.get("body"), self.marker, True),
+      },
     )
+    self.verify(release_id)
 
 
 def main():
