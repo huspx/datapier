@@ -27,28 +27,39 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
         id: Uuid::new_v4(),
         name: "transfer-fixture".into(),
         provider: kind,
-        host: "127.0.0.1".into(),
-        port: port.parse().unwrap(),
-        username: if kind == ProviderKind::Mysql {
-            "datapier".into()
-        } else {
-            String::new()
-        },
-        database: if kind == ProviderKind::Mysql {
-            Some("datapier_fixture".into())
-        } else {
-            None
-        },
-        redis_db: 15,
         access_mode: AccessMode::ReadWrite,
-        tls: TlsConfig::default(),
-        visible_databases: None,
+        connection: ConnectionConfig::Direct(DirectConnection {
+            host: "127.0.0.1".into(),
+            port: port.parse().unwrap(),
+            username: if kind == ProviderKind::Mysql {
+                "datapier".into()
+            } else {
+                String::new()
+            },
+            database: if kind == ProviderKind::Mysql {
+                Some("datapier_fixture".into())
+            } else {
+                None
+            },
+            redis_db: 15,
+            tls: TlsConfig::default(),
+            visible_databases: None,
+        }),
     };
     (store, profile, secret)
 }
-async fn sink(store: &Store, method: &str) -> ExecutionSink {
+async fn sink(store: &Store, method: &str, profile: &Profile) -> ExecutionSink {
     let task = store
-        .create_task(Uuid::new_v4(), "transfer-fixture", method, json!({}), false)
+        .create_task(
+            Uuid::new_v4(),
+            "transfer-fixture",
+            method,
+            json!({"_task_context": {
+                "source":"direct", "connection":profile.name, "provider":profile.provider,
+                "database":profile.default_database(), "redis_db":profile.redis_db(), "targets":[]
+            }}),
+            false,
+        )
         .await
         .unwrap();
     ExecutionSink::new(store.clone(), task.id)
@@ -59,13 +70,9 @@ async fn call(
     method: &str,
     params: Json,
 ) -> datapier_core::Result<Json> {
+    let sink = sink(store, method, session.profile()).await;
     session
-        .call(
-            method,
-            params,
-            &sink(store, method).await,
-            &CancellationToken::new(),
-        )
+        .call(method, params, &sink, &CancellationToken::new())
         .await
 }
 async fn sql(session: &mut ProviderSession, store: &Store, text: &str) -> Json {
@@ -79,15 +86,10 @@ async fn transfer_call(
     method: &str,
     params: Json,
 ) -> Json {
-    transfer::run(
-        session,
-        method,
-        params,
-        &sink(store, method).await,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap()
+    let sink = sink(store, method, session.profile()).await;
+    transfer::run(session, method, params, &sink, &CancellationToken::new())
+        .await
+        .unwrap()
 }
 async fn rows(store: &Store, response: &Json) -> Vec<Vec<Value>> {
     let id: Uuid = serde_json::from_value(response["results"][0].clone()).unwrap();
@@ -196,10 +198,11 @@ async fn mysql_csv_enum_set_type_names_round_trip() {
         sql(&mut session, &store, &format!("INSERT INTO `{source}` VALUES (1,'print','BIT','BIT,REAL,JSON,DATE,BLOB',X'00FF')")).await;
         let exported = transfer_call(&mut session, &store, "transfer.export", json!({"format":"csv","path":csv_path,"target":mysql_target(&source)})).await;
         assert_eq!(exported["progress"]["completed_rows"], 1);
+        let preview_sink = sink(&store, "transfer.preview", session.profile()).await;
         let preview = transfer::preview(
             &mut session,
             json!({"format":"csv","path":csv_path,"target":mysql_target(&destination)}),
-            &sink(&store, "transfer.preview").await,
+            &preview_sink,
             &CancellationToken::new(),
         ).await.unwrap();
         assert_eq!(preview["errors"], json!([]));
@@ -286,7 +289,11 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
     let mut session = ProviderSession::connect(profile.clone(), secret)
         .await
         .unwrap();
-    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", profile.port)).unwrap();
+    let client = redis::Client::open(format!(
+        "redis://127.0.0.1:{}/",
+        profile.direct().unwrap().port
+    ))
+    .unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let _: () = redis::cmd("SELECT")
         .arg(15)

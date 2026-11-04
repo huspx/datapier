@@ -9,6 +9,13 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# 同一分支串行，避免不同 main 提交混用同版本草稿中的资源。
+concurrency:
+  group: native-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
 jobs:
   format:
     name: Formatting
@@ -17,6 +24,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      - name: Check release version and changelog
+        run: python scripts/version.py --check-release
+      - name: Test release scripts
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -51,7 +65,10 @@ jobs:
           fi
   native:
     name: Native ${{ matrix.target }}
-    strategy:
+    if: github.ref != 'refs/heads/main' || github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    strategy: &native-strategy
       fail-fast: false
       matrix:
         include:
@@ -67,58 +84,59 @@ jobs:
             target: x86_64-pc-windows-msvc
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Linux system dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev
-      - name: Verify native runner architecture
-        shell: pwsh
-        run: |
-          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-          $expected = if ('${{ matrix.target }}'.StartsWith('aarch64-')) { 'Arm64' } else { 'X64' }
-          if ($arch -ne $expected) { throw "Expected native $expected runner, got $arch" }
-      - name: Run native unit tests
-        run: cargo test --workspace --target ${{ matrix.target }} --locked
-      - name: Build native executable
-        run: cargo build --release --package datapier --target ${{ matrix.target }} --locked
-      - name: Smoke native executable
-        shell: pwsh
-        run: |
-          $extension = if ($IsWindows) { '.exe' } else { '' }
-          $nativeBinary = Join-Path $PWD "target/${{ matrix.target }}/release/datapier$extension"
-          $versionOutput = & $nativeBinary --version
-          if ($LASTEXITCODE -ne 0 -or $versionOutput -cne 'datapier 0.1.0') { throw 'Native CLI smoke failed' }
-      - name: Package binary
-        if: github.ref == 'refs/heads/main'
-        shell: pwsh
-        run: ./scripts/package-target.ps1 -Target '${{ matrix.target }}'
-      - uses: actions/upload-artifact@v7
-        if: github.ref == 'refs/heads/main'
-        with:
-          name: datapier-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-  bundle:
-    if: github.ref == 'refs/heads/main'
-    needs: native
+    uses: ./.github/workflows/native-build.yml
+    with:
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+  prepare-release:
+    name: Prepare draft release
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: format
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.draft.outputs.release-id }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
         with:
-          pattern: datapier-*
-          path: dist
-          merge-multiple: true
-      - name: Assemble plugin and checksums
-        shell: pwsh
-        run: ./scripts/assemble-release.ps1 -Artifacts dist
-      - uses: actions/upload-artifact@v7
+          persist-credentials: false
+      - uses: actions/setup-python@v7
         with:
-          name: datapier-0.1.0-release
-          path: dist/*
-          if-no-files-found: error
+          python-version: "3.15"
+      - name: Prepare version draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/draft_release.py prepare
+  native-release:
+    name: Native ${{ matrix.target }}
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: prepare-release
+    permissions:
+      contents: write
+    strategy: *native-strategy
+    uses: ./.github/workflows/native-build.yml
+    with:
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+      release-id: ${{ needs.prepare-release.outputs.release-id }}
+  bundle:
+    name: Complete draft release
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [prepare-release, native-release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      - name: Assemble from draft assets and upload final files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRAFT_RELEASE_ID: ${{ needs.prepare-release.outputs.release-id }}
+        run: python scripts/draft_release.py assemble --release-id "$DRAFT_RELEASE_ID"

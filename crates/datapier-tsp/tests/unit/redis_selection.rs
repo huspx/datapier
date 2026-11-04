@@ -15,10 +15,10 @@ fn fixture() -> (App, DeleteContext) {
         tab: app.tabs[0].id,
         generation: app.generation,
         profile: profile.id,
-        database: profile.redis_db,
+        database: profile.redis_db(),
         session,
         targets: vec![ResourceTarget {
-            database: Some(profile.redis_db.to_string()),
+            database: Some(profile.redis_db().to_string()),
             name: "base64:/w==".into(),
             key_b64: Some("/w==".into()),
             kind: "string".into(),
@@ -141,11 +141,11 @@ async fn ui_open_request_is_accepted_by_real_redis_provider() {
     let (backend, mut requests, _) = Backend::scripted();
     let (mut app, mut context) = fixture();
     let mut profile = app.profile.clone().unwrap();
-    profile.port = std::env::var("DATAPIER_TEST_REDIS_PORT")
+    profile.direct_mut().unwrap().port = std::env::var("DATAPIER_TEST_REDIS_PORT")
         .unwrap()
         .parse()
         .unwrap();
-    profile.redis_db = 15;
+    profile.direct_mut().unwrap().redis_db = 15;
     profile.access_mode = datapier_core::model::AccessMode::ReadWrite;
     context.database = 15;
     app.profile = Some(profile.clone());

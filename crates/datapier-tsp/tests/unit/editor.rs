@@ -138,17 +138,17 @@ fn statement_gutter_ranges_follow_tokens_and_utf16() {
 fn explain_and_format_are_safe_for_selection_and_undo() {
     let mode = MysqlMode::default();
     assert_eq!(
-        explain_selection("SELECT 1", mode).unwrap(),
+        explain_selection_in("SELECT 1", SqlContext::Session(mode)).unwrap(),
         "EXPLAIN FORMAT=JSON SELECT 1"
     );
-    assert!(explain_selection("SELECT 1; SELECT 2", mode).is_err());
+    assert!(explain_selection_in("SELECT 1; SELECT 2", SqlContext::Session(mode)).is_err());
     assert!(
-        explain_selection(
+        explain_selection_in(
             "DELETE FROM t",
-            MysqlMode {
+            SqlContext::Session(MysqlMode {
                 ansi_quotes: true,
                 ..mode
-            }
+            })
         )
         .is_err()
     );
@@ -164,4 +164,48 @@ fn explain_and_format_are_safe_for_selection_and_undo() {
     assert_eq!(editor.text, "前;select '😀', ? from t;后");
     assert!(format_selection("SELECT 1 /*! hint */", mode).is_err());
     assert!(format_selection("SELECT 1--2", mode).is_err());
+}
+
+#[test]
+fn stateless_ranges_and_current_statement_use_utf16() {
+    let sql = "SELECT '😀;中';\n SELECT `表` FROM t;";
+    let context = SqlContext::Stateless;
+    let items = statements_in(sql, context).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!((items[0].first_line, items[1].first_line), (1, 2));
+    let cursor = sql[..sql.find("FROM").unwrap()].encode_utf16().count();
+    let range = current_statement_in(sql, cursor, context).unwrap();
+    assert_eq!(range, items[1].range);
+    let start = utf16_to_byte(sql, range.start).unwrap();
+    let end = utf16_to_byte(sql, range.end).unwrap();
+    assert_eq!(&sql[start..end], "SELECT `表` FROM t");
+    assert!(current_statement_in(sql, "SELECT '".len() + 1, context).is_err());
+    assert!(current_statement_in(sql, sql.encode_utf16().count(), context).is_err());
+}
+
+#[test]
+fn stateless_explain_and_format_reject_mode_dependent_input() {
+    let context = SqlContext::Stateless;
+    assert_eq!(
+        explain_selection_in("SELECT '😀'", context).unwrap(),
+        "EXPLAIN FORMAT=JSON SELECT '😀'"
+    );
+    assert!(explain_selection_in("SELECT 1; SELECT 2", context).is_err());
+    for sql in [r#"SELECT "x""#, r"SELECT 'a\b'", "SELECT 1 /* comment */"] {
+        assert!(statements_in(sql, context).is_err(), "{sql}");
+        assert!(explain_selection_in(sql, context).is_err(), "{sql}");
+        assert!(
+            format_range_in(sql, 0..sql.encode_utf16().count(), context).is_err(),
+            "{sql}"
+        );
+    }
+    let mut editor = Editor::new("SELECT 1;select '😀' from t;SELECT 2");
+    let start = "SELECT 1;".encode_utf16().count();
+    let end = "SELECT 1;select '😀' from t".encode_utf16().count();
+    assert!(editor.set_selection(end, start));
+    let formatted = format_range_in(&editor.text, editor.selection(), context).unwrap();
+    assert!(editor.edit(editor.selection(), &formatted));
+    assert!(editor.undo());
+    assert_eq!(editor.text, "SELECT 1;select '😀' from t;SELECT 2");
+    assert_eq!((editor.anchor, editor.cursor), (end, start));
 }

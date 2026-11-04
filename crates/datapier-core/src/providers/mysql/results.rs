@@ -137,6 +137,19 @@ pub(super) async fn execute_statement(
     // CALL／EXECUTE 的结果由运行时决定，SQLx 不暴露空动态结果元数据，
     // 且边界事件也可能是命令 OK 包，不能据此伪造列或断言存在结果集。
     let dynamic = sql::is_dynamic(text);
+    // 动态语句可能在结果集后继续写入；只有读完整个流才知道服务端已结束。
+    let local_error = |mut error: AppError| {
+        error.details["result_stream_incomplete"] = json!(true);
+        if dynamic {
+            AppError::unknown(format!(
+                "动态语句结果未读完，写入结果无法确认: {}",
+                error.message
+            ))
+            .with_details(json!({"local_error": error, "result_stream_incomplete": true}))
+        } else {
+            error
+        }
+    };
     let initial = conn
         .prepare(sqlx::AssertSqlSafe(text).into_sql_str())
         .await
@@ -172,33 +185,45 @@ pub(super) async fn execute_statement(
                         .take()
                         .filter(|m| !m.is_empty())
                         .unwrap_or_else(|| columns(row.columns()));
-                    let result = sink.start(meta, "rows").await?;
+                    let result = sink.start(meta, "rows").await.map_err(local_error)?;
                     results.push(result);
                     id = Some(result);
                 }
-                rows.push(decode_row(&row)?);
+                rows.push(decode_row(&row).map_err(local_error)?);
                 count += 1;
                 if rows.len() == 128 {
-                    sink.append(id.unwrap(), std::mem::take(&mut rows)).await?;
+                    sink.append(id.unwrap(), std::mem::take(&mut rows))
+                        .await
+                        .map_err(local_error)?;
                 }
             }
             sqlx::Either::Left(done) => {
                 affected = affected.saturating_add(done.rows_affected());
                 if id.is_none() && pending.as_ref().is_some_and(|c| !c.is_empty()) {
-                    let result = sink.start(pending.take().unwrap(), "rows").await?;
+                    let result = sink
+                        .start(pending.take().unwrap(), "rows")
+                        .await
+                        .map_err(local_error)?;
                     results.push(result);
                     id = Some(result);
                 }
                 if id.is_none() && dynamic {
-                    let result = sink.start(Vec::new(), "columns_unknown").await?;
+                    let result = sink
+                        .start(Vec::new(), "columns_unknown")
+                        .await
+                        .map_err(local_error)?;
                     results.push(result);
-                    sink.finish(result, json!({"columns_known":false,"result_set_presence":"unknown","reason":"driver_does_not_expose_empty_dynamic_result_metadata"})).await?;
+                    sink.finish(result, json!({"columns_known":false,"result_set_presence":"unknown","reason":"driver_does_not_expose_empty_dynamic_result_metadata"})).await.map_err(local_error)?;
                 }
                 if let Some(result) = id.take() {
                     if !rows.is_empty() {
-                        sink.append(result, std::mem::take(&mut rows)).await?;
+                        sink.append(result, std::mem::take(&mut rows))
+                            .await
+                            .map_err(local_error)?;
                     }
-                    sink.finish(result, json!({"row_count":count})).await?;
+                    sink.finish(result, json!({"row_count":count}))
+                        .await
+                        .map_err(local_error)?;
                     count = 0;
                 }
                 pending = None;

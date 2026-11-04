@@ -4,22 +4,76 @@ pub(super) struct CloseOperation {
     remaining: Vec<Uuid>,
     waiting: Option<(Uuid, Uuid)>,
     edit: Option<(Profile, bool)>,
+    after_action: Option<String>,
 }
 
 impl App {
+    /// 仅创建并切换标签；由调用方决定是否先结束原位编辑。
+    pub(super) fn create_query_tab(&mut self) {
+        self.archery.open_continuation = None;
+        let database = self.database.clone();
+        let redis_db = self.is_redis().then(|| self.current_redis_db());
+        self.tabs.push(Tab {
+            title: format!("查询 {}", self.tabs.len() + 1),
+            query: Editor::new(""),
+            cli_query: Editor::default(),
+            profile_id: self.profile.as_ref().map(|p| p.id),
+            id: Uuid::new_v4(),
+            layout: Vec::new(),
+            browse: BrowseSettings {
+                database,
+                redis_db,
+                ..BrowseSettings::default()
+            },
+            pending: Value::Null,
+            pending_live: false,
+            runtime: TabRuntime::default(),
+        });
+        self.tabs.last_mut().unwrap().runtime.profile = self.profile.clone();
+        self.empty_context = None;
+        self.switch_tab(self.tabs.len() - 1);
+        self.focus_current_tab();
+        self.dirty = true;
+    }
+
     pub(super) fn close_tabs(
         &mut self,
         ids: Vec<Uuid>,
         edit: Option<(Profile, bool)>,
         backend: &Backend,
     ) {
+        self.close_tabs_plan(ids, edit, None, backend);
+    }
+
+    pub(crate) fn close_profile_tabs_then(
+        &mut self,
+        profiles: &[Uuid],
+        continuation: &str,
+        backend: &Backend,
+    ) -> bool {
+        let ids = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.profile_id.is_some_and(|id| profiles.contains(&id)))
+            .map(|tab| tab.id)
+            .collect();
+        self.close_tabs_plan(ids, None, Some(continuation.to_owned()), backend)
+    }
+
+    fn close_tabs_plan(
+        &mut self,
+        ids: Vec<Uuid>,
+        edit: Option<(Profile, bool)>,
+        after_action: Option<String>,
+        backend: &Backend,
+    ) -> bool {
         if self.tab_close.is_some() {
-            return;
+            return false;
         }
         // 先检查整个冻结集合；不得为了检查原位编辑而隐式提交它。
         for id in &ids {
             let Some(index) = self.tabs.iter().position(|tab| tab.id == *id) else {
-                return;
+                return false;
             };
             let tab = &self.tabs[index];
             let (drafts, running) = if index == self.active {
@@ -47,19 +101,21 @@ impl App {
             };
             if drafts || !tab.pending.is_null() {
                 self.status = i18n::UiMessage::key("请先提交或丢弃该 tab 的待提交变更");
-                return;
+                return false;
             }
             if running {
                 self.status = i18n::UiMessage::key("请等待或取消该 tab 的任务后再关闭");
-                return;
+                return false;
             }
         }
         self.tab_close = Some(CloseOperation {
             remaining: ids,
             waiting: None,
             edit,
+            after_action,
         });
         self.close_tabs_next(backend);
+        true
     }
 
     pub(super) fn edit_profile_after_close(&mut self, id: Uuid, tls: bool, backend: &Backend) {
@@ -72,6 +128,10 @@ impl App {
         else {
             return;
         };
+        if let Some(source) = profile.archery() {
+            self.archery_open_server(source.server_id, source.instance_id, backend);
+            return;
+        }
         let ids = self
             .tabs
             .iter()
@@ -87,13 +147,16 @@ impl App {
                 return;
             };
             let Some(id) = operation.remaining.pop() else {
-                let edit = self.tab_close.take().and_then(|op| op.edit);
-                if let Some((profile, tls)) = edit {
+                let operation = self.tab_close.take().unwrap();
+                if let Some((profile, tls)) = operation.edit {
                     self.profile_form(Some(profile));
                     if tls {
                         self.field_set("tls", "true");
                         self.workbench.profile_tls_details = true;
                     }
+                }
+                if let Some(action) = operation.after_action {
+                    self.action(&action, backend);
                 }
                 return;
             };
@@ -113,6 +176,9 @@ impl App {
                     "connection.close",
                     json!({"session_id":session}),
                 ) {
+                    if operation.after_action.is_some() {
+                        self.archery.error = Some(error.to_string());
+                    }
                     self.tab_close = None;
                     self.status = i18n::UiMessage::raw(error.to_string());
                 }
@@ -139,6 +205,13 @@ impl App {
         if let Err(error) = &response.result
             && error.code != "not_found"
         {
+            if self
+                .tab_close
+                .as_ref()
+                .is_some_and(|operation| operation.after_action.is_some())
+            {
+                self.archery.error = Some(error.to_string());
+            }
             self.tab_close = None;
             self.status = i18n::UiMessage::raw(error.to_string());
             return true;
@@ -160,18 +233,27 @@ impl App {
     }
 
     fn remove_closed_tab(&mut self, index: usize) {
+        // 批量配置仍在管理弹窗中；关闭最后一个标签不能清掉待提交计划的展示层。
+        let overlay = self
+            .tab_close
+            .as_ref()
+            .filter(|operation| operation.after_action.is_some())
+            .and_then(|_| self.workbench.overlay.clone());
+        self.close_result_info(false);
+        if self.tabs.len() == 1 {
+            self.capture_empty_context();
+        }
         if index == self.active && self.tabs.len() > 1 {
+            self.archery.open_continuation = None;
             self.switch_tab(if index == 0 { 1 } else { index - 1 });
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             // 空工作区没有活动 runtime；后续迟到响应也无法再找到原 tab ID。
-            self.profile = None;
             self.session = None;
             self.resources.clear();
             self.cursor = None;
             self.scan_token = None;
-            self.database = None;
             self.target = None;
             self.task = None;
             self.operation_pending = false;
@@ -205,6 +287,9 @@ impl App {
                 self.active -= 1;
             }
             self.focus_current_tab();
+        }
+        if let Some(overlay) = overlay {
+            self.workbench.overlay = Some(overlay);
         }
         self.dirty = true;
     }

@@ -2,7 +2,7 @@
 //! key、field 和 member 保留原始字节；扫描结果允许并发变化，不是快照。
 
 mod batch_delete;
-mod command;
+pub(crate) mod command;
 mod edit;
 mod transfer;
 
@@ -15,6 +15,27 @@ use serde_json::{Value as Json, json};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// 判断 Redis 命令文本是否包含 AUTH 或 HELLO 的 AUTH 参数；解析失败时返回错误。
+pub fn redis_contains_auth(text: &str) -> Result<bool> {
+    Ok(command::parse_commands(text)?.iter().any(|args| {
+        args[0].eq_ignore_ascii_case(b"AUTH")
+            || (args[0].eq_ignore_ascii_case(b"HELLO") && {
+                let mut options = args[1..].iter();
+                let mut found = false;
+                while let Some(option) = options.next() {
+                    if option.eq_ignore_ascii_case(b"AUTH") {
+                        found = true;
+                        break;
+                    }
+                    if option.eq_ignore_ascii_case(b"SETNAME") {
+                        options.next();
+                    }
+                }
+                found
+            })
+    }))
+}
 
 type Conn = MultiplexedConnection;
 // WATCH 状态属于物理连接；令牌持有该连接直到提交、丢弃或会话关闭。
@@ -84,7 +105,10 @@ pub struct RedisSession {
     profile: Profile,
     client: Client,
     secret: Option<String>,
-    conn: Conn,
+    conn: Option<Conn>,
+    browser_conn: Option<Conn>,
+    command_db: u32,
+    command_transaction: Option<Vec<Option<u32>>>,
     command_conn: Option<Conn>,
     command_dead: bool,
     edits: HashMap<Uuid, Edit>,
@@ -115,7 +139,7 @@ fn key(target: &ResourceTarget) -> Result<Vec<u8>> {
 fn target(p: &Json, profile: &Profile) -> Result<ResourceTarget> {
     let t: ResourceTarget = param(p, "target")?;
     if let Some(db) = &t.database
-        && db.parse::<u32>().ok() != Some(profile.redis_db)
+        && db.parse::<u32>().ok() != Some(profile.redis_db())
     {
         return Err(AppError::invalid("目标数据库与连接不一致"));
     }
@@ -187,29 +211,25 @@ impl RedisSession {
     /// 校验配置并建立普通连接；认证、TLS、证书读取或连接失败时返回错误。
     pub async fn connect(profile: Profile, secret: Option<String>) -> Result<Self> {
         profile.validate()?;
-        let addr = if profile.tls.enabled {
+        let direct = profile.direct()?;
+        let addr = if direct.tls.enabled {
             ConnectionAddr::TcpTls {
-                host: profile.host.clone(),
-                port: profile.port,
+                host: direct.host.clone(),
+                port: direct.port,
                 insecure: false,
                 tls_params: None,
             }
         } else {
-            ConnectionAddr::Tcp(profile.host.clone(), profile.port)
+            ConnectionAddr::Tcp(direct.host.clone(), direct.port)
         };
         let settings = RedisConnectionInfo::default().set_skip_set_lib_name();
         let info = "redis://localhost/"
             .into_connection_info()?
             .set_addr(addr)
             .set_redis_settings(settings);
-        let client = if profile.tls.enabled {
-            let root_cert = profile
-                .tls
-                .ca_path
-                .as_ref()
-                .map(std::fs::read)
-                .transpose()?;
-            let client_tls = match (&profile.tls.client_cert_path, &profile.tls.client_key_path) {
+        let client = if direct.tls.enabled {
+            let root_cert = direct.tls.ca_path.as_ref().map(std::fs::read).transpose()?;
+            let client_tls = match (&direct.tls.client_cert_path, &direct.tls.client_key_path) {
                 (Some(c), Some(k)) => Some(redis::ClientTlsConfig {
                     client_cert: std::fs::read(c)?,
                     client_key: std::fs::read(k)?,
@@ -225,20 +245,24 @@ impl RedisSession {
                 },
             )?
         } else {
-            if profile.tls.ca_path.is_some()
-                || profile.tls.client_cert_path.is_some()
-                || profile.tls.client_key_path.is_some()
+            if direct.tls.ca_path.is_some()
+                || direct.tls.client_cert_path.is_some()
+                || direct.tls.client_key_path.is_some()
             {
                 return Err(AppError::invalid("TLS 未启用"));
             }
             Client::open(info)?
         };
+        let command_db = profile.redis_db();
         let conn = connect_database(&client, &profile, secret.as_deref()).await?;
         Ok(Self {
             profile,
             client,
             secret,
-            conn,
+            browser_conn: None,
+            command_db,
+            command_transaction: None,
+            conn: Some(conn),
             command_conn: None,
             command_dead: false,
             edits: HashMap::new(),
@@ -251,11 +275,16 @@ impl RedisSession {
     pub fn profile(&self) -> &Profile {
         &self.profile
     }
+    /// 返回命令连接当前选择的 DB；浏览连接始终使用配置中的 DB。
+    pub fn command_db(&self) -> u32 {
+        self.command_db
+    }
     /// 释放编辑和命令连接，清理扫描缓存及导入临时 key，再关闭普通连接。
     /// 清理失败时仍尝试其余清理，并返回第一个错误。
     pub async fn close(&mut self) -> Result<()> {
         self.edits.clear();
         self.batch_edits.clear();
+        self.browser_conn = None;
         self.command_conn = None;
         self.command_dead = true;
         let mut failure = None;
@@ -269,19 +298,36 @@ impl RedisSession {
                 failure = Some(e.into());
             }
         }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let Some(mut conn) = self.conn.take() else {
+            return failure.map_or(Ok(()), Err);
+        };
         let imports = std::mem::take(&mut self.imports);
         for (_, i) in imports {
-            if let Err(e) = query::<i64>(&mut self.conn, &import_cleanup_args(&i)).await
-                && failure.is_none()
+            match tokio::time::timeout_at(
+                deadline,
+                query::<i64>(&mut conn, &import_cleanup_args(&i)),
+            )
+            .await
             {
-                failure = Some(e);
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    if failure.is_none() {
+                        failure = Some(e);
+                    }
+                }
+                Err(_) => {
+                    if failure.is_none() {
+                        failure = Some(AppError::new("timeout", "清理 Redis 导入超时"));
+                    }
+                    break;
+                }
             }
         }
-        let quit: Result<String> = query(&mut self.conn, &args(&["QUIT"])).await;
         if let Some(e) = failure {
             return Err(e);
         }
-        quit?;
+        drop(conn);
         Ok(())
     }
     /// 分派 Redis 操作；写入受配置的访问模式约束，取消不会保证撤销已发送命令。
@@ -293,33 +339,31 @@ impl RedisSession {
         cancel: &CancellationToken,
     ) -> Result<Json> {
         ensure_not_cancelled(cancel)?;
+        if self.conn.is_none() {
+            return Err(AppError::new("connection_closed", "连接已关闭"));
+        }
+        if matches!(
+            method,
+            "connection.info" | "resource.list" | "resource.describe" | "resource.browse"
+        ) {
+            // 未完成的 multiplexed 响应仍可能留在驱动中；取消时丢弃独立物理连接。
+            let mut conn = match self.browser_conn.take() {
+                Some(conn) => conn,
+                None => tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(AppError::cancelled()),
+                    result = connect_database(&self.client, &self.profile, self.secret.as_deref()) => result?,
+                },
+            };
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(AppError::cancelled()),
+                result = self.read_resource(method, &p, sink, cancel, &mut conn) => result,
+            };
+            self.browser_conn = Some(conn);
+            return result;
+        }
         match method {
-            "connection.info" => {
-                let info: String = query(&mut self.conn, &args(&["INFO", "server"])).await?;
-                let version = info
-                    .lines()
-                    .find_map(|l| l.strip_prefix("redis_version:"))
-                    .unwrap_or("")
-                    .trim();
-                Ok(json!({"server_version":version,"database":self.profile.redis_db}))
-            }
-            "resource.list" => self.list(&p, sink, cancel).await,
-            "resource.describe" => {
-                let t = target(&p, &self.profile)?;
-                self.describe(t).await
-            }
-            "resource.browse" => {
-                let t = target(&p, &self.profile)?;
-                let k = key(&t)?;
-                let type_args = vec![b"TYPE".to_vec(), k.clone()];
-                record_browse_command(sink, &type_args).await?;
-                let kind: String = query(&mut self.conn, &type_args).await?;
-                let ttl_args = vec![b"PTTL".to_vec(), k.clone()];
-                record_browse_command(sink, &ttl_args).await?;
-                let ttl: i64 = query(&mut self.conn, &ttl_args).await?;
-                let id = browse(&mut self.conn, &k, &kind, sink, cancel).await?;
-                Ok(json!({"results":[id],"type":kind,"ttl_ms":ttl}))
-            }
             "change.open" if p.get("targets").is_some() => self.open_batch_delete(&p, cancel).await,
             "change.open" => self.open_edit(&p, sink, cancel).await,
             "change.discard" => {
@@ -344,11 +388,47 @@ impl RedisSession {
             _ => Err(AppError::invalid(format!("未知 Redis 方法 {method}"))),
         }
     }
+    async fn read_resource(
+        &mut self,
+        method: &str,
+        p: &Json,
+        sink: &ExecutionSink,
+        cancel: &CancellationToken,
+        conn: &mut Conn,
+    ) -> Result<Json> {
+        match method {
+            "connection.info" => {
+                let info: String = query(conn, &args(&["INFO", "server"])).await?;
+                let version = info
+                    .lines()
+                    .find_map(|line| line.strip_prefix("redis_version:"))
+                    .unwrap_or("")
+                    .trim();
+                Ok(json!({"server_version":version,"database":self.profile.redis_db()}))
+            }
+            "resource.list" => self.list(p, sink, cancel, conn).await,
+            "resource.describe" => Self::describe(conn, target(p, &self.profile)?).await,
+            "resource.browse" => {
+                let t = target(p, &self.profile)?;
+                let k = key(&t)?;
+                let type_args = vec![b"TYPE".to_vec(), k.clone()];
+                record_browse_command(sink, &type_args).await?;
+                let kind: String = query(conn, &type_args).await?;
+                let ttl_args = vec![b"PTTL".to_vec(), k.clone()];
+                record_browse_command(sink, &ttl_args).await?;
+                let ttl: i64 = query(conn, &ttl_args).await?;
+                let id = browse(conn, &k, &kind, sink, cancel).await?;
+                Ok(json!({"results":[id],"type":kind,"ttl_ms":ttl}))
+            }
+            _ => unreachable!(),
+        }
+    }
     async fn list(
         &mut self,
         p: &Json,
         sink: &ExecutionSink,
         cancel: &CancellationToken,
+        conn: &mut Conn,
     ) -> Result<Json> {
         use futures_util::TryStreamExt;
         use sqlx::Row;
@@ -402,7 +482,7 @@ impl RedisSession {
                     let key: &[u8] = row.try_get(1)?;
                     let resource = Resource {
                         name: String::from_utf8_lossy(key).into_owned(), kind: row.try_get(2)?,
-                        database: Some(self.profile.redis_db.to_string()), key_b64: Some(STANDARD.encode(key)), data: Json::Null,
+                        database: Some(self.profile.redis_db().to_string()), key_b64: Some(STANDARD.encode(key)), data: Json::Null,
                     };
                     // TTL 是当前页的读取值；预留最坏 i64 JSON 长度，仍遵守分页字节上限。
                     let bytes = serde_json::to_vec(&resource)?.len() + 1 + 32;
@@ -423,7 +503,7 @@ impl RedisSession {
                 command.arg(scan.cursor).arg("COUNT").arg(limit);
                 if let Some(pattern) = &scan.pattern { command.arg("MATCH").arg(pattern); }
                 if let Some(kind) = &scan.kind { command.arg("TYPE").arg(kind); }
-                let (next, keys): (u64, Vec<Vec<u8>>) = command.query_async(&mut self.conn).await?;
+                let (next, keys): (u64, Vec<Vec<u8>>) = command.query_async(&mut *conn).await?;
                 if !keys.is_empty() {
                     let mut tx = scan.cache.begin().await?;
                     // 每批最多 768 个绑定参数，也兼容 SQLite 的 999 参数上限。
@@ -431,7 +511,7 @@ impl RedisSession {
                         ensure_not_cancelled(cancel)?;
                         let mut types = redis::pipe();
                         for key in keys { types.cmd("TYPE").arg(key); }
-                        let kinds: Vec<String> = types.query_async(&mut self.conn).await?;
+                        let kinds: Vec<String> = types.query_async(&mut *conn).await?;
                         if kinds.len() != keys.len() { return Err(AppError::new("database", "Redis 类型回复数量不匹配")); }
                         if let Some(mut insert) = scan_insert(&group, keys, &kinds, scan.kind.as_deref()) {
                             insert.build().persistent(false).execute(&mut *tx).await?;
@@ -444,7 +524,7 @@ impl RedisSession {
             }
             if !resources.is_empty() {
                 ensure_not_cancelled(cancel)?;
-                let ttls: Vec<i64> = ttl_query.query_async(&mut self.conn).await?;
+                let ttls: Vec<i64> = ttl_query.query_async(&mut *conn).await?;
                 if ttls.len() != resources.len() {
                     return Err(AppError::new("database", "Redis TTL 回复数量不匹配"));
                 }
@@ -474,9 +554,9 @@ impl RedisSession {
         }
         Ok(serde_json::to_value(result?)?)
     }
-    async fn describe(&mut self, t: ResourceTarget) -> Result<Json> {
+    async fn describe(conn: &mut Conn, t: ResourceTarget) -> Result<Json> {
         let k = key(&t)?;
-        let (kind, ttl) = metadata(&mut self.conn, &k).await?;
+        let (kind, ttl) = metadata(conn, &k).await?;
         let cmd = match kind.as_str() {
             "string" => "STRLEN",
             "hash" => "HLEN",
@@ -486,7 +566,7 @@ impl RedisSession {
             "none" => return Ok(json!({"target":t,"type":kind,"ttl_ms":ttl,"length":0})),
             _ => return Err(AppError::invalid("不支持的 Redis 类型")),
         };
-        let n: i64 = query(&mut self.conn, &[cmd.as_bytes().to_vec(), k]).await?;
+        let n: i64 = query(conn, &[cmd.as_bytes().to_vec(), k]).await?;
         Ok(json!({"target":t,"type":kind,"ttl_ms":ttl,"length":n}))
     }
     async fn open_edit(
@@ -526,23 +606,21 @@ async fn connect_database(
 ) -> Result<Conn> {
     // 每次调用新建连接，SELECT 只影响该连接，不使用 multiplexed clone 隔离 DB。
     let mut c = client.get_multiplexed_async_connection().await?;
+    let direct = profile.direct()?;
     if let Some(s) = secret {
         let mut a = vec![b"AUTH".to_vec()];
-        if !profile.username.is_empty() {
-            a.push(profile.username.as_bytes().to_vec());
+        if !direct.username.is_empty() {
+            a.push(direct.username.as_bytes().to_vec());
         }
         a.push(s.as_bytes().to_vec());
         let _: String = query(&mut c, &a).await?;
-    } else if !profile.username.is_empty() {
+    } else if !direct.username.is_empty() {
         return Err(AppError::invalid("ACL 用户需要凭据"));
     }
-    if profile.redis_db != 0 {
+    if direct.redis_db != 0 {
         let _: String = query(
             &mut c,
-            &[
-                b"SELECT".to_vec(),
-                profile.redis_db.to_string().into_bytes(),
-            ],
+            &[b"SELECT".to_vec(), direct.redis_db.to_string().into_bytes()],
         )
         .await?;
     }

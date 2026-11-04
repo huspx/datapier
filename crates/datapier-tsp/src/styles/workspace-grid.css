@@ -1,0 +1,484 @@
+.tabs {
+  height: 39px;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--l2);
+  background: var(--card);
+}
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+}
+.tab {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  height: 100%;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 0;
+  color: var(--t3);
+}
+.tab.active {
+  border-bottom: 2px solid var(--accent);
+  background: var(--panel);
+  color: var(--t1);
+}
+.body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.redis-layout {
+  flex-direction: row;
+}
+.split, .history-layout {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.detail-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.resource-nav {
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-height: 28px;
+  gap: 12px;
+  padding-right: 18px;
+  border-bottom: 1px solid var(--l2);
+}
+.resource-identity {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--t3);
+  font-size: 11px;
+}
+.sql-results-head {
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  height: 39px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--l2);
+  background: var(--card);
+  color: var(--t3);
+  font-size: 12px;
+}
+.result-tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+}
+.sql-results-head .active {
+  color: var(--t1);
+}
+.toolbar {
+  min-height: 48px;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--l2);
+}
+.toolbar .field {
+  flex: 1;
+  min-width: 180px;
+  padding: 0;
+}
+.toolbar .row-search {
+  flex: 0 1 230px;
+  min-width: 140px;
+}
+.row-search .sf-input {
+  width: 100%;
+  min-width: 0;
+}
+.field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 8px;
+}
+.label {
+  flex: none;
+  min-width: 86px;
+  color: var(--t3);
+  font-size: 11px;
+}
+.field .sf-input, .field .sf-editor {
+  flex: 1;
+  min-width: 0;
+}
+.choice-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px 8px;
+}
+.completion {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.gridscroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.gridrow {
+  display: flex;
+  min-width: max-content;
+}
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background: var(--card);
+}
+.cell {
+  box-sizing: border-box;
+  display: block;
+  flex: none;
+  height: 35px;
+  overflow: hidden;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  border-right: 1px solid var(--l2);
+  border-bottom: 1px solid var(--l2);
+  background: var(--panel);
+  color: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px var(--mono);
+}
+.header .cell {
+  height: 42px;
+  padding: 6px 12px;
+  background: var(--card);
+  color: var(--t3);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.header .column-type {
+  display: block;
+  margin-top: 2px;
+  color: var(--t3);
+  font: 9px var(--mono);
+}
+.cell.numeric {
+  text-align: right;
+}
+.cell.selected {
+  background: var(--tv-sel);
+}
+.cell.edited {
+  border-left: 2px solid var(--warn);
+  color: var(--warn);
+}
+.cell.null {
+  color: var(--t3);
+  font-style: italic;
+}
+.cell .sf-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+.rownum {
+  box-sizing: border-box;
+  flex: none;
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  width: 38px;
+  height: 35px;
+  padding: 5px 9px 5px 8px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  border-right: 1px solid var(--l2);
+  border-bottom: 1px solid var(--l2);
+  background: var(--card);
+  color: var(--t3);
+  text-align: right;
+  font: 10px var(--mono);
+}
+.header .rownum {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  text-align: center;
+}
+.table-footer {
+  min-height: 38px;
+  gap: 10px;
+  padding: 5px 18px;
+  border-top: 1px solid var(--l2);
+  color: var(--t3);
+  font-size: 11px;
+}
+.sql-editor {
+  box-sizing: border-box;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--panel);
+}
+.sql-editor .sf-editor {
+  flex: 1;
+  min-width: max-content;
+  min-height: 100%;
+}
+.ddl-code .sf-code {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: 11px/1.8 var(--mono);
+}
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  height: min(60vh, 500px);
+  min-height: 240px;
+  gap: 10px;
+  min-width: 0;
+}
+.history-panel > .sf-field, .history-count {
+  flex: none;
+}
+.history-count {
+  color: var(--t3);
+  font-size: 11px;
+}
+.history-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+.history-search > .sf-field {
+  flex: 1;
+  min-width: 160px;
+}
+.history-pagination {
+  flex: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.history-pagination > .sf-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  flex: none;
+}
+.history-pagination > .sf-field > .sf-field-label {
+  flex: none;
+}
+.history-pagination > .sf-field > :not(.sf-field-label) {
+  width: 78px;
+}
+.history-layout {
+  gap: 0;
+  border-top: 1px solid var(--l2);
+}
+.history-list {
+  flex: none;
+  width: 44%;
+  min-width: 0;
+  overflow: auto;
+  border-right: 1px solid var(--l2);
+}
+.history-item {
+  box-sizing: border-box;
+  min-height: 62px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--l2);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.history-item:hover {
+  background: var(--l1);
+}
+.history-item.active {
+  background: var(--tv-sel);
+}
+.history-summary {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px var(--mono);
+}
+.history-meta, .history-preview-meta {
+  color: var(--t3);
+  font-size: 10px;
+  white-space: normal;
+  text-align: left;
+}
+.history-preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  gap: 10px;
+  padding: 16px;
+}
+.details, .preview {
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.history-preview .preview {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  font: 11px/18px var(--mono);
+}
+.key-browser {
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 284px;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--l2);
+}
+.key-tools {
+  flex: none;
+  padding: 14px 12px 11px;
+  border-bottom: 1px solid var(--l2);
+}
+.key-tools .field {
+  padding: 0;
+}
+.key-tools .sf-input {
+  min-width: 0;
+}
+.key-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+.key-browser > .toolbar {
+  min-height: 0;
+  gap: 4px;
+  padding: 5px 12px;
+}
+.key-tools .choice-row {
+  gap: 2px;
+  padding: 8px 0 0;
+}
+.key-tools .choice-row .label {
+  min-width: 30px;
+}
+.key-tools .toolbar {
+  min-height: 0;
+  padding: 8px 0 0;
+  border: 0;
+  gap: 4px;
+}
+.key-list-title {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 13px;
+  color: var(--t3);
+  font-size: 10px;
+}
+.key-pagination {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 10px;
+}
+.key-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 5px;
+}
+.key-tree-row {
+  display: flex;
+  min-width: 100%;
+}
+.key-tree-indent {
+  flex: 0 0 auto;
+}
+.key-tree-row > .resource {
+  flex: 1;
+  width: 0;
+  min-width: 80px;
+}
+.key-directory {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--t2);
+  text-align: left;
+}
+.key-directory * {
+  pointer-events: none;
+}

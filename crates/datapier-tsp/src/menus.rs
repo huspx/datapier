@@ -75,11 +75,9 @@ impl App {
 
     /// 仅对来源明确、列完整匹配 schema 的 MySQL 基表提供 INSERT。
     pub(super) fn can_copy_insert(&self) -> bool {
-        if !self
-            .profile
-            .as_ref()
-            .is_some_and(|profile| profile.provider == datapier_core::model::ProviderKind::Mysql)
-            || !self.browse_result
+        if !self.profile.as_ref().is_some_and(|profile| {
+            profile.provider == datapier_core::model::ProviderKind::Mysql && !profile.is_archery()
+        }) || !self.browse_result
         {
             return false;
         }
@@ -100,6 +98,17 @@ impl App {
         let Some(grid) = self.grid.as_ref() else {
             return false;
         };
+        if grid
+            .page
+            .result
+            .summary
+            .get("origin")
+            .and_then(|origin| origin.get("source"))
+            .and_then(|source| source.as_str())
+            == Some("archery")
+        {
+            return false;
+        }
         !database.is_empty()
             && !target.name.is_empty()
             && !columns.is_empty()

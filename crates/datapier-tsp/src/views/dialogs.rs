@@ -176,10 +176,23 @@ fn change_preview_panel(preview: &Value) -> Node<Msg> {
 pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
     let title = crate::i18n::tr(match kind {
         "profile" => {
-            if app.connection_form_is_editing() {
+            if app.archery.server_only {
+                if app.archery.saved {
+                    "编辑服务"
+                } else {
+                    "新建服务"
+                }
+            } else if app.connection_form_is_editing() {
                 "连接设置"
             } else {
                 "新建连接"
+            }
+        }
+        "archery-auth" => {
+            if app.archery.state == "challenge_required" {
+                "Archery 验证码认证"
+            } else {
+                "Archery 密码认证"
             }
         }
         "diagnostics" => app.detail_context.kind,
@@ -245,19 +258,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
     match kind {
         "history" => {
             panel = panel.child(history_panel(app));
-            let label = crate::i18n::tr(if app.is_redis() {
-                "打开到 CLI"
-            } else {
-                "打开到查询"
-            })
-            .into_owned();
-            let mut open = ui::button(label)
-                .variant(ui::ButtonVariant::Primary)
-                .disabled(app.workbench.history_selected.is_none());
-            if let Some(index) = app.workbench.history_selected {
-                open = open.on_click(Msg::Action(format!("history-open:{index}")));
-            }
-            footer = footer.child(open);
+            footer = history_footer(app);
         }
         "shortcuts" => panel = panel.child(shortcut_help()),
         "redis-delete-rows" => {
@@ -390,7 +391,30 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
         "profile" => {
             (panel, footer) = profile_form::profile_form(app);
         }
+        "archery-auth" => {
+            (panel, footer) = archery::auth_dialog(app);
+        }
         "transfer" | "import" | "export" => {
+            let archery = app
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.is_archery());
+            let result = if app.workbench.cli_export || (archery && app.is_redis()) {
+                app.workbench
+                    .cli_grid
+                    .as_ref()
+                    .map(|grid| &grid.page.result)
+            } else {
+                app.grid.as_ref().map(|grid| &grid.page.result)
+            };
+            let archery_result = result.is_some_and(|result| {
+                result
+                    .summary
+                    .get("origin")
+                    .and_then(|origin| origin.get("source"))
+                    .and_then(Value::as_str)
+                    == Some("archery")
+            });
             let configured = app.field("mapping") != "{}"
                 || app.field("null_marker") != "\\N"
                 || app.field("backslash_escape") != "true"
@@ -431,7 +455,13 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 form = form.child(advanced);
             }
             panel = panel.child(form);
-            if kind != "export"
+            if archery_result && app.field("format") == "csv" {
+                panel = panel.child(
+                    html::p(crate::i18n::tr("CSV 不包含来源元数据").into_owned()).class("muted"),
+                );
+            }
+            if !archery
+                && kind != "export"
                 && ((writable(app)
                     && (app.is_redis() || app.target.as_ref().is_some_and(|t| t.kind == "table")))
                     || (app.is_redis()
@@ -444,8 +474,15 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     .child(button("预览导入", "preview-import"))
                     .child(button("确认导入", "import"));
             }
-            if kind != "import" {
-                footer = footer.child(button("导出完整结果", "export"));
+            if kind != "import" && (!archery || result.is_some_and(|result| result.complete)) {
+                footer = footer.child(button(
+                    if archery_result || archery {
+                        "导出本次返回结果"
+                    } else {
+                        "导出完整结果"
+                    },
+                    "export",
+                ));
             }
         }
         "file" => {
@@ -498,7 +535,15 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             }
         }
         "cell" => {
-            panel = panel.child(html::pre(app.field("cell")).class("preview"));
+            let text = if app.is_redis() {
+                app.detail_cell()
+                    .and_then(|cell| app.grid.as_ref()?.value(cell))
+                    .map(|value| value_text(value, true).into_owned())
+                    .unwrap_or_default()
+            } else {
+                app.field("cell").to_owned()
+            };
+            panel = panel.child(html::pre(text).class("preview"));
             if writable(app) && !app.is_redis() {
                 panel = panel.child(field(app, "cell", "单元格值"));
                 footer = footer
@@ -524,6 +569,11 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 } else {
                     panel = panel
                         .child(html::pre(value_text(value, true).into_owned()).class("preview"));
+                    footer = footer.child(
+                        ui::button(crate::i18n::tr("复制").into_owned())
+                            .icon("copy")
+                            .on_click(Msg::CopyText(value_text(value, true).into_owned())),
+                    );
                 }
             }
         }
@@ -673,14 +723,66 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     ))
                 });
             panel = panel.child(ui::field(crate::i18n::tr("语言").into_owned()).child(language));
+            let mut servers = html::div().class("archery-server-list").child(
+                html::div()
+                    .class("archery-section-heading")
+                    .child(html::strong(crate::i18n::tr("Archery 服务器").into_owned()))
+                    .child(icon_button("plus", "新建服务", "server-new")),
+            );
+            for server in &app.archery.servers {
+                let Some(id) = server["id"].as_str() else {
+                    continue;
+                };
+                let count = uuid::Uuid::parse_str(id)
+                    .ok()
+                    .map(|id| {
+                        app.profiles
+                            .iter()
+                            .filter(|profile| {
+                                profile
+                                    .archery()
+                                    .is_some_and(|source| source.server_id == id)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                servers = servers.child(
+                    html::div()
+                        .class("archery-server-row")
+                        .child(
+                            html::div()
+                                .class("archery-server-info")
+                                .child(html::strong(
+                                    server["name"].as_str().unwrap_or("").to_owned(),
+                                ))
+                                .child(html::span(
+                                    server["base_url"].as_str().unwrap_or("").to_owned(),
+                                ))
+                                .child(html::span(
+                                    server["username"].as_str().unwrap_or("").to_owned(),
+                                ))
+                                .child(html::span(crate::i18n::format_message(
+                                    "关联 {count} 个连接",
+                                    &[("count", &count.to_string())],
+                                ))),
+                        )
+                        .child(icon_button(
+                            "edit",
+                            "编辑服务",
+                            &format!("server-edit:{id}"),
+                        ))
+                        .child(icon_button(
+                            "trash",
+                            "删除服务",
+                            &format!("server-delete:{id}"),
+                        )),
+                );
+            }
+            panel = panel.child(servers);
         }
         "redis" if writable(app) => {
             let op = app.field("operation");
-            let mut form = html::div().class(if op == "zset_set" {
-                "form-grid redis-form-grid redis-zset-form"
-            } else {
-                "form-grid redis-form-grid"
-            });
+            let mut form = html::div().class("form-grid redis-form-grid");
             if let Some(target) = &app.target {
                 let key = target
                     .key_b64

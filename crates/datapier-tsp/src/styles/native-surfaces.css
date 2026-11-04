@@ -1,0 +1,331 @@
+/* 只重置工作台行与轻量入口，表单和主要操作保留宿主样式。 */
+.brand,
+.connection,
+.resource,
+.nav-item,
+.resource-group-title,
+.key-row,
+.key-directory,
+.sidebar-action,
+.tab-title,
+.tab-close,
+.profile-form .tls-disclosure,
+.status-action {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  text-align: left;
+}
+.connection,
+.resource,
+.nav-item,
+.resource-group-title,
+.key-row,
+.key-directory,
+.sidebar-action,
+.profile-form .tls-disclosure {
+  justify-content: flex-start;
+}
+.compact .connection, .compact .sidebar-action, .tab-close {
+  justify-content: center;
+}
+.connection {
+  min-height: 44px;
+  padding: 4px 8px;
+}
+.key-row {
+  height: 34px;
+}
+.key-directory:hover,
+.key-row:hover,
+.sidebar-action:hover,
+.tab-title:hover,
+.tab-close:hover {
+  background: var(--tv-sel);
+}
+.tab, .tab.active {
+  background: transparent;
+}
+.tab-title {
+  min-height: 32px;
+}
+.tab-close {
+  width: 22px;
+  height: 24px;
+}
+.key-view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.profile-form .tls-disclosure {
+  align-self: flex-start;
+}
+.status-action {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 0 4px;
+  color: var(--t3);
+  font-size: 11px;
+}
+.status-action.active {
+  color: var(--accent);
+}
+.status-action *, .sidebar-action *, .tab-title * {
+  pointer-events: none;
+}
+.sidebar-action.icon-only .action-label, .tab-close .action-label {
+  display: none;
+}
+.tab-title {
+  display: flex;
+  align-items: center;
+}
+.status-action:hover {
+  background: var(--tv-sel);
+}
+.change-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.change-preview .draft-item {
+  flex: none;
+  padding: 6px 0;
+}
+.change-preview .preview {
+  margin: 0;
+  padding: 6px 8px;
+  font: 11px/17px var(--mono);
+}
+.preview-parameters {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.preview-parameters > strong {
+  padding: 8px 0 4px;
+  font-size: 11px;
+}
+.preview-parameter-row {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 26px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--l2);
+  font: 11px/17px var(--mono);
+}
+.preview-parameter-header {
+  color: var(--t3);
+  background: var(--card);
+  font-family: var(--sans);
+}
+.preview-parameter-row > span:first-child {
+  flex: 0 0 24px;
+}
+.preview-parameter-row > span:nth-child(2) {
+  flex: 0 0 72px;
+  overflow-wrap: anywhere;
+}
+.preview-parameter-row > span:nth-child(3) {
+  flex: 0 0 42px;
+  text-align: right;
+}
+.preview-parameter-row > :last-child {
+  flex: 1;
+  min-width: 0;
+}
+.preview-parameter-value {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.preview-parameter-value > .muted {
+  flex: none;
+  font: 9px/17px var(--sans);
+}
+.preview-parameter-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+.diagnostic-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 6px 0;
+}
+.diagnostic-section .section-title {
+  padding: 4px 0;
+}
+.diagnostic-section .diagnostic-section {
+  padding-left: 10px;
+  border-left: 1px solid var(--l2);
+}
+.sql-results-head .row-search {
+  flex: 0 1 200px;
+  min-width: 80px;
+}
+.cli-command {
+  margin: 0 0 6px;
+  color: var(--t1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/17px var(--mono);
+}
+.redis-layout .header .cell {
+  display: flex;
+  align-items: center;
+}
+.provider-choice > .label {
+  align-self: flex-start;
+  text-align: left;
+}
+.task-details, .task-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.task-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+.task-summary > strong {
+  font-size: 13px;
+}
+.task-state {
+  padding: 2px 6px;
+  border: 1px solid var(--l2);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--t3);
+}
+.task-state-succeeded {
+  color: var(--ok);
+}
+.task-state-failed, .task-state-outcome_unknown {
+  color: var(--bad);
+}
+.task-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+}
+.task-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--l2);
+  overflow-wrap: anywhere;
+}
+.task-fact > .muted {
+  font-size: 11px;
+}
+.task-fact-value {
+  white-space: pre-wrap;
+  font: 11px/18px var(--mono);
+}
+.task-result-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 0.8fr 1.2fr;
+  gap: 12px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--l2);
+  font-size: 11px;
+}
+.task-result-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.task-result-header {
+  color: var(--t3);
+}
+.task-statement {
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/18px var(--mono);
+}
+.task-error {
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+.task-error > p {
+  white-space: pre-wrap;
+}
+.task-warning {
+  color: var(--warn);
+  font-size: 11px;
+  margin: 0;
+}
+/* CLI 使用 SDK field/editor；旧的 .field/.sf-input 规则不会命中这两个节点。 */
+.cli-prompt > .sf-field {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+.cli-prompt .sf-field-ctl {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+.cli-prompt .sf-editor {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+.cli-prompt .sf-field-label {
+  display: none;
+}
+.table-footer .page-indicator {
+  flex: none;
+  white-space: nowrap;
+}
+.table-footer .selected-count {
+  color: var(--accent);
+}
+.bp-small .table-footer .selection-hint,
+.bp-medium .table-footer .selection-hint {
+  display: none;
+}
+.key-delete-target {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.context .db-picker > .sf-select {
+  align-self: center;
+}
+
+[data-role="redis-delete"] .ic {
+  color: var(--bad);
+}
+.field-error, .form-submit-error {
+  color: var(--bad);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.field-error {
+  display: block;
+  margin-top: 4px;
+}

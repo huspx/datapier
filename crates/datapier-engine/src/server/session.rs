@@ -46,7 +46,7 @@ pub(super) async fn client_with_lease(
         } else if request
             .pointer("/params/protocol_version")
             .and_then(Value::as_u64)
-            != Some(1)
+            != Some(2)
         {
             Err(AppError::new(
                 "protocol_incompatible",
@@ -58,7 +58,7 @@ pub(super) async fn client_with_lease(
             opened = true;
             events = Some(engine.state.lock().unwrap().event_senders[&owner].subscribe());
             Ok(
-                json!({"protocol_version":1,"engine_id":engine.id,"client_session_id":owner,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
+                json!({"protocol_version":2,"engine_id":engine.id,"client_session_id":owner,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
             )
         };
         let _ = tx.send(response(id, result)).await;

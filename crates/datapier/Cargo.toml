@@ -9,5 +9,6 @@ clap.workspace = true
 datapier-core = { path = "../datapier-core" }
 datapier-engine = { path = "../datapier-engine" }
 datapier-tsp = { path = "../datapier-tsp" }
+rustls.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true

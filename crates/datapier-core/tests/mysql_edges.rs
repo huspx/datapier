@@ -19,17 +19,19 @@ impl Fixture {
             id: Uuid::new_v4(),
             name: "isolated-fixture".into(),
             provider: ProviderKind::Mysql,
-            host: "127.0.0.1".into(),
-            port: std::env::var("DATAPIER_TEST_MYSQL_PORT")
-                .expect("设置隔离MySQL端口")
-                .parse()
-                .unwrap(),
-            username: "datapier".into(),
-            database: Some("datapier_fixture".into()),
-            redis_db: 0,
             access_mode: AccessMode::ReadWrite,
-            tls: TlsConfig::default(),
-            visible_databases: None,
+            connection: ConnectionConfig::Direct(DirectConnection {
+                host: "127.0.0.1".into(),
+                port: std::env::var("DATAPIER_TEST_MYSQL_PORT")
+                    .expect("设置隔离MySQL端口")
+                    .parse()
+                    .unwrap(),
+                username: "datapier".into(),
+                database: Some("datapier_fixture".into()),
+                redis_db: 0,
+                tls: TlsConfig::default(),
+                visible_databases: None,
+            }),
         };
         let secret = Some(std::env::var("DATAPIER_TEST_MYSQL_SECRET").expect("设置测试MySQL凭据"));
         let db = ProviderSession::connect(profile.clone(), secret.clone())
@@ -1045,6 +1047,218 @@ async fn preview_json_check_and_write_match_server_version() {
         .await
         .unwrap();
     assert_eq!(f.rows(&result).await[0][0], Value::Json(value));
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要非 strict 默认模式的隔离 MySQL 5.7、8.0 或 8.4"]
+async fn structured_writes_reject_overlong_text_on_non_strict_server() {
+    let mut f = Fixture::open().await;
+    let mode = f.sql("SELECT @@GLOBAL.sql_mode").await.unwrap();
+    let mode = f.rows(&mode).await;
+    let Value::Text(mode) = &mode[0][0] else {
+        panic!("缺少 SQL 模式")
+    };
+    assert!(!mode.to_ascii_uppercase().contains("STRICT_"));
+    for engine in ["InnoDB", "MyISAM"] {
+        let table = name("dp_length");
+        f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, value VARCHAR(100) NOT NULL, day DATE NULL) ENGINE={engine} DEFAULT CHARSET=utf8mb4")).await.unwrap();
+        f.sql(&format!(
+            "INSERT INTO `{table}` (id,value) VALUES (1, 'original')"
+        ))
+        .await
+        .unwrap();
+        let t = target(&table);
+        let schema = describe(&mut f, &t).await;
+        let long = Value::Text(format!("{} ", "界".repeat(100)));
+        let insert = RowChange {
+            operation: "insert".into(),
+            key: BTreeMap::new(),
+            before: BTreeMap::new(),
+            values: [
+                ("id".into(), Value::Integer("2".into())),
+                ("value".into(), long.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert!(submit(&mut f, &t, &insert).await.is_err());
+        let mut ordinary = insert.clone();
+        ordinary
+            .values
+            .insert("value".into(), Value::Text("x".repeat(101)));
+        assert!(submit(&mut f, &t, &ordinary).await.is_err());
+        let old = before(&mut f, &table, &schema).await;
+        assert!(
+            submit(&mut f, &t, &update(old, "value", long.clone()))
+                .await
+                .is_err()
+        );
+        assert!(f.call("import.rows", json!({"target":t,"columns":["id","value"],"rows":[[Value::Integer("3".into()),long]]})).await.is_err());
+        // DATE 类型匹配但值无效，由结构化写连接的 strict 模式阻止服务端修正。
+        assert!(f.call("import.rows", json!({"target":t,"columns":["id","value","day"],"rows":[[Value::Integer("5".into()),Value::Text("valid".into()),Value::Date("2024-02-31".into())]]})).await.is_err());
+        let result = f
+            .sql(&format!("SELECT id, value FROM `{table}` ORDER BY id"))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.rows(&result).await,
+            vec![vec![
+                Value::Integer("1".into()),
+                Value::Text("original".into())
+            ]]
+        );
+        let mut boundary = insert;
+        boundary
+            .values
+            .insert("value".into(), Value::Text("界".repeat(100)));
+        submit(&mut f, &t, &boundary).await.unwrap();
+        let result = f
+            .sql(&format!("SELECT value FROM `{table}` WHERE id=2"))
+            .await
+            .unwrap();
+        assert_eq!(f.rows(&result).await[0][0], Value::Text("界".repeat(100)));
+        // 查询标签继续使用服务端默认的非 strict 模式。
+        f.sql(&format!(
+            "INSERT INTO `{table}` (id,value) VALUES (4, '{}')",
+            "x".repeat(101)
+        ))
+        .await
+        .unwrap();
+        let result = f
+            .sql(&format!(
+                "SELECT CHAR_LENGTH(value) FROM `{table}` WHERE id=4"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(f.rows(&result).await[0][0], Value::Integer("100".into()));
+        f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL TLS 服务、私有 CA、匹配和不匹配的主机名"]
+async fn mysql_tls_requires_trusted_chain_and_matching_identity() {
+    let f = Fixture::open().await;
+    let mut profile = f.profile.clone();
+    let direct = profile.direct_mut().unwrap();
+    direct.host = std::env::var("DATAPIER_TEST_MYSQL_TLS_HOST").unwrap();
+    direct.port = std::env::var("DATAPIER_TEST_MYSQL_TLS_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    direct.tls.enabled = true;
+    let untrusted = match ProviderSession::connect(profile.clone(), f.secret.clone()).await {
+        Ok(_) => panic!("未配置 CA 却信任了私有 CA"),
+        Err(error) => error,
+    };
+    assert!(
+        untrusted
+            .message
+            .to_ascii_lowercase()
+            .contains("certificate")
+    );
+    profile.direct_mut().unwrap().tls.ca_path =
+        Some(std::env::var("DATAPIER_TEST_MYSQL_TLS_CA").unwrap());
+    let mut trusted = ProviderSession::connect(profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    trusted.close().await.unwrap();
+    profile.direct_mut().unwrap().host =
+        std::env::var("DATAPIER_TEST_MYSQL_TLS_WRONG_HOST").unwrap();
+    let wrong_host = match ProviderSession::connect(profile, f.secret.clone()).await {
+        Ok(_) => panic!("错误主机名通过身份验证"),
+        Err(error) => error,
+    };
+    assert!(
+        wrong_host
+            .message
+            .to_ascii_lowercase()
+            .contains("certificate")
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 和 CREATE ROUTINE 权限"]
+async fn call_cache_failure_reports_unknown_without_reclassifying_later_select() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_call_cache");
+    let procedure = name("dp_call_cache_proc");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("INSERT INTO `{table}` VALUES (1, 0)"))
+        .await
+        .unwrap();
+    f.sql(&format!("CREATE PROCEDURE `{procedure}`() BEGIN SELECT value FROM `{table}`; UPDATE `{table}` SET value=value+1 WHERE id=1; END")).await.unwrap();
+    // 只破坏缓存写入，配置库仍可记录发送状态和查询执行记录。
+    sqlx::query("CREATE TRIGGER fail_result_rows BEFORE INSERT ON result_rows BEGIN SELECT RAISE(FAIL, 'injected cache failure'); END")
+        .execute(&f.store.cache).await.unwrap();
+    let task = f
+        .store
+        .create_task(Uuid::new_v4(), "fixture", "execution.run", json!({}), false)
+        .await
+        .unwrap();
+    let error =
+        f.db.call(
+            "execution.run",
+            json!({"text":format!("CALL `{procedure}`()")}),
+            &ExecutionSink::new(f.store.clone(), task.id),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    let recorded = f.store.task(task.id).await.unwrap();
+    assert!(recorded.sent && recorded.may_write);
+    assert_eq!(error.code, "outcome_unknown");
+    assert_eq!(error.details["statements"][0]["status"], "outcome_unknown");
+    assert!(
+        error.details["local_error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("injected cache failure")
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), f.sql("SELECT 1"))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "connection_closed"
+    );
+    // 中断结果流的连接不可再用；新会话用于独立核对，不重放原 CALL。
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    let task_error = f
+        .sql(&format!(
+            "UPDATE `{table}` SET value=7 WHERE id=1; SELECT value FROM `{table}`"
+        ))
+        .await
+        .unwrap_err();
+    assert_ne!(task_error.code, "outcome_unknown");
+    assert_eq!(task_error.details["statements"][0]["status"], "executed");
+    assert_eq!(task_error.details["statements"][1]["status"], "failed");
+    sqlx::query("DROP TRIGGER fail_result_rows")
+        .execute(&f.store.cache)
+        .await
+        .unwrap();
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    let result = f
+        .sql(&format!("SELECT value FROM `{table}` WHERE id=1"))
+        .await
+        .unwrap();
+    assert_eq!(f.rows(&result).await[0][0], Value::Integer("7".into()));
+    f.sql(&format!("DROP PROCEDURE `{procedure}`"))
+        .await
+        .unwrap();
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
     f.close().await;
 }

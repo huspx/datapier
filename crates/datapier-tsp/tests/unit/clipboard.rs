@@ -13,6 +13,7 @@ fn pending(app: &App) -> Clipboard {
         copy: None,
         redis: None,
         grid: None,
+        cli: None,
         redis_write: None,
     }
 }
@@ -20,6 +21,42 @@ fn app() -> App {
     let mut app = App::new("clipboard".into());
     app.tabs[app.active].query = Editor::new("SELECT '😀'; SELECT '😀';");
     app
+}
+
+#[test]
+fn cli_copy_cannot_resume_after_leaving_its_tab_or_replacing_log() {
+    let mut app = app();
+    app.profile_form(None);
+    app.field_set("provider", "redis");
+    app.profile = Some(app.form_profile().unwrap());
+    app.workbench.cli_history.push(crate::workbench::CliRecord {
+        id: Uuid::new_v4(),
+        command: "PING".into(),
+        instance: "fixture".into(),
+        database: "0".into(),
+        state: i18n::UiMessage::raw("succeeded"),
+        elapsed: None,
+        error: i18n::UiMessage::default(),
+        results: Vec::new(),
+        result_grids: Vec::new(),
+        result_page_histories: Vec::new(),
+    });
+    let (backend, _requests, _) = Backend::scripted();
+    let mut clipboard = Clipboard::default();
+    clipboard.copy_cli(&mut app, &backend);
+    assert!(clipboard.cli.as_ref().unwrap().matches(&app));
+    app.generation += 1;
+    clipboard.observe_redis_context(&app);
+    app.generation -= 1;
+    assert!(clipboard.cli.is_none());
+    clipboard.copy_cli(&mut app, &backend);
+    let record = app.workbench.cli_history.pop().unwrap();
+    clipboard.observe_redis_context(&app);
+    app.workbench.cli_history.push(record);
+    assert!(clipboard.cli.is_none());
+    clipboard.copy_cli(&mut app, &backend);
+    clipboard.copy_redis_value(&mut app, &backend);
+    assert!(clipboard.cli.is_none());
 }
 #[test]
 fn grid_copy_freezes_large_values_and_rejects_selection_or_page_changes() {
@@ -303,6 +340,7 @@ fn copy_reports_host_result_and_timeout() {
         copy: Some((Uuid::nil(), Instant::now())),
         redis: None,
         grid: None,
+        cli: None,
         redis_write: None,
     };
     assert!(!clipboard.reply(&mut app, b"type=write:id=other:status=DONE"));

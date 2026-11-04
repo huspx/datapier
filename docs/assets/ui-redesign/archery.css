@@ -1,0 +1,178 @@
+.archery-body {
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.archery-cli {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+}
+.archery-cli .cli-head {
+  min-width: 0;
+  height: auto;
+  min-height: 36px;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.archery-cli .cli-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.archery-cli .cli-prompt input {
+  min-width: 0;
+}
+.archery-body textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  font: 12px var(--mono);
+}
+.archery-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 10px 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.archery-group .toolbar {
+  padding: 6px 0;
+  min-height: 0;
+}
+.archery-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.archery-output {
+  white-space: pre-wrap;
+  font: 12px var(--mono);
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.archery-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.server-list-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.server-selector {
+  align-items: end;
+}
+.server-selector label {
+  display: flex;
+  flex: 1 1 180px;
+  min-width: 0;
+  flex-direction: column;
+}
+.server-selector select {
+  width: 100%;
+}
+.archery-body .table-wrap {
+  flex: none;
+  max-height: 300px;
+}
+.archery-history-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 4px 0;
+}
+.archery-editor {
+  color: var(--fg);
+  -webkit-text-fill-color: var(--fg);
+}
+.archery-query-workbench.has-sql-results .sql-editor-wrap {
+  flex: 0 1 38%;
+  min-height: 72px;
+}
+.archery-query-workbench .sql-results {
+  overflow: hidden;
+  min-height: 140px;
+}
+.archery-query-workbench .sql-results-head {
+  flex: none;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 16px;
+}
+.result-limit, .page-size-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.result-limit select, .page-size-control select {
+  min-height: 26px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+.archery-result-details {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(360px, calc(100dvh - 24px));
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--fg) 16%, transparent);
+  font-size: 11px;
+}
+.result-popup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.archery-result-details dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+}
+.archery-result-details dt {
+  color: var(--muted);
+}
+.archery-result-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.result-pager, .history-layout .table-footer {
+  row-gap: 5px;
+}
+.result-pager .pager-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+@media (max-height: 600px) {
+  .archery-query-workbench.has-sql-results .sql-editor-wrap {
+    min-height: 52px;
+    flex-basis: 28%;
+  }
+}
+@media (max-width: 760px) {
+  .archery-body {
+    padding: 10px;
+  }
+  .archery-body textarea {
+    min-height: 110px;
+  }
+}

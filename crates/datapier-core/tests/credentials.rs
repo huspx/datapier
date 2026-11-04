@@ -15,14 +15,16 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         id: Uuid::new_v4(),
         name: "凭据服务隔离验收".into(),
         provider: ProviderKind::Mysql,
-        host: "127.0.0.1".into(),
-        port: 1,
-        username: "datapier-test".into(),
-        database: None,
-        redis_db: 0,
         access_mode: AccessMode::ReadOnly,
-        tls: TlsConfig::default(),
-        visible_databases: None,
+        connection: ConnectionConfig::Direct(DirectConnection {
+            host: "127.0.0.1".into(),
+            port: 1,
+            username: "datapier-test".into(),
+            database: None,
+            redis_db: 0,
+            tls: TlsConfig::default(),
+            visible_databases: None,
+        }),
     };
     let secret = Uuid::new_v4().to_string();
     let account = format!(

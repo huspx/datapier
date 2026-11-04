@@ -5,6 +5,10 @@
 *.profdata
 /coverage/
 
+# Python 开发发布脚本的运行缓存
+__pycache__/
+*.py[cod]
+
 # 原生发布包与下载产物
 /dist/
 /artifacts/

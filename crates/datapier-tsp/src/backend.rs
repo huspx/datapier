@@ -12,6 +12,81 @@ use uuid::Uuid;
 const REDIS_COPY_METHOD: &str = "local.redis.copy_value";
 const REDIS_ROWS_METHOD: &str = "local.redis.selected_rows";
 const GRID_COPY_METHOD: &str = "local.grid.copy";
+const CLI_COPY_METHOD: &str = "local.cli.copy";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct CliCopyRecord {
+    pub instance: String,
+    pub database: String,
+    pub command: String,
+    pub state: String,
+    pub error: String,
+    pub results: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CliCopyRequest {
+    records: Vec<CliCopyRecord>,
+    empty: String,
+}
+
+// 复制的是执行日志及其全部缓存，不随当前页、旧记录选中态或字段预览截断。
+async fn cli_copy_log(client: &Client, request: CliCopyRequest) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for record in request.records {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        let _ = writeln!(
+            text,
+            "{} · DB {} · {}\n› {}",
+            record.instance, record.database, record.state, record.command
+        );
+        if !record.error.is_empty() {
+            let _ = writeln!(text, "{}", record.error);
+        }
+        for id in record.results {
+            let result_id =
+                Uuid::parse_str(&id).map_err(|error| AppError::invalid(error.to_string()))?;
+            let mut start = 0;
+            let mut count = None;
+            loop {
+                let page: ResultPage = serde_json::from_value(client.request(
+                    "result.page",
+                    json!({"result_id":id,"start":start,"max_rows":200,"max_bytes":1048576}),
+                ).await?)?;
+                if page.result.id != result_id
+                    || page.start != start
+                    || count.is_some_and(|count| count != page.result.row_count)
+                {
+                    return Err(AppError::invalid("CLI 缓存结果已变化"));
+                }
+                if start == 0
+                    && let Some(db) = page.result.summary.get("redis_db").and_then(Value::as_u64)
+                {
+                    let _ = writeln!(text, "DB {db}");
+                }
+                count = Some(page.result.row_count);
+                let end = start + page.rows.len() as u64;
+                if page.result.row_count == 0 {
+                    let _ = writeln!(text, "{}", request.empty);
+                } else {
+                    let rows = redis_resolve_rows(client, page.rows, false).await?;
+                    text.push_str(&crate::grid::encode_tsv(&rows)?);
+                }
+                match page.next {
+                    Some(next) if next == end && next > start && next < page.result.row_count => {
+                        start = next
+                    }
+                    None if end == page.result.row_count => break,
+                    _ => return Err(AppError::invalid("CLI 缓存分页不完整")),
+                }
+            }
+        }
+    }
+    Ok(text)
+}
 fn decode_large(data: &[u8], kind: &str) -> Result<DataValue> {
     let full: DataValue = serde_json::from_slice(data)?;
     let actual = match &full {
@@ -475,6 +550,13 @@ impl Backend {
                                                     .map(Value::String),
                                                 Err(error) => Err(error),
                                             }
+                                        }
+                                        Err(error) => Err(error.into()),
+                                    }
+                                } else if request.method == CLI_COPY_METHOD {
+                                    match serde_json::from_value::<CliCopyRequest>(request.params) {
+                                        Ok(log) => {
+                                            cli_copy_log(&client, log).await.map(Value::String)
                                         }
                                         Err(error) => Err(error.into()),
                                     }

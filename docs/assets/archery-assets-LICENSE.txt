@@ -1,0 +1,5 @@
+Archery 来源标识资源
+
+archery.svg：原创数据库与审核入口组合主图，入口内的 A 与 Archery 名称对应，用于连接类型和服务器入口。
+archery-badge.svg：原创右上角三角来源角标，提炼主图的 A 形入口，用于 MySQL／Redis 类型图标上的 Archery 来源识别；不表示连接成功、审核通过或写入权限。
+这两个 SVG 为本项目原创设计，不含上游图片，不表示 Archery 官方品牌图标。许可：MIT License，Copyright (c) 2026 Datapier contributors；完整许可见项目根目录 LICENSE。

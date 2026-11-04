@@ -60,4 +60,19 @@ impl ExecutionSink {
         ensure_not_cancelled(&self.cancel)?;
         self.store.mark_sent(self.execution_id, may_write).await
     }
+    /// 记录已校验的完整响应；即使取消已触发，也保留已知远端完成事实。
+    pub async fn mark_remote_completed(&self) -> Result<()> {
+        let _guard = match &self.dispatch {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        self.store
+            .mark_remote_completed(self.execution_id)
+            .await
+            .map_err(|error| {
+                AppError::new("storage", "平台已返回完整响应，但本地完成阶段保存失败").with_details(
+                    serde_json::json!({"remote_completion":"completed","persistence_error":error}),
+                )
+            })
+    }
 }

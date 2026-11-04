@@ -32,7 +32,7 @@ async fn database(
     cancel: &CancellationToken,
 ) -> Result<String> {
     ensure_not_cancelled(cancel)?;
-    if let Some(name) = requested.or_else(|| s.profile.database.clone()) {
+    if let Some(name) = requested.or_else(|| s.profile.default_database().map(str::to_owned)) {
         if name.is_empty() {
             return Err(AppError::invalid("数据库名不能为空"));
         }

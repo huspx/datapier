@@ -1,5 +1,10 @@
 use super::*;
 
+#[path = "connections/archery_open.rs"]
+mod archery_open;
+#[path = "connections/archery_wizard.rs"]
+mod archery_wizard;
+
 fn connected_app() -> (App, Profile, Value) {
     let mut app = App::new("profile-reconnect-test".into());
     app.profile_form(None);
@@ -37,7 +42,14 @@ fn all_profile_submissions_reject_invalid_fields_without_requests() {
     assert!(requests.try_recv().is_err());
     app.field_set("key", "client.key");
     app.action("test-profile", &backend);
-    assert_eq!(requests.try_recv().unwrap().method, "profile.test");
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "profile.test");
+    assert_eq!(request.params["profile"]["connection"]["kind"], "direct");
+    assert_eq!(
+        request.params["profile"]["connection"]["tls"]["client_cert_path"],
+        "client.pem"
+    );
+    assert!(request.params["profile"].get("host").is_none());
 }
 
 #[test]
@@ -45,17 +57,18 @@ fn new_form_after_editing_resets_credentials_tls_scope_and_undo() {
     let (mut app, mut profile, session) = connected_app();
     profile.name = "previous".into();
     profile.provider = ProviderKind::Redis;
-    profile.host = "previous-host".into();
-    profile.port = 6379;
-    profile.username = "previous-user".into();
-    profile.database = Some("previous-db".into());
-    profile.redis_db = 15;
-    profile.visible_databases = Some(vec!["previous-db".into()]);
+    let direct = profile.direct_mut().unwrap();
+    direct.host = "previous-host".into();
+    direct.port = 6379;
+    direct.username = "previous-user".into();
+    direct.database = Some("previous-db".into());
+    direct.redis_db = 15;
+    direct.visible_databases = Some(vec!["previous-db".into()]);
+    direct.tls.enabled = true;
+    direct.tls.ca_path = Some("previous-ca".into());
+    direct.tls.client_cert_path = Some("previous-cert".into());
+    direct.tls.client_key_path = Some("previous-key".into());
     profile.access_mode = AccessMode::ReadWrite;
-    profile.tls.enabled = true;
-    profile.tls.ca_path = Some("previous-ca".into());
-    profile.tls.client_cert_path = Some("previous-cert".into());
-    profile.tls.client_key_path = Some("previous-key".into());
     app.profile_form(Some(profile.clone()));
     app.field_set("password", "temporary-password");
     app.fields.get_mut("name").unwrap().edit(0..8, "changed");
@@ -68,16 +81,19 @@ fn new_form_after_editing_resets_credentials_tls_scope_and_undo() {
     let fresh = app.form_profile().unwrap();
     assert_ne!(fresh.id, profile.id);
     assert_eq!(fresh.provider, ProviderKind::Mysql);
-    assert_eq!((fresh.host.as_str(), fresh.port), ("127.0.0.1", 3306));
+    let direct = fresh.direct().unwrap();
+    assert_eq!((direct.host.as_str(), direct.port), ("127.0.0.1", 3306));
     assert_eq!(fresh.access_mode, AccessMode::ReadOnly);
-    assert!(fresh.name.is_empty() && fresh.username.is_empty() && app.field("password").is_empty());
-    assert!(fresh.database.is_none() && fresh.visible_databases.is_none());
-    assert_eq!(fresh.redis_db, 0);
-    assert!(!fresh.tls.enabled);
     assert!(
-        fresh.tls.ca_path.is_none()
-            && fresh.tls.client_cert_path.is_none()
-            && fresh.tls.client_key_path.is_none()
+        fresh.name.is_empty() && direct.username.is_empty() && app.field("password").is_empty()
+    );
+    assert!(direct.database.is_none() && direct.visible_databases.is_none());
+    assert_eq!(direct.redis_db, 0);
+    assert!(!direct.tls.enabled);
+    assert!(
+        direct.tls.ca_path.is_none()
+            && direct.tls.client_cert_path.is_none()
+            && direct.tls.client_key_path.is_none()
     );
     assert!(!app.fields.get_mut("name").unwrap().undo());
     assert!(!app.navigation.form.loaded && app.navigation.form.candidates.is_empty());
@@ -147,9 +163,19 @@ fn editing_save_reconnects_its_tabs_and_preserves_other_profile_and_queries() {
             .all(|r| r.params["profile_id"] == saved["id"] && r.params["secret"].is_null())
     );
     assert_eq!(app.active, 0);
-    assert_eq!(app.profile.as_ref().unwrap().host, "updated-host");
     assert_eq!(
-        app.tabs[1].runtime.profile.as_ref().unwrap().host,
+        app.profile.as_ref().unwrap().direct().unwrap().host,
+        "updated-host"
+    );
+    assert_eq!(
+        app.tabs[1]
+            .runtime
+            .profile
+            .as_ref()
+            .unwrap()
+            .direct()
+            .unwrap()
+            .host,
         "updated-host"
     );
     assert_eq!(app.tabs[0].query.text, "SELECT '中文😀'");
@@ -172,7 +198,10 @@ fn editing_save_refuses_background_work_without_persisting_or_reconnecting() {
     app.action("save-profile", &backend);
     assert!(requests.try_recv().is_err());
     assert_eq!(app.session, Some(session));
-    assert_eq!(app.profile.as_ref().unwrap().host, "127.0.0.1");
+    assert_eq!(
+        app.profile.as_ref().unwrap().direct().unwrap().host,
+        "127.0.0.1"
+    );
     assert_eq!(app.field("host"), "new-host");
     assert_eq!(app.workbench.overlay.as_deref(), Some("profile"));
     assert!(app.workbench.profile_error.is_some());

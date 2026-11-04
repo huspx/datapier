@@ -1,0 +1,247 @@
+/* 全局保持语义 field 的标签与必填标记同排，不改写输入控件皮肤。 */
+.sf-field-lbl {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  gap: 4px;
+}
+.cell.inline-editing {
+  position: relative;
+  overflow: visible;
+  z-index: 6;
+}
+.grid-inline-error {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  min-width: 160px;
+  max-width: 480px;
+  padding: 6px 8px;
+  color: var(--bad);
+  background: var(--card);
+  border: 1px solid var(--bad);
+  border-radius: 4px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font: 11px/16px var(--sans);
+}
+.archery-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 20px;
+}
+.archery-section-heading, .archery-server-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.archery-section-heading > strong, .archery-server-info {
+  flex: 1;
+  min-width: 0;
+}
+.archery-server-info, .archery-preview-row, .archery-preview-delete {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+.archery-server-row > :not(.archery-server-info) {
+  flex: none;
+}
+.archery-server-select,
+.archery-instance-heading,
+.archery-database-row,
+.archery-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.archery-server-select {
+  align-items: flex-end;
+}
+.archery-server-select > .sf-field {
+  flex: 1;
+  min-width: 0;
+}
+.archery-server-select > :not(.sf-field) {
+  flex: none;
+}
+.archery-server-summary {
+  overflow-wrap: anywhere;
+}
+.archery-step-current {
+  color: var(--accent);
+  font-weight: 600;
+}
+.archery-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--l2);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 10px 0;
+}
+.archery-instance-heading > .database-choice {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.archery-instance-heading > .sf-button {
+  flex: none;
+}
+.archery-instance-details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding-left: 20px;
+}
+.archery-instance-details > .sf-field {
+  align-self: stretch;
+}
+.archery-database-row {
+  align-self: stretch;
+}
+.archery-database-row > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.archery-database-row > .sf-button {
+  flex: none;
+}
+.bp-small .profile-form .form-grid {
+  flex-direction: column;
+}
+.bp-small .profile-form .form-grid > [data-role="datapier.form-field"],
+.bp-small .profile-form .form-grid > .profile-password {
+  flex: none;
+  width: 100%;
+}
+.bp-small .provider-cards {
+  gap: 6px;
+}
+.bp-small .provider-card {
+  height: auto;
+  min-height: 70px;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 8px 4px;
+}
+.bp-small .modal-footer {
+  flex-wrap: wrap;
+}
+.archery-preview-delete {
+  color: var(--bad);
+}
+[data-role="archery-server-delete-confirm"].sf-button {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: var(--card);
+}
+.bp-small .history-layout {
+  flex-direction: column;
+}
+.bp-small .history-list {
+  width: 100%;
+  height: 40%;
+  max-height: 180px;
+  border-right: 0;
+  border-bottom: 1px solid var(--l2);
+}
+.bp-small .history-preview {
+  padding: 12px 0;
+}
+.bp-small .task-facts {
+  gap: 0 16px;
+}
+.bp-small .task-result-row {
+  gap: 8px;
+  padding: 8px 4px;
+}
+
+.cli-header-wrap {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+}
+.cli-header-wrap > .cli-head {
+  flex: none;
+  width: 100%;
+  flex-wrap: wrap;
+  overflow-x: visible;
+  height: auto;
+  min-height: 33px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.cli-header-wrap > .cli-head > .muted {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.result-info-anchor {
+  position: relative;
+  flex: none;
+}
+.result-info-anchor.focused > .sf-button {
+  outline: 1px solid var(--accent);
+}
+.result-info-popup {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 50;
+  width: min(420px, calc(100vw - 100px));
+  max-height: min(360px, 60vh);
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 12px;
+  background: var(--card);
+  border: 1px solid var(--l2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+.result-info-head, .result-pagination, .request-limit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.result-info-head {
+  justify-content: space-between;
+}
+.result-pagination {
+  flex-wrap: wrap;
+  max-width: 100%;
+  flex: none;
+}
+.query-check-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.query-check-icon:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.query-check-search {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  transform: scale(0.65);
+}

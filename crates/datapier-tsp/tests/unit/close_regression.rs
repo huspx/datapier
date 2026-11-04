@@ -1,4 +1,5 @@
 use super::*;
+use crate::workspace::finish_after_input_closed;
 
 #[test]
 fn closing_input_waits_for_workspace_save_acknowledgment() {
@@ -112,7 +113,7 @@ fn batch_close_preflights_every_tab_and_uses_clicked_identity() {
     app.action(&format!("tab-close-all:{}", ids[0]), &backend);
     assert!(app.tabs.is_empty());
     assert!(app.session.is_none());
-    assert!(app.workspace_snapshot().unwrap().tabs.is_empty());
+    assert!(app.workspace_snapshot().tabs.is_empty());
     app.action("new-tab", &backend);
     assert_eq!(app.tabs.len(), 1);
 }
@@ -169,7 +170,7 @@ fn empty_workspace_round_trips_and_profile_can_open() {
     let mut app = App::new("empty".into());
     let id = app.tabs[0].id;
     app.close_tab(id, &backend);
-    let state = serde_json::to_value(app.workspace_snapshot().unwrap()).unwrap();
+    let state = serde_json::to_value(app.workspace_snapshot()).unwrap();
     let mut restored = App::new("empty".into());
     restored.response(
         Response {
@@ -185,4 +186,125 @@ fn empty_workspace_round_trips_and_profile_can_open() {
     restored.workbench.overlay = None;
     restored.select_profile(0, &backend);
     assert_eq!(restored.tabs.len(), 1);
+}
+
+#[test]
+fn empty_workspace_visible_actions_restore_query_and_navigation() {
+    let (backend, _requests, _) = Backend::scripted();
+    let mut app = App::new("empty-actions".into());
+    app.close_tab(app.tabs[0].id, &backend);
+    assert!(app.tabs.is_empty());
+    let caps = tern_sdk::Capabilities {
+        cols: 60,
+        ..Default::default()
+    };
+    app.update_viewport(&caps);
+    assert!(app.navigation_compact());
+    app.action("navigation-toggle", &backend);
+    assert!(!app.navigation_compact());
+    app.action("view-query", &backend);
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.view, "query");
+    assert_eq!(app.focus, "query");
+}
+
+#[test]
+fn last_tab_keeps_target_across_workspace_restore_and_reconnect() {
+    for provider in ["mysql", "redis"] {
+        for profiles_first in [true, false] {
+            let (backend, mut requests, _) = Backend::scripted();
+            let mut app = App::new("retained-target".into());
+            app.profile_form(None);
+            app.field_set("provider", provider);
+            app.field_set("name", "retained-connection");
+            let profile = app.form_profile().unwrap();
+            app.profiles.push(profile.clone());
+            app.profile = Some(profile.clone());
+            app.tabs[0].profile_id = Some(profile.id);
+            app.database = Some(
+                if provider == "redis" {
+                    "3"
+                } else {
+                    "analytics"
+                }
+                .into(),
+            );
+            app.tabs[0].browse.database = app.database.clone();
+            app.tabs[0].browse.redis_db = (provider == "redis").then_some(3);
+            app.workbench.overlay = None;
+            app.session = Some(json!({"session_id":Uuid::new_v4()}));
+            app.close_tab(app.tabs[0].id, &backend);
+            let close = requests.try_recv().unwrap();
+            app.routed_response(
+                Response {
+                    tag: close.tag,
+                    result: Ok(json!({})),
+                },
+                &backend,
+            );
+            assert!(app.tabs.is_empty());
+            assert!(app.session.is_none());
+            assert_eq!(app.profile.as_ref().unwrap().id, profile.id);
+
+            let state = serde_json::to_value(app.workspace_snapshot()).unwrap();
+            let mut restored = App::new("retained-target".into());
+            let profiles = Response {
+                tag: "profile.list".into(),
+                result: Ok(json!({"profiles":[profile]})),
+            };
+            let workspace = Response {
+                tag: "workspace.load".into(),
+                result: Ok(json!({"revision":1,"state":state})),
+            };
+            let responses = if profiles_first {
+                [profiles, workspace]
+            } else {
+                [workspace, profiles]
+            };
+            for response in responses {
+                restored.response(response, &backend);
+            }
+            assert!(restored.tabs.is_empty());
+            assert_eq!(
+                restored.profile.as_ref().unwrap().id,
+                app.profile.as_ref().unwrap().id
+            );
+            assert_eq!(restored.database, app.database);
+            restored.select_profile(0, &backend);
+            let open = requests.try_recv().unwrap();
+            assert_eq!(open.method, "connection.open");
+            if provider == "redis" {
+                assert_eq!(open.params["redis_db"], 3);
+                assert_eq!(restored.current_redis_db(), 3);
+            } else {
+                assert_eq!(open.params["database"], "analytics");
+            }
+        }
+    }
+}
+
+#[test]
+fn selecting_another_connection_after_last_close_does_not_reuse_its_database() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("other-connection".into());
+    app.profile_form(None);
+    app.field_set("provider", "redis");
+    app.field_set("name", "first");
+    let first = app.form_profile().unwrap();
+    let mut second = first.clone();
+    second.id = Uuid::new_v4();
+    second.name = "second".into();
+    second.direct_mut().unwrap().redis_db = 7;
+    app.profiles = vec![first.clone(), second.clone()];
+    app.profile = Some(first.clone());
+    app.tabs[0].profile_id = Some(first.id);
+    app.tabs[0].browse.redis_db = Some(3);
+    app.database = Some("3".into());
+    app.workbench.overlay = None;
+    app.close_tab(app.tabs[0].id, &backend);
+    app.select_profile(1, &backend);
+    let open = requests.try_recv().unwrap();
+    assert_eq!(open.params["profile_id"], json!(second.id));
+    assert_eq!(open.params["redis_db"], 7);
+    assert_eq!(app.current_redis_db(), 7);
 }

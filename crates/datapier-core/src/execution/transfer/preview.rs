@@ -78,6 +78,12 @@ pub async fn preview(
     sink: &ExecutionSink,
     cancel: &CancellationToken,
 ) -> Result<Json> {
+    if session.profile().is_archery() {
+        return Err(AppError::new(
+            "capability_unavailable",
+            "Archery 不支持导入预览",
+        ));
+    }
     validate_options(&params)?;
     let fmt = format(&params)?;
     let target: ResourceTarget = param(&params, "target")?;
@@ -85,7 +91,7 @@ pub async fn preview(
     let provider = session.profile().provider;
     if provider == ProviderKind::Redis
         && let Some(db) = target.database.as_deref()
-        && db.parse::<u32>().ok() != Some(session.profile().redis_db)
+        && db.parse::<u32>().ok() != Some(session.profile().redis_db())
     {
         return Err(AppError::invalid("目标数据库与连接不一致"));
     }

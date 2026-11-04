@@ -100,6 +100,35 @@ fn row_selection_respects_visible_rows_and_prunes_on_filter_change() {
 }
 
 #[test]
+fn keyboard_navigation_skips_filtered_rows_and_stays_on_visible_boundaries() {
+    let mut grid = grid(
+        vec![Column::new("a", "text"), Column::new("b", "text")],
+        vec![vec![Value::Null, Value::Null]; 5],
+    );
+    grid.set_visible_rows([11, 13]);
+    grid.navigate(Navigation::Down, false);
+    assert_eq!(grid.focus, Some(Cell { row: 13, column: 0 }));
+    grid.navigate(Navigation::Down, false);
+    assert_eq!(grid.focus, Some(Cell { row: 13, column: 0 }));
+    grid.navigate(Navigation::Up, true);
+    assert_eq!(grid.focus, Some(Cell { row: 11, column: 0 }));
+    grid.navigate(Navigation::Up, false);
+    assert_eq!(grid.focus, Some(Cell { row: 11, column: 0 }));
+
+    grid.navigate(Navigation::End, false);
+    grid.navigate(Navigation::Tab, false);
+    assert_eq!(grid.focus, Some(Cell { row: 13, column: 0 }));
+    grid.navigate(Navigation::BackTab, false);
+    assert_eq!(grid.focus, Some(Cell { row: 11, column: 1 }));
+    grid.set_visible_rows([13]);
+    grid.navigate(Navigation::BackTab, false);
+    assert_eq!(grid.focus, Some(Cell { row: 13, column: 0 }));
+    grid.set_visible_rows([]);
+    grid.navigate(Navigation::Down, false);
+    assert!(grid.focus.is_none());
+}
+
+#[test]
 fn table_column_merge_requires_unique_complete_names_and_enforces_constraints() {
     let mut grid = grid(
         vec![

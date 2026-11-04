@@ -71,17 +71,39 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
             _ => "connection-dot",
         };
         let state = crate::i18n::tr(state).into_owned();
-        let description = format!(
-            "{} · {} · {}:{}{}",
-            p.name,
-            state,
-            p.host,
-            p.port,
-            reason
-                .as_ref()
-                .map(|reason| format!(" · {reason}"))
-                .unwrap_or_default()
-        );
+        let (endpoint, source) = match &p.connection {
+            datapier_core::model::ConnectionConfig::Direct(direct) => {
+                (format!("{}:{}", direct.host, direct.port), None)
+            }
+            datapier_core::model::ConnectionConfig::Archery(archery) => {
+                let server = app.archery.servers.iter().find(|server| {
+                    server["id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        == Some(archery.server_id)
+                });
+                let address = server
+                    .and_then(|server| server["base_url"].as_str())
+                    .filter(|address| !address.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| crate::i18n::tr("未提供").into_owned());
+                let display = server
+                    .and_then(|server| server["name"].as_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&address)
+                    .to_owned();
+                (display, Some(address))
+            }
+        };
+        let description = if let Some(address) = source {
+            format!("{} · Archery · {} · {}", p.name, address, state)
+        } else {
+            format!("{} · {} · {}", p.name, endpoint, state)
+        };
+        let description = match reason.as_ref() {
+            Some(reason) => format!("{description} · {reason}"),
+            None => description,
+        };
         let mut card = html::button("")
             .class(if active {
                 "connection active"
@@ -90,15 +112,21 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
             })
             .key(format!("p{}", p.id))
             .prop("title", description.clone())
-            .attr("aria-label", description)
+            .aria(description)
             .child(
                 html::div()
                     .class("connection-icon")
-                    .child(provider_icon(
-                        app,
-                        p.provider == datapier_core::model::ProviderKind::Redis,
-                    ))
-                    .child(html::span("●").class(dot_class)),
+                    .child(connection_provider_icon(app, p))
+                    .child(
+                        html::span("").class(dot_class).child(
+                            html::span(if dot_class == "connection-dot failed" {
+                                "!"
+                            } else {
+                                ""
+                            })
+                            .class("connection-dot-mark"),
+                        ),
+                    ),
             );
         if !compact {
             card = card.child(
@@ -107,10 +135,9 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                     .child(
                         html::div()
                             .class("connection-name")
-                            .child(html::strong(p.name.clone()))
-                            .child(html::span(state).class("connection-state")),
+                            .child(html::strong(p.name.clone())),
                     )
-                    .child(html::span(format!("{}:{}", p.host, p.port)).class("muted")),
+                    .child(html::span(endpoint).class("muted")),
             );
         }
         panel = panel.child(
@@ -157,6 +184,7 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                         ui::input()
                             .variant(ui::InputVariant::Field)
                             .key("input-object_filter")
+                            .aria(crate::i18n::tr("筛选表和视图").into_owned())
                             .text(ed.text.clone())
                             .cursor(ed.cursor)
                             .anchor(ed.anchor)
@@ -195,73 +223,78 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                     .profile
                     .as_ref()
                     .and_then(|profile| app.profiles.iter().find(|saved| saved.id == profile.id))
-                    .and_then(|profile| profile.visible_databases.as_ref())
+                    .and_then(crate::navigation::navigation_visible_databases)
                     .is_some_and(|visible| !visible.contains(&database.name))
                 {
                     continue;
                 }
                 let node = tree.nodes.get(&database.name);
                 let can_drop = app.profile.as_ref().is_some_and(|profile| {
-                    profile.access_mode == datapier_core::model::AccessMode::ReadWrite
+                    !profile.is_archery()
+                        && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
                 });
                 let expanded = node.is_some_and(|node| node.expanded);
-                panel =
-                    panel.child(
-                        html::button("")
-                            .class("resource nav-item database-node")
-                            .child(ui::icon(if expanded { "chev" } else { "chev-r" }))
-                            .child(ui::icon("database"))
-                            .child(html::span(database.name.clone()))
-                            .actions(
-                                ui::Actions::new()
-                                    .menu(ui::MenuEntry::header(database.name.clone()))
-                                    .menu(
-                                        ui::MenuItem::new(
-                                            "toggle",
-                                            crate::i18n::tr("打开 / 折叠").into_owned(),
-                                        )
-                                        .icon(if expanded { "chev" } else { "chev-r" }),
-                                    )
-                                    .menu(
-                                        ui::MenuItem::new(
-                                            "refresh",
-                                            crate::i18n::tr("刷新资源").into_owned(),
-                                        )
-                                        .icon("repeat"),
-                                    )
-                                    .menu(
-                                        ui::MenuItem::new(
-                                            "database-copy-name",
-                                            crate::i18n::tr("复制名称").into_owned(),
-                                        )
-                                        .icon("copy"),
-                                    )
-                                    .menu(ui::MenuEntry::Separator)
-                                    .menu(
-                                        ui::MenuItem::new(
-                                            "delete",
-                                            crate::i18n::tr("删除数据库").into_owned(),
-                                        )
-                                        .icon("trash")
-                                        .danger(true)
-                                        .disabled(!can_drop),
-                                    ),
-                            )
-                            .on_action(
-                                "toggle",
-                                Msg::Action(format!("navigation-db:{}", database.name)),
-                            )
-                            .on_action(
-                                "refresh",
-                                Msg::Action(format!("navigation-db-refresh:{}", database.name)),
-                            )
-                            .on_action("database-copy-name", Msg::CopyText(database.name.clone()))
-                            .on_action(
-                                "delete",
-                                Msg::Action(format!("navigation-drop-db:{}", database.name)),
-                            )
-                            .on_click(Msg::Action(format!("navigation-db:{}", database.name))),
+                let mut database_menu = ui::Actions::new()
+                    .menu(ui::MenuEntry::header(database.name.clone()))
+                    .menu(
+                        ui::MenuItem::new("toggle", crate::i18n::tr("打开 / 折叠").into_owned())
+                            .icon(if expanded { "chev" } else { "chev-r" }),
+                    )
+                    .menu(
+                        ui::MenuItem::new("refresh", crate::i18n::tr("刷新资源").into_owned())
+                            .icon("repeat"),
+                    )
+                    .menu(
+                        ui::MenuItem::new(
+                            "database-copy-name",
+                            crate::i18n::tr("复制名称").into_owned(),
+                        )
+                        .icon("copy"),
                     );
+                if !app
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.is_archery())
+                {
+                    database_menu = database_menu.menu(ui::MenuEntry::Separator).menu(
+                        ui::MenuItem::new("delete", crate::i18n::tr("删除数据库").into_owned())
+                            .icon("trash")
+                            .danger(true)
+                            .disabled(!can_drop),
+                    );
+                }
+                panel = panel.child(
+                    html::button("")
+                        .class(
+                            if app.profile.as_ref().is_some_and(|profile| {
+                                profile.is_archery()
+                                    && profile.provider == datapier_core::model::ProviderKind::Mysql
+                                    && app.database.as_deref() == Some(database.name.as_str())
+                            }) {
+                                "resource nav-item database-node active"
+                            } else {
+                                "resource nav-item database-node"
+                            },
+                        )
+                        .child(ui::icon(if expanded { "chev" } else { "chev-r" }))
+                        .child(ui::icon("database"))
+                        .child(html::span(database.name.clone()))
+                        .actions(database_menu)
+                        .on_action(
+                            "toggle",
+                            Msg::Action(format!("navigation-db:{}", database.name)),
+                        )
+                        .on_action(
+                            "refresh",
+                            Msg::Action(format!("navigation-db-refresh:{}", database.name)),
+                        )
+                        .on_action("database-copy-name", Msg::CopyText(database.name.clone()))
+                        .on_action(
+                            "delete",
+                            Msg::Action(format!("navigation-drop-db:{}", database.name)),
+                        )
+                        .on_click(Msg::Action(format!("navigation-db:{}", database.name))),
+                );
                 if let Some(node) = node.filter(|node| node.expanded) {
                     if node.loading {
                         panel = panel.child(
@@ -271,7 +304,9 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                     if let Some(error) = &node.error {
                         panel = panel.child(html::span(error.clone()).class("connection-error"));
                     }
-                    for (kind, title) in [("table", "表"), ("view", "视图")] {
+                    for (kind, title) in
+                        [("table", "表"), ("view", "视图"), ("unknown", "未知类型")]
+                    {
                         let collapsed = node.collapsed_kinds.contains(kind);
                         let mut count = 0;
                         let mut items = html::div().class("resource-group-items");
@@ -319,7 +354,12 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                     )
                                     .icon("copy"),
                                 );
-                            if resource.kind == "table" {
+                            if resource.kind == "table"
+                                && !app
+                                    .profile
+                                    .as_ref()
+                                    .is_some_and(|profile| profile.is_archery())
+                            {
                                 menu = menu.menu(ui::MenuEntry::Separator).menu(
                                     ui::MenuItem::new(
                                         "delete",

@@ -6,19 +6,19 @@
     "quoteStyle": "preferSingle"
   },
   "sql": {
-    "dialect": "sqlite",
-    "indentWidth": 4
+    "dialect": "sqlite"
   },
   "shfmt": {
-    "dialect": "posix",
-    "indentWidth": 4
+    "dialect": "posix"
   },
   "stylua": {
-    "syntax": "luau",
-    "indentWidth": 4
+    "syntax": "luau"
+  },
+  "ruff": {
+    "targetVersion": "py315"
   },
   "includes": [
-    "**/*.{html,css,json,jsonc,yml,yaml,toml,sql,sh,luau}"
+    "**/*.{html,css,js,json,jsonc,yml,yaml,toml,sql,sh,luau,py}"
   ],
   "excludes": [
     "**/node_modules",
@@ -44,6 +44,7 @@
     "npm:dprint-plugin-yaml@0.6.0",
     "npm:@dprint/sql@0.4.1",
     "npm:@dprint/shfmt@0.1.2",
-    "npm:@dprint/stylua@0.1.0"
+    "npm:@dprint/stylua@0.1.0",
+    "npm:@dprint/ruff@0.11.3"
   ]
 }

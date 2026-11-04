@@ -100,3 +100,100 @@ fn context_format_undo_restores_reverse_selection() {
     assert_eq!((query.anchor, query.cursor), (end, 0));
     assert_eq!(query.text, "select '😀' from t");
 }
+
+#[test]
+fn archery_plan_uses_stateless_context_and_selected_database() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app("SELECT '😀'; SELECT 2");
+    app.profile = Some(
+        serde_json::from_value(json!({
+            "id": Uuid::new_v4(), "name": "Archery", "provider": "mysql",
+            "access_mode": "read_only", "connection": {
+                "kind": "archery", "server_id": Uuid::new_v4(), "instance_id": 1,
+                "instance_name": "mysql", "databases": ["one", "two"], "default_database": "one"
+            }
+        }))
+        .unwrap(),
+    );
+    app.database = Some("two".into());
+    app.workbench.sql_mode = None;
+    assert!(app.query_action("query-plan", &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.params["text"], "EXPLAIN FORMAT=JSON SELECT 2");
+    assert_eq!(request.params["database"], "two");
+}
+
+#[test]
+fn pagination_rejects_late_plans_and_preserves_result_ownership() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app("SELECT 1");
+    let first = Uuid::new_v4().to_string();
+    let second = Uuid::new_v4().to_string();
+    app.request_result_pagination(&backend, &first);
+    let old = requests.try_recv().unwrap();
+    app.workbench
+        .query_ui
+        .pagination
+        .get_mut(&first)
+        .unwrap()
+        .page_size = 50;
+    app.request_result_pagination(&backend, &first);
+    let current = requests.try_recv().unwrap();
+    app.request_result_pagination(&backend, &second);
+    let other = requests.try_recv().unwrap();
+    let tag =
+        |request: &crate::backend::Request| request.tag.splitn(3, ':').nth(2).unwrap().to_owned();
+    app.accept_result_pagination(
+        &tag(&old),
+        json!({"page_size":20,"row_count":40,"complete":true,"starts":[0,20]}),
+        &backend,
+    );
+    assert!(app.workbench.query_ui.pagination[&first].starts.is_empty());
+    app.accept_result_pagination(
+        &tag(&current),
+        json!({"page_size":50,"row_count":60,"complete":true,"starts":[0,7,57]}),
+        &backend,
+    );
+    app.accept_result_pagination(
+        &tag(&other),
+        json!({"page_size":20,"row_count":0,"complete":true,"starts":[0]}),
+        &backend,
+    );
+    assert_eq!(app.workbench.query_ui.pagination[&first].starts, [0, 7, 57]);
+    assert_eq!(app.workbench.query_ui.pagination[&second].starts, [0]);
+}
+
+#[test]
+fn result_info_closing_restores_focus_only_when_requested() {
+    let mut app = query_app("SELECT 1");
+    app.workbench.query_ui.result_info = Some(Uuid::new_v4().to_string());
+    app.close_result_info(false);
+    assert!(app.workbench.query_ui.result_info.is_none());
+    assert!(app.workbench.focus_request.is_none());
+    app.workbench.query_ui.result_info = Some(Uuid::new_v4().to_string());
+    app.close_result_info(true);
+    assert_eq!(app.workbench.focus_request.as_deref(), Some("result-info"));
+}
+
+#[test]
+fn request_limit_changes_only_while_idle() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app("SELECT 1");
+    app.profile = Some(serde_json::from_value(json!({
+        "id": Uuid::new_v4(), "name": "Archery", "provider": "mysql", "access_mode": "read_only",
+        "connection": { "kind": "archery", "server_id": Uuid::new_v4(), "instance_id": 1,
+            "instance_name": "mysql", "databases": ["one"], "default_database": "one" }
+    })).unwrap());
+    app.workbench_action("archery-request-limit:500", &backend);
+    assert_eq!(app.workbench.query_ui.request_limit, 500);
+    app.task = Some(Uuid::new_v4().to_string());
+    app.workbench_action("archery-request-limit:1000", &backend);
+    assert_eq!(app.workbench.query_ui.request_limit, 500);
+    app.task = None;
+    app.workbench_action("archery-request-limit:123", &backend);
+    assert_eq!(app.workbench.query_ui.request_limit, 500);
+    app.database = Some("one".into());
+    assert!(app.query_action("query-plan", &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.params["limit"], 500);
+}

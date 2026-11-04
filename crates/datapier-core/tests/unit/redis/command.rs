@@ -19,3 +19,12 @@ fn read_only_commands_do_not_accept_scripts_or_transactions() {
     assert!(!read_command(&args(&["MULTI"])));
     assert!(!read_command(&args(&["SORT", "key", "STORE", "out"])));
 }
+
+#[test]
+fn authentication_detection_respects_command_boundaries_and_escapes() {
+    assert!(redis_contains_auth("PING\n'aU'\\x54H user secret").unwrap());
+    assert!(redis_contains_auth("HELLO 3 AUTH user secret").unwrap());
+    assert!(!redis_contains_auth("SET key 'AUTH secret'\nGET key").unwrap());
+    assert!(!redis_contains_auth("HELLO 3 SETNAME authless").unwrap());
+    assert!(redis_contains_auth("AUTH 'unfinished").is_err());
+}

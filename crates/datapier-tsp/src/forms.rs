@@ -71,8 +71,41 @@ const OPERATORS: [(&str, &str); 10] = [
     ("is_not_null", "不是 NULL"),
 ];
 
+// 只处理本地写入预检标记；数据库原始诊断必须原样保留。
+fn mysql_validation_reason(column: &Column, error: &AppError) -> Option<UiMessage> {
+    if error.code != "invalid_input" || error.database_code.is_some() {
+        return None;
+    }
+    let kind = error.details.get("validation")?.as_str()?;
+    let template = match kind {
+        "character_length" => "列 {name} 超过字符长度 {limit}",
+        "numeric_range" => "列 {name} ({type})：数值无效、超出范围或无法按目标精度和标度无损表示",
+        "type_mismatch" => "列 {name} ({type}): 值类型不受支持或不匹配",
+        "bit_width" => "列 {name} ({type}) 的二进制值超出位宽或类型无效",
+        "generated_column" => "生成列不可写: {name}",
+        "null_not_allowed" => "列 {name} 不允许 NULL",
+        "invalid_base64" => return Some(UiMessage::key("无效的 Base64 二进制值")),
+        _ => return None,
+    };
+    let mut args = vec![
+        ("name", UiArg::Raw(column.name.clone())),
+        ("type", UiArg::Raw(column.type_name.clone())),
+    ];
+    if kind == "character_length" {
+        args.push((
+            "limit",
+            UiArg::Raw(error.details.get("limit")?.as_u64()?.to_string()),
+        ));
+    }
+    Some(UiMessage::template(template, args))
+}
+
 fn form_validation_error(template: &'static str, column: &Column, error: AppError) -> UiMessage {
-    let reason = if error.message == format!("列 {} 不允许 NULL", column.name) {
+    let reason = if error.database_code.is_some() {
+        UiMessage::raw(error.message)
+    } else if let Some(reason) = mysql_validation_reason(column, &error) {
+        reason
+    } else if error.message == format!("列 {} 不允许 NULL", column.name) {
         UiMessage::template(
             "列 {name} 不允许 NULL",
             vec![("name", UiArg::Raw(column.name.clone()))],
@@ -659,14 +692,21 @@ fn button(label: &str, action: &str) -> Node<Msg> {
         .into()
 }
 
-fn input(app: &App, name: &str, label: &str, editor: &Editor) -> Node<Msg> {
+fn input(app: &App, name: &str, label: &str, editor: &Editor, required: bool) -> Node<Msg> {
     let focus = name.to_owned();
     let undo = focus.clone();
     let edit = focus.clone();
+    let accessible_label = if required {
+        crate::i18n::format_message("{label}（必填）", &[("label", label)])
+    } else {
+        label.to_owned()
+    };
     let control: Node<Msg> = ui::field(label.to_owned())
+        .required(required)
         .key(name.to_owned())
         .child(
             ui::input()
+                .aria(accessible_label)
                 .variant(ui::InputVariant::Field)
                 .key(format!("input-{name}"))
                 .text(editor.text.clone())
@@ -700,7 +740,7 @@ fn advanced_input(app: &App, name: &str, label: &str) -> Node<Msg> {
     } else {
         &app.fields[name]
     };
-    input(app, name, label, editor)
+    input(app, name, label, editor, true)
 }
 
 /// 正文与主要动作分开返回，长表单滚动时仍能在固定页脚加入草稿。
@@ -724,16 +764,7 @@ pub(crate) fn row_form(app: &App) -> (Node<Msg>, Node<Msg>) {
                 RowMode::Value => "输入值",
                 RowMode::Null => "NULL",
             };
-            let label = format!(
-                "{} · {}{}",
-                field.column.name,
-                field.column.type_name,
-                if required_column(&field.column) {
-                    " *"
-                } else {
-                    ""
-                }
-            );
+            let label = format!("{} · {}", field.column.name, field.column.type_name);
             let mut item = html::div().class("form-field form-row-field");
             if field.column.generated {
                 item = item
@@ -746,6 +777,7 @@ pub(crate) fn row_form(app: &App) -> (Node<Msg>, Node<Msg>) {
                         &format!("sql-form-row-{index}"),
                         &label,
                         &field.editor,
+                        required_column(&field.column),
                     ))
                     .child(button(tr(mode).as_ref(), &format!("sql-row-mode:{index}")));
             }
@@ -825,6 +857,7 @@ pub(crate) fn filter_form(app: &App) -> (Node<Msg>, Node<Msg>) {
                     "sql-form-filter-value",
                     tr("值").as_ref(),
                     &state.filter_value,
+                    true,
                 ));
             }
         }

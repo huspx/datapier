@@ -8,7 +8,7 @@ async fn interleaved_events_and_responses_do_not_hold_client_open() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":1}}),
+            &json!({"id":open["id"],"result":{"protocol_version":2}}),
         )
         .await
         .unwrap();
@@ -50,7 +50,7 @@ async fn oversized_request_preserves_concurrent_requests_and_events() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":1}}),
+            &json!({"id":open["id"],"result":{"protocol_version":2}}),
         )
         .await
         .unwrap();
@@ -98,7 +98,7 @@ async fn cancelled_oversized_request_does_not_interrupt_writer() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":1}}),
+            &json!({"id":open["id"],"result":{"protocol_version":2}}),
         )
         .await
         .unwrap();
@@ -151,7 +151,7 @@ async fn concurrent_last_drops_close_a_blocked_writer() {
     let open = protocol::read(&mut peer).await.unwrap();
     protocol::write(
         &mut peer,
-        &json!({"id":open["id"],"result":{"protocol_version":1}}),
+        &json!({"id":open["id"],"result":{"protocol_version":2}}),
     )
     .await
     .unwrap();
@@ -199,7 +199,7 @@ async fn dropping_last_client_closes_a_stalled_heartbeat() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":1}}),
+            &json!({"id":open["id"],"result":{"protocol_version":2}}),
         )
         .await
         .unwrap();
@@ -278,4 +278,32 @@ async fn cancelled_requests_are_removed_and_shutdown_wakes_waiters() {
     inner.shutdown.cancel();
     assert_eq!(task.await.unwrap().unwrap_err().code, "disconnected");
     assert!(inner.pending.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn client_rejects_v1_engine_and_sends_no_business_request() {
+    let (stream, mut peer) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+        let open = protocol::read(&mut peer).await.unwrap();
+        assert_eq!(open["method"], "session.open");
+        assert_eq!(open["params"]["protocol_version"], 2);
+        protocol::write(
+            &mut peer,
+            &json!({"id":open["id"],"result":{"protocol_version":1}}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), protocol::read(&mut peer))
+                .await
+                .unwrap()
+                .is_err()
+        );
+    });
+    let error = match Client::handshake(Box::new(stream)).await {
+        Ok(_) => panic!("v1 Engine must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "protocol_incompatible");
+    server.await.unwrap();
 }

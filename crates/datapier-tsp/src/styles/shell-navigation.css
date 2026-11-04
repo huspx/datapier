@@ -1,0 +1,310 @@
+.context .db-picker {
+  flex: none;
+  width: 100px;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+
+.layout {
+  position: absolute;
+  /* Tern 0.9.9 的区域上下各有 6px 留白，会计入文档滚动范围。
+     等量 bottom／负 margin 抵消它而不缩小视口；scoped sheet 不能修改区域自身。 */
+  inset: 0;
+  bottom: 12px;
+  margin-bottom: -12px;
+  /* 主内容及其 sticky 元素留在同一叠放层，模态层独立居上。 */
+  z-index: 0;
+  display: flex;
+  min-height: 0;
+  /* screen 布局固定在 surface 视口内，滚动由各数据区承担。 */
+  overflow: hidden;
+  background: var(--panel);
+  color: var(--t1);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+.sidebar {
+  box-sizing: border-box;
+  width: 224px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 14px 10px 8px;
+  background: var(--card);
+  border-right: 1px solid var(--l2);
+}
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.sidebar-section-title {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 8px;
+  color: var(--t3);
+  font-size: 11px;
+}
+.compact .sidebar-section-title {
+  justify-content: center;
+  padding: 0;
+}
+.sidebar-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  text-align: left;
+}
+.compact .sidebar-action {
+  justify-content: center;
+  padding: 6px 0;
+}
+.object-search-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin: 8px 0;
+}
+.resource-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 14px 4px 20px;
+  color: var(--t3);
+  text-align: left;
+}
+.sidebar.compact {
+  width: 58px;
+  padding: 14px 6px 8px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 2px 9px 16px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.brand-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--l2);
+  border-radius: 6px;
+  color: var(--accent);
+  font: 600 13px var(--mono);
+}
+.compact .brand {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+.connection {
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.connection.active, .nav-item.active, .resource.active {
+  background: var(--tv-sel);
+  color: var(--t1);
+}
+.connection-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--accent);
+  font: 600 10px var(--mono);
+}
+.connection-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.connection-info .muted {
+  margin-top: 2px;
+  font: 10px var(--mono);
+}
+.compact .connection {
+  justify-content: center;
+  padding: 8px 4px;
+  gap: 0;
+}
+.group-title {
+  display: block;
+  flex: none;
+  padding: 13px 10px 7px;
+  color: var(--t3);
+  font-size: 11px;
+}
+.resource, .nav-item {
+  box-sizing: border-box;
+  display: block;
+  flex: none;
+  width: 100%;
+  overflow: hidden;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--t3);
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.resource-group .nav-item {
+  padding-left: 30px;
+}
+.object-context {
+  display: flex;
+  justify-content: space-between;
+  margin: 16px 9px 0;
+  color: var(--t3);
+  font-size: 10px;
+}
+.workspace-name {
+  margin-left: 8px;
+}
+.sidebar-footer {
+  margin-top: auto;
+  padding: 10px 9px 2px;
+  border-top: 1px solid var(--l2);
+  color: var(--t3);
+  font-size: 11px;
+}
+.object-search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.object-search .sf-input {
+  width: 100%;
+  min-width: 0;
+}
+.sidebar .toolbar {
+  min-height: 0;
+  padding: 4px 0;
+  border: 0;
+  gap: 2px;
+}
+.content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.context, .tabs, .subnav, .toolbar, .table-footer, .draftbar, .status {
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+.context {
+  height: 54px;
+  gap: 10px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--l2);
+}
+.context-title {
+  font-weight: 600;
+}
+.breadcrumb, .context-hint, .muted {
+  color: var(--t3);
+}
+.spacer {
+  flex: 1;
+  min-width: 0;
+}
+.mono {
+  font-family: var(--mono);
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--t3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.connection-feedback {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--l2);
+  color: var(--bad);
+}
+.connection-message {
+  flex: 1;
+  min-width: 160px;
+  overflow-wrap: anywhere;
+}
+.connection-error {
+  margin-top: 12px;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+.resource:hover,
+.nav-item:hover,
+.connection:hover,
+.history-item:hover,
+button.cli-cell:hover {
+  background: var(--tv-sel);
+}
+.resource:focus,
+.connection:focus,
+.history-item:focus,
+.cell:focus {
+  border-color: var(--accent);
+}
+/* TSP 的点击不冒泡，按钮内装饰节点必须让按钮接收命中。 */
+.connection *,
+.resource *,
+.nav-item *,
+.key-row *,
+.cell *,
+.history-item *,
+.namespace-row *,
+.cli-cell * {
+  pointer-events: none;
+}

@@ -154,6 +154,6 @@ fn closed_events_end_consumer_and_allow_unsaved_workspace_to_fail() {
 
     let mut app = crate::App::new("test".into());
     app.dirty = true;
-    let error = crate::finish_after_input_closed(&mut app, &mut backend).unwrap_err();
+    let error = crate::workspace::finish_after_input_closed(&mut app, &mut backend).unwrap_err();
     assert_eq!(error.code, "workspace_save");
 }

@@ -205,6 +205,7 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
         "execution.start" | "execution.run" => "执行查询",
         "change.submit" => "提交变更",
         "transfer.import" => "导入",
+        "archery.sql_check" => "检查上线 SQL",
         "transfer.export" => "导出",
         _ => method,
     });
@@ -323,6 +324,14 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
     let id = value.get("id").and_then(Value::as_str).unwrap_or("");
     let facts = html::div()
         .class("task-facts")
+        .child(diagnostic_fact(
+            "来源",
+            context
+                .and_then(|context| context.get("source"))
+                .and_then(Value::as_str)
+                .unwrap_or(&missing)
+                .to_owned(),
+        ))
         .child(diagnostic_fact("连接 / 数据库", connection))
         .child(diagnostic_fact("资源", resource))
         .child(diagnostic_fact("耗时", elapsed))

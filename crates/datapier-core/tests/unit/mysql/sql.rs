@@ -76,7 +76,6 @@ fn readonly_metadata_whitelist() {
         "DESC `app`.`users`",
         "EXPLAIN app.users",
         "EXPLAIN SELECT count(*) FROM users",
-        "EXPLAIN ANALYZE SELECT 1",
     ] {
         assert!(readonly(sql), "should allow: {sql}");
     }
@@ -94,6 +93,7 @@ fn readonly_metadata_whitelist() {
         "SHOW TABLES /*!50000 INTO OUTFILE '/tmp/a' */",
         "DESCRIBE f()",
         "DESCRIBE app.users extra",
+        "EXPLAIN ANALYZE SELECT 1",
         "EXPLAIN ANALYZE users",
         "EXPLAIN UPDATE users SET x = 1",
         "EXPLAIN ANALYZE DELETE FROM users",
@@ -104,5 +104,78 @@ fn readonly_metadata_whitelist() {
         "EXPLAIN SELECT 1 INTO OUTFILE '/tmp/a'",
     ] {
         assert!(!readonly(sql), "should reject: {sql}");
+    }
+}
+
+#[test]
+fn stateless_ranges_and_nested_callable_safety() {
+    let text = "  SELECT '中;😀'; ; SELECT count(*) FROM `表`  ";
+    let ranges = stateless_statement_ranges(text).unwrap();
+    assert_eq!(
+        ranges.iter().map(|&(a, b)| &text[a..b]).collect::<Vec<_>>(),
+        vec!["SELECT '中;😀'", "SELECT count(*) FROM `表`"]
+    );
+    for sql in [
+        "SELECT \\\'x'",
+        "SELECT \"x\"",
+        "SELECT 1 /* x */",
+        "SELECT 1 -- x",
+        "DELIMITER $$",
+    ] {
+        assert!(stateless_statement_ranges(sql).is_err(), "{sql}");
+    }
+    for sql in [
+        "SELECT 函数()",
+        "SELECT `sleep`(1)",
+        "SELECT db.count(*)",
+        "WITH x AS (SELECT SLEEP(1)) SELECT * FROM x",
+        "SELECT (SELECT secret())",
+        "SELECT * FROM func()",
+        "SELECT 1 FOR UPDATE",
+        "EXPLAIN ANALYZE SELECT 1",
+    ] {
+        assert!(validate_readonly(sql).is_err(), "{sql}");
+    }
+    assert!(validate_readonly("WITH x AS (SELECT 1 AS n) SELECT count(*) FROM x").is_ok());
+    assert!(validate_readonly("SHOW INDEX FROM `db`.`表`").is_ok());
+    for sql in [
+        "SHOW INDEX FROM `db#1`.`t@x--/*\"`",
+        "SHOW FULL COLUMNS FROM `db#1`.`t@x--/*\"`",
+        "SELECT '# @ -- /* \"'",
+        "SELECT `a``#@` FROM `t--x`",
+    ] {
+        assert!(validate_readonly(sql).is_ok(), "{sql}");
+    }
+    for sql in [
+        "SELECT 1 # comment",
+        "SELECT @x",
+        "SELECT 1 /* comment */",
+        "SELECT \"x\"",
+    ] {
+        assert!(validate_readonly(sql).is_err(), "{sql}");
+    }
+    assert!(validate_readonly("SHOW INDEX FROM t WHERE SLEEP(1)").is_err());
+    assert!(validate_readonly("SELECT 1; DELETE FROM t").is_err());
+}
+
+#[test]
+fn readonly_rejects_mode_sensitive_function_spacing() {
+    for sql in [
+        "SELECT COUNT (1)",
+        "SELECT COUNT\t(1)",
+        "WITH x AS (SELECT TRIM\n(1)) SELECT * FROM x",
+        "SELECT (SELECT MAX (v) FROM t)",
+        "SHOW TABLES WHERE COUNT (1) = 1",
+        "EXPLAIN SELECT SUM (1)",
+    ] {
+        assert!(validate_readonly(sql).is_err(), "should reject: {sql}");
+    }
+    for sql in [
+        "SELECT COUNT(1), TRIM(1) FROM t",
+        "WITH x AS (SELECT 1 AS v) SELECT COUNT(*) FROM x",
+        "SELECT(1) AS v WHERE 1 IN (1, 2)",
+        "SELECT 'COUNT (1)', `COUNT (1)` FROM t",
+    ] {
+        assert!(validate_readonly(sql).is_ok(), "should allow: {sql}");
     }
 }

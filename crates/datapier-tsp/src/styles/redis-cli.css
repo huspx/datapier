@@ -1,0 +1,223 @@
+.scan-note {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--l2);
+  color: var(--t3);
+  font-size: 10px;
+  line-height: 1.7;
+}
+.key-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 36px;
+  margin: 0;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--t1);
+  text-align: left;
+}
+.key-row.active {
+  background: var(--tv-sel);
+}
+.key-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px var(--mono);
+}
+.key-aside {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 28px;
+  gap: 2px;
+}
+.key-type {
+  box-sizing: border-box;
+  display: inline-block;
+  padding: 3px 5px;
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--accent);
+  text-align: center;
+  font: 600 10px var(--mono);
+}
+.key-row .key-type {
+  width: 28px;
+  min-width: 28px;
+  padding: 0 2px;
+  font-size: 9px;
+  line-height: 12px;
+}
+.key-ttl {
+  color: var(--t3);
+  white-space: nowrap;
+  font: 10px/12px var(--mono);
+}
+.key-title {
+  flex: none;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--l2);
+}
+.key-title h2, .key-title strong {
+  font: 500 15px var(--mono);
+  overflow-wrap: anywhere;
+}
+.key-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.key-heading strong {
+  min-width: 0;
+}
+.redis-layout .header .cell, .redis-layout .header .rownum {
+  height: 35px;
+}
+.redis-layout .header .column-type {
+  display: none;
+}
+.key-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  color: var(--t3);
+  font-size: 11px;
+}
+.key-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: 45px;
+  gap: 5px;
+  padding: 0 17px;
+  border-bottom: 1px solid var(--l2);
+}
+.key-value, .string-value {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.string-value {
+  padding: 22px;
+}
+.value-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.95 var(--mono);
+}
+.value-hint {
+  flex: none;
+  padding: 10px 20px;
+  border-top: 1px solid var(--l2);
+  color: var(--t3);
+  font-size: 11px;
+}
+.redis-cli-layout {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+/* 只约束公开 split 根节点；pane 几何与拖拽继续由宿主负责。 */
+.redis-cli-layout > .sf-split {
+  position: absolute;
+  inset: 0;
+  height: auto !important;
+  min-height: 0;
+  margin: 0;
+}
+.cli-panel {
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--l2);
+  background: var(--card);
+}
+.cli-panel.cli-full {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 80px;
+}
+.cli-entry {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-bottom: 10px;
+}
+.cli-head {
+  box-sizing: border-box;
+  min-width: 0;
+  overflow-x: auto;
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: 33px;
+  gap: 10px;
+  padding: 0 15px;
+  border-bottom: 1px solid var(--l2);
+  font-size: 11px;
+}
+.cli-body {
+  box-sizing: border-box;
+  min-width: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 18px;
+  font: 11px/1.8 var(--mono);
+}
+.cli-results {
+  min-height: 0;
+  /* 输出只由 cli-body 滚动，内层结果不再建立第二个滚动容器。 */
+  overflow: visible;
+}
+.cli-prompt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 9px;
+  color: var(--accent);
+}
+.cli-cell {
+  box-sizing: border-box;
+  flex: none;
+  width: 160px;
+  height: 24px;
+  min-height: 24px;
+  overflow: hidden;
+  padding: 4px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  border-right: 1px solid var(--l2);
+  border-bottom: 1px solid var(--l2);
+  background: var(--card);
+  color: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px var(--mono);
+}

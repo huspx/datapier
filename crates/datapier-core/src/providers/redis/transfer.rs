@@ -7,7 +7,7 @@ impl RedisSession {
         // 用 Redis 服务端时间换算绝对期限，导入时不会因传输时间延长寿命。
         let script = "local t=redis.call('TYPE',KEYS[1]).ok; local ttl=redis.call('PTTL',KEYS[1]); if ttl==-2 then return {t, false} end; if ttl==-1 then return {t, false} end; local now=redis.call('TIME'); return {t, tostring(now[1]*1000+math.floor(now[2]/1000)+ttl)}";
         let (kind, expires): (String, Option<String>) = query(
-            &mut self.conn,
+            self.conn.as_mut().unwrap(),
             &[
                 b"EVAL".to_vec(),
                 script.as_bytes().to_vec(),
@@ -37,9 +37,14 @@ impl RedisSession {
             ),
             _ => return Err(AppError::invalid("无效过期时间")),
         };
-        let exists: i64 = query(&mut self.conn, &[b"EXISTS".to_vec(), k.clone()]).await?;
+        let exists: i64 = query(
+            self.conn.as_mut().unwrap(),
+            &[b"EXISTS".to_vec(), k.clone()],
+        )
+        .await?;
         if exists != 0 {
-            let (sec, micro): (i64, i64) = query(&mut self.conn, &args(&["TIME"])).await?;
+            let (sec, micro): (i64, i64) =
+                query(self.conn.as_mut().unwrap(), &args(&["TIME"])).await?;
             if expires.is_none_or(|e| e > sec * 1000 + micro / 1000) {
                 return Err(AppError::conflict("目标 key 已存在"));
             }
@@ -75,7 +80,7 @@ redis.call('PEXPIRE', KEYS[1], 86400000)
 return 1
 "#;
         let created: i64 = send_write(
-            &mut self.conn,
+            self.conn.as_mut().unwrap(),
             &[
                 b"EVAL".to_vec(),
                 script.as_bytes().to_vec(),
@@ -191,7 +196,7 @@ return rotate and 2 or 1
             if collides {
                 import.pending_marker = Some(next_marker.clone());
             }
-            let res: Result<i64> = send_write(&mut self.conn, &wrapped, sink).await;
+            let res: Result<i64> = send_write(self.conn.as_mut().unwrap(), &wrapped, sink).await;
             match res {
                 Ok(code) => {
                     if code == 2 {
@@ -255,7 +260,7 @@ return redis.call('RENAMENX', KEYS[1], KEYS[2])
             import.marker.clone(),
             expiry.into_bytes(),
         ];
-        let code: i64 = match send_write(&mut self.conn, &a, sink).await {
+        let code: i64 = match send_write(self.conn.as_mut().unwrap(), &a, sink).await {
             Ok(v) => v,
             Err(e) => {
                 import.valid = false;
@@ -288,7 +293,12 @@ return redis.call('RENAMENX', KEYS[1], KEYS[2])
             .imports
             .get(&id)
             .ok_or_else(|| AppError::invalid("导入令牌已失效"))?;
-        let _: i64 = send_write(&mut self.conn, &import_cleanup_args(import), sink).await?;
+        let _: i64 = send_write(
+            self.conn.as_mut().unwrap(),
+            &import_cleanup_args(import),
+            sink,
+        )
+        .await?;
         self.imports.remove(&id);
         Ok(json!({"discarded":true}))
     }

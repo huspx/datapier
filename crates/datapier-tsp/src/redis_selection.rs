@@ -42,7 +42,7 @@ impl App {
             tab: tab.id,
             generation: self.generation,
             profile: profile.id,
-            database: profile.redis_db,
+            database: profile.redis_db(),
             session: self.session_id()?,
             targets,
         })
@@ -67,7 +67,7 @@ impl App {
             )
         };
         generation == context.generation
-            && profile.is_some_and(|p| p.id == context.profile && p.redis_db == context.database)
+            && profile.is_some_and(|p| p.id == context.profile && p.redis_db() == context.database)
             && session.and_then(|s| s.get("session_id")) == Some(&context.session)
     }
 
@@ -164,7 +164,7 @@ impl App {
                     let profile_matches = self.profile.as_ref().is_some_and(|p| {
                         pending.get("profile_id") == Some(&json!(p.id))
                             && pending.get("redis_db").and_then(Value::as_u64)
-                                == Some(u64::from(p.redis_db))
+                                == Some(u64::from(p.redis_db()))
                     });
                     if !profile_matches {
                         self.status = "请连接原 Redis 数据库后重新确认".into();
