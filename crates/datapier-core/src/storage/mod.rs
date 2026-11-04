@@ -73,20 +73,37 @@ struct ResultGuard {
 impl Store {
     /// 打开或创建数据目录与数据库，并安装或检查当前 schema。
     /// 调用方负责确保目录权限；不完整或较新 schema 及 I/O 错误会使打开失败。
+    /// 打开失败时，返回前等待已建立的连接池关闭，释放数据库文件句柄。
     pub async fn open(root: &Path) -> Result<Self> {
         tokio::fs::create_dir_all(root.join("values")).await?;
         let root = tokio::fs::canonicalize(root).await?;
         let pool = open_database(&root.join("datapier.sqlite3")).await?;
-        let cache = open_database(&root.join("cache.sqlite3")).await?;
-        migration::preflight_config(&pool).await?;
-        preflight(&cache, true).await?;
-        migrate(
-            &cache,
-            include_str!("../../migrations/0001_cache.sql"),
-            true,
-        )
-        .await?;
-        migration::migrate_config(&pool).await?;
+        let cache = match open_database(&root.join("cache.sqlite3")).await {
+            Ok(cache) => cache,
+            Err(error) => {
+                pool.close().await;
+                return Err(error);
+            }
+        };
+        let initialized: Result<()> = async {
+            migration::preflight_config(&pool).await?;
+            preflight(&cache, true).await?;
+            migrate(
+                &cache,
+                include_str!("../../migrations/0001_cache.sql"),
+                true,
+            )
+            .await?;
+            migration::migrate_config(&pool).await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = initialized {
+            // Pool 的 drop 不等待 SQLite worker 退出，Windows 会继续占用文件。
+            pool.close().await;
+            cache.close().await;
+            return Err(error);
+        }
         let store = Self {
             pool,
             cache,
@@ -97,13 +114,22 @@ impl Store {
             result_gates: Arc::new(StdMutex::new(HashMap::new())),
             profile_gate: Arc::new(Mutex::new(())),
         };
-        store.profiles().await?;
-        if !sqlx::query("PRAGMA foreign_key_check")
-            .fetch_all(&store.pool)
-            .await?
-            .is_empty()
-        {
-            return Err(AppError::new("storage_version", "配置关联无效"));
+        let validated: Result<()> = async {
+            store.profiles().await?;
+            if !sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(&store.pool)
+                .await?
+                .is_empty()
+            {
+                return Err(AppError::new("storage_version", "配置关联无效"));
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = validated {
+            store.pool.close().await;
+            store.cache.close().await;
+            return Err(error);
         }
         Ok(store)
     }

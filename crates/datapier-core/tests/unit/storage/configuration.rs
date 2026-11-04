@@ -143,6 +143,22 @@ async fn incomplete_and_newer_baselines_are_rejected() {
 }
 
 #[tokio::test]
+async fn cache_open_failure_releases_configuration_database() {
+    let store = fixture().await;
+    let root = (*store.root).clone();
+    store.pool.close().await;
+    store.cache.close().await;
+    drop(store);
+    let cache_path = root.join("cache.sqlite3");
+    tokio::fs::remove_file(&cache_path).await.unwrap();
+    tokio::fs::create_dir(&cache_path).await.unwrap();
+
+    assert!(Store::open(&root).await.is_err());
+    // 缓存库打开失败后，配置库也必须释放，不能妨碍隔离目录清理。
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_workspace_save_cannot_overwrite_other_window() {
     let store = fixture().await;
     assert_eq!(
