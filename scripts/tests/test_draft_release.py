@@ -50,6 +50,8 @@ class GitHubServer:
     self.tag_objects = {}
     self.redirect_downloads = False
     self.redirect_authorizations = []
+    self.reset_missing_patch_tag = False
+    self.persisted_patch_overrides = {}
     fixture = self
 
     class Handler(BaseHTTPRequestHandler):
@@ -175,8 +177,14 @@ class GitHubServer:
           if len(parts) == 1 and method == "GET":
             return self.reply(200, release)
           if len(parts) == 1 and method == "PATCH":
-            release.update(json.loads(self.body()))
-            return self.reply(200, release)
+            payload = json.loads(self.body())
+            release.update(payload)
+            # 模拟未显式保留 tag 时的漂移，以及 PATCH 成功后读到不同状态。
+            if fixture.reset_missing_patch_tag and "tag_name" not in payload:
+              release["tag_name"] = "untagged-fixture"
+            response = copy.deepcopy(release)
+            release.update(fixture.persisted_patch_overrides)
+            return self.reply(200, response)
         return self.reply(404, {"message": f"unknown fixture endpoint {method} {path}"})
 
       do_GET = dispatch
@@ -352,6 +360,7 @@ class DraftReleaseTests(unittest.TestCase):
   def test_prepare_creates_draft_and_outputs_identity(self):
     release = self.prepare()
     self.assertTrue(release["draft"])
+    self.assertEqual(release["name"], "Datapier " + VERSION)
     self.assertEqual(release["tag_name"], "v" + VERSION)
     self.assertEqual(release["target_commitish"], COMMIT)
     self.assertIn(f"<!-- datapier-build:{COMMIT}:100:1 -->", release["body"])
@@ -369,9 +378,13 @@ class DraftReleaseTests(unittest.TestCase):
     self.server.add_asset(
       release["id"], "datapier-9.9.9-x86_64-apple-darwin.tar.gz", b"other version"
     )
-    self.cli("prepare", run="101", attempt="2")
+    self.server.reset_missing_patch_tag = True
+    self.cli("prepare", run="101", attempt="2", commit=OTHER_COMMIT)
+    self.assertEqual(release["name"], "Datapier " + VERSION)
+    self.assertEqual(release["tag_name"], "v" + VERSION)
+    self.assertEqual(release["target_commitish"], OTHER_COMMIT)
     self.assertIn("Human release notes", release["body"])
-    self.assertIn(f"<!-- datapier-build:{COMMIT}:101:2 -->", release["body"])
+    self.assertIn(f"<!-- datapier-build:{OTHER_COMMIT}:101:2 -->", release["body"])
     self.assertNotIn(f"<!-- datapier-build:{COMMIT}:100:1 -->", release["body"])
     self.assertEqual(
       self.server.by_name(),
@@ -380,6 +393,58 @@ class DraftReleaseTests(unittest.TestCase):
         "datapier-9.9.9-x86_64-apple-darwin.tar.gz": b"other version",
       },
     )
+
+  def test_prepare_reuses_named_untagged_draft(self):
+    release = self.prepare()
+    release_id = release["id"]
+    release["tag_name"] = "untagged-previous"
+    release["body"] = "Human release notes\n\n" + release["body"]
+    self.server.add_asset(release_id, "manual.txt", b"keep")
+    self.server.reset_missing_patch_tag = True
+    self.cli("prepare", run="101", commit=OTHER_COMMIT)
+    self.assertEqual(len(self.server.releases), 1)
+    self.assertEqual(release["id"], release_id)
+    self.assertEqual(release["name"], "Datapier " + VERSION)
+    self.assertEqual(release["tag_name"], "v" + VERSION)
+    self.assertEqual(release["target_commitish"], OTHER_COMMIT)
+    self.assertIn(f"<!-- datapier-build:{OTHER_COMMIT}:101:1 -->", release["body"])
+    self.assertIn("Human release notes", release["body"])
+    self.assertEqual(self.server.by_name(), {"manual.txt": b"keep"})
+
+  def test_prepare_rejects_multiple_name_or_tag_matches_without_mutation(self):
+    for second_tag in ("v" + VERSION, "untagged-second"):
+      with self.subTest(second_tag=second_tag):
+        self.server.releases.clear()
+        self.server.assets.clear()
+        first = self.prepare()
+        first["tag_name"] = "untagged-first"
+        second = copy.deepcopy(first)
+        second["id"] = self.server.next_release
+        self.server.next_release += 1
+        second["tag_name"] = second_tag
+        self.server.releases[second["id"]] = second
+        self.server.add_asset(first["id"], name(TARGETS[0]), b"keep first")
+        self.server.add_asset(second["id"], "manual.txt", b"keep second")
+        before = copy.deepcopy((self.server.releases, self.server.assets))
+        self.cli("prepare", run="101", success=False)
+        self.assertEqual((self.server.releases, self.server.assets), before)
+
+  def test_prepare_rejects_unowned_or_conflicting_named_draft(self):
+    release = self.prepare()
+    original = copy.deepcopy(release)
+    self.server.add_asset(release["id"], "manual.txt", b"keep")
+    for field, value in (
+      ("body", "Human release notes"),
+      ("body", original["body"] + "\n" + original["body"]),
+      ("tag_name", "v9.9.9"),
+    ):
+      with self.subTest(field=field, value=value):
+        release.clear()
+        release.update(original)
+        release[field] = value
+        before = copy.deepcopy((self.server.releases, self.server.assets))
+        self.cli("prepare", run="101", success=False)
+        self.assertEqual((self.server.releases, self.server.assets), before)
 
   def test_invalid_changelog_cannot_refresh_or_upload_to_draft(self):
     release = self.prepare()
@@ -452,9 +517,32 @@ class DraftReleaseTests(unittest.TestCase):
     self.assertEqual((self.server.releases, self.server.assets), before)
     self.assertFalse((self.artifacts / f"datapier-plugin-{VERSION}.zip").exists())
 
+  def test_assemble_rejects_identity_drift_after_successful_final_patch(self):
+    for field, value in (
+      ("name", "Another release"),
+      ("tag_name", "untagged-after-patch"),
+      ("target_commitish", OTHER_COMMIT),
+      ("body", "Replaced externally"),
+      ("draft", False),
+    ):
+      with self.subTest(field=field):
+        self.server.releases.clear()
+        self.server.assets.clear()
+        self.server.persisted_patch_overrides = {}
+        release = self.prepare()
+        self.upload_all(release)
+        self.server.persisted_patch_overrides = {field: value}
+        self.cli("assemble", "--release-id", release["id"], success=False)
+        self.assertEqual(release[field], value)
+        self.assertEqual(
+          set(self.server.by_name()),
+          {name(target) for target in TARGETS} | {f"datapier-plugin-{VERSION}.zip"},
+        )
+
   def test_complete_release_has_valid_manifest_and_plugin_metadata(self):
     release = self.prepare()
     expected = self.upload_all(release)
+    self.server.reset_missing_patch_tag = True
     next(iter(self.server.assets.values()))["digest"] = None
     # 删除本地归档，确保汇总实际下载草稿中的资源。
     for path in self.artifacts.iterdir():
@@ -498,6 +586,9 @@ class DraftReleaseTests(unittest.TestCase):
       self.assertIn(b'version = "1.2.3"', plugin.read("datapier/plugin.toml"))
       self.assertEqual(plugin.read("datapier/LICENSE"), b"fixture license\n")
       self.assertEqual(plugin.read("datapier/content.txt"), b"fixture plugin\n")
+    self.assertEqual(release["name"], "Datapier " + VERSION)
+    self.assertEqual(release["tag_name"], "v" + VERSION)
+    self.assertEqual(release["target_commitish"], COMMIT)
 
 
 if __name__ == "__main__":

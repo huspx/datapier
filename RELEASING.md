@@ -8,7 +8,7 @@
 
 本指南描述发布步骤，不代表已完成这些操作，也不构成提交、推送、合并、创建 tag 或发布的授权。工作区有文件不代表目标提交或分发仓库包含它们；正式发布前必须确保实际源码、Cargo 配置和锁文件、plugin、安装器、组包脚本及工作流都已进入目标提交，不能依赖未跟踪或被忽略的本地文件。
 
-六目标共用 `.github/workflows/native-build.yml`：调用方为 PR 授予 `contents: read`，仅 main 的草稿准备、上传和汇总任务获得 `contents: write`。跨 job 通过同一个草稿 Release 的资源传递文件，不再使用 upload／download-artifact。main 工作流串行运行，草稿绑定完整提交 SHA、run ID 和 attempt；目标上传与汇总均复核身份及未发布状态。只刷新同版本草稿的生成附件，保留人工正文与其他附件；已发布的同版本 Release 或指向其他提交的已有 tag 均拒绝覆盖。正式发布仍由维护者验收并授权。
+六目标共用 `.github/workflows/native-build.yml`：调用方为 PR 授予 `contents: read`，仅 main 的草稿准备、上传和汇总任务获得 `contents: write`。跨 job 通过同一个草稿 Release 的资源传递文件，不再使用 upload／download-artifact。main 工作流串行运行，草稿绑定完整提交 SHA、run ID 和 attempt；目标上传与汇总均复核身份及未发布状态。准备阶段按版本名称或标签查找候选，仅复用唯一且带一个 Datapier 构建标记的草稿；同名 `untagged-*` 草稿可恢复预期标签，同名多份、无托管标记或关联其他版本标签时拒绝修改。两个草稿更新位置均显式写入 `name`、`tag_name` 和完整 `target_commitish`，写入后重新读取并校验身份。只刷新同版本草稿的生成附件，保留维护者填写的发布说明与其他附件；已发布的同版本 Release 或指向其他提交的已有 tag 均拒绝覆盖。正式发布仍由维护者验收并授权。
 
 ## 版本号与关联文件
 
@@ -64,7 +64,9 @@ python3 scripts/version.py --check-release
 
 ## tag 与目标提交
 
-草稿使用 `v<Version>` 名称并绑定当前完整提交 SHA；准备草稿时不单独推送 Git tag。若同名 tag 已存在，必须解析至本次提交，否则工作流拒绝继续。六目标产物、完整组包及运行验收完成并获得正式发布授权后，维护者核对该 tag 的目标提交再发布草稿。`v` 前缀来自组包脚本生成的下载地址 `https://github.com/<owner>/<repo>/releases/download/v<version>`，tag、Release、plugin 内下载地址和资源必须一致。
+Release 名称统一为 `Datapier <Version>`，tag 保持 `v<Version>`，例如名称 `Datapier 0.1.1`、tag `v0.1.1`。草稿绑定本次构建的完整提交 SHA；准备、上传和汇总阶段不创建或推送 Git tag。下一次 main 构建可将同一版本草稿刷新至新的完整 SHA，并重新生成附件。若同名 Git tag 已存在，必须解析至本次提交，否则工作流拒绝继续。
+
+正式发布时，先冻结已经完成构建、组包和运行验收的候选提交，核对草稿 `target_commitish`、构建标记中的 SHA 与附件来源一致。获得正式发布授权后，为这个完整 SHA 创建并推送 `v<Version>` tag，再在 GitHub 编辑该草稿，选择这个已存在的 tag 后发布；已有 tag 则直接核对其解析后的提交。不得以发布时的最新 main 代替候选 SHA，也不移动已经公开的 tag。`v` 前缀来自组包脚本生成的下载地址 `https://github.com/<owner>/<repo>/releases/download/v<version>`，Git tag、Release 标签、plugin 内下载地址和资源必须一致。
 
 ## 构建与组包
 
@@ -81,7 +83,7 @@ python3 scripts/version.py --check-release
 
 独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档随 runner 清理，不上传 Actions artifact 或 Release 资源。
 
-main 的 `prepare-release` 在格式检查成功后创建或刷新 `v<version>` 草稿，清理该版本的六个目标归档和 plugin 包，保留人工附加附件；六个 `native-release` job 各上传一个目标归档。所有目标成功后，`bundle` 从相同草稿鉴权下载六个归档，验证资源及 GitHub 提供的可用 SHA-256，生成内嵌归档与程序摘要的 `datapier-plugin-<version>.zip` 并上传，最后标记构建完成，Release 仍保持草稿。流程生成六个归档和一个 plugin 包，共七个附件；人工附加附件不计入此集合，失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
+main 的 `prepare-release` 在格式检查成功后创建或刷新 `Datapier <Version>` 草稿，tag 为 `v<Version>`，清理该版本的六个目标归档和 plugin 包，保留人工附加附件；六个 `native-release` job 各上传一个目标归档。所有目标成功后，`bundle` 从相同草稿鉴权下载六个归档，验证资源及 GitHub 提供的可用 SHA-256，生成内嵌归档与程序摘要的 `datapier-plugin-<version>.zip` 并上传，最后标记构建完成，Release 仍保持草稿。流程生成六个归档和一个 plugin 包，共七个附件；人工附加附件不计入此集合，失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
 
 官方 Actions 使用 Node.js 24 运行时的 `actions/checkout@v7` 与 `actions/setup-python@v7`；当前流程不再调用 `actions/upload-artifact` 或 `actions/download-artifact`。六目标仍使用 GitHub 托管的原生 runner。
 
@@ -106,6 +108,13 @@ python3 scripts/assemble-release.py --artifacts dist --repository "$repository"
 
 ## 实际发布与发布后核对
 
-main 工作流完成后，维护者核对版本草稿绑定的提交、run、六目标归档与 plugin 包，完成所需验收并补充人工发布说明；获得正式发布授权后发布该草稿。无需从 Actions artifact 下载再手动上传，也不因草稿构建完成而自动公开 Release。若采用本地组包，则仍需人工创建草稿并上传相同文件，遵守同一提交和版本约束。
+main 工作流完成后，维护者按以下步骤发布同一个草稿：
+
+1. 确认该版本只有一个候选草稿，记录 Release ID、完整提交 SHA、run ID 与 attempt；核对六目标归档、plugin 包及所需运行验收。重名草稿需先明确保留对象，不按列表顺序自动删除。
+2. 结合 CHANGELOG 和实际验收记录补充人工发布说明，保留工具维护的隐藏构建标记与状态区；确认正文中的构建 SHA、`target_commitish` 与七个附件的来源一致。
+3. 获得正式发布授权后，按[tag 与目标提交](#tag-与目标提交)创建或核对 `v<Version>` Git tag。在 GitHub 编辑已记录的草稿，选择该 tag，保存后复核 Release 标签及 Git tag 实际解析的提交，再发布。若仍显示 `untagged-*` 或 tag 指向其他提交，停止发布并纠正。
+4. 发布后核对 `draft=false`、预期的 `prerelease`、实际 `published_at`、Release 标签及 Git tag 的目标提交，并执行下面的正式下载与安装验证。
+
+无需从 Actions artifact 下载再手动上传，也不因草稿构建完成而自动公开 Release。若采用本地组包，则仍需人工创建草稿并上传相同文件，遵守同一提交和版本约束。
 
 发布后从实际 Release 地址核对七个附件的文件名、下载地址、版本与 GitHub digest，确认 plugin 内的地址、归档摘要及程序摘要与实际资源一致；在 macOS arm64 验证干净安装、缓存完整性校验与 Tern 启动，并记录结果。其他目标的构建结果与未实测运行范围分别披露；发现本版要求的校验或验收缺项时如实记录，不将六目标构建描述为六目标完整原生运行验收。
