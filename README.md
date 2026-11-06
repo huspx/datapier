@@ -101,7 +101,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 |---|---|
 | 0.1.0 | MySQL／Redis 基础数据库工作台 |
 | 0.1.1 | Archery 只读访问与 MySQL 上线 SQL 检查，开发中 |
-| 0.2.0 | MCP stdio 接入与 Agent 协作，共用 Engine，可脱离 Tern 使用 |
+| 0.2.0 | MCP stdio 与审批、独立 TUI 数据源管理、实时分页与结果不落盘，规划中 |
 | 0.3.0 | 结构设计、批量修改与高级值编辑 |
 | 0.4.0 | 数据交换、迁移与项目文件 |
 | 0.5.0 | 分析展示、显示规则与数据库维护 |
@@ -113,6 +113,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 - [产品规划](docs/product-plan.md)：产品范围、架构、平台矩阵、版本路线与质量标准。
 - [0.1.0 技术方案](docs/technical-design-0.1.0.md)：模块、IPC、数据模型、数据库实现、分发及验收要求。
 - [0.1.1 技术方案](docs/technical-design-0.1.1.md)：Archery 来源、升级边界和当前验收记录。
+- [0.2.0 技术方案](docs/technical-design-0.2.0.md)：MCP 工具、独立配置、权限与审批、实时查询及升级设计，尚未实施。
 - [UI 交互设计稿](docs/ui-redesign.html)及[还原说明](docs/ui-redesign.md)：界面交互、文字约束和视觉对照要求。
 - [贡献指南](CONTRIBUTING.md)：文档职责、开发环境、编码与模块边界、隔离验证及 PR 说明。
 - [发布指南](RELEASING.md)：产品版本来源与派生、发布前检查、原生组包及人工发布核对。
