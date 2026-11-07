@@ -6,7 +6,11 @@ use serde_json::{Value as Json, json};
 use sqlx::{Arguments, Row, mysql::MySqlArguments};
 use tokio_util::sync::CancellationToken;
 
-use super::{MysqlSession, quote_ident, results::stream_query};
+use super::{
+    MysqlSession,
+    live::{self, Recipe},
+    quote_ident,
+};
 use crate::{
     ExecutionSink,
     model::{
@@ -48,6 +52,250 @@ async fn database(
         result = sqlx::query_scalar("SELECT DATABASE()").fetch_one(s.connection()?) => result?,
     };
     current.ok_or_else(|| AppError::invalid("请选择数据库"))
+}
+
+pub(super) async fn databases(s: &mut MysqlSession) -> Result<Json> {
+    let mut conn = s.new_connection().await?;
+    let databases: Vec<String> = sqlx::query_scalar(
+        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .map_err(super::errors::mysql_error)?;
+    Ok(
+        json!({"state":"known","source":"information_schema","databases":databases,"configured_count":null,"reason":null}),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GrantPatternToken {
+    Literal(char),
+    One,
+    Many,
+}
+
+// SHOW GRANTS 的库级 scope 使用 LIKE 模式；反斜线转义和反引号加倍
+// 都必须在匹配时保留其含义，不能先去掉反斜线再误认成通配符。
+fn grant_pattern_token(
+    pattern: &str,
+    pos: usize,
+) -> std::result::Result<Option<(GrantPatternToken, usize)>, ()> {
+    let Some(first) = pattern[pos..].chars().next() else {
+        return Ok(None);
+    };
+    let next = pos + first.len_utf8();
+    match first {
+        '%' => Ok(Some((GrantPatternToken::Many, next))),
+        '_' => Ok(Some((GrantPatternToken::One, next))),
+        '\\' | '`' => {
+            let escaped = pattern[next..].chars().next().ok_or(())?;
+            if first == '`' && escaped != '`' {
+                return Err(());
+            }
+            Ok(Some((
+                GrantPatternToken::Literal(escaped),
+                next + escaped.len_utf8(),
+            )))
+        }
+        c => Ok(Some((GrantPatternToken::Literal(c), next))),
+    }
+}
+
+fn grant_schema_matches(scope: &str, database: &str, case_insensitive: bool) -> bool {
+    let Some(pattern) = scope.strip_prefix('`').and_then(|s| s.strip_suffix("`.*")) else {
+        return false;
+    };
+    let (mut p, mut d) = (0, 0);
+    let mut wildcard = None;
+    loop {
+        let token = match grant_pattern_token(pattern, p) {
+            Ok(token) => token,
+            Err(()) => return false,
+        };
+        if let Some((GrantPatternToken::Many, next)) = token {
+            wildcard = Some((next, d));
+            p = next;
+            continue;
+        }
+        let current = database[d..].chars().next();
+        match (token, current) {
+            (None, None) => return true,
+            (Some((GrantPatternToken::One, next)), Some(c)) => {
+                p = next;
+                d += c.len_utf8();
+            }
+            (Some((GrantPatternToken::Literal(expected), next)), Some(c))
+                if expected == c
+                    || (case_insensitive
+                        && expected.is_ascii()
+                        && c.is_ascii()
+                        && expected.eq_ignore_ascii_case(&c)) =>
+            {
+                p = next;
+                d += c.len_utf8();
+            }
+            _ => match wildcard {
+                Some((after, previous)) => {
+                    let Some(c) = database[previous..].chars().next() else {
+                        return false;
+                    };
+                    d = previous + c.len_utf8();
+                    p = after;
+                    wildcard = Some((after, d));
+                }
+                None => return false,
+            },
+        }
+    }
+}
+
+pub(super) async fn inspect(s: &mut MysqlSession, params: &Json) -> Result<Json> {
+    let objects = params
+        .get("objects")
+        .and_then(Json::as_array)
+        .ok_or_else(|| AppError::invalid("objects 必须是数组"))?;
+    let mut conn = s.new_connection().await?;
+    let lower_case: u64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
+        .fetch_one(&mut conn)
+        .await
+        .map_err(super::errors::mysql_error)?;
+    if !(0..=2).contains(&lower_case) {
+        return Err(AppError::new("database", "无法识别 lower_case_table_names"));
+    }
+    let case_insensitive = lower_case != 0;
+    // 只使用 SHOW GRANTS 明确列出的权限，角色继承不作为证明。
+    let rows = sqlx::query("SHOW GRANTS")
+        .fetch_all(&mut conn)
+        .await
+        .map_err(super::errors::mysql_error)?;
+    let grants: Vec<String> = rows
+        .into_iter()
+        .map(|row| row.try_get(0))
+        .collect::<std::result::Result<_, _>>()?;
+    let mut result = Vec::new();
+    for object in objects {
+        let database: String = param(object, "database")?;
+        let name: String = param(object, "name")?;
+        quote_ident(&database)?;
+        quote_ident(&name)?;
+        let write = object.get("write").and_then(Json::as_bool).unwrap_or(false);
+        let table_scope = format!("{}.{}", quote_ident(&database)?, quote_ident(&name)?);
+        let mut schema_select = false;
+        let mut global_select = false;
+        let mut object_select = false;
+        let mut show_view = false;
+        let mut trigger = false;
+        for grant in &grants {
+            let Some((permissions, rest)) = grant.split_once(" ON ") else {
+                continue;
+            };
+            let Some((scope, _)) = rest.split_once(" TO ") else {
+                continue;
+            };
+            let global = scope == "*.*";
+            let schema = grant_schema_matches(scope, &database, case_insensitive);
+            let object = scope == table_scope
+                || (case_insensitive && scope.eq_ignore_ascii_case(&table_scope));
+            if !global && !schema && !object {
+                continue;
+            }
+            let permissions = permissions.to_ascii_uppercase();
+            let all = permissions.contains("ALL PRIVILEGES");
+            let has_select = all
+                || permissions
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|p| p == "SELECT");
+            global_select |= global && has_select;
+            schema_select |= (global || schema) && has_select;
+            object_select |= has_select;
+            show_view |= all || permissions.contains("SHOW VIEW");
+            trigger |= all
+                || permissions
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|p| p == "TRIGGER");
+        }
+        let table = sqlx::query("SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")
+            .bind(&database).bind(&name).fetch_optional(&mut conn).await.map_err(super::errors::mysql_error)?;
+        let Some(table) = table else {
+            let complete = schema_select;
+            result.push(json!({"database":database,"name":name,"write":write,"kind":"unknown","exists":false,"view_definition":null,"triggers":[],"foreign_keys":[],"complete":complete,"reason":if complete { None } else { Some("对象不存在或元数据不可见") }}));
+            continue;
+        };
+        let actual_database: String = table.try_get("TABLE_SCHEMA")?;
+        let actual_name: String = table.try_get("TABLE_NAME")?;
+        let same = |left: &str, right: &str| {
+            left == right || (case_insensitive && left.eq_ignore_ascii_case(right))
+        };
+        if !same(&actual_database, &database) || !same(&actual_name, &name) {
+            result.push(json!({"database":database,"name":name,"write":write,"kind":"unknown","exists":null,"complete":false,"reason":"元数据对象标识符不匹配"}));
+            continue;
+        }
+        let kind = if table
+            .try_get::<String, _>("TABLE_TYPE")?
+            .eq_ignore_ascii_case("VIEW")
+        {
+            "view"
+        } else {
+            "table"
+        };
+        let definition: Option<String> = if kind == "view" {
+            sqlx::query_scalar("SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")
+                .bind(&actual_database).bind(&actual_name).fetch_optional(&mut conn).await.map_err(super::errors::mysql_error)?
+        } else {
+            None
+        };
+        let trigger_rows = if write {
+            sqlx::query("SELECT TRIGGER_NAME, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA=? AND EVENT_OBJECT_TABLE=?")
+            .bind(&actual_database).bind(&actual_name).fetch_all(&mut conn).await.map_err(super::errors::mysql_error)?
+        } else {
+            Vec::new()
+        };
+        let mut triggers = Vec::new();
+        for row in trigger_rows {
+            triggers.push(json!({"name":row.try_get::<String,_>("TRIGGER_NAME")?,"definition":row.try_get::<Option<String>,_>("ACTION_STATEMENT")?}));
+        }
+        // 同时收集出向和入向外键；后者可能通过 CASCADE 修改其他表。
+        // 全局 SELECT 是证明跨库入向引用未被元数据权限过滤的前提。
+        let fk_rows = if write {
+            sqlx::query("SELECT k.TABLE_SCHEMA,k.TABLE_NAME,k.REFERENCED_TABLE_SCHEMA,k.REFERENCED_TABLE_NAME,r.UPDATE_RULE,r.DELETE_RULE FROM information_schema.KEY_COLUMN_USAGE k LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND r.TABLE_NAME=k.TABLE_NAME AND r.CONSTRAINT_NAME=k.CONSTRAINT_NAME WHERE k.REFERENCED_TABLE_NAME IS NOT NULL AND ((k.TABLE_SCHEMA=? AND k.TABLE_NAME=?) OR (k.REFERENCED_TABLE_SCHEMA=? AND k.REFERENCED_TABLE_NAME=?))")
+            .bind(&actual_database).bind(&actual_name).bind(&actual_database).bind(&actual_name).fetch_all(&mut conn).await.map_err(super::errors::mysql_error)?
+        } else {
+            Vec::new()
+        };
+        let mut foreign_keys = Vec::new();
+        let mut foreign_keys_complete = true;
+        for row in fk_rows {
+            let source_db: String = row.try_get("TABLE_SCHEMA")?;
+            let source_name: String = row.try_get("TABLE_NAME")?;
+            let target_db: String = row.try_get("REFERENCED_TABLE_SCHEMA")?;
+            let target_name: String = row.try_get("REFERENCED_TABLE_NAME")?;
+            let outgoing = same(&source_db, &actual_database) && same(&source_name, &actual_name);
+            let incoming = same(&target_db, &actual_database) && same(&target_name, &actual_name);
+            let update_rule: Option<String> = row.try_get("UPDATE_RULE")?;
+            let delete_rule: Option<String> = row.try_get("DELETE_RULE")?;
+            let effect = |rule: Option<&str>| match rule {
+                Some("CASCADE" | "SET NULL") => Some(true),
+                Some("RESTRICT" | "NO ACTION") => Some(false),
+                _ => None,
+            };
+            let update_write = effect(update_rule.as_deref());
+            let delete_write = effect(delete_rule.as_deref());
+            foreign_keys_complete &= update_write.is_some() && delete_write.is_some();
+            if outgoing {
+                foreign_keys.push(json!({"database":target_db,"name":target_name,"write":false}));
+            }
+            if incoming {
+                foreign_keys.push(json!({"database":source_db,"name":source_name,"write":update_write.unwrap_or(true) || delete_write.unwrap_or(true)}));
+            }
+        }
+        let complete = object_select
+            && (!write || (global_select && trigger))
+            && (kind != "view" || (show_view && definition.is_some()))
+            && foreign_keys_complete
+            && triggers.iter().all(|t| !t["definition"].is_null());
+        result.push(json!({"database":database,"name":name,"actual_database":actual_database,"actual_name":actual_name,"write":write,"kind":kind,"exists":true,"view_definition":definition,"triggers":triggers,"foreign_keys":foreign_keys,"complete":complete,"reason":if complete { None } else { Some("无法证明视图、触发器及跨库外键元数据完整可见") }}));
+    }
+    Ok(json!({"objects":result}))
 }
 
 pub(super) async fn list(
@@ -254,7 +502,7 @@ async fn schema_inner(
     })
 }
 
-fn add_filter_arg(args: &mut MySqlArguments, value: &Json) -> Result<()> {
+pub(super) fn add_filter_arg(args: &mut MySqlArguments, value: &Json) -> Result<()> {
     let value = if value.is_object() && value.get("type").is_some() {
         serde_json::from_value::<Value>(value.clone())?
     } else {
@@ -267,6 +515,7 @@ fn add_filter_arg(args: &mut MySqlArguments, value: &Json) -> Result<()> {
         }
     };
     let result = match value {
+        Value::Null => args.add(Option::<String>::None),
         Value::Bool(v) => args.add(v),
         Value::Integer(v) => args.add(
             v.parse::<i64>()
@@ -329,7 +578,7 @@ pub(super) async fn browse(
     sql.push('.');
     sql.push_str(&quote_ident(&table.target.name)?);
     let columns: HashSet<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
-    let mut args = MySqlArguments::default();
+    let mut bindings = Vec::new();
     let filters = match params.get("filters") {
         None | Some(Json::Null) => &[][..],
         Some(v) => v
@@ -376,7 +625,7 @@ pub(super) async fn browse(
             if is_null {
                 return Err(AppError::invalid("NULL 过滤请使用 is_null 或 is_not_null"));
             }
-            add_filter_arg(&mut args, value)?;
+            bindings.push(value.clone());
             sql.push_str(" ?");
         }
     }
@@ -432,8 +681,19 @@ pub(super) async fn browse(
             end < sql.len(),
         )
         .await?;
-    let mut conn = s.new_connection().await?;
-    stream_query(&mut conn, &sql, args, table.columns, sink, cancel).await
+    let size = params
+        .get("page_size")
+        .and_then(Json::as_u64)
+        .unwrap_or(sink.store.settings().await?.paging.mysql_table_rows as u64)
+        .clamp(1, 1000) as usize;
+    let recipe = Recipe {
+        sql,
+        bindings,
+        source_columns: Some(table.columns),
+        independent: true,
+        context: None,
+    };
+    live::start(s, recipe, size, sink, cancel).await
 }
 
 #[cfg(test)]

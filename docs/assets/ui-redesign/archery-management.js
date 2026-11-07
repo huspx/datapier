@@ -109,17 +109,22 @@ function serverList() {
     )
   }</div>${
     servers.map(s =>
-      `<div class="archery-group"><div class="row"><strong class="server-list-name">${
-        h(s.name)
-      }</strong><span class="spacer"></span><button class="icon-button" data-archery="server-edit:${s.id}" title="${
+      `<div class="archery-group config-server-group"><div class="config-server-info">${
+        configRow(az('服务名称', 'Server name'), `<span class="server-list-name">${h(s.name)}</span>`)
+      }${configRow(az('服务地址', 'Server address'), `<span>${h(s.url)}</span>`)}${
+        configRow(az('用户名', 'Username'), `<span>${h(s.username)}</span>`)
+      }${
+        configRow(
+          az('关联连接', 'Connections'),
+          `<span>${archeryConnections.filter(c => c.server === s.id).length}</span>`,
+        )
+      }</div><div class="config-server-actions"><button class="icon-button" data-archery="server-edit:${s.id}" title="${
         az('编辑', 'Edit')
       }" aria-label="${az('编辑服务器', 'Edit server')}">${
         icon('edit')
       }</button><button class="icon-button danger" data-archery="server-delete:${s.id}" title="${
         az('删除', 'Delete')
-      }" aria-label="${az('删除服务器', 'Delete server')}">${icon('trash')}</button></div><p>${h(s.url)} · ${
-        h(s.username)
-      } · ${az('关联连接', 'Connections')}: ${archeryConnections.filter(c => c.server === s.id).length}</p></div>`
+      }" aria-label="${az('删除服务器', 'Delete server')}">${icon('trash')}</button></div></div>`
     ).join('')
   }`;
 }

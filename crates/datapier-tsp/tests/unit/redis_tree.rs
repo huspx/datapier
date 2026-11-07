@@ -109,3 +109,59 @@ fn deeply_delimited_key_stays_folded_without_recursive_storage() {
         }]
     ));
 }
+
+#[test]
+fn later_pages_keep_existing_order_and_group_new_children() {
+    let profile = Uuid::new_v4();
+    let owner = Some((profile, 0));
+    let mut expansion = Expansion::default();
+    expansion.toggle(profile, 0, &encoded(b"b:"));
+    let mut tree = Tree::from_resources(&resources(&[b"b:one", b"z", b"b:two"]));
+    tree.append(&resources(&[b"a:new", b"b:three", b"a", b"\xff"]));
+    let rows = tree.rows(&expansion, owner);
+    let visible: Vec<_> = rows
+        .iter()
+        .map(|row| match row.kind {
+            Kind::Directory { prefix, .. } => (prefix.to_vec(), None),
+            Kind::Key { index } => (row.label.to_vec(), Some(index)),
+        })
+        .collect();
+    assert_eq!(
+        visible,
+        vec![
+            (b"b:".to_vec(), None),
+            (b"one".to_vec(), Some(0)),
+            (b"two".to_vec(), Some(2)),
+            (b"three".to_vec(), Some(4)),
+            (b"z".to_vec(), Some(1)),
+            (b"a:".to_vec(), None),
+            (b"a".to_vec(), Some(5)),
+            (b"\xff".to_vec(), Some(6)),
+        ]
+    );
+    expansion.toggle(profile, 0, &encoded(b"a:"));
+    assert_eq!(keys(&tree.rows(&expansion, owner)), [0, 2, 4, 1, 3, 5, 6]);
+}
+
+#[test]
+fn reset_replaces_keys_and_expansion_is_scoped_to_database() {
+    let profile = Uuid::new_v4();
+    let mut expansion = Expansion::default();
+    expansion.toggle(profile, 0, &encoded(b"x:"));
+    let mut tree = Tree::from_resources(&resources(&[b"x:old", b"old"]));
+    tree.reset(&resources(&[b"x:\xff", b"new"]));
+    let opened = tree.rows(&expansion, Some((profile, 0)));
+    assert_eq!(keys(&opened), [0, 1]);
+    assert_eq!(opened[1].label, b"\xff");
+    let other_db = tree.rows(&expansion, Some((profile, 1)));
+    assert_eq!(keys(&other_db), [1]);
+    assert!(matches!(
+        other_db[0].kind,
+        Kind::Directory {
+            expanded: false,
+            ..
+        }
+    ));
+    tree.reset(&[]);
+    assert!(tree.rows(&expansion, Some((profile, 0))).is_empty());
+}

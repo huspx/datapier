@@ -54,7 +54,6 @@ async fn server_preflight_rejects_invalid_rows_without_changing_them() {
         assert_eq!(before, after);
     }
     store.pool.close().await;
-    store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -76,7 +75,6 @@ async fn server_preflight_checks_normalized_identity_and_accepts_valid_rows() {
     let reopened = Store::open(&root).await.unwrap();
     assert_eq!(reopened.archery_servers().await.unwrap().len(), 1);
     reopened.pool.close().await;
-    reopened.cache.close().await;
     sqlx::query(insert)
         .bind(Uuid::new_v4().to_string())
         .bind("服务二")
@@ -104,6 +102,5 @@ async fn server_preflight_checks_normalized_identity_and_accepts_valid_rows() {
             .unwrap();
     assert_eq!(before, after);
     store.pool.close().await;
-    store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

@@ -58,6 +58,8 @@ fn cache_session(provider: ProviderKind) -> ArcherySession {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "fixture".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider,
         access_mode: AccessMode::ReadOnly,
         connection: ConnectionConfig::Archery(ArcheryConnection {
@@ -84,7 +86,17 @@ async fn cached_platform_responses_preserve_columns_values_and_redis_coverage() 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let root = std::env::temp_dir().join(format!("datapier-archery-cache-{}", Uuid::new_v4()));
     let store = Store::open(&root).await.unwrap();
-    let sink = ExecutionSink::new(store.clone(), Uuid::new_v4());
+    let task = store
+        .create_task(
+            Uuid::new_v4(),
+            "archery-test",
+            "execution.start",
+            json!({}),
+            false,
+        )
+        .await
+        .unwrap();
+    let sink = ExecutionSink::new(store.clone(), task.id);
     let cancel = CancellationToken::new();
     let mysql = cache_session(ProviderKind::Mysql);
     let empty = decode_query(
@@ -209,7 +221,6 @@ async fn cached_platform_responses_preserve_columns_values_and_redis_coverage() 
     }
     drop(sink);
     store.pool.close().await;
-    store.cache.close().await;
     drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

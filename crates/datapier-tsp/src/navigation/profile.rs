@@ -67,6 +67,8 @@ impl App {
             self.session = None;
             self.generation = self.generation.wrapping_add(1);
             self.resources.clear();
+            self.workbench.redis_tree.reset(&[]);
+            self.workbench.redis_tree_owner = None;
             self.cursor = None;
             self.scan_token = None;
             self.schema = None;

@@ -122,6 +122,76 @@ fn same_auth_config(a: &ArcheryServer, b: &ArcheryServer) -> bool {
 }
 
 impl Engine {
+    pub(super) async fn mcp_archery_status(
+        &self,
+        _owner: Uuid,
+        server_id: Uuid,
+    ) -> Result<(String, u64)> {
+        let shared = self
+            .state
+            .lock()
+            .unwrap()
+            .archery
+            .shared
+            .get(&server_id)
+            .cloned();
+        Ok(match shared {
+            Some(shared) => {
+                let status = shared.auth.status().await;
+                (status.state, status.generation)
+            }
+            None => ("auth_required".into(), 0),
+        })
+    }
+    pub(super) fn mcp_archery_release_controller(&self, owner: Uuid, server_id: Uuid) {
+        let shared = self
+            .state
+            .lock()
+            .unwrap()
+            .archery
+            .shared
+            .get(&server_id)
+            .cloned();
+        if let Some(shared) = shared {
+            let mut controller = shared.controller.lock().unwrap();
+            if controller
+                .as_ref()
+                .is_some_and(|current| current.owner == owner && current.verify_operation.is_none())
+            {
+                *controller = None;
+            }
+        }
+    }
+    pub(super) async fn discover_archery_databases(
+        &self,
+        owner: Uuid,
+        profile: &Profile,
+    ) -> Result<Value> {
+        let connection = profile
+            .archery()
+            .ok_or_else(|| AppError::invalid("连接不是 Archery 来源"))?;
+        let entry = self.ready_entry(owner, connection.server_id).await?;
+        let cancel = CancellationToken::new();
+        let instances = entry.auth.instances(&cancel).await?;
+        let instance = instances
+            .iter()
+            .find(|item| {
+                item.id == connection.instance_id
+                    && item.name == connection.instance_name
+                    && item.provider == profile.provider
+            })
+            .ok_or_else(|| AppError::new("target_changed", "所选实例已不在当前账号范围"))?;
+        let available = entry.auth.databases(instance, &cancel).await?;
+        let databases: Vec<_> = connection
+            .databases
+            .iter()
+            .filter(|name| available.contains(name))
+            .cloned()
+            .collect();
+        Ok(
+            json!({"state":"known","source":"platform_reported","databases":databases,"configured_count":null,"reason":null}),
+        )
+    }
     pub(super) fn service_gate(&self, server_id: Uuid) -> Arc<AsyncMutex<()>> {
         self.state
             .lock()

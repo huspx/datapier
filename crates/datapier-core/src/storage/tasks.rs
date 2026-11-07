@@ -10,11 +10,69 @@ impl Store {
         params: Json,
         may_write: bool,
     ) -> Result<TaskRecord> {
+        let params = sanitize_params(params);
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO executions(id,owner,workspace_id,method,params,state,sent,may_write,summary) VALUES(?,?,?,?,?,'queued',0,?,'null')")
             .bind(id.to_string()).bind(owner.to_string()).bind(workspace).bind(method).bind(params.to_string())
             .bind(i64::from(may_write)).execute(&self.pool).await?;
         self.task(id).await
+    }
+
+    /// 按全局保留规则清理终态命令，存活结果及尚需核对的执行始终保留。
+    pub async fn cleanup_history(&self) -> Result<u64> {
+        let settings = self.settings().await?;
+        let history = &settings.history;
+        if !history.auto_cleanup_enabled
+            || (history.retention_days.is_none() && history.max_entries.is_none())
+        {
+            return Ok(0);
+        }
+        let retention = history
+            .retention_days
+            .map(|days| days.saturating_mul(86_400).min(i64::MAX as u64) as i64);
+        let maximum = history
+            .max_entries
+            .map(|count| count.min(i64::MAX as u64) as i64);
+        // 与 start_result 共用锁直到事务结束，防止检查后产生依赖已删除 proof 的结果。
+        let mut results = self.results.lock().await;
+        let live =
+            results.live_execution_ids(Duration::from_secs(settings.limits.result_idle_seconds));
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("CREATE TEMP TABLE IF NOT EXISTS history_cleanup_candidates(seq INTEGER PRIMARY KEY,id TEXT NOT NULL)").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM history_cleanup_candidates")
+            .execute(&mut *tx)
+            .await?;
+        // 先冻结排序，再分批删除；删除不能改变尚未遍历记录的排名。
+        sqlx::query("INSERT INTO history_cleanup_candidates(seq,id) SELECT seq,id FROM (SELECT rowid AS seq,id,state,created_at,row_number() OVER (ORDER BY created_at DESC,rowid DESC) AS rank FROM executions WHERE method IN ('execution.start','execution.run')) WHERE state IN ('succeeded','failed','cancelled') AND ((? IS NOT NULL AND created_at < unixepoch()-?) OR (? IS NOT NULL AND rank>?))")
+            .bind(retention).bind(retention).bind(maximum).bind(maximum).execute(&mut *tx).await?;
+        let mut last = 0i64;
+        let mut deleted = 0u64;
+        loop {
+            let rows = sqlx::query(
+                "SELECT seq,id FROM history_cleanup_candidates WHERE seq>? ORDER BY seq LIMIT 200",
+            )
+            .bind(last)
+            .fetch_all(&mut *tx)
+            .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                last = row.get(0);
+                let id: &str = row.get(1);
+                if live.contains(&parse_id(id)?) {
+                    continue;
+                }
+                let result = sqlx::query("DELETE FROM executions WHERE id=? AND state IN ('succeeded','failed','cancelled') AND NOT EXISTS (SELECT 1 FROM approvals WHERE execution_id=executions.id AND state IN ('pending','dispatching'))")
+                    .bind(id).execute(&mut *tx).await?;
+                deleted += result.rows_affected();
+            }
+        }
+        sqlx::query("DROP TABLE history_cleanup_candidates")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(deleted)
     }
     /// 查询开始时记录物理连接的当前数据库，不能以初始连接配置代替 USE 后的状态。
     pub async fn record_task_database(&self, id: Uuid, database: Option<&str>) -> Result<()> {
@@ -36,25 +94,7 @@ impl Store {
         let owner = Uuid::parse_str(row.get::<&str, _>(0))
             .map_err(|e| AppError::new("storage", e.to_string()))?;
         let error: Option<String> = row.get(7);
-        let result_rows = sqlx::query(
-            "SELECT id,row_count,complete,kind,CASE WHEN kind='columns_unknown' THEN NULL ELSE json_array_length(columns) END,json_extract(summary,'$.redis_type') FROM results WHERE execution_id=? ORDER BY rowid",
-        )
-        .bind(id.to_string())
-        .fetch_all(&self.cache)
-        .await?;
-        let result_summaries: Vec<TaskResultSummary> = result_rows
-            .iter()
-            .map(|result| {
-                Ok(TaskResultSummary {
-                    id: parse_id(result.get::<&str, _>(0))?,
-                    row_count: result.get::<i64, _>(1) as u64,
-                    complete: result.get::<i64, _>(2) != 0,
-                    kind: result.get(3),
-                    column_count: result.get::<Option<i64>, _>(4).map(|n| n as u64),
-                    redis_type: result.get(5),
-                })
-            })
-            .collect::<Result<_>>()?;
+        let result_summaries = self.result_summaries(id).await?;
         let summary: Json = serde_json::from_str(row.get::<&str, _>(6))?;
         let context: Option<String> = row.get(9);
         let mut context: Option<crate::model::TaskContext> = context
@@ -162,6 +202,37 @@ impl Store {
             .bind(&interrupted).bind(unknown).bind(interrupted).execute(&self.pool).await?;
         Ok(())
     }
+    /// 返回未分页授权之前的候选，调用方必须先过滤再统计和输出。
+    pub async fn history_candidates(
+        &self,
+        workspace: &str,
+        search: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<TaskRecord>> {
+        if limit == 0 || limit > 1000 || offset > i64::MAX as u64 {
+            return Err(AppError::invalid("历史分页参数无效"));
+        }
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM executions WHERE workspace_id=? AND method IN ('execution.start','execution.run') AND (instr(lower(COALESCE(json_extract(params,'$.text'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(params,'$._execution_text'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(params,'$._task_context'),'')),lower(?))>0) ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?")
+            .bind(workspace).bind(search).bind(search).bind(search).bind(limit as i64).bind(offset as i64).fetch_all(&self.pool).await?;
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id in ids {
+            tasks.push(self.task_details(parse_id(&id)?).await?);
+        }
+        Ok(tasks)
+    }
+    pub async fn execution_proof(&self, id: Uuid) -> Result<Option<Json>> {
+        let value: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT json_extract(params,'$._access_proof') FROM executions WHERE id=?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        value
+            .ok_or_else(|| AppError::new("not_found", "任务不存在"))?
+            .map(|v| serde_json::from_str(&v).map_err(Into::into))
+            .transpose()
+    }
     /// 在同一读取快照中合并有效状态、筛选、计数并分页。
     pub async fn history(
         &self,
@@ -223,4 +294,38 @@ impl Store {
         tx.commit().await?;
         Ok(json!({"items":items,"total":total,"offset":offset,"limit":limit}))
     }
+}
+
+fn sanitize_params(mut value: Json) -> Json {
+    fn clean(value: &mut Json) {
+        match value {
+            Json::Object(map) => {
+                map.retain(|key, _| {
+                    !matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "before"
+                            | "rows"
+                            | "result"
+                            | "password"
+                            | "secret"
+                            | "token"
+                            | "cookie"
+                            | "otp"
+                            | "totp"
+                    )
+                });
+                for child in map.values_mut() {
+                    clean(child);
+                }
+            }
+            Json::Array(items) => {
+                for item in items {
+                    clean(item);
+                }
+            }
+            _ => {}
+        }
+    }
+    clean(&mut value);
+    value
 }

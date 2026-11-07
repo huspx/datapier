@@ -475,3 +475,95 @@ async fn history_large_text_is_bounded_but_details_remain_complete() {
     }
     cleanup(store).await;
 }
+
+#[tokio::test]
+async fn history_retention_keeps_live_results_and_pending_execution() {
+    let store = fixture().await;
+    let owner = Uuid::new_v4();
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        tasks.push(
+            store
+                .create_task(
+                    owner,
+                    "main",
+                    "execution.run",
+                    json!({"text":"select 1"}),
+                    false,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    for task in &tasks {
+        sqlx::query("UPDATE executions SET created_at=1 WHERE id=?")
+            .bind(task.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+    for task in &tasks[..2] {
+        store
+            .update_task(task.id, "succeeded", json!({}), None)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE executions SET state='approval_required' WHERE id=?")
+        .bind(tasks[2].id.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let result = store
+        .start_result(tasks[0].id, vec![], "query")
+        .await
+        .unwrap();
+    store.finish_result(result, json!({})).await.unwrap();
+    assert_eq!(store.cleanup_history().await.unwrap(), 0);
+    assert!(store.task(tasks[1].id).await.is_ok());
+    let mut settings = store.settings().await.unwrap();
+    settings.history.auto_cleanup_enabled = true;
+    settings.history.retention_days = Some(1);
+    store.set_settings(&settings).await.unwrap();
+    assert!(store.task(tasks[0].id).await.is_ok());
+    assert_eq!(store.task(tasks[1].id).await.unwrap_err().code, "not_found");
+    assert!(store.task(tasks[2].id).await.is_ok());
+    assert!(store.task(tasks[3].id).await.is_ok());
+    store.release_result(result).await.unwrap();
+    assert_eq!(store.cleanup_history().await.unwrap(), 1);
+    assert_eq!(store.task(tasks[0].id).await.unwrap_err().code, "not_found");
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn history_max_entries_uses_original_order_across_deletions() {
+    let store = fixture().await;
+    let mut ids = Vec::new();
+    for index in 1..=5 {
+        let task = store
+            .create_task(Uuid::new_v4(), "main", "execution.start", json!({}), false)
+            .await
+            .unwrap();
+        store
+            .update_task(task.id, "succeeded", json!({}), None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE executions SET created_at=? WHERE id=?")
+            .bind(index as i64)
+            .bind(task.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        ids.push(task.id);
+    }
+    let mut settings = store.settings().await.unwrap();
+    settings.history.auto_cleanup_enabled = true;
+    settings.history.max_entries = Some(2);
+    store.set_settings(&settings).await.unwrap();
+    for id in &ids[..3] {
+        assert!(store.task(*id).await.is_err());
+    }
+    for id in &ids[3..] {
+        assert!(store.task(*id).await.is_ok());
+    }
+    cleanup(store).await;
+}

@@ -25,6 +25,8 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
     let direct = Profile {
         id: Uuid::new_v4(),
         name: "d".repeat(2 * 1024 * 1024 + 1024),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: ConnectionConfig::Direct(model::DirectConnection {
@@ -33,6 +35,7 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
             username: "test".into(),
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -57,13 +60,13 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
     let handler = tokio::spawn(client(engine.clone(), Uuid::new_v4(), Box::new(stream)));
     protocol::write(
         &mut peer,
-        &json!({"id":"open","method":"session.open","params":{"protocol_version":2}}),
+        &json!({"id":"open","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
     )
     .await
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        2
+        3
     );
     protocol::write(
         &mut peer,
@@ -224,7 +227,7 @@ async fn sql_check_paginates_large_platform_details() {
         let page = engine
             .dispatch(
                 owner,
-                "result.page",
+                "result.read",
                 json!({"result_id":result,"start":start,"max_rows":80,"max_bytes":16384}),
             )
             .await
@@ -258,7 +261,7 @@ async fn sql_check_paginates_large_platform_details() {
 }
 
 #[tokio::test]
-async fn cached_export_survives_connection_switch_auth_expiry_and_restart() {
+async fn retained_export_survives_switch_and_auth_expiry_but_not_restart() {
     let (engine, root, owner, fixture, auth) = setup().await;
     let item = profile(fixture.server.id, 7, "one");
     save(&engine, owner, &fixture, &auth, vec![item.clone()])
@@ -324,10 +327,14 @@ async fn cached_export_survives_connection_switch_auth_expiry_and_restart() {
     assert_eq!(recovered.state, "failed");
     assert_eq!(recovered.error.unwrap().code, "interrupted");
     let id: Uuid = serde_json::from_value(result_id).unwrap();
-    let page = reopened.result_page(id, 0, 10, 16384).await.unwrap();
-    assert_eq!(page.rows.len(), 1);
-    assert_eq!(page.rows[0][0], model::Value::Integer("1".into()));
-    assert!(page.result.complete);
+    assert_eq!(
+        reopened
+            .result_page(id, 0, 10, 16384)
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
     assert_eq!(fixture.count(), before);
     drop(reopened);
     let _ = std::fs::remove_dir_all(root);
@@ -341,6 +348,8 @@ async fn direct_only_profile_list_keeps_existing_response_limit() {
     let direct = Profile {
         id: Uuid::new_v4(),
         name: "d".repeat(5 * 1024 * 1024),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: ConnectionConfig::Direct(model::DirectConnection {
@@ -349,6 +358,7 @@ async fn direct_only_profile_list_keeps_existing_response_limit() {
             username: "test".into(),
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),

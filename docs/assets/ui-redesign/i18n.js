@@ -48,7 +48,8 @@ const messages = {
     binaryColumns: '二进制列 JSON',
     previewImport: '预览导入',
     confirmImport: '确认导入',
-    exportFull: '导出完整结果',
+    previewExport: '预览导出请求',
+    exportScope: '支持实时分页的安全只读查询可重新执行以导出结果；其他结果仅导出已保留的范围。',
     requestPreviewOnly: '请求预览；未发送，也不会读取或写入文件。',
     columnComment: '注释',
     setNull: '设为 NULL',
@@ -492,7 +493,9 @@ const messages = {
     binaryColumns: 'Binary columns JSON',
     previewImport: 'Preview import',
     confirmImport: 'Confirm import',
-    exportFull: 'Export full result',
+    previewExport: 'Preview export request',
+    exportScope:
+      'Safe read-only queries that support live paging can be re-executed to export results; other results are limited to the retained range.',
     requestPreviewOnly: 'Request preview only; nothing is sent and no files are read or written.',
     columnComment: 'Comment',
     setNull: 'Set NULL',
@@ -945,10 +948,16 @@ function translatePreview() {
   );
   $('#preview-state').querySelectorAll('option').forEach(option => {
     const archeryLabel = archeryPreviewLabels[option.value];
-    option.textContent = archeryLabel
+    const mcpLabel = mcpPreviewLabels[option.value];
+    const resultLabel = resultPreviewLabels[option.value];
+    option.textContent = mcpLabel
+      ? mcpLabel[language === 'zh-CN' ? 0 : 1]
+      : archeryLabel
       ? archeryLabel[language === 'zh-CN' ? 0 : 1]
+      : resultLabel
+      ? resultLabel[language === 'zh-CN' ? 'zh' : 'en']
       : t('previewOptions')[option.value];
-    option.hidden = option.value.startsWith('archery-') !== (previewSource === 'archery');
+    option.hidden = !mcpLabel && option.value.startsWith('archery-') !== (previewSource === 'archery');
   });
   document.querySelector('.preview-note').textContent = t('previewNote');
 }

@@ -22,6 +22,26 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// 连接 Engine 时登记的客户端身份和访问范围。
+#[derive(Clone, Debug)]
+pub struct ClientOptions {
+    pub kind: datapier_core::model::ClientKind,
+    pub workspace: String,
+    pub allow_connections: Vec<Uuid>,
+    pub start_engine: bool,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            kind: datapier_core::model::ClientKind::Tsp,
+            workspace: "default".into(),
+            allow_connections: Vec::new(),
+            start_engine: true,
+        }
+    }
+}
+
 /// 所属客户端的任务状态通知，不承载 SQL、凭据或结果行。
 ///
 /// 通知可能先于启动请求的响应到达，也可能因订阅背压而丢失；消费者应按
@@ -88,6 +108,11 @@ impl Client {
     /// 数据目录必须通过当前用户权限检查。启动竞态由 Engine 的 OS 文件锁裁决，
     /// 只探测 socket 或描述文件不能证明实例有效；协议不兼容时直接报错，不强杀旧实例。
     pub async fn connect(root: &Path) -> Result<Self> {
+        Self::connect_with(root, ClientOptions::default()).await
+    }
+
+    /// 使用明确的客户端身份连接；窗口桥接可禁止启动新的 Engine。
+    pub async fn connect_with(root: &Path, options: ClientOptions) -> Result<Self> {
         let root = platform::root(root)?;
         let endpoint = platform::endpoint(&root)?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -95,8 +120,11 @@ impl Client {
         loop {
             let error = match platform::connect(&endpoint).await {
                 Ok(stream) => {
-                    match tokio::time::timeout(Duration::from_secs(5), Self::handshake(stream))
-                        .await
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        Self::handshake(stream, options.clone()),
+                    )
+                    .await
                     {
                         Ok(Ok(client)) => return Ok(client),
                         Ok(Err(error)) if error.code == "protocol_incompatible" => {
@@ -108,6 +136,12 @@ impl Client {
                 }
                 Err(error) => error,
             };
+            if !options.start_engine {
+                return Err(AppError::new(
+                    "connection_failed",
+                    format!("无法连接 Engine：{error}"),
+                ));
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(AppError::new(
                     "connection_failed",
@@ -121,7 +155,7 @@ impl Client {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    async fn handshake(stream: platform::Stream) -> Result<Self> {
+    async fn handshake(stream: platform::Stream, options: ClientOptions) -> Result<Self> {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let (tx, mut rx) = mpsc::channel::<Value>(128);
         let inner = Arc::new(Inner {
@@ -197,7 +231,7 @@ impl Client {
             inner,
         };
         let handshake = match client
-            .request("session.open", json!({"protocol_version":2}))
+            .request("session.open", json!({"protocol_version":3,"client_kind":options.kind,"workspace":options.workspace,"allow_connections":options.allow_connections}))
             .await
         {
             Ok(value) => value,
@@ -206,7 +240,7 @@ impl Client {
                 return Err(e);
             }
         };
-        if handshake.get("protocol_version").and_then(Value::as_u64) != Some(2) {
+        if handshake.get("protocol_version").and_then(Value::as_u64) != Some(3) {
             client.inner.shutdown.cancel();
             return Err(AppError::new(
                 "protocol_incompatible",

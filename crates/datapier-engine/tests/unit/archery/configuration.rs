@@ -73,6 +73,7 @@ async fn batch_rechecks_full_baseline_and_local_changes_need_no_discovery() {
     assert_eq!(changed["modified"], json!([renamed.id]));
     assert_eq!(changed["deleted"], json!([two.id]));
     assert_eq!(fixture.count(), before);
+    let renamed = engine.store.profile(renamed.id).await.unwrap();
     let result = engine.dispatch(owner, "archery.profile.apply_batch", json!({"server_id":fixture.server.id,"expected_server_revision":1,"expected_profiles":[renamed],"desired_profiles":[]})).await.unwrap();
     assert_eq!(result["profiles"], json!([]));
     assert!(engine.store.archery_server(fixture.server.id).await.is_ok());

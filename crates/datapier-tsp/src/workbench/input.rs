@@ -84,6 +84,13 @@ impl App {
         {
             return true;
         }
+        if self.approvals.open {
+            if key.is("escape") {
+                self.action("approval-close", backend);
+                return true;
+            }
+            return false;
+        }
         if self.workbench.overlay.is_some() {
             if key.is("escape") {
                 self.action("overlay-close", backend);

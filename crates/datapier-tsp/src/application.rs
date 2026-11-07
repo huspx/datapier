@@ -2,6 +2,57 @@
 use super::*;
 use crate::i18n::UiMessage;
 
+pub(super) const SETTINGS_FIELDS: &[(&str, &str, &str)] = &[
+    ("paging", "mysql_table_rows", "MySQL 表页行数"),
+    ("paging", "sql_rows", "SQL 页行数"),
+    ("paging", "redis_value_rows", "Redis 值页行数"),
+    ("paging", "history_rows", "历史页行数"),
+    ("paging", "archery_grid_rows", "平台结果页行数"),
+    ("paging", "redis_key_batch", "Redis key 批量"),
+    ("archery", "request_rows", "平台请求行数"),
+    ("limits", "mcp_response_rows", "MCP 最大行数"),
+    ("limits", "response_bytes", "响应字节上限"),
+    ("limits", "value_preview_bytes", "值预览字节数"),
+    ("limits", "connect_timeout_seconds", "连接超时（秒）"),
+    ("limits", "query_timeout_seconds", "查询超时（秒）"),
+    ("limits", "count_timeout_seconds", "计数超时（秒）"),
+    ("limits", "result_idle_seconds", "结果空闲回收（秒）"),
+    (
+        "limits",
+        "result_memory_bytes_per_client",
+        "客户端结果内存字节数",
+    ),
+    ("limits", "running_tasks_per_mcp_client", "MCP 并发任务数"),
+    ("approval", "ttl_seconds", "审批有效期（秒）"),
+    ("history", "retention_days", "历史保留天数（可留空）"),
+    ("history", "max_entries", "历史最大条数（可留空）"),
+];
+pub(super) const SETTINGS_SWITCHES: &[(&str, &str, &str)] = &[
+    ("mcp", "fine_grained_access", "MCP 细粒度权限"),
+    ("notifications", "approval", "审批通知"),
+    ("notifications", "authentication", "认证通知"),
+    ("history", "auto_cleanup_enabled", "自动清理历史"),
+];
+
+pub(super) fn settings_is_mcp(group: &str, key: &str) -> bool {
+    matches!(group, "mcp" | "notifications" | "approval")
+        || (group == "limits"
+            && matches!(key, "mcp_response_rows" | "running_tasks_per_mcp_client"))
+}
+
+fn settings_field(group: &str, key: &str) -> String {
+    format!("settings-{group}-{key}")
+}
+fn settings_text(value: &Value) -> String {
+    if value.is_null() {
+        String::new()
+    } else if let Some(text) = value.as_str() {
+        text.to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
 pub(super) fn mysql_mode(value: &Value) -> Option<editor::MysqlMode> {
     let mode = value.get("sql_mode")?.as_str()?;
     Some(editor::MysqlMode {
@@ -37,6 +88,79 @@ pub(super) struct ArcheryHistory {
 }
 
 impl App {
+    fn settings_load_fields(&mut self) {
+        let value = serde_json::to_value(&self.settings).unwrap_or_default();
+        for &(group, key, _) in SETTINGS_FIELDS.iter().chain(SETTINGS_SWITCHES) {
+            self.field_set(
+                &settings_field(group, key),
+                settings_text(&value[group][key]),
+            );
+        }
+        self.field_set(
+            "settings-approval-default_policy",
+            settings_text(&value["approval"]["default_policy"]),
+        );
+    }
+    fn mcp_rules_request(
+        &mut self,
+        backend: &Backend,
+        operation: &str,
+        method: &str,
+        params: Value,
+        retry: &str,
+    ) {
+        let tag = format!(
+            "{operation}/{}/{}",
+            self.field("mcp-rule-profile"),
+            Uuid::new_v4()
+        );
+        self.field_set("mcp-rule-pending", &tag);
+        self.field_set("mcp-rule-error", "");
+        self.field_set("mcp-rule-retry", retry);
+        if let Err(error) = backend.request(&tag, method, params) {
+            self.field_set("mcp-rule-pending", "");
+            self.field_set("mcp-rule-error", error.to_string());
+        }
+    }
+
+    pub(super) fn mcp_rules_response(
+        &mut self,
+        tag: &str,
+        result: &Result<Value>,
+        backend: &Backend,
+    ) {
+        let Some((operation, rest)) = tag.split_once('/') else {
+            return;
+        };
+        let Some((id, _)) = rest.split_once('/') else {
+            return;
+        };
+        if self.field("mcp-rule-profile") != id || self.field("mcp-rule-pending") != tag {
+            return;
+        }
+        self.field_set("mcp-rule-pending", "");
+        match result {
+            Ok(value) if operation == "mcp-rules-get" => {
+                self.field_set("mcp-rule-data", value.to_string());
+            }
+            Ok(value) if operation == "mcp-rules-set" || operation == "mcp-policy-set" => {
+                if let Some(policy) = value["profile"]["approval_policy"].as_str() {
+                    self.field_set("mcp-rule-policy", policy);
+                }
+                self.mcp_rules_request(
+                    backend,
+                    "mcp-rules-get",
+                    "profile.rules.get",
+                    json!({"profile_id":id}),
+                    &format!("mcp-rules-load:{id}"),
+                );
+                self.request(backend, "profile.list", "profile.list", json!({}));
+            }
+            Err(error) => self.field_set("mcp-rule-error", error.to_string()),
+            _ => {}
+        }
+    }
+
     pub(super) fn refresh_settings(&mut self, backend: &Backend) {
         if self.settings_save_token.is_some() || self.settings_unsaved {
             return;
@@ -46,11 +170,14 @@ impl App {
             "settings.get",
             json!({}),
         ) {
+            self.field_set("settings-reload", "false");
+            self.field_set("settings-error", error.to_string());
             self.status = i18n::UiMessage::raw(error.to_string());
         }
     }
 
     fn save_settings(&mut self, backend: &Backend) {
+        self.field_set("settings-error", "");
         let token = Uuid::new_v4();
         self.settings_save_token = Some(token);
         self.settings_unsaved = false;
@@ -60,6 +187,7 @@ impl App {
             json!({"settings":self.settings}),
         ) {
             self.settings_save_token = None;
+            self.field_set("settings-error", error.to_string());
             self.settings_unsaved = true;
             self.status = i18n::UiMessage::template(
                 "语言选择仅应用于本次会话，未保存: {error}",
@@ -95,22 +223,31 @@ impl App {
             .and_then(|v| serde_json::from_value::<AppSettings>(v).map_err(Into::into))
         {
             Ok(settings) => {
+                let first_load = !self.settings_loaded;
+                self.settings_loaded = true;
+                self.field_set("settings-error", "");
+                if saving && self.settings_unsaved {
+                    self.settings.revision = settings.revision;
+                }
                 if !saving || !self.settings_unsaved {
                     self.settings = settings;
                     self.settings_unsaved = false;
+                    if !saving && (first_load || self.field("settings-reload") == "true") {
+                        self.settings_load_fields();
+                        self.field_set("settings-reload", "false");
+                    }
                     i18n::set_preference(self.settings.language);
                 }
             }
             Err(error) => {
+                self.field_set("settings-reload", "false");
+                self.field_set("settings-error", error.to_string());
                 self.settings_unsaved |= saving;
-                self.status = if saving {
-                    i18n::UiMessage::template(
-                        "语言选择仅应用于本次会话，未保存: {error}",
-                        vec![("error", i18n::UiArg::Raw(error.to_string()))],
-                    )
-                } else {
-                    i18n::UiMessage::raw(error.to_string())
-                };
+                self.status = i18n::UiMessage::template(
+                    "设置未保存: {error}；请重新加载设置后再保存",
+                    vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                );
+                return;
             }
         }
         if response_pending {
@@ -327,12 +464,185 @@ impl App {
             if self.finish_inline(true) {
                 self.workbench.overlay = Some("settings".into());
                 self.refresh_archery_servers(backend);
+                self.settings_load_fields();
+                self.field_set("settings-tab", "general");
+                self.field_set("mcp-rule-profile", "");
+                self.field_set("mcp-rule-data", "");
+                self.field_set("mcp-rule-scope", "");
+                self.field_set("mcp-rule-pending", "");
+                self.field_set("mcp-rule-error", "");
+            }
+            return true;
+        }
+        if let Some(tab) = name.strip_prefix("settings-tab:") {
+            if matches!(tab, "general" | "mcp") {
+                self.field_set("settings-tab", tab);
+                self.workbench.generic_select = None;
             }
             return true;
         }
         if name == "query-result-close" {
             // 隐藏结果不等于取消任务；任务和独立结果引用继续由所属 tab 管理。
             self.workbench.query_ui.results_hidden = true;
+            return true;
+        }
+        if let Some(id) = name.strip_prefix("mcp-rules-load:") {
+            self.workbench.generic_select = None;
+            if let Some(policy) = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id.to_string() == id)
+                .and_then(|profile| serde_json::to_value(profile.approval_policy).ok())
+                .and_then(|value| value.as_str().map(str::to_owned))
+            {
+                if self.field("mcp-rule-profile") != id {
+                    self.field_set("mcp-rule-data", "");
+                    self.field_set("mcp-rule-scope", "");
+                    self.field_set("mcp-rule-policy", policy);
+                }
+                self.field_set("mcp-rule-profile", id);
+                self.mcp_rules_request(
+                    backend,
+                    "mcp-rules-get",
+                    "profile.rules.get",
+                    json!({"profile_id":id}),
+                    name,
+                );
+            }
+            return true;
+        }
+        if let Some(level) = name.strip_prefix("mcp-rules-level:") {
+            if !self.field("mcp-rule-pending").is_empty() {
+                return true;
+            }
+            if !matches!(level, "disabled" | "read_only" | "read_write") {
+                return true;
+            }
+            let id = self.field("mcp-rule-profile").to_owned();
+            let Some(profile) = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id.to_string() == id)
+            else {
+                return true;
+            };
+            let redis = profile.provider == datapier_core::model::ProviderKind::Redis;
+            let scope = if redis {
+                "*".to_owned()
+            } else {
+                self.field("mcp-rule-scope").trim().to_owned()
+            };
+            if scope.is_empty() {
+                self.field_set("mcp-rule-error", i18n::tr("请填写数据库名称").into_owned());
+                self.field_set("mcp-rule-retry", "");
+                return true;
+            }
+            let Ok(mut data) = serde_json::from_str::<Value>(self.field("mcp-rule-data")) else {
+                return true;
+            };
+            let Some(rules) = data["rules"].as_array_mut() else {
+                return true;
+            };
+            let kind = if redis { "instance" } else { "database" };
+            rules.retain(|rule| !(rule["scope_kind"] == kind && rule["scope_key"] == scope));
+            rules.push(json!({"profile_id":id,"scope_kind":kind,"scope_key":scope,"level":level}));
+            self.field_set("mcp-rule-data", data.to_string());
+            self.field_set("mcp-rule-error", "");
+            self.field_set("mcp-rule-retry", "");
+            return true;
+        }
+        if let Some(policy) = name.strip_prefix("mcp-policy-set:") {
+            if self.field("mcp-rule-pending").is_empty()
+                && matches!(policy, "off" | "dangerous" | "all_writes")
+            {
+                let id = self.field("mcp-rule-profile").to_owned();
+                if let Ok(data) = serde_json::from_str::<Value>(self.field("mcp-rule-data")) {
+                    self.mcp_rules_request(backend, "mcp-policy-set", "profile.approval.set", json!({"profile_id":id,"expected_revision":data["revision"],"approval_policy":policy}), name);
+                }
+            }
+            return true;
+        }
+        if name == "mcp-rules-save" {
+            if self.field("mcp-rule-pending").is_empty() {
+                let id = self.field("mcp-rule-profile").to_owned();
+                if let Ok(data) = serde_json::from_str::<Value>(self.field("mcp-rule-data")) {
+                    self.mcp_rules_request(backend, "mcp-rules-set", "profile.rules.set", json!({"profile_id":id,"expected_revision":data["revision"],"rules":data["rules"]}), name);
+                }
+            }
+            return true;
+        }
+        if name == "settings-reload" {
+            if self.settings_save_token.is_none() {
+                self.settings_unsaved = false;
+                self.settings_epoch = self.settings_epoch.wrapping_add(1);
+                self.field_set("settings-reload", "true");
+                self.refresh_settings(backend);
+            }
+            return true;
+        }
+        if let Some(rest) = name.strip_prefix("settings-toggle:") {
+            if let Some((group, key)) = rest.split_once(':') {
+                let field = settings_field(group, key);
+                let next = self.field(&field) != "true";
+                self.field_set(&field, next.to_string());
+            }
+            return true;
+        }
+        if let Some(policy) = name.strip_prefix("settings-policy:") {
+            if matches!(policy, "dangerous" | "all_writes") {
+                self.field_set("settings-approval-default_policy", policy);
+            }
+            return true;
+        }
+        if name == "settings-save" {
+            if !self.settings_loaded || self.field("settings-reload") == "true" {
+                return true;
+            }
+            self.field_set("settings-error", "");
+            let Ok(mut value) = serde_json::to_value(&self.settings) else {
+                return true;
+            };
+            for &(group, key, label) in SETTINGS_FIELDS {
+                let text = self.field(&settings_field(group, key)).trim();
+                let parsed = if text.is_empty() && group == "history" {
+                    Value::Null
+                } else if let Ok(number) = text.parse::<u64>() {
+                    json!(number)
+                } else {
+                    self.field_set(
+                        "settings-error",
+                        i18n::format_message(
+                            "无效设置: {setting}",
+                            &[("setting", &i18n::tr(label))],
+                        ),
+                    );
+                    self.status = i18n::UiMessage::template(
+                        "无效设置: {setting}",
+                        vec![("setting", i18n::UiArg::Raw(format!("{group}.{key}")))],
+                    );
+                    return true;
+                };
+                value[group][key] = parsed;
+            }
+            for &(group, key, _) in SETTINGS_SWITCHES {
+                value[group][key] = json!(self.field(&settings_field(group, key)) == "true");
+            }
+            value["approval"]["default_policy"] =
+                json!(self.field("settings-approval-default_policy"));
+            match serde_json::from_value::<AppSettings>(value) {
+                Ok(settings) => {
+                    self.settings = settings;
+                    self.settings_epoch = self.settings_epoch.wrapping_add(1);
+                    self.settings_unsaved = true;
+                    if self.settings_save_token.is_none() {
+                        self.save_settings(backend);
+                    }
+                }
+                Err(error) => {
+                    self.field_set("settings-error", error.to_string());
+                    self.status = i18n::UiMessage::raw(error.to_string());
+                }
+            }
             return true;
         }
         if let Some(language) = name.strip_prefix("language:") {

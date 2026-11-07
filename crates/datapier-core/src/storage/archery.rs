@@ -364,8 +364,8 @@ impl Store {
             let mut tx = store.pool.begin().await?;
             let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM archery_servers WHERE id=?").bind(server_id.to_string()).fetch_optional(&mut *tx).await?;
             if revision != Some(expected_revision as i64) { return Err(AppError::conflict("服务修订已变化")); }
-            let rows: Vec<String> = sqlx::query_scalar("SELECT payload FROM profiles WHERE archery_server_id=? ORDER BY id").bind(server_id.to_string()).fetch_all(&mut *tx).await?;
-            let current: Vec<Profile> = rows.iter().map(|s| serde_json::from_str(s)).collect::<std::result::Result<_, _>>()?;
+            let rows = sqlx::query("SELECT payload,revision FROM profiles WHERE archery_server_id=? ORDER BY id").bind(server_id.to_string()).fetch_all(&mut *tx).await?;
+            let current: Vec<Profile> = rows.iter().map(|row| { let mut p: Profile = serde_json::from_str(row.get::<&str,_>(0))?; p.revision = row.get::<i64,_>(1) as u64; Ok(p) }).collect::<Result<_>>()?;
             let index = |profiles: &[Profile]| -> Result<HashMap<Uuid, Json>> {
                 let mut map = HashMap::new();
                 let mut instances = HashSet::new();
@@ -386,6 +386,7 @@ impl Store {
                     return Err(AppError::conflict("不能替换实例连接身份"));
                 }
                 if let Some(previous) = prior.get(&p.id) {
+                    if p.revision != previous.revision { return Err(AppError::conflict("连接修订已变化")); }
                     let a = p.archery().unwrap();
                     let b = previous.archery().unwrap();
                     if p.provider != previous.provider || a.server_id != b.server_id || a.instance_id != b.instance_id || a.instance_name != b.instance_name { return Err(AppError::conflict("不能替换实例身份")); }
@@ -395,6 +396,8 @@ impl Store {
             let mut deleted: Vec<Uuid> = old.keys().filter_map(|id| (!next.contains_key(id)).then_some(*id)).collect();
             let mut modified: Vec<Uuid> = next.iter().filter_map(|(id, profile)| old.get(id).filter(|old| *old != profile).map(|_| *id)).collect();
             added.sort(); modified.sort(); deleted.sort();
+            let mut desired = desired;
+            for p in &mut desired { if modified.contains(&p.id) { p.revision = p.revision.checked_add(1).filter(|n| *n <= i64::MAX as u64).ok_or_else(|| AppError::invalid("连接版本溢出"))?; } }
             let mut profiles = desired.clone();
             profiles.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
             let result = json!({"added":added,"modified":modified,"deleted":deleted,"profiles":profiles});
@@ -406,7 +409,7 @@ impl Store {
                     sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved,archery_server_id,archery_instance_id) VALUES(?,?,?,0,?,?)")
                         .bind(p.id.to_string()).bind(&p.name).bind(serde_json::to_string(p)?).bind(server_id.to_string()).bind(a.instance_id).execute(&mut *tx).await?;
                 } else if modified.contains(&p.id) {
-                    sqlx::query("UPDATE profiles SET name=?,payload=? WHERE id=?").bind(&p.name).bind(serde_json::to_string(p)?).bind(p.id.to_string()).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE profiles SET name=?,payload=?,revision=? WHERE id=?").bind(&p.name).bind(serde_json::to_string(p)?).bind(p.revision as i64).bind(p.id.to_string()).execute(&mut *tx).await?;
                 }
             }
             tx.commit().await?;

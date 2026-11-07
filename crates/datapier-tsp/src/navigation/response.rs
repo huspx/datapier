@@ -447,6 +447,79 @@ impl App {
                     }
                 }
             }
+            Pending::RedisDiscovery {
+                profile_id,
+                profile,
+                secret,
+                session,
+            } => {
+                if let Some(id) = profile_id {
+                    let alive = self.tabs.iter().enumerate().any(|(index, tab)| {
+                        tab.profile_id == Some(id)
+                            && if index == self.active {
+                                self.session_id()
+                                    .is_some_and(|value| Some(json!(value)) == session)
+                            } else {
+                                tab.runtime
+                                    .session
+                                    .as_ref()
+                                    .and_then(|value| value.get("session_id"))
+                                    == session.as_ref()
+                            }
+                    });
+                    if !alive {
+                        self.navigation.redis_discovery.remove(&id);
+                        return;
+                    }
+                } else {
+                    let current = self
+                        .form_profile()
+                        .ok()
+                        .and_then(|value| serde_json::to_value(value).ok());
+                    let current_secret = if self.field("password").is_empty() {
+                        Value::Null
+                    } else {
+                        json!(self.field("password"))
+                    };
+                    if current != profile || current_secret != secret {
+                        self.navigation.form_redis_discovery.loading = false;
+                        return;
+                    }
+                }
+                let state = if let Some(id) = profile_id {
+                    self.navigation.redis_discovery.entry(id).or_default()
+                } else {
+                    &mut self.navigation.form_redis_discovery
+                };
+                state.loading = false;
+                match result {
+                    Ok(value) => {
+                        if let Some(databases) = value.get("databases").and_then(Value::as_array) {
+                            state.databases = databases
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .filter(|value| value.parse::<u32>().is_ok())
+                                .map(str::to_owned)
+                                .collect();
+                            state.loaded = true;
+                            state.error = value
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            if state.databases.is_empty() && state.error.is_none() {
+                                state.error = Some(
+                                    crate::i18n::tr("未能确定 Redis DB 数量，请配置数量覆盖")
+                                        .into_owned(),
+                                );
+                            }
+                        } else {
+                            state.error =
+                                Some(crate::i18n::tr("数据库发现返回了无效结果").into_owned());
+                        }
+                    }
+                    Err(error) => state.error = Some(error.to_string()),
+                }
+            }
             Pending::Redis {
                 tab,
                 generation,
@@ -512,6 +585,8 @@ impl App {
                                 self.workbench.sql_mode = None;
                                 self.target = None;
                                 self.resources.clear();
+                                self.workbench.redis_tree.reset(&[]);
+                                self.workbench.redis_tree_owner = None;
                                 self.cursor = None;
                                 self.scan_token = None;
                                 self.grid = None;

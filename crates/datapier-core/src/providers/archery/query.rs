@@ -13,7 +13,6 @@ mod tests;
 
 const MAX_TEXT: usize = 1024 * 1024;
 const MAX_STATEMENTS: usize = 100;
-const DEFAULT_LIMIT: u64 = 100;
 const MAX_LIMIT: u64 = 10000;
 
 /// 平台查询的有序列和原始行；完整性必须由调用者结合平台计数与脱敏证据判断。
@@ -56,9 +55,9 @@ fn target<'a>(session: &'a ArcherySession, database: &str) -> Result<&'a model::
     }
     Ok(connection)
 }
-fn limit(params: &Json) -> Result<u64> {
+fn limit(params: &Json, default: u64) -> Result<u64> {
     match params.get("limit") {
-        None | Some(Json::Null) => Ok(DEFAULT_LIMIT),
+        None | Some(Json::Null) => Ok(default),
         Some(value) => value
             .as_u64()
             .filter(|n| (1..=MAX_LIMIT).contains(n))
@@ -260,7 +259,7 @@ fn cell(value: Json, ty: &str, redis: bool, masked: bool) -> Value {
         }
     }
 }
-/// 将完整平台响应写入本地结果缓存，完成状态仅描述该响应。
+/// 将平台响应保存到有界会话内存；覆盖范围描述本次响应。
 pub(super) async fn cache_response(
     session: &ArcherySession,
     database: &str,
@@ -303,6 +302,10 @@ pub(super) async fn cache_response(
     bounded(&summary, 32 * 1024)?;
     bounded(&json!({"columns":columns,"summary":summary}), 256 * 1024)?;
     let id = sink.start(columns, "rows").await?;
+    sink.store
+        .update_result_summary(id, summary.clone())
+        .await?;
+    let mut limited = false;
     let mut batch = Vec::with_capacity(128);
     for row in response.rows {
         model::ensure_not_cancelled(cancel)?;
@@ -319,16 +322,30 @@ pub(super) async fn cache_response(
                 })
                 .collect(),
         );
-        if batch.len() == 128 {
-            sink.append(id, std::mem::take(&mut batch)).await?;
+        if batch.len() == 128
+            && let Err(error) = sink.append(id, std::mem::take(&mut batch)).await
+        {
+            if error.code != "resource_limit" {
+                return Err(error);
+            }
+            limited = true;
+            break;
         }
     }
-    if !batch.is_empty() {
-        sink.append(id, batch).await?;
+    if !limited
+        && !batch.is_empty()
+        && let Err(error) = sink.append(id, batch).await
+    {
+        if error.code != "resource_limit" {
+            return Err(error);
+        }
+        limited = true;
     }
     model::ensure_not_cancelled(cancel)?;
+    let mut summary = summary;
+    summary["resource_limited"] = json!(limited);
     sink.finish(id, summary).await?;
-    Ok(json!({"results":[id],"row_count":count}))
+    Ok(json!({"results":[id],"row_count":count,"resource_limited":limited}))
 }
 fn redis_commands(input: &str) -> Result<Vec<String>> {
     let commands = command::parse_commands(input)?;
@@ -407,7 +424,10 @@ pub(super) async fn run(
     let database: String = model::param(params, "database")?;
     target(session, &database)?;
     let input = text(params)?;
-    let requested_limit = limit(params)?;
+    let requested_limit = limit(
+        params,
+        sink.store.settings().await?.archery.request_rows as u64,
+    )?;
     let statements = if session.profile.provider == ProviderKind::Mysql {
         mysql::validate_readonly(&input)?;
         mysql::stateless_statements(&input)?
@@ -577,6 +597,10 @@ pub(super) async fn sql_check(
     bounded(&summary, 32 * 1024)?;
     bounded(&json!({"columns":columns,"summary":summary}), 256 * 1024)?;
     let id = sink.start(columns, "rows").await?;
+    sink.store
+        .update_result_summary(id, summary.clone())
+        .await?;
+    let mut limited = false;
     let mut batch = Vec::with_capacity(128);
     for row in checked.rows {
         model::ensure_not_cancelled(cancel)?;
@@ -593,14 +617,28 @@ pub(super) async fn sql_check(
             .collect();
         values.push(Value::Json(Json::Object(row)));
         batch.push(values);
-        if batch.len() == 128 {
-            sink.append(id, std::mem::take(&mut batch)).await?;
+        if batch.len() == 128
+            && let Err(error) = sink.append(id, std::mem::take(&mut batch)).await
+        {
+            if error.code != "resource_limit" {
+                return Err(error);
+            }
+            limited = true;
+            break;
         }
     }
-    if !batch.is_empty() {
-        sink.append(id, batch).await?;
+    if !limited
+        && !batch.is_empty()
+        && let Err(error) = sink.append(id, batch).await
+    {
+        if error.code != "resource_limit" {
+            return Err(error);
+        }
+        limited = true;
     }
     model::ensure_not_cancelled(cancel)?;
+    let mut summary = summary;
+    summary["resource_limited"] = json!(limited);
     sink.finish(id, summary).await?;
     Ok(
         json!({"results":[id],"result_id":id,"check_state":"completed","verdict":checked.verdict,"warning_count":checked.warnings,"error_count":checked.errors}),

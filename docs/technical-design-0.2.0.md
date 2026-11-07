@@ -2,7 +2,7 @@
 
 ## 1. 状态、依据与范围
 
-本文是 **0.2.0 实施前的技术方案**，基于本次需求讨论及当前 0.1.1 源码编写。文中的模块、字段、接口和验收场景是实施目标，不代表已经实现、编译、运行验收或发布。本次仅创建 feature worktree 并编写文档，不修改产品版本、依赖、数据库 migration 或功能代码。
+本文记录 **0.2.0** 的设计契约与验收要求。当前开发版本已接入 MCP、普通终端 TUI、TSP 入口迁移、权限审批、内存结果与分页、Redis 探测及 schema／IPC 迁移；正在进行真实运行验收，具体结果和未解决项见第 15 节。设计要求不等同于端到端验收或正式发布。
 
 依据为 [产品规划](product-plan.md)、[贡献指南](../CONTRIBUTING.md)、[0.1.0 技术方案](technical-design-0.1.0.md)、[0.1.1 技术方案](technical-design-0.1.1.md) 及已确认的需求。0.1.x 方案保留为历史；本文明确替代其查询结果持久化、分页、TSP 导出及 `tui` 入口设计。发布操作仍只按 [发布指南](../RELEASING.md) 执行，本方案不构成提交、推送、合并或发布授权。
 
@@ -67,7 +67,7 @@ flowchart LR
 
 同一规范化 `--data-dir` 仍发现／启动唯一 Engine，沿用 `DATAPIER_DATA_DIR`。`--workspace` 用于 UI 工作区与历史归属，不形成授权边界。MCP 可通过重复 `--allow-connection ID` 限定实例范围；未指定不额外收窄。名称只用于展示，工具参数引用稳定 ID。
 
-公开子命令固定为 `tui`、`tsp`、`mcp`、`engine`。plugin、开发命令、安装后 smoke 同步改用 `tsp`；不保留把旧 `tui` 当 TSP 的兼容分派。实现时才调整 Cargo workspace、版本与脚本，本方案阶段不创建空 crate。
+公开子命令为 `tui`、`tsp`、`mcp`、`engine`；plugin 和开发命令使用 `tsp`，不保留把旧 `tui` 当 TSP 的兼容分派。workspace 为六个 crate，产品版本为 0.2.0。
 
 ### 2.2 技术选型
 
@@ -78,7 +78,7 @@ flowchart LR
 | 查询与存储 | 保留 SQLx 0.9、redis-rs 1.8、sqlparser 0.62 visitor、SQLite 与 keyring；不另引入数据库代理或第二套连接实现 |
 | IPC | 保留 UDS／Named Pipe、长度分帧 JSON、8 MiB 帧上限；业务响应默认预算 1 MiB |
 
-上述新增依赖稳定版本、MSRV 和许可证已通过 crates.io 元数据核对：rmcp 为 Rust 1.88／Apache-2.0，Ratatui 为 Rust 1.88／MIT，Crossterm 为 Rust 1.63／MIT，均不提高现有 Rust 1.94 基线。这里只核对元数据，未做依赖解析或六目标编译；实施时精确锁入 Cargo.lock 并完成许可证与传递依赖核对。产品规划中旧 rmcp 3.8 选型由本方案替代。
+上述新增依赖已纳入 workspace 和 Cargo.lock；本轮仅在 macOS arm64 完成适用构建与运行验证，其他目标保留实现与 CI 配置。依赖解析不能代替平台验收。
 
 TUI 采用单一拥有 terminal 的事件循环，异步 IPC、keyring 与网络等待不阻塞输入；只在状态改变时重绘。退出、错误和 panic 均恢复 raw mode／alternate screen。保留简体中文、英文和系统语言选项；TUI 全键盘可操作，秘密输入掩码且提交后清除。
 
@@ -103,6 +103,8 @@ TUI 与 TSP 共用 Engine 表单契约与 Core 校验，不共享界面状态。
 ### 3.2 设置模型与默认值
 
 设置按数据目录全局共享，并带 `revision`；保存携带 `expected_revision`，冲突后重新加载，不覆盖其他窗口更新。保持现有 `language` 字段，新增以下分组。
+
+TSP 全局设置分为“常规”和“MCP”两个 tab：常规管理语言、分页、通用限制、历史和 Archery 服务；MCP 管理响应行数、并发、审批、通知及各连接权限。字段统一左 label、右值，布尔项使用原生 Switch；保存主按钮与重新加载放在 dialog 底部，正文独立滚动。MySQL、Redis、Archery 连接表单不展示 MCP 配置；普通编辑保留已有审批策略，新建连接采用全局默认策略，已保存连接只在全局 MCP tab 选择后管理策略和权限。切 tab 保留输入、连接选择及错误，不自动保存。
 
 | 字段 | 默认值 | 作用 |
 |---|---:|---|
@@ -261,7 +263,7 @@ stateDiagram-v2
 
 ### 6.3 TSP 在线与离线路由
 
-在线指同一 Engine 下存在有窗口承载、能够交互的 TSP，不仅是 TSP 进程或 PTY 存活。优先选择正在使用该连接的窗口，否则最近活跃窗口。发送待办／通知，不自动切 tab、聚焦或弹出抢焦窗口。一次请求一个交互控制者，其他窗口只观察；用户点击通知后才定位审批内容。
+在线指同一 Engine 下存在有窗口承载、能够交互的 TSP，不仅是 TSP 进程或 PTY 存活。优先选择正在使用该连接的窗口，否则最近活跃窗口。发送窗口 toast／待办提示，不自动切 tab、聚焦或弹出抢焦窗口。一次请求一个交互控制者，其他窗口只观察；用户主动打开工作台的 MCP 待办入口查看审批或认证内容。
 
 TSP 关闭或窗口存在性租约过期时，pending 请求可转离线路由，不自动同意。离线 `approve_command` 根据 MCP client 能力发起原生 elicitation；不支持时，由 Agent／宿主先询问用户，再调用该工具。后一路径明确信任宿主／Agent 遵守用户确认流程，不宣称 tool 调用是可验证的用户签名。`approved=true` 不能授权一个未冻结的新命令。
 
@@ -273,9 +275,9 @@ plugin 的 window 半部通过 `tern.on`、`tern.timer` 和 `cx.session` 维护�
 
 使用 `tsp` 的内部隐藏桥接模式进行短生命周期 IPC 同步，argv 分项传递非秘密窗口元数据，不拼 shell；该模式不渲染 TSP、不启动新 Engine，也不作为 Engine 保活客户端。window VM 每 5 秒异步同步一次，最多一个未完成同步；Engine 以 15 秒窗口租约判定可交互存在性。关闭／重载后未续期自然离线。手工启动 `tsp` 也必须完成同样窗口绑定；没有可验证窗口绑定时使用离线路由，而不是假装在线。
 
-同步结果仅携带目标 client／pane、待办 ID、类型与数量；SQL／结果与凭据仍由 TSP 经 IPC 读取。窗口内使用 toast／待办指示；系统通知通过 Tern 的 attention 能力，仅发送不含 SQL 的摘要。桥接通过目标 window／pane 标识定位，不能向“当前任意焦点 pane”发送请求；用户点击才允许定位。
+同步结果仅携带目标 client／pane、待办 ID、类型与数量；SQL／结果与凭据仍由 TSP 经 IPC 读取。0.2.0 使用窗口内 toast／待办指示，仅提示有命令等待审批或有连接等待认证，不含 SQL 或凭据。桥接依据目标 window／pane 发送提示，不能向“当前任意焦点 pane”发送请求。用户通过工作台的 MCP 待办入口处理；关闭 toast 提醒不隐藏待办，也不改变权限或控制者。
 
-公开文档证明 timer、异步 process、window key、pane event 和 attention notification 可用，但尚未在本仓目标 Tern 0.9.9 验证该完整组合。实施必须先运行真实多窗口／关闭窗口验证，不满足契约时修正桥接或明确提高 Tern 基线，不能以进程心跳代替窗口证明交付。
+0.2.0 的通知交付范围为窗口 toast 与待办面板，不提供 toast 点击回调。系统通知及点击系统通知定位移入后续规划，不属于本版验收项。窗口存在性、单一控制者、提醒不抢焦与关闭窗口后的离线路由仍按第 14 节验证。
 
 ## 7. 认证与秘密
 
@@ -428,7 +430,7 @@ revision／状态／JSON 类型、主外键与必要索引在目标 migration �
 
 ## 13. 实施切片与文件落点
 
-本节是后续实现计划，不代表已进入实施。按可运行纵向路径交付，不预建空壳 crate 或保留旧缓存接口兼容层。
+本节保留实施切片和文件落点，作为设计与验收的对应关系；具体结果见第 15 节。
 
 | 顺序 | 范围与主要文件 | 完成标准 |
 |---|---|---|
@@ -438,7 +440,7 @@ revision／状态／JSON 类型、主外键与必要索引在目标 migration �
 | 4 | 新 `datapier-tui`，现有 `datapier-tsp` 共享 paging／设置／认证；CLI 与 plugin 启动 | 无 Tern 完成三类数据源管理与认证；TSP 六类分页器一致，`tui`／`tsp` 名实相符 |
 | 5 | `engine` 审批／window presence、TSP 待办与 plugin window bridge | 通知不抢焦、窗口关闭转离线、冻结请求只执行一次，多窗口竞争和期限有效 |
 | 6 | 新 `datapier-mcp`，CLI mcp 分派 | 23 个工具全部接入真实 Engine；原生确认与信任宿主路径、无 Tern 查询、权限与资源收尾通过实际 MCP client |
-| 7 | 安装脚本、版本 smoke、工作流与发布说明；必要的 UI／开发文档 | 六目标原生包与独立二进制使用路径明确，旧入口／缓存调用全部迁移，无假完成记录 |
+| 7 | 安装脚本、版本 smoke、工作流与发布说明；必要的 UI／开发文档 | 保留六目标原生包实现与明确的独立二进制使用路径；本轮验证 macOS arm64 的构建、组包与运行，旧入口／缓存调用全部迁移，无假完成记录 |
 
 `datapier-core` 的 result 模块定义类型与有界容器，Engine 持有生命周期和 registry；provider 只负责原生读取，不依赖 TSP／MCP。TSP 统一分页模型放在现有 query/workbench 的可复用模块，不在每个 view 复制状态机。MCP tool 定义、schema 和 adapter 放新 crate，不能把 SQL 安全判断或权限规则复制到 adapter。
 
@@ -456,6 +458,7 @@ revision／状态／JSON 类型、主外键与必要索引在目标 migration �
 | 读取二次授权 | 收紧可见范围／权限后，旧结果、value、history 搜索／total、错误详情及观察者都不能泄露已撤销范围 |
 | 审批 | execute 返回 approval_required 时数据库未发送；TSP／MCP 两路批准最多一次，重复／拒绝／过期／目标变化／断线不重复写库 |
 | 窗口存在性 | TSP 进程仍在但窗口关闭时转离线；通知不抢焦，双窗口只一个控制者，桥接不永久保活 Engine |
+| 窗口提醒 | 审批／认证窗口 toast 不含命令正文或凭据，两类提醒开关独立；关闭提醒仍可从 MCP 待办入口处理，不抢焦；系统通知与通知点击定位不在本版范围 |
 | 认证 | 已存凭据／TOTP 可恢复；手动密码／OTP 只进 TUI／TSP；同 Engine 成功后显式重试，无失败命令重放 |
 | 实时分页 | 大表第一页无需读完全表，无 COUNT 自动发生；每页默认 100，切换页大小与条件正确；每次统计重算，期间并发修改不伪装快照 |
 | 单次执行 | 写入／CALL 等不因翻页和 COUNT 重发；先有首批再有终态；释放／超时后正确消费或关闭连接并保存写入结果 |
@@ -473,9 +476,8 @@ revision／状态／JSON 类型、主外键与必要索引在目标 migration �
 
 必须用真实 MySQL／Redis／Archery 和标准 MCP client 运行受影响路径，实际观察 initialize、tools/list、tools/call、elicitation／非 elicitation、分页、取消、EOF、多个客户端与重启。CLI／TUI 在实际 terminal 交互；TSP 与通知在实际 Tern 多窗口观察；测试通过或组包成功不代替运行验收。
 
-所有六个目标保留实现与 CI 构建／默认测试／版本 smoke；正式运行支持必须分别给原生证据，不把 0.1.1 仅 macOS arm64 的例外自动移植为本版全部平台已验收。发布前按发布指南核对该版本实际原生范围，任何缺项明确披露并由维护者决定，不能在实现期间静默缩减目标。
+本轮 0.2.0 验收按用户确认仅覆盖 macOS arm64，完成该平台的适用构建、默认测试、版本 smoke 与原生运行验证。其他五个原生目标及六目标 CI 不作为本轮实施验收门禁，其实现、配置和分发流程保留，未执行项明确记录。该范围调整只限定验证平台，不减少本章功能行为、数据库、权限、生命周期与迁移要求；后续正式发布按实际分发范围核对产物。
 
-本次文档任务只检查本地链接／锚点、标题、表格、代码块、需求与契约一致性；不安装依赖，不启动数据库，不运行无关构建、测试或 smoke。
 
 ## 15. 风险与当前完成状态
 
@@ -486,17 +488,34 @@ revision／状态／JSON 类型、主外键与必要索引在目标 migration �
 | 借用连接的 stream 无法直接放入普通 registry | 会话 worker 自持连接与流；背压、busy、取消与协议终态在同一所有者内完成 |
 | 权限变更、审批竞争和连接状态变化 | revision／代次冻结、每次访问重验、唯一 dispatch 与发送前持久化，崩溃不重放 |
 | 原生 MCP 确认客户端覆盖不一致 | 协商能力，支持则原生交互；否则信任宿主已询问用户，清楚记录保证边界 |
-| Tern 文档能力未在 0.9.9 完整组合验收 | 实施先验证窗口／通知桥接，无法满足不得以进程在线替代；必要基线变化需确认 |
+| 窗口提醒范围 | 0.2.0 仅交付窗口 toast 与待办面板；系统通知及通知点击定位进入后续规划。仍须验证真实窗口存在性、单一控制者、提醒不抢焦和离线路由 |
 | 巨大单字段与平台完整 HTTP JSON | 区分保留预算与驱动临时分配，已有 HTTP 有界接收保持，资源限制明确，不用磁盘假兜底 |
 | 实时 COUNT／翻页与原事务不一致 | 只对能保持正确语义的安全查询开放，说明统计时间及范围，不伪装快照 |
 | 旧缓存删除或模式切换破坏回退 | 默认退休保留，显式受限清理；备份配置与凭据追踪，不修改旧版本历史方案 |
 
-本文产品取舍已确定，可作为后续实现输入，不代表批准开始实施。当前只完成方案编写与资料核对；功能实现、依赖锁定、schema 迁移、MCP／TUI／TSP／数据库运行验收均未执行。宿主能力组合、驱动行为和六目标运行仍须按第 14 节取得实际证据。
+当前为 0.2.0 开发版本，已完成本轮用户确认范围内的 macOS arm64 实施与适用运行验收。本版通知采用窗口 toast 与待办面板，系统通知与通知点击定位进入后续规划。以下结果不代表其他平台运行支持或正式发布：
+
+- 默认测试 423 项通过、61 项忽略，Clippy、Rust 格式检查和窗口插件 Luau 格式检查通过；Python 3.15.2 脚本回归 25 项通过，`version --check-release` 通过。
+- 标准 Node MCP SDK 真实回归 27 组全部通过，覆盖 23 个 tools、原生 elicitation／宿主确认、权限收紧、跨 owner 句柄、MySQL 与 Redis 事务、Archery 四版本以及结果生命周期。运行记录保存在本地 `target/datapier020-smoke/mcp-evidence.json`，不提交测试数据或截图。
+- 权限修正后的运行证据：`USE` 后按实际库冻结浏览目标；拒绝写视图；视图定义改变后拒绝旧结果翻页与统计；撤权后隐藏审批正文及观察列表；外键父引用只读可插入子表，级联写入仍要求目标库写权限。
+- 查询期限与历史清理证据：1 秒读取期限下等待下一页 2.2 秒后仍成功读完 450 行；实际慢读取约 1.1 秒取消后会话可复用；已发送且被行锁阻塞的写入约 31 秒进入 `outcome_unknown`，不重放；终态历史被清理后，原会话仍可继续查询。
+- 真实 MySQL 5.7／8.0／8.4 与 Redis 6.2／7.2／8.0 各运行 23 项通过，包含十万行 CSV／JSON；MySQL edges 适用用例分别为 16／17／18 项通过，5.7 不支持的语法已筛除。MySQL 8.4 非严格模式专项通过，覆盖 InnoDB／MyISAM 结构化写入拒绝截断与查询连接保留服务端 warning；解包后的 release 二进制经真实 Engine IPC 验证会话模式、1265 warning、截断后的值及同批次 `INSERT → SHOW WARNINGS`，记录见 `target/datapier020-native-final/query-evidence.json`。
+- 当前源码 TLS 专项 3 项通过：MySQL 5.7.42 Debian 10 fixture 验证 `require_secure_transport` 的 3159 明文拒绝和受信 TLS 连接，MySQL 8.4.13／Redis 6.2.24 验证受信 CA 成功、错误 CA 与错误主机身份拒绝。5.7 fixture 先经 OpenSSL 验证证书与 IP 并协商 TLS 1.2 ECDHE；旧 Oracle Linux／OpenSSL 1.0.2k fixture 的 DHE-only 兼容限制不通过降低 Rustls 安全性规避。记录见 `target/datapier020-tls-final/suite-current.log`、`mysql57-debian-ecdhe.log` 与 `evidence.txt`。
+- macOS arm64 原生环境中，TUI 已观察完整创建 MySQL／Redis、测试并保存连接，以及 Archery 认证、实例／DB 选择与批量确认；TSP 先前已观察连接、设置和 SQL 前 100 行。实际 Tern 为 0.9.12（e498b49），0.9.9 是最低设计基线，现有 types 和原生证据不能证明本候选在 0.9.9 上运行。
+- 真实 Tern 双窗口已验证单一认证控制者、观察窗口禁用认证，以及关闭控制窗口后保留原 PTY 并转交控制与认证通知。退出全部原生窗口进程后，两个原 TSP PTY 仍运行，MCP 返回 `interactive=false`；不以进程存活判定可交互在线。
+- 认证与窗口提醒已通过 12 组回归：6 组覆盖重启无会话凭据、无窗口不能控制、请求去重、撤权、配置变化、删除连接和请求客户端断线；6 组覆盖双窗口控制、独立认证通知开关、控制转交、真实 Archery 表单登录、全窗口退出后的离线状态，以及活跃工作台中可见的认证 toast 和 MCP 待办入口。实际提示为“Datapier · 有连接等待认证”，不含 SQL 或凭据。通过真实 Tern window VM 注入 TSP `edit`／`action` 事件完成安全输入和登录，Engine 返回 `ready` 且认证待办清空；未验证 OS 键盘或 Accessibility 密码录入。本地记录见 `target/datapier020-smoke/native-auth-evidence.json`。
+- MCP 待办按 [UI 设计规范](ui-guidelines.md#8-mcp-待办设计)改为原生大号对话框，分待审批、待认证、Agent 任务三标签；冻结上下文与命令分区、完整诊断默认折叠，观察结果的分页限定在已保留行。重设计后 TSP 相关测试 255 项通过、1 项忽略，Clippy 与格式检查通过；HTML 已检查五种状态、宽窄屏和明暗主题。桌面停在 `loginwindow`，本轮采用 Tern 原生离屏渲染连接真实 Engine／MCP／MySQL 验证与截图，不能作为解锁后桌面鼠标／键盘及控制窗口认证录入的证明。本地证据保存在 `target/datapier-mcp-ui-review/`，旧状态栏浮层截图不再代表当前设计。
+- TSP 设置重组后，相关测试 256 项通过、1 项忽略，Clippy、格式检查与 debug 构建通过。实际 Tern 离屏场景验证常规／MCP tab、水平字段、原生 Switch、跨 tab 草稿真实保存、连接审批策略真实修改，以及底部重新加载和 Primary 保存按钮；底部不再提供关闭按钮。HTML 额外验证四类连接、失败状态、语言切换、480px／1280px 布局、保存／重新加载与正文滚动时 footer 固定可见。原生截图保存在本地 `target/datapier-settings-tabs/`，验证期间修改的隔离配置已恢复；此轮未验证解锁桌面的 OS 鼠标／键盘输入。
+- macOS arm64 的真实 Keychain 专项通过，覆盖保存、存储重开、SQLite 不含秘密，以及切换会话凭据后删除原系统条目；测试按 revision 契约重载配置后更新。Redis 6.2.24 百万 key 专项通过，扫描 1,000 页、1,000,000 个 key，无重复或遗漏，扫描耗时 34.80 秒并清理自身资源；日志见 `target/datapier020-native-final/redis-scale.log`。
+- macOS arm64 release 已实际构建和组包，解包后核对唯一成员、执行权限与 0.2.0 版本，并观察 TUI 正常启动／退出；标准 MCP SDK 对解包程序完成 initialize、23 个 tools 发现和服务信息查询。产物及摘要在 `target/datapier020-native-final/dist/` 和 `evidence.json`，该候选包未上传或发布。
+- 本轮验收平台已按用户确认限定为 macOS arm64。其余五个原生目标与六目标 CI 未执行，不再作为本轮验收阻塞；实现及 CI 配置保留，未验证的平台不声明运行已验收。
+
+本轮候选二进制、macOS arm64 构建产物及适用原生场景须以实际证据闭环；后续正式分发的产物核对仍按发布指南执行，不能以本摘要代替发布前检查。
 
 ## 16. 外部依据
 
 - [MCP tools 与 annotations](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)、[用户交互 elicitation](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation)：原生用户决定与非秘密表单；SDK 协商版本，不手写伪兼容。
 - [rmcp stdio](https://docs.rs/rmcp/3.9.0/rmcp/transport/io/index.html)、[SDK 与版本元数据](https://crates.io/api/v1/crates/rmcp)：仅启用需要的协议能力。
 - [Ratatui](https://ratatui.rs/)、[Ratatui 元数据](https://crates.io/api/v1/crates/ratatui)、[Crossterm 元数据](https://crates.io/api/v1/crates/crossterm)：终端恢复、事件流及 MSRV／许可证。
-- [Tern Window API](https://docs.stencil.so/tern/reference/api-window.md)、[Shared API](https://docs.stencil.so/tern/reference/api-shared.md)、[attention 行为](https://docs.stencil.so/tern/scripts/terminal.md#attention-and-overview)：窗口 timer／process／pane 交互和通知，不自动抢焦。
+- [Tern Window API](https://docs.stencil.so/tern/reference/api-window.md)、[Shared API](https://docs.stencil.so/tern/reference/api-shared.md)：窗口 timer／process／pane 交互和窗口 toast，不自动抢焦。
 - [Redis CONFIG GET](https://redis.io/docs/latest/commands/config-get/)、[INFO](https://redis.io/docs/latest/commands/info/)、[SELECT](https://redis.io/docs/latest/commands/select/)：配置总数、keyspace 统计与连接 DB 状态分别处理。

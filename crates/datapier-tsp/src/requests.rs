@@ -115,6 +115,16 @@ impl App {
         {
             self.profile_saves.remove(&id);
         }
+        if response.tag.starts_with("mcp-rules-get/")
+            || response.tag.starts_with("mcp-rules-set/")
+            || response.tag.starts_with("mcp-policy-set/")
+        {
+            self.mcp_rules_response(&response.tag, &response.result, backend);
+            return;
+        }
+        if self.approval_response(&response.tag, &response.result, backend) {
+            return;
+        }
         if response.tag.starts_with("settings.") {
             self.settings_response(response, backend);
             return;
@@ -165,6 +175,32 @@ impl App {
                         self.page_token = None;
                         response.tag = "result.page".into();
                         self.response(response, backend);
+                    }
+                } else if let Some((result_id, token)) = tag
+                    .strip_prefix("result.count/")
+                    .and_then(|value| value.split_once('/'))
+                {
+                    if let Some(state) = self.workbench.query_ui.pagination.get_mut(result_id)
+                        && state.count_token == Uuid::parse_str(token).ok()
+                        && state.count_token.is_some()
+                    {
+                        state.count_token = None;
+                        match response.result {
+                            Ok(value) if self.result_id.as_deref() == Some(result_id) => {
+                                if let Some(grid) = self
+                                    .grid
+                                    .as_mut()
+                                    .filter(|grid| grid.page.result.id.to_string() == result_id)
+                                {
+                                    grid.page.result.summary["total_rows"] =
+                                        value["total_rows"].clone();
+                                    grid.page.result.summary["counted_at"] =
+                                        value["counted_at"].clone();
+                                }
+                            }
+                            Err(error) => self.status = i18n::UiMessage::raw(error.to_string()),
+                            _ => {}
+                        }
                     }
                 } else if let Some(token) = tag.strip_prefix("transfer.preview/") {
                     if Uuid::parse_str(token).ok()

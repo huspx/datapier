@@ -125,6 +125,7 @@ async fn generic_profile_save_rejects_archery_changes_without_mutation() {
     save(&engine, owner, &fixture, &auth, vec![current.clone()])
         .await
         .unwrap();
+    let current = engine.store.profile(current.id).await.unwrap();
     for changed in [invalid_database, stale] {
         assert!(
             engine

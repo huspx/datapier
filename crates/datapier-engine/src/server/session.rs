@@ -46,20 +46,39 @@ pub(super) async fn client_with_lease(
         } else if request
             .pointer("/params/protocol_version")
             .and_then(Value::as_u64)
-            != Some(2)
+            != Some(3)
         {
             Err(AppError::new(
                 "protocol_incompatible",
                 "Engine 协议版本不兼容",
             ))
-        } else if !engine.register(owner) {
-            Err(AppError::new("disconnected", "Engine 正在退出"))
         } else {
-            opened = true;
-            events = Some(engine.state.lock().unwrap().event_senders[&owner].subscribe());
-            Ok(
-                json!({"protocol_version":2,"engine_id":engine.id,"client_session_id":owner,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
-            )
+            let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+            let context = (|| -> Result<super::ClientContext> {
+                Ok(super::ClientContext {
+                    kind: datapier_core::model::param(&params, "client_kind")?,
+                    workspace: datapier_core::model::param(&params, "workspace")?,
+                    allow_connections: datapier_core::model::param(&params, "allow_connections")?,
+                })
+            })();
+            match context {
+                Err(error) => Err(error),
+                Ok(context) => {
+                    if !engine.register_with(owner, context) {
+                        Err(AppError::new("disconnected", "Engine 正在退出"))
+                    } else {
+                        opened = true;
+                        events =
+                            Some(engine.state.lock().unwrap().event_senders[&owner].subscribe());
+                        match engine.store.settings().await {
+                            Ok(settings) => Ok(
+                                json!({"protocol_version":3,"engine_id":engine.id,"client_session_id":owner,"settings_revision":settings.revision,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
+                            ),
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
+            }
         };
         let _ = tx.send(response(id, result)).await;
     }

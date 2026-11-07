@@ -16,6 +16,7 @@ const paths = {
   folder: '<path d="M3 6h7l2 2h9v11H3z"/>',
   upload: '<path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/>',
   'check-square': '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="m7 12 3 3 7-7"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
   'file-search':
     '<path d="M13 3H5v18h7M13 3v5h5l-5-5Z"/><circle cx="16" cy="15" r="4"/><path d="m19 18 3 3M8 11h3M8 15h2"/>',
   'clear-square': '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="m8 8 8 8m0-8-8 8"/>',

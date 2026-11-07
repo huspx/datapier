@@ -21,8 +21,25 @@ pub(super) async fn export(
         Err(e) => return Err(e.into()),
     }
     let (tmp, file) = create_temp(&dst, progress)?;
-    let result = if params.get("result_id").is_some_and(|v| !v.is_null()) {
+    let retained = params.get("result_id").is_some_and(|v| !v.is_null());
+    let mut coverage = Json::Null;
+    let result = if retained
+        && matches!(session, ProviderSession::Mysql(_))
+        && sink
+            .store
+            .result_meta(param(params, "result_id")?)
+            .await?
+            .summary
+            .get("retrieval_mode")
+            .and_then(Json::as_str)
+            == Some("live_page")
+    {
+        coverage = json!({"scope":"requery","snapshot":"may_differ"});
+        export_mysql(session, params, sink, cancel, progress, fmt, file).await
+    } else if retained {
         let id: Uuid = param(params, "result_id")?;
+        let meta = sink.store.result_meta(id).await?;
+        coverage = json!({"scope":"retained_rows","page_start":meta.summary.get("page_start").and_then(Json::as_u64).unwrap_or(0),"complete":meta.complete && !meta.summary.get("resource_limited").and_then(Json::as_bool).unwrap_or(false),"source_coverage":meta.summary.get("coverage")});
         export_cached(id, sink, cancel, progress, fmt, file, false).await
     } else {
         match session.profile().provider {
@@ -34,7 +51,11 @@ pub(super) async fn export(
             }
         }
     };
-    finish_export(result, &tmp, &dst, cancel, progress, fmt)
+    let mut output = finish_export(result, &tmp, &dst, cancel, progress, fmt)?;
+    if retained {
+        output["coverage"] = coverage;
+    }
+    Ok(output)
 }
 pub(super) fn finish_export(
     result: Result<()>,
@@ -60,9 +81,140 @@ async fn export_mysql(
     fmt: &str,
     file: File,
 ) -> Result<()> {
-    let t: ResourceTarget = param(params, "target")?;
-    let id = browse(session, &t, sink, cancel).await?;
-    export_cached(id, sink, cancel, p, fmt, file, true).await
+    ensure_not_cancelled(cancel)?;
+    let mut request = params.clone();
+    if request.get("result_id").is_none_or(Json::is_null) {
+        let target: ResourceTarget = param(params, "target")?;
+        let id = browse(session, &target, sink, cancel).await?;
+        request["result_id"] = json!(id);
+    }
+    let ProviderSession::Mysql(mysql) = session else {
+        return Err(AppError::invalid("需要 MySQL 直连"));
+    };
+    match mysql.export_query(&request, cancel).await {
+        Ok((mut conn, sql, args)) => {
+            write_mysql_stream(&mut conn, &sql, args, cancel, p, fmt, file)
+                .await
+                .0
+        }
+        Err(error) if error.code == "unsupported" => {
+            let (conn, sql, args) = mysql.export_session_query(&request).await?;
+            let (result, clean) = write_mysql_stream(conn, &sql, args, cancel, p, fmt, file).await;
+            if !clean {
+                mysql.invalidate_connection();
+            }
+            result
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn write_mysql_stream(
+    conn: &mut sqlx::MySqlConnection,
+    sql: &str,
+    args: sqlx::mysql::MySqlArguments,
+    cancel: &CancellationToken,
+    p: &mut Progress,
+    fmt: &str,
+    file: File,
+) -> (Result<()>, bool) {
+    use futures_util::TryStreamExt;
+    use sqlx::{Executor, SqlSafeStr, Statement};
+    let statement = match conn.prepare(sqlx::AssertSqlSafe(sql).into_sql_str()).await {
+        Ok(statement) => statement,
+        Err(error) => return (Err(error.into()), false),
+    };
+    let columns = crate::providers::mysql::export_columns(statement.columns());
+    let mut out = BufWriter::new(file);
+    let init: Result<Option<csv::Writer<Vec<u8>>>> = (|| {
+        if fmt == "csv" {
+            let mut writer = csv::Writer::from_writer(Vec::new());
+            writer
+                .write_record(columns.iter().map(|column| column.name.as_str()))
+                .map_err(csv_error)?;
+            Ok(Some(writer))
+        } else {
+            write!(
+                out,
+                "{{\"format\":\"datapier\",\"version\":1,\"columns\":{},\"rows\":[",
+                serde_json::to_string(&columns)?
+            )?;
+            Ok(None)
+        }
+    })();
+    let mut csv = match init {
+        Ok(csv) => csv,
+        Err(error) => return (Err(error), true),
+    };
+    let mut first = true;
+    let mut stream = statement.query_with(args).fetch(conn);
+    let mut failure: Option<AppError> = None;
+    let mut deadline = None;
+    loop {
+        let next = if let Some(until) = deadline {
+            match tokio::time::timeout_at(until, stream.try_next()).await {
+                Ok(value) => value,
+                Err(_) => {
+                    return (
+                        Err(failure.unwrap_or_else(|| AppError::new("timeout", "导出收尾超时"))),
+                        false,
+                    );
+                }
+            }
+        } else {
+            tokio::select! {
+                row = stream.try_next() => row,
+                _ = cancel.cancelled() => {
+                    failure = Some(AppError::cancelled());
+                    deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                    continue;
+                }
+            }
+        };
+        let row = match next {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => return (Err(failure.unwrap_or_else(|| error.into())), false),
+        };
+        if failure.is_some() {
+            continue;
+        }
+        let written: Result<()> = (|| {
+            let row = crate::providers::mysql::export_decode_row(&row)?;
+            if let Some(writer) = csv.as_mut() {
+                writer
+                    .write_record(row.iter().map(csv_value).collect::<Result<Vec<_>>>()?)
+                    .map_err(csv_error)?;
+                flush_csv(writer, &mut out, false)?;
+            } else {
+                if !first {
+                    out.write_all(b",")?;
+                }
+                serde_json::to_writer(&mut out, &row)?;
+                first = false;
+            }
+            p.rows += 1;
+            Ok(())
+        })();
+        if let Err(error) = written {
+            failure = Some(error);
+            deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+        }
+    }
+    if let Some(error) = failure {
+        return (Err(error), true);
+    }
+    let finish: Result<()> = (|| {
+        if let Some(writer) = csv.as_mut() {
+            flush_csv(writer, &mut out, true)?;
+        } else {
+            out.write_all(b"]}")?;
+        }
+        out.flush()?;
+        out.get_ref().sync_all()?;
+        Ok(())
+    })();
+    (finish, true)
 }
 
 pub(super) trait ExportFile: Write {
@@ -123,28 +275,20 @@ pub(super) async fn export_cached<W: ExportFile>(
             }
         }
     };
-    if !meta.complete {
-        return Err(AppError::new(
-            "incomplete_result",
-            "结果尚未完整，不能作为全量导出",
-        ));
-    }
     let mut writer = BufWriter::new(file);
     if fmt == "json" {
-        if archery {
-            write!(
-                writer,
-                "{{\"format\":\"datapier-query-result\",\"version\":1,\"columns\":{},\"summary\":{},\"rows\":[",
-                serde_json::to_string(&meta.columns)?,
-                serde_json::to_string(&meta.summary)?
-            )?;
+        let format = if archery {
+            "datapier-query-result"
         } else {
-            write!(
-                writer,
-                "{{\"format\":\"datapier\",\"version\":1,\"columns\":{},\"rows\":[",
-                serde_json::to_string(&meta.columns)?
-            )?;
-        }
+            "datapier"
+        };
+        write!(
+            writer,
+            "{{\"format\":{},\"version\":1,\"columns\":{},\"summary\":{},\"rows\":[",
+            serde_json::to_string(format)?,
+            serde_json::to_string(&meta.columns)?,
+            serde_json::to_string(&meta.summary)?
+        )?;
     }
     let mut csv = if fmt == "csv" {
         let mut c = csv::Writer::from_writer(Vec::new());
@@ -154,7 +298,11 @@ pub(super) async fn export_cached<W: ExportFile>(
     } else {
         None
     };
-    let mut start = 0;
+    let mut start = meta
+        .summary
+        .get("page_start")
+        .and_then(Json::as_u64)
+        .unwrap_or(0);
     let mut first = true;
     loop {
         ensure_not_cancelled(cancel)?;

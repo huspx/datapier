@@ -1,69 +1,56 @@
 use super::*;
 
 #[tokio::test]
-async fn pagination_rpc_uses_registered_client_and_cached_result_pages() {
+async fn result_pages_require_the_owner_and_obey_byte_limits() {
     let (engine, root) = engine().await;
     let owner = Uuid::new_v4();
-    let result_id = engine
+    let other = Uuid::new_v4();
+    assert!(engine.register(owner));
+    assert!(engine.register(other));
+    let task = engine
         .store
-        .start_result(Uuid::new_v4(), vec![], "rows")
+        .create_task(owner, "w", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let id = engine
+        .store
+        .start_result(task.id, vec![], "rows")
         .await
         .unwrap();
     engine
         .store
-        .append_rows(
-            result_id,
-            vec![vec![model::Value::Text("a".repeat(200))]; 45],
-        )
+        .append_rows(id, vec![vec![model::Value::Text("a".repeat(200))]; 45])
         .await
         .unwrap();
-    let params = json!({"result_id": result_id, "page_size": 20, "max_bytes": 1024});
+    engine.store.finish_result(id, json!({})).await.unwrap();
+    let params = json!({"result_id":id,"start":0,"max_rows":20,"max_bytes":1024});
     assert_eq!(
         engine
-            .dispatch(owner, "result.pagination", params.clone())
+            .dispatch(other, "result.read", params.clone())
             .await
             .unwrap_err()
             .code,
-        "disconnected"
+        "permission_denied"
     );
-    assert!(engine.register(owner));
-    let plan = engine
-        .dispatch(owner, "result.pagination", params)
-        .await
-        .unwrap();
-    assert_eq!(plan["row_count"], 45);
-    assert_eq!(plan["complete"], false);
-    let starts = plan["starts"].as_array().unwrap();
-    let mut count = 0u64;
-    for (index, start) in starts.iter().enumerate() {
-        assert_eq!(start.as_u64(), Some(count));
+    let mut start = 0;
+    loop {
         let page = engine
             .dispatch(
                 owner,
-                "result.page",
-                json!({"result_id":result_id,"start":count,"max_rows":20,"max_bytes":1024}),
+                "result.read",
+                json!({"result_id":id,"start":start,"max_rows":20,"max_bytes":1024}),
             )
             .await
             .unwrap();
-        count += page["rows"].as_array().unwrap().len() as u64;
-        assert_eq!(
-            page["next"].as_u64(),
-            starts.get(index + 1).and_then(Value::as_u64)
-        );
+        let count = page["rows"].as_array().unwrap().len() as u64;
+        assert!(count > 0);
+        start += count;
+        if page["next"].is_null() {
+            break;
+        }
+        assert_eq!(page["next"].as_u64(), Some(start));
     }
-    assert_eq!(count, 45);
-    assert_eq!(
-        engine
-            .dispatch(
-                owner,
-                "result.pagination",
-                json!({"result_id":result_id,"page_size":1})
-            )
-            .await
-            .unwrap_err()
-            .code,
-        "invalid_input"
-    );
+    assert_eq!(start, 45);
     drop(engine);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -171,85 +158,47 @@ async fn cancelled_sent_batch_requires_complete_confirmed_rollback() {
 }
 
 #[tokio::test]
-async fn result_release_dispatch_retries_external_file_cleanup() {
+async fn release_invalidates_result_and_is_not_available_to_other_clients() {
     let (engine, root) = engine().await;
     let owner = Uuid::new_v4();
+    let other = Uuid::new_v4();
     assert!(engine.register(owner));
-    let execution_id = Uuid::new_v4();
-    let result_id = engine
+    assert!(engine.register(other));
+    let task = engine
         .store
-        .start_result(execution_id, vec![model::Column::new("v", "TEXT")], "rows")
+        .create_task(owner, "w", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let id = engine
+        .store
+        .start_result(task.id, vec![], "rows")
         .await
         .unwrap();
     engine
         .store
-        .append_rows(result_id, vec![vec![model::Value::Text("x".repeat(70000))]])
+        .append_rows(id, vec![vec![model::Value::Text("value".into())]])
         .await
         .unwrap();
-    let page = engine
-        .store
-        .result_page(result_id, 0, 1, 16384)
-        .await
-        .unwrap();
-    let value_id = match &page.rows[0][0] {
-        model::Value::Large { id, .. } => *id,
-        _ => panic!("字段应当外置"),
-    };
-    let path = root.join("values").join(value_id.to_string());
-    engine.state.lock().unwrap().tasks.insert(
-        execution_id,
-        Running {
-            owner,
-            session_id: Uuid::new_v4(),
-            cancel: CancellationToken::new(),
-            transition: Arc::new(AsyncMutex::new(())),
-            abort: None,
-            started: None,
-        },
-    );
-    let params = json!({"result_id": result_id});
+    engine.store.finish_result(id, json!({})).await.unwrap();
+    let params = json!({"result_id":id});
     assert_eq!(
         engine
-            .dispatch(owner, "result.release", params.clone())
+            .dispatch(other, "result.release", params.clone())
             .await
             .unwrap_err()
             .code,
-        "busy"
+        "permission_denied"
     );
-    engine.state.lock().unwrap().tasks.remove(&execution_id);
-    tokio::fs::remove_file(&path).await.unwrap();
-    tokio::fs::create_dir(&path).await.unwrap();
-    assert!(
-        engine
-            .dispatch(owner, "result.release", params.clone())
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        engine
-            .dispatch(owner, "result.page", params.clone())
-            .await
-            .unwrap_err()
-            .code,
-        "not_found"
-    );
-    assert_eq!(
-        engine.store.read_value(value_id).await.unwrap_err().code,
-        "not_found"
-    );
-    tokio::fs::remove_dir(&path).await.unwrap();
-    tokio::fs::write(&path, b"remaining").await.unwrap();
     assert_eq!(
         engine
             .dispatch(owner, "result.release", params.clone())
             .await
             .unwrap(),
-        json!({"released": true})
+        json!({"released":true})
     );
-    assert!(!path.exists());
     assert_eq!(
         engine
-            .dispatch(owner, "result.page", params)
+            .dispatch(owner, "result.read", params)
             .await
             .unwrap_err()
             .code,

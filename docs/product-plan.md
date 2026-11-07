@@ -4,9 +4,9 @@
 
 Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接、资源浏览、查询和数据编辑体验，同时保留不同数据库的数据模型与操作语义。
 
-首批支持 **MySQL 与 Redis**，以 **Rust TSP 应用＋Tern 启动 plugin** 交付。共享 Engine 独立于界面；数据库采用内置 provider 扩展，后续可接入 PostgreSQL、MongoDB 及其他界面。MCP、独立终端 TUI 和实时查询模型调整属于 0.2.0 规划，当前尚未实现；本文相关架构、接口与验收均为未来目标，详细契约见 [0.2.0 技术方案](technical-design-0.2.0.md)。
+首批支持 **MySQL 与 Redis**，提供普通终端 TUI、Rust TSP／Tern 工作台及 MCP stdio 接入，共享 Engine 使用内置 provider。0.2.0 当前处于运行验收中，详细契约与状态见 [0.2.0 技术方案](technical-design-0.2.0.md)；PostgreSQL、MongoDB 为后续方向。
 
-正式目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**，共六种原生运行组合。0.1.0 以此范围交付 UI 与 Engine，0.2.0 规划 MCP 同样覆盖全部目标；既有运行记录见[0.1.0 技术方案](technical-design-0.1.0.md#11-实现与运行记录)，当前 0.1.1 状态见[运行记录](technical-design-0.1.1.md#12-实现与验证记录)。
+目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**，共六种原生运行组合。历史运行记录见[0.1.0 技术方案](technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 记录](technical-design-0.1.1.md#12-实现与验证记录)，不能代替 0.2.0 的平台验收。
 
 核心使用场景：
 
@@ -23,7 +23,7 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 | 层次 | 选型 | 职责 |
 |---|---|---|
 | Tern 界面 | Rust、官方 tern-sdk 0.2.0、Tern 0.9.9 原生渲染 | 工作区、资源树、查询编辑器、数据 grid 与交互状态 |
-| 普通终端 TUI，0.2.0 规划 | Ratatui 0.30.2、Crossterm 0.29.0 | 无 Tern 的数据源、认证与全局设置管理，不提供查询 grid 或审批 |
+| 普通终端 TUI | Ratatui 0.30.2、Crossterm 0.29.0 | 无 Tern 的数据源、认证与全局设置管理，不提供查询 grid 或审批 |
 | Tern 启动集成 | Tern 内嵌 Luau、Plugin SDK | 命令面板入口、快捷键、定位并启动 Rust 程序 |
 | 业务内核与 Engine | Rust、Tokio、Serde | 连接、provider、执行任务、结果、变更、持久化与生命周期 |
 | 内部通信 | macOS／Linux 使用 Unix domain socket，Windows 使用字节模式 Named Pipe；共用长度分帧的 JSON 消息 | UI／MCP 到 Engine 的请求、响应和任务事件；支持协议版本握手 |
@@ -32,13 +32,13 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 | 内部存储 | SQLite，通过 SQLx 访问 | 连接配置、工作区、草稿、查询历史和执行记录；不作为首批外部数据库入口 |
 | 凭据存储 | keyring 4.2，启用 `v1`；macOS Keychain、Windows Credential Manager、Linux Secret Service | 密码等秘密数据，与普通配置分离；凭据服务不可用时仅会话内保存 |
 | SQL 辅助 | sqlparser-rs、sqlformat、数据库元数据 | 语句定位、基础诊断、补全与原生选区格式化；保留 token 语义，实际执行以数据库反馈为准 |
-| Agent 接入，0.2.0 规划 | 官方 Rust MCP SDK rmcp 3.9.0、stdio | 23 个 tools、结构化结果与能力协商后的用户确认；不提供远程 transport |
+| Agent 接入 | 官方 Rust MCP SDK rmcp 3.9.0、stdio | 23 个 tools、结构化结果与能力协商后的用户确认；不提供远程 transport |
 
 Rust 使用 stable toolchain、edition 2024；TSP SDK 在 workspace 精确固定为 `0.2.0`，依赖由 `Cargo.lock` 锁定。界面使用 Tern 公开语义控件，表单与主操作保留明确层级；导航行、标签、grid 和状态入口按唯一 HTML 设计使用局部样式，不维护旧 SDK 兼容层。IPC 编解码和会话层共用异步字节流接口，平台实现负责连接建立、端点命名、访问权限、实例锁及进程启动／退出；业务逻辑不按 OS 分叉。
 
 ### 2.2 组件与进程边界
 
-以下为 0.2.0 目标架构；当前入口与已实现模块仍以 README 和源码为准。
+以下为 0.2.0 架构；具体实现与运行验收状态见技术方案。
 
 ```mermaid
 flowchart LR
@@ -61,7 +61,7 @@ flowchart LR
 - **Luau plugin** 使用 window entry，负责启动集成；界面与业务状态由 Rust 实现。
 - **MCP adapter** 只做协议转换、权限上下文传递和会话管理，复用 Engine 的 provider、任务及提交逻辑。
 
-发布一个 `datapier` 可执行文件；0.2.0 按子命令启动独立进程：`tui` 运行普通终端的数据源与认证管理，`tsp` 运行现有 Tern 工作台，`mcp` 运行 stdio server，`engine` 运行共享内核。各入口按同一用户数据目录发现或启动唯一 Engine；不同工作区可由同一 Engine 管理。规划不保留把旧 `tui` 当 TSP 的兼容分派，实际切换在实现阶段完成。
+一个 `datapier` 可执行文件按子命令启动独立进程：`tui` 运行普通终端的数据源与认证管理，`tsp` 运行 Tern 工作台，`mcp` 运行 stdio server，`engine` 运行共享内核。各入口按同一用户数据目录发现或启动唯一 Engine；不同工作区可由同一 Engine 管理。旧 `tui` 不再分派 TSP。
 
 TSP 和 MCP 分属不同进程及通道：UI 的 PTY 承载 TSP，MCP 的 stdin／stdout 仅承载 MCP 消息。Engine 不继承或持有这两套协议的 stdio，日志也不写入协议输出。
 
@@ -122,7 +122,7 @@ Engine 使用私有数据目录和 OS 文件锁保证实例唯一；运行描述
 ### 2.6 数据与一致性约束
 
 1. **类型保真。** 大整数、精确小数使用带类型的字符串传输，二进制使用可逆编码；NULL、空字符串与 Redis key 不存在分别表达。未来 BSON 等类型保留原生类型信息，不经普通 JSON 数值或显示字符串静默降级。
-2. **按需结果。** 0.2.0 目标为查询结果不落盘、仅保留有界会话内数据；普通只读查询实时分页，不能安全重复的语句只执行一次并分批读流。IPC 按字节限制传输，大字段按需读取；历史不保存结果行。TSP 导出安全只读源时显式重查流写，其他来源只导出仍保留数据并注明范围；MCP 不提供导入导出。0.1.x 的结果缓存与导出契约保留在对应历史方案。
+2. **按需结果。** 0.2.0 查询结果不落盘、仅保留有界会话内数据；普通只读查询实时分页，不能安全重复的语句只执行一次并分批读流。IPC 按字节限制传输，大字段按需读取；历史不保存结果行。TSP 导出安全只读源时显式重查流写，其他来源只导出仍保留数据并注明范围；MCP 不提供导入导出。0.1.x 的结果缓存与导出契约保留在对应历史方案。
 3. **编辑与提交。** 未提交编辑支持撤销和丢弃。MySQL 行级编辑要求完整主键或非空唯一键，以参数化 SQL 和原值检查处理并发冲突；无可靠行标识的结果保持只读。Redis 按 key、field、member、index 的实际语义提交，检查并发变化，修改值默认保留 TTL。
 4. **执行语义。** 事务绑定所属会话的专属物理连接。MySQL DDL 按服务端隐式提交规则处理；取消使用控制连接请求 `KILL QUERY` 并等待最终状态。Redis 停止等待不等于撤销服务端命令；不承诺统一的跨数据库回滚。
 5. **权限一致。** Core 校验连接原有只读／读写模式，数据库账号与平台权限作为上限。0.2.0 MCP 基准范围与保存的资源树可见范围一致；细粒度控制默认关闭，关闭时沿用连接模式，开启时叠加 MySQL DB 级／Redis 实例级授权。自由 SQL 分析实际读写范围，未知范围拒绝，危险审批不能扩权；annotations 和 SQL 前缀不替代检查。
@@ -155,7 +155,7 @@ datapier/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── crates/
-│   ├── datapier/                   # 当前 tui／engine；0.2.0 规划 tui／tsp／mcp／engine
+│   ├── datapier/                   # tui／tsp／mcp／engine 分派
 │   ├── datapier-core/
 │   │   └── src/
 │   │       ├── model/              # 资源、值类型、能力描述
@@ -185,7 +185,7 @@ datapier/
     └── technical-design-0.2.0.md
 ```
 
-- Engine 实例化并持有 Core；TSP、规划中的 TUI 和 MCP adapter 都通过本地 IPC 访问 Engine，不直接连接数据库。内部契约与 client 在各入口复用，不复制业务实现。
+- Engine 实例化并持有 Core；TSP、TUI 和 MCP adapter 都通过本地 IPC 访问 Engine，不直接连接数据库。内部契约与 client 在各入口复用，不复制业务实现。
 - provider 先保留为 Core 内部模块，使用同一公共契约和显式注册；依赖和实现规模需要时再拆 crate，不要求每个 provider 首期独立成包。
 - `plugins/datapier` 是可安装的 Tern 启动包；plugin ID 为 `datapier`，命令面板入口保留 `New Datapier block`，实际启动 pane 内的 TSP 应用。
 - Rust 构建产物、二进制缓存、数据库文件、日志和运行描述文件放在启动包外，避免触发 plugin 热重载。工作区和秘密数据不依赖启动包目录存续。
@@ -231,18 +231,18 @@ Archery 是受控数据库访问来源，保留 MySQL／Redis 类型、平台权
 
 ### 4.2 0.2.0：MCP、独立配置与实时查询
 
-目标：Agent 与人复用数据库内核，脱离 Tern 仍可配置和使用；将共享查询模型改为按需读取。详细接口、数据迁移、保证边界与验收见 [0.2.0 技术方案](technical-design-0.2.0.md)，当前尚未实施。
+目标：Agent 与人复用数据库内核，脱离 Tern 仍可配置和使用；共享查询模型按需读取。本轮验收平台按用户确认限定为 macOS arm64，其他平台保留实现与 CI 配置；详细接口、迁移、保证边界及验证状态见 [0.2.0 技术方案](technical-design-0.2.0.md)。
 
 - `datapier mcp` 提供本机 stdio server；23 个 tools 覆盖发现、会话、结构、浏览、执行与审批、分页、显式统计、大值、任务、事务、历史和 Archery SQL 检查。不提供 MCP 导入导出、结构化变更提交或工单执行。
 - `datapier tui` 提供普通终端的数据源、认证与设置管理；现有 Tern 工作台改为 `datapier tsp`。TUI 不提供审批和查询 grid。
 - MCP 可见基准与保存的资源树数据库／实例范围一致，额外启动白名单只能缩小范围。全局细粒度控制默认关闭，沿用连接模式；开启时使用 MySQL 每 DB、Redis 每实例的关闭／只读／读写授权，权限控件随之显隐但保存值保留。
-- 连接级危险审批独立于细粒度开关；危险批次先冻结、同意后只执行一次，默认有效 10 分钟。TSP 可交互在线走通知与界面，不抢焦；离线走审批工具，优先客户端原生确认，不支持时明确信任宿主取得用户同意。秘密仍由 TUI／TSP 输入。
+- 连接级危险审批独立于细粒度开关；危险批次先冻结、同意后只执行一次，默认有效 10 分钟。在线通过窗口 toast 提醒并由工作台待办入口处理，离线走审批工具；原生确认不可用时明确信任宿主取得用户同意。0.2.0 仅提供窗口提醒与待办面板，系统通知及通知点击定位进入后续规划。秘密仍由 TUI／TSP 输入。
 - 查询结果不持久化。MySQL 表与安全只读 SQL 默认每页 100，翻页重查；不安全重放语句保持单次执行流。总行数仅显式点击统计且每次重算。历史保存命令与必要元数据，审批／写入日志独立保留。
 - MySQL、SQL、Redis 复合值、历史和 Archery grid 共用分页器，行数选择置于翻页按钮之前。Redis key 默认每批 1000 个新 key，加载更多追加与去重；资源目录不设行数上限，按字节续取。
 - Direct Redis 自动探测 logical DB 配置数量，失败显示未知，不把默认 16 当事实；支持显式覆盖。Archery 保持平台选定 DB 范围。
 - TSP 安全只读导出独立重查并流式写文件；Archery 与不可安全重放结果只导出当前仍保留数据并注明范围。Agent 任务可在 TSP 查看状态与存活结果，不承诺重启后恢复结果。
 
-**验收：** 真实标准 MCP client、普通终端和 Tern 分别完成对应闭环；验证范围过滤、跨库授权、两条审批路径一次执行、统一分页／手动 COUNT、Redis 发现／增量浏览、内存与生命周期、旧缓存退出运行链路。宿主退出只释放所属会话，不重发可能写入的操作，不影响其他客户端。
+**验收：** 在 macOS arm64 上由真实标准 MCP client、普通终端和 Tern 分别完成对应闭环；验证范围过滤、跨库授权、两条审批路径一次执行、统一分页／手动 COUNT、Redis 发现／增量浏览、内存与生命周期、旧缓存退出运行链路。宿主退出只释放所属会话，不重发可能写入的操作，不影响其他客户端。
 
 ### 4.3 0.3.0：结构设计与高级编辑
 
@@ -283,11 +283,11 @@ Archery 是受控数据库访问来源，保留 MySQL／Redis 类型、平台权
 
 ### 5.1 开发环境
 
-macOS 开发使用 Homebrew 安装的 Rust 与 Cargo，不强制引入 rustup；Linux 与 Windows 准备对应 stable Rust／Cargo 和本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。六种目标使用一致的锁定依赖；0.1.1 在 macOS arm64 使用实际 Tern 验证，其他目标在 PR 阶段核对构建。CodeGraph 用于 AI 定位符号、调用关系和影响范围，Cargo 编译诊断作为实现反馈；LSP 不列为必需条件，格式化规则统一见[贡献指南](../CONTRIBUTING.md#代码格式化)。
+macOS 开发使用 Homebrew 安装的 Rust 与 Cargo，不强制引入 rustup；Linux 与 Windows 准备对应 stable Rust／Cargo 和本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。六种目标使用一致的锁定依赖；0.2.0 各目标构建及真实运行分别记录。CodeGraph 可用于定位符号、调用关系和影响范围；LSP 不列为必需条件，格式化规则统一见[贡献指南](../CONTRIBUTING.md#代码格式化)。
 
 Luau 由 Tern 内嵌执行，不要求单独安装 Luau runtime。修改启动 plugin 时可由目标版本的 `tern plugin types` 生成声明供参考，真实行为通过 Tern 加载和启动验证，不以类型声明或 LSP 检查代替运行。TSP SDK 负责协议编码与事件接入，grid 和数据库工作流仍由 Datapier 实现。
 
-0.1.0 的实现与历史运行范围见[技术方案](technical-design-0.1.0.md#11-实现与运行记录)。后续 MCP 与高级功能计划复用现有能力。
+0.1.0 的实现与历史运行范围见[技术方案](technical-design-0.1.0.md#11-实现与运行记录)。当前 MCP 已接入共享内核，高级功能仍按后续版本规划。
 
 ### 5.2 验证标准
 
@@ -305,7 +305,7 @@ Luau 由 Tern 内嵌执行，不要求单独安装 Luau runtime。修改启动 p
 | MCP | 实际 initialize、tools/list、tools/call；查询、分页、显式 COUNT、取消、范围拒绝与一次审批执行；任务可在 TSP 定位，窗口关闭转离线，宿主退出传播至 Engine，无 Tern 时独立配置与运行 |
 | 安装与版本 | 在本版原生验收平台从干净环境安装，取得正确架构的匹配二进制；保留 Windows `.exe`、Unix 执行权限、空格／中文路径及所需运行库的跨平台实现；下载失败可重试且不留下可执行的半文件；IPC 不兼容时明确报错，不抢占活动实例 |
 
-平台实现与构建保留第 2.7 节全部六种组合。0.1.1 原生运行验收仅覆盖 macOS arm64，验证安装启动、TSP 交互、数据库读写及 TLS、类型保真、凭据存取、多客户端 IPC、退出收尾和恢复；其他五个目标在 PR 阶段验证编译、默认测试和版本 smoke，不要求本轮原生运行验收。构建与运行记录分别说明，不把编译通过写成实际运行通过。后续版本的运行范围在对应方案中确认；0.2.0 起的 MCP 验收仍包括 stdio 及无 Tern 的独立运行。
+平台实现与构建保留第 2.7 节全部六种组合。0.1.1 的历史原生运行验收仅覆盖 macOS arm64；本轮 0.2.0 另经用户确认，仅在 macOS arm64 验证安装启动、TUI／TSP／MCP、数据库读写及 TLS、类型保真、凭据存取、多客户端 IPC、退出收尾和恢复。其他五个目标保留实现与 CI 配置，本轮不要求其原生运行或六目标 CI 通过。构建与运行记录分别说明，历史或编译证据不能替代本候选实际运行。MCP 验收仍包括 stdio 及无 Tern 的独立配置和运行。
 
 当前宿主验收基线为 Tern 0.9.9，数据库范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点。数据库实例可部署于独立测试服务器，不要求数据库服务端与客户端在同一台机器。TSP SDK、协议事件及 native editing 以验收平台 Tern 的实际行为为准；其他平台保留对应实现，包括 Windows 随附 ConPTY，运行状态按实际证据说明。
 

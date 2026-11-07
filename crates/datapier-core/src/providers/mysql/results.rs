@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{errors, sql};
 use crate::{ExecutionSink, model::*};
 
-fn columns(cols: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
+pub(crate) fn columns(cols: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
     cols.iter()
         .map(|c| Column::new(c.name(), c.type_info().name()))
         .collect()
@@ -17,7 +17,7 @@ fn columns(cols: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
 
 // 按原生类型解码：大整数和 DECIMAL 用字符串保留精度，二进制用 Base64
 // 可逆传递；未知类型显式报错，不能退回可能有损的显示文本。
-fn decode_row(row: &MySqlRow) -> Result<Vec<Value>> {
+pub(crate) fn decode_row(row: &MySqlRow) -> Result<Vec<Value>> {
     row.columns()
         .iter()
         .enumerate()
@@ -84,59 +84,23 @@ fn decode_row(row: &MySqlRow) -> Result<Vec<Value>> {
         .collect()
 }
 
-pub(super) async fn stream_query(
-    conn: &mut MySqlConnection,
-    sql: &str,
-    args: MySqlArguments,
-    source_columns: Vec<Column>,
-    sink: &ExecutionSink,
-    cancel: &CancellationToken,
-) -> Result<Json> {
-    ensure_not_cancelled(cancel)?;
-    // 先 prepare 取得列定义，保证零行结果也能建立带列信息的结果集。
-    let stmt = conn
-        .prepare(sqlx::AssertSqlSafe(sql).into_sql_str())
-        .await?;
-    let mut metadata = columns(stmt.columns());
-    // schema 与 prepare 之间可能发生 DDL；不能把注释错配到新增或重排后的列。
-    if metadata.len() != source_columns.len() {
-        return Err(AppError::new("conflict", "表结构已变化，请重新浏览"));
-    }
-    for (column, source) in metadata.iter_mut().zip(source_columns) {
-        if column.name != source.name {
-            return Err(AppError::new("conflict", "表结构已变化，请重新浏览"));
-        }
-        column.comment = source.comment;
-    }
-    let id = sink.start(metadata, "rows").await?;
-    let mut stream = stmt.query_with(args).fetch(&mut *conn);
-    let mut rows = Vec::with_capacity(128);
-    let mut count = 0u64;
-    loop {
-        let row = tokio::select! { row = stream.try_next() => row?, _ = cancel.cancelled() => return Err(AppError::cancelled()) };
-        let Some(row) = row else { break };
-        rows.push(decode_row(&row)?);
-        count += 1;
-        if rows.len() == 128 {
-            sink.append(id, std::mem::take(&mut rows)).await?;
-        }
-    }
-    if !rows.is_empty() {
-        sink.append(id, rows).await?;
-    }
-    sink.finish(id, json!({"row_count":count})).await?;
-    Ok(json!({"results":[id],"row_count":count}))
-}
-
 pub(super) async fn execute_statement(
     conn: &mut MySqlConnection,
     text: &str,
     sink: &ExecutionSink,
+    cancel: &CancellationToken,
+    may_write: bool,
+    batch_size: usize,
+    parameters: &[Json],
 ) -> Result<(Vec<Uuid>, u64)> {
     // 普通语句的 prepare 元数据用于保留空结果的列；prepare 失败时仍执行。
     // CALL／EXECUTE 的结果由运行时决定，SQLx 不暴露空动态结果元数据，
     // 且边界事件也可能是命令 OK 包，不能据此伪造列或断言存在结果集。
     let dynamic = sql::is_dynamic(text);
+    let diagnostic = sql::is_diagnostic(text);
+    if diagnostic && !parameters.is_empty() {
+        return Err(AppError::invalid("诊断语句不支持绑定参数"));
+    }
     // 动态语句可能在结果集后继续写入；只有读完整个流才知道服务端已结束。
     let local_error = |mut error: AppError| {
         error.details["result_stream_incomplete"] = json!(true);
@@ -150,20 +114,46 @@ pub(super) async fn execute_statement(
             error
         }
     };
-    let initial = conn
-        .prepare(sqlx::AssertSqlSafe(text).into_sql_str())
-        .await
-        .ok()
-        .map(|stmt| columns(stmt.columns()));
-    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(text.to_owned())).fetch_many(&mut *conn);
+    let initial = if diagnostic {
+        None
+    } else {
+        conn.prepare(sqlx::AssertSqlSafe(text).into_sql_str())
+            .await
+            .ok()
+            .map(|stmt| columns(stmt.columns()))
+    };
+    let mut args = MySqlArguments::default();
+    for value in parameters {
+        super::catalog::add_filter_arg(&mut args, value)?;
+    }
+    #[allow(deprecated)]
+    let mut stream = if parameters.is_empty() {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(text.to_owned())).fetch_many(&mut *conn)
+    } else {
+        sqlx::query_with(sqlx::AssertSqlSafe(text), args).fetch_many(&mut *conn)
+    };
     let mut results = Vec::new();
     let mut id = None;
     let mut pending = if dynamic { None } else { initial };
-    let mut rows = Vec::with_capacity(128);
+    let mut rows = Vec::with_capacity(batch_size);
     let mut count = 0u64;
+    let mut retaining = true;
+    let mut limited = false;
     let mut affected = 0u64;
+    let mut drain_deadline = None;
     loop {
-        let item = match stream.try_next().await {
+        let next = if let Some(deadline) = drain_deadline {
+            match tokio::time::timeout_at(deadline, stream.try_next()).await {
+                Ok(item) => item,
+                Err(_) => {
+                    return Err(AppError::unknown("停止展示后写入未在期限内结束")
+                        .with_details(json!({"result_stream_incomplete":true})));
+                }
+            }
+        } else {
+            stream.try_next().await
+        };
+        let item = match next {
             Ok(Some(item)) => item,
             Ok(None) => break,
             Err(error) => {
@@ -180,26 +170,56 @@ pub(super) async fn execute_statement(
         };
         match item {
             sqlx::Either::Right(row) => {
-                if id.is_none() {
+                if retaining && id.is_none() {
                     let meta = pending
                         .take()
                         .filter(|m| !m.is_empty())
                         .unwrap_or_else(|| columns(row.columns()));
                     let result = sink.start(meta, "rows").await.map_err(local_error)?;
+                    sink.store
+                        .update_result_summary(
+                            result,
+                            json!({"retrieval_mode":"single_execution_stream","has_more":true}),
+                        )
+                        .await
+                        .map_err(local_error)?;
                     results.push(result);
                     id = Some(result);
                 }
-                rows.push(decode_row(&row).map_err(local_error)?);
-                count += 1;
-                if rows.len() == 128 {
-                    sink.append(id.unwrap(), std::mem::take(&mut rows))
-                        .await
-                        .map_err(local_error)?;
+                if retaining {
+                    rows.push(decode_row(&row).map_err(local_error)?);
+                    if rows.len() == batch_size {
+                        match sink.append(id.unwrap(), std::mem::take(&mut rows)).await {
+                            Ok(()) => {
+                                count += batch_size as u64;
+                                retaining = sink.wait_demand(id.unwrap(), count, cancel).await?;
+                            }
+                            Err(error)
+                                if error.code == "resource_limit" || error.code == "not_found" =>
+                            {
+                                limited |= error.code == "resource_limit";
+                                retaining = false;
+                            }
+                            Err(error) => return Err(local_error(error)),
+                        }
+                        if !retaining && !may_write {
+                            return Err(local_error(if limited {
+                                AppError::new("resource_limit", "结果达到内存上限")
+                            } else {
+                                AppError::cancelled()
+                            }));
+                        }
+                        if !retaining && may_write && drain_deadline.is_none() {
+                            drain_deadline = Some(
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                            );
+                        }
+                    }
                 }
             }
             sqlx::Either::Left(done) => {
                 affected = affected.saturating_add(done.rows_affected());
-                if id.is_none() && pending.as_ref().is_some_and(|c| !c.is_empty()) {
+                if retaining && id.is_none() && pending.as_ref().is_some_and(|c| !c.is_empty()) {
                     let result = sink
                         .start(pending.take().unwrap(), "rows")
                         .await
@@ -207,23 +227,48 @@ pub(super) async fn execute_statement(
                     results.push(result);
                     id = Some(result);
                 }
-                if id.is_none() && dynamic {
+                if retaining && id.is_none() && (dynamic || diagnostic) {
                     let result = sink
                         .start(Vec::new(), "columns_unknown")
                         .await
                         .map_err(local_error)?;
                     results.push(result);
-                    sink.finish(result, json!({"columns_known":false,"result_set_presence":"unknown","reason":"driver_does_not_expose_empty_dynamic_result_metadata"})).await.map_err(local_error)?;
+                    let reason = if diagnostic {
+                        "driver_does_not_expose_empty_diagnostic_result_metadata"
+                    } else {
+                        "driver_does_not_expose_empty_dynamic_result_metadata"
+                    };
+                    sink.finish(result, json!({"columns_known":false,"result_set_presence":"unknown","reason":reason})).await.map_err(local_error)?;
                 }
                 if let Some(result) = id.take() {
-                    if !rows.is_empty() {
-                        sink.append(result, std::mem::take(&mut rows))
-                            .await
-                            .map_err(local_error)?;
+                    if retaining && !rows.is_empty() {
+                        let batch = std::mem::take(&mut rows);
+                        let len = batch.len() as u64;
+                        match sink.append(result, batch).await {
+                            Ok(()) => count += len,
+                            Err(error)
+                                if error.code == "resource_limit" || error.code == "not_found" =>
+                            {
+                                limited |= error.code == "resource_limit";
+                                retaining = false;
+                            }
+                            Err(error) => return Err(local_error(error)),
+                        }
                     }
-                    sink.finish(result, json!({"row_count":count}))
-                        .await
-                        .map_err(local_error)?;
+                    if limited {
+                        count = sink
+                            .store
+                            .result_meta(result)
+                            .await
+                            .map(|meta| meta.row_count)
+                            .unwrap_or(count);
+                    }
+                    if let Err(error) = sink.finish(result, json!({"row_count":count,"retrieval_mode":"single_execution_stream","has_more":false,"resource_limited":limited,"retained_prefix":!retaining})).await
+                        && error.code != "not_found" { return Err(local_error(error)); }
+                    if !retaining && may_write && drain_deadline.is_none() {
+                        drain_deadline =
+                            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+                    }
                     count = 0;
                 }
                 pending = None;
@@ -231,10 +276,27 @@ pub(super) async fn execute_statement(
         }
     }
     if let Some(result) = id {
-        if !rows.is_empty() {
-            sink.append(result, rows).await?;
+        if retaining && !rows.is_empty() {
+            let len = rows.len() as u64;
+            match sink.append(result, rows).await {
+                Ok(()) => count += len,
+                Err(error) if error.code == "resource_limit" || error.code == "not_found" => {
+                    limited |= error.code == "resource_limit";
+                    retaining = false;
+                }
+                Err(error) => return Err(local_error(error)),
+            }
         }
-        sink.finish(result, json!({"row_count":count})).await?;
+        if limited {
+            count = sink
+                .store
+                .result_meta(result)
+                .await
+                .map(|meta| meta.row_count)
+                .unwrap_or(count);
+        }
+        if let Err(error) = sink.finish(result, json!({"row_count":count,"retrieval_mode":"single_execution_stream","has_more":false,"resource_limited":limited,"retained_prefix":!retaining})).await
+            && error.code != "not_found" { return Err(local_error(error)); }
     }
     Ok((results, affected))
 }

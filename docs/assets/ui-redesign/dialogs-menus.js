@@ -261,19 +261,8 @@ function overlay() {
   if (state.overlay === 'app-settings') {
     return modal(
       t('settings'),
-      `<label>${h(t('language'))}<select id="language-preference" aria-label="${h(t('language'))}">${
-        ['system', 'zh-CN', 'en'].map(value =>
-          `<option value="${value}" ${languagePreference === value ? 'selected' : ''}>${
-            h(t(
-              value === 'system'
-                ? 'system'
-                : value === 'zh-CN'
-                ? 'chinese'
-                : 'english',
-            ))
-          }</option>`
-        ).join('')
-      }</select></label><section class="detail-section">${serverList()}</section>`,
+      settingsPreview(),
+      settingsPreviewFooter(),
     );
   }
   if (state.overlay === 'cell-details') {

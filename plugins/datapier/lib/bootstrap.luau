@@ -32,9 +32,10 @@ function M.start(cx)
         fresh:toast("error", "Datapier 安装失败", tostring(message or "安装脚本返回无效结果"))
         return
       end
+      tern.kv.set("binary", data.cwd .. (if os == "windows" then "\\datapier.exe" else "/datapier"))
       -- 异步回调使用 fresh 上下文；原生程序通过 cwd + 固定 shell 命令启动，
       -- Launch 的 block args 不能当作进程 argv，用户输入也不能拼入命令。
-      local command = if os == "windows" then ".\\datapier.exe tui" else "./datapier tui"
+      local command = if os == "windows" then ".\\datapier.exe tsp" else "./datapier tsp"
       local started, failure = pcall(function()
         fresh.hosts:terminal("local", { cwd = data.cwd, command = command })
       end)

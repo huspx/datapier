@@ -23,17 +23,29 @@ impl App {
         .then_some(index)
     }
 
-    fn redis_selection_scope(&self) -> Option<(Uuid, u32)> {
-        self.profile
-            .as_ref()
-            .filter(|_| self.is_redis())
-            .map(|p| (p.id, p.redis_db()))
+    pub(super) fn redis_selection_scope(&self) -> Option<(Uuid, u32)> {
+        self.profile.as_ref().filter(|_| self.is_redis()).map(|p| {
+            (
+                p.id,
+                self.tabs[self.active]
+                    .browse
+                    .redis_db
+                    .unwrap_or_else(|| p.redis_db()),
+            )
+        })
+    }
+
+    pub(super) fn redis_tree_matches_resources(&self) -> bool {
+        self.workbench.redis_tree_owner == self.redis_selection_scope()
+            && self.workbench.redis_tree.len() == self.resources.len()
     }
 
     fn redis_visible_key_indices(&self) -> Vec<usize> {
         if self.workbench.tree {
-            let tree = crate::redis_tree::Tree::from_resources(&self.resources);
-            let rows = tree.rows(
+            if !self.redis_tree_matches_resources() {
+                return Vec::new();
+            }
+            let rows = self.workbench.redis_tree.rows(
                 &self.workbench.redis_expansion,
                 self.redis_selection_scope(),
             );

@@ -227,6 +227,17 @@ pub(super) fn focus_node_id(view: &View<Msg>, key: &str) -> Option<String> {
     for (region, node) in ["main", "dock", "layer"].into_iter().zip(view.regions()) {
         if let Some(node) = node {
             let mut path = region.to_owned();
+            match node.props().get("key") {
+                Some(Value::String(root_key)) => {
+                    path.push('.');
+                    path.push_str(root_key);
+                }
+                Some(Value::Number(root_key)) => {
+                    use std::fmt::Write as _;
+                    let _ = write!(path, ".{root_key}");
+                }
+                _ => {}
+            }
             if find(node, key, &mut path) {
                 return Some(path);
             }

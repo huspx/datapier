@@ -701,6 +701,8 @@ fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
             data: Value::Null,
         })
         .collect();
+    app.workbench.redis_tree.reset(&app.resources);
+    app.workbench.redis_tree_owner = app.redis_selection_scope();
     app.workbench.key_page = 4;
     app.normalize_key_page();
     assert_eq!(app.workbench.key_page, 0);
@@ -713,6 +715,77 @@ fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
     app.workbench_action("keys-next", &backend);
     app.workbench_action("redis-tree:YTo=", &backend);
     assert_eq!(app.workbench.key_page, 0);
+}
+
+#[test]
+fn redis_tree_keeps_selection_on_append_and_resets_for_another_db() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.workbench.tree = true;
+    let resource = |key: &str| {
+        json!({
+            "name": key, "kind": "string", "database": null,
+            "key_b64": STANDARD.encode(key), "data": null
+        })
+    };
+    app.response(Response {
+        tag: "resource.list".into(),
+        result: Ok(json!({"resources": [resource("b:one"), resource("z")], "cursor": "next", "complete": false})),
+    }, &backend);
+    app.workbench_action("redis-tree:Yjo=", &backend);
+    app.redis_key_click(0, false, true, &backend);
+    assert!(app.redis_key_selected(0));
+    app.response(Response {
+        tag: "resource.list".into(),
+        result: Ok(json!({"resources": [resource("a:one"), resource("b:two")], "cursor": null, "complete": true})),
+    }, &backend);
+    assert!(app.redis_key_selected(0));
+    let rows = app
+        .workbench
+        .redis_tree
+        .rows(&app.workbench.redis_expansion, app.redis_selection_scope());
+    let labels: Vec<_> = rows.iter().map(|row| row.label).collect();
+    assert_eq!(labels, [b"b".as_slice(), b"one", b"two", b"z", b"a"]);
+
+    app.tabs[app.active].browse.redis_db = Some(1);
+    assert!(!app.redis_tree_matches_resources());
+    app.response(
+        Response {
+            tag: "resource.list".into(),
+            result: Ok(json!({"resources": [resource("b:new")], "cursor": null, "complete": true})),
+        },
+        &backend,
+    );
+    assert_eq!(app.resources.len(), 1);
+    assert!(!app.redis_key_selected(0));
+    let rows = app
+        .workbench
+        .redis_tree
+        .rows(&app.workbench.redis_expansion, app.redis_selection_scope());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, b"b");
+    assert!(matches!(
+        rows[0].kind,
+        crate::redis_tree::Kind::Directory {
+            expanded: false,
+            ..
+        }
+    ));
+
+    app.action("list", &backend);
+    app.response(
+        Response {
+            tag: "resource.list".into(),
+            result: Ok(json!({"resources": [resource("c:new")], "cursor": null, "complete": true})),
+        },
+        &backend,
+    );
+    let rows = app
+        .workbench
+        .redis_tree
+        .rows(&app.workbench.redis_expansion, app.redis_selection_scope());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, b"c");
 }
 
 #[test]
@@ -813,7 +886,7 @@ fn readonly_redis_large_values_load_in_chunks_without_edit_baseline() {
                 ("hex", "7B 22 61 22 3A 31 7D"),
             ] {
                 app.workbench_action(&format!("format:{format}"), &backend);
-                let view = crate::views::render(&app);
+                let view = crate::views::render_window(&app, Some(Uuid::new_v4()));
                 assert_eq!(
                     view.regions().into_iter().flatten().find_map(content),
                     Some(expected)

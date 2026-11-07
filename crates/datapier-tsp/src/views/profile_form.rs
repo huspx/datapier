@@ -171,6 +171,11 @@ pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         form = form.child(
             ui::field(crate::i18n::tr("默认 DB").into_owned()).child(redis_db_picker(app, true)),
         );
+        form = form.child(field(
+            app,
+            "redis_databases_override",
+            "Redis DB 数量覆盖（留空为自动探测）",
+        ));
     }
     let read_only = app.field("access") == "read_only";
     form = form

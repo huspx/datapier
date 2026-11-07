@@ -12,10 +12,128 @@ use redis::{
     Client, ConnectionAddr, IntoConnectionInfo, RedisConnectionInfo, aio::MultiplexedConnection,
 };
 use serde_json::{Value as Json, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// 使用执行器同一解析器分析命令；不支持证明访问范围的命令会被拒绝。
+pub fn analyze_command(text: &str) -> Result<Json> {
+    let parsed = command::parse_commands(text)?;
+    if parsed.is_empty() {
+        return Err(AppError::invalid("命令为空"));
+    }
+    let mut commands = Vec::new();
+    let mut may_write = false;
+    let mut dangerous = false;
+    let mut databases = Vec::new();
+    let mut change_database = None;
+    for args in parsed {
+        let name = std::str::from_utf8(&args[0])
+            .map_err(|_| AppError::invalid("命令名必须是 UTF-8"))?
+            .to_ascii_uppercase();
+        let is_read = command::read_command(&args);
+        let is_control = matches!(
+            name.as_str(),
+            "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH"
+        );
+        let is_write = matches!(
+            name.as_str(),
+            "SET"
+                | "SETNX"
+                | "SETEX"
+                | "PSETEX"
+                | "MSET"
+                | "MSETNX"
+                | "DEL"
+                | "UNLINK"
+                | "EXPIRE"
+                | "PEXPIRE"
+                | "EXPIREAT"
+                | "PEXPIREAT"
+                | "PERSIST"
+                | "INCR"
+                | "INCRBY"
+                | "INCRBYFLOAT"
+                | "DECR"
+                | "DECRBY"
+                | "APPEND"
+                | "SETRANGE"
+                | "GETSET"
+                | "GETDEL"
+                | "GETEX"
+                | "HSET"
+                | "HSETNX"
+                | "HMSET"
+                | "HDEL"
+                | "HINCRBY"
+                | "HINCRBYFLOAT"
+                | "LPUSH"
+                | "RPUSH"
+                | "LPUSHX"
+                | "RPUSHX"
+                | "LPOP"
+                | "RPOP"
+                | "LSET"
+                | "LINSERT"
+                | "LREM"
+                | "LTRIM"
+                | "SADD"
+                | "SREM"
+                | "SPOP"
+                | "SMOVE"
+                | "SDIFFSTORE"
+                | "SINTERSTORE"
+                | "SUNIONSTORE"
+                | "ZADD"
+                | "ZREM"
+                | "ZINCRBY"
+                | "ZREMRANGEBYRANK"
+                | "ZREMRANGEBYSCORE"
+                | "ZREMRANGEBYLEX"
+                | "ZUNIONSTORE"
+                | "ZINTERSTORE"
+                | "RENAME"
+                | "RENAMENX"
+                | "COPY"
+                | "FLUSHDB"
+        );
+        if !is_read && !is_control && !is_write {
+            return Err(AppError::new(
+                "permission_denied",
+                format!("无法证明 Redis 命令 {name} 的访问范围"),
+            ));
+        }
+        if name == "COPY"
+            && args
+                .iter()
+                .skip(3)
+                .any(|arg| arg.eq_ignore_ascii_case(b"DB"))
+        {
+            return Err(AppError::new("permission_denied", "不允许跨 DB COPY"));
+        }
+        let db = if name == "SELECT" {
+            if args.len() != 2 {
+                return Err(AppError::invalid("SELECT 需要一个 DB 编号"));
+            }
+            let db = std::str::from_utf8(&args[1])
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .ok_or_else(|| AppError::invalid("无效 Redis DB"))?;
+            databases.push(db);
+            change_database = Some(db);
+            Some(db)
+        } else {
+            None
+        };
+        let command_dangerous = matches!(name.as_str(), "FLUSHDB" | "DEL" | "UNLINK");
+        may_write |= is_write || name == "EXEC";
+        dangerous |= command_dangerous;
+        commands.push(json!({"name":name,"may_write":is_write || name == "EXEC","dangerous":command_dangerous,"select_database":db}));
+    }
+    Ok(
+        json!({"may_write":may_write,"dangerous":dangerous,"databases":databases,"change_database":change_database,"commands":commands}),
+    )
+}
 /// 判断 Redis 命令文本是否包含 AUTH 或 HELLO 的 AUTH 参数；解析失败时返回错误。
 pub fn redis_contains_auth(text: &str) -> Result<bool> {
     Ok(command::parse_commands(text)?.iter().any(|args| {
@@ -89,13 +207,18 @@ fn import_cleanup_args(import: &Import) -> Vec<Vec<u8>> {
         import.pending_marker.clone().unwrap_or_default(),
     ]
 }
-// SQLite 缓存跨页保存去重结果及已输出位置，避免把全量 key 留在内存。
+// 原始字节用于去重，待输出的超量 SCAN 响应保留到下一逻辑批次。
 struct KeyScan {
     cursor: u64,
     complete: bool,
+    limited: bool,
     pattern: Option<String>,
     kind: Option<String>,
-    cache: sqlx::SqlitePool,
+    seen: HashSet<Vec<u8>>,
+    pending: VecDeque<(Vec<u8>, String)>,
+    bytes: usize,
+    store: crate::Store,
+    execution_id: Uuid,
 }
 /// 持有一个 Redis DB 的普通连接，以及隔离的命令、编辑和扫描状态。
 ///
@@ -161,29 +284,6 @@ async fn query<T: redis::FromRedisValue>(conn: &mut Conn, args: &[Vec<u8>]) -> R
 }
 fn args(parts: &[&str]) -> Vec<Vec<u8>> {
     parts.iter().map(|s| s.as_bytes().to_vec()).collect()
-}
-fn scan_insert(
-    group: &str,
-    keys: &[Vec<u8>],
-    kinds: &[String],
-    expected: Option<&str>,
-) -> Option<sqlx::QueryBuilder<sqlx::Sqlite>> {
-    let mut entries = keys
-        .iter()
-        .zip(kinds)
-        .filter(|(_, kind)| {
-            kind.as_str() != "none" && expected.is_none_or(|expected| expected == kind.as_str())
-        })
-        .peekable();
-    entries.peek()?;
-    let mut insert =
-        sqlx::QueryBuilder::new("INSERT OR IGNORE INTO redis_key_scan(scan_id,key,kind) ");
-    insert.push_values(entries, |mut row, (key, kind)| {
-        row.push_bind(group.to_owned())
-            .push_bind(key.clone())
-            .push_bind(kind.clone());
-    });
-    Some(insert)
 }
 // 写命令发送后发生 I/O 错误时，无法判断服务端是否执行，不能自动重放。
 fn error_unknown(e: redis::RedisError) -> AppError {
@@ -289,13 +389,10 @@ impl RedisSession {
         self.command_dead = true;
         let mut failure = None;
         for (id, scan) in std::mem::take(&mut self.scans) {
-            if let Err(e) = sqlx::query("DELETE FROM redis_key_scan WHERE scan_id=?")
-                .bind(id.to_string())
-                .execute(&scan.cache)
-                .await
+            if let Err(error) = scan.store.release_auxiliary(id).await
                 && failure.is_none()
             {
-                failure = Some(e.into());
+                failure = Some(error);
             }
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -342,6 +439,52 @@ impl RedisSession {
         if self.conn.is_none() {
             return Err(AppError::new("connection_closed", "连接已关闭"));
         }
+        if method == "database.list" {
+            let override_count = self.profile.direct()?.redis_databases_override;
+            let (source, result) = if let Some(count) = override_count {
+                ("manual_override", Ok(count))
+            } else {
+                let timeout = sink.store.settings().await?.limits.connect_timeout_seconds;
+                let probe = async {
+                    let mut conn =
+                        connect_database(&self.client, &self.profile, self.secret.as_deref())
+                            .await?;
+                    let values: Vec<String> =
+                        query(&mut conn, &args(&["CONFIG", "GET", "databases"])).await?;
+                    if values.len() != 2 || !values[0].eq_ignore_ascii_case("databases") {
+                        return Err(AppError::invalid("Redis databases 配置响应无效"));
+                    }
+                    values[1]
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| AppError::invalid("Redis databases 数量无效"))
+                };
+                (
+                    "server_config",
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout as u64),
+                        probe,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(AppError::new("timeout", "Redis DB 探测超时")),
+                    },
+                )
+            };
+            return Ok(match result {
+                Ok(count) if count > 0 => {
+                    json!({"state":"known","source":source,"databases":(0..count).map(|n| n.to_string()).collect::<Vec<_>>(),"configured_count":count,"reason":null})
+                }
+                Ok(_) => {
+                    json!({"state":"unknown","source":source,"databases":[],"configured_count":null,"reason":"Redis databases 数量无效"})
+                }
+                Err(error) => {
+                    json!({"state":"unknown","source":source,"databases":[],"configured_count":null,"reason":error.to_string()})
+                }
+            });
+        }
         if matches!(
             method,
             "connection.info" | "resource.list" | "resource.describe" | "resource.browse"
@@ -381,6 +524,7 @@ impl RedisSession {
             "change.submit" => self.submit(&p, sink, cancel).await,
             "execution.run" => self.run(&p, sink, cancel).await,
             "export.meta" => self.export_meta(&p).await,
+            "export.read" => self.export_read(&p).await,
             "import.begin" => self.import_begin(&p, sink).await,
             "import.append" => self.import_append(&p, sink).await,
             "import.finish" => self.import_finish(&p, sink).await,
@@ -404,7 +548,9 @@ impl RedisSession {
                     .find_map(|line| line.strip_prefix("redis_version:"))
                     .unwrap_or("")
                     .trim();
-                Ok(json!({"server_version":version,"database":self.profile.redis_db()}))
+                Ok(
+                    json!({"server_version":version,"database":if self.command_dead { None } else { Some(self.command_db) },"browse_database":self.profile.redis_db(),"transaction":self.command_transaction.is_some()}),
+                )
             }
             "resource.list" => self.list(p, sink, cancel, conn).await,
             "resource.describe" => Self::describe(conn, target(p, &self.profile)?).await,
@@ -417,7 +563,7 @@ impl RedisSession {
                 let ttl_args = vec![b"PTTL".to_vec(), k.clone()];
                 record_browse_command(sink, &ttl_args).await?;
                 let ttl: i64 = query(conn, &ttl_args).await?;
-                let id = browse(conn, &k, &kind, sink, cancel).await?;
+                let id = browse(conn, &k, &kind, sink, cancel, true).await?;
                 Ok(json!({"results":[id],"type":kind,"ttl_ms":ttl}))
             }
             _ => unreachable!(),
@@ -430,8 +576,9 @@ impl RedisSession {
         cancel: &CancellationToken,
         conn: &mut Conn,
     ) -> Result<Json> {
-        use futures_util::TryStreamExt;
-        use sqlx::Row;
+        let settings = sink.store.settings().await?;
+        let budget = settings.limits.result_memory_bytes_per_client as usize;
+        let response_budget = settings.limits.response_bytes as usize;
         let cursor = p.get("cursor").filter(|v| !v.is_null());
         let fresh = cursor.is_none();
         let id = if let Some(v) = cursor {
@@ -439,17 +586,20 @@ impl RedisSession {
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or_else(|| AppError::invalid("无效扫描令牌"))?
         } else {
-            sqlx::query("CREATE TABLE IF NOT EXISTS redis_key_scan (seq INTEGER PRIMARY KEY AUTOINCREMENT, scan_id TEXT NOT NULL, key BLOB NOT NULL, kind TEXT NOT NULL, emitted INTEGER NOT NULL DEFAULT 0, UNIQUE(scan_id,key))").execute(&sink.store.cache).await?;
-            sqlx::query("CREATE INDEX IF NOT EXISTS redis_key_scan_pending ON redis_key_scan(scan_id,emitted,seq)").execute(&sink.store.cache).await?;
             let id = Uuid::new_v4();
             self.scans.insert(
                 id,
                 KeyScan {
                     cursor: 0,
                     complete: false,
+                    limited: false,
                     pattern: p.get("pattern").and_then(Json::as_str).map(str::to_owned),
                     kind: p.get("type").and_then(Json::as_str).map(str::to_owned),
-                    cache: sink.store.cache.clone(),
+                    seen: HashSet::new(),
+                    pending: VecDeque::new(),
+                    bytes: 0,
+                    store: sink.store.clone(),
+                    execution_id: sink.execution_id,
                 },
             );
             id
@@ -457,102 +607,172 @@ impl RedisSession {
         let limit = p
             .get("limit")
             .and_then(Json::as_u64)
-            .unwrap_or(200)
+            .unwrap_or(settings.paging.redis_key_batch as u64)
             .clamp(1, 1000) as usize;
+        let other_bytes: usize = self
+            .scans
+            .iter()
+            .filter(|(key, _)| **key != id)
+            .map(|(_, scan)| scan.bytes)
+            .sum();
+        let budget = budget.saturating_sub(other_bytes);
         let result: Result<ResourcePage> = async {
-            let scan = self.scans.get_mut(&id).ok_or_else(|| AppError::invalid("扫描令牌已失效"))?;
-            if p.get("pattern").and_then(Json::as_str).is_some_and(|s| Some(s) != scan.pattern.as_deref())
-                || p.get("type").and_then(Json::as_str).is_some_and(|s| Some(s) != scan.kind.as_deref()) {
+            let scan = self
+                .scans
+                .get_mut(&id)
+                .ok_or_else(|| AppError::invalid("扫描令牌已失效"))?;
+            if p.get("pattern")
+                .and_then(Json::as_str)
+                .is_some_and(|s| Some(s) != scan.pattern.as_deref())
+                || p.get("type")
+                    .and_then(Json::as_str)
+                    .is_some_and(|s| Some(s) != scan.kind.as_deref())
+            {
                 return Err(AppError::invalid("扫描条件与令牌不匹配"));
             }
-            let group = id.to_string();
             let mut resources = Vec::with_capacity(limit);
-            let mut ttl_query = redis::pipe();
-            let mut last = 0i64;
             let mut size = 0usize;
-            // SCAN 可返回空批次和重复项；只有服务端 cursor 为零才算扫描结束。
-            // 缓存中的唯一约束去重，分页分别受条数和序列化字节数限制。
             loop {
                 ensure_not_cancelled(cancel)?;
-                let mut cached = sqlx::query("SELECT seq,key,kind FROM redis_key_scan WHERE scan_id=? AND emitted=0 AND seq>? ORDER BY seq LIMIT ?")
-                    .bind(&group).bind(last).bind((limit - resources.len()) as i64).fetch(&scan.cache);
-                let mut page_full = false;
-                while let Some(row) = cached.try_next().await? {
-                    let seq: i64 = row.try_get(0)?;
-                    let key: &[u8] = row.try_get(1)?;
+                while let Some((key, kind)) = scan.pending.front() {
                     let resource = Resource {
-                        name: String::from_utf8_lossy(key).into_owned(), kind: row.try_get(2)?,
-                        database: Some(self.profile.redis_db().to_string()), key_b64: Some(STANDARD.encode(key)), data: Json::Null,
+                        name: String::from_utf8_lossy(key).into_owned(),
+                        kind: kind.clone(),
+                        database: Some(self.profile.redis_db().to_string()),
+                        key_b64: Some(STANDARD.encode(key)),
+                        data: Json::Null,
                     };
-                    // TTL 是当前页的读取值；预留最坏 i64 JSON 长度，仍遵守分页字节上限。
-                    let bytes = serde_json::to_vec(&resource)?.len() + 1 + 32;
-                    if size + bytes > 1024 * 1024 - 1024 {
-                        if resources.is_empty() { return Err(AppError::new("result_too_large", "单个 Redis key 超过分页字节限制")); }
-                        page_full = true;
+                    let bytes = serde_json::to_vec(&resource)?.len() + 33;
+                    if size.saturating_add(bytes) > response_budget.saturating_sub(1024) {
+                        if resources.is_empty() {
+                            return Err(AppError::new(
+                                "result_too_large",
+                                "单个 Redis key 超过分页字节限制",
+                            ));
+                        }
                         break;
                     }
                     size += bytes;
-                    last = seq;
-                    ttl_query.cmd("PTTL").arg(key);
                     resources.push(resource);
-                    if resources.len() == limit { page_full = true; break; }
+                    scan.pending.pop_front();
+                    if resources.len() == limit {
+                        break;
+                    }
                 }
-                drop(cached);
-                if page_full || scan.complete { break; }
+                if resources.len() == limit
+                    || !scan.pending.is_empty()
+                    || scan.complete
+                    || scan.limited
+                {
+                    break;
+                }
                 let mut command = redis::cmd("SCAN");
                 command.arg(scan.cursor).arg("COUNT").arg(limit);
-                if let Some(pattern) = &scan.pattern { command.arg("MATCH").arg(pattern); }
-                if let Some(kind) = &scan.kind { command.arg("TYPE").arg(kind); }
+                if let Some(pattern) = &scan.pattern {
+                    command.arg("MATCH").arg(pattern);
+                }
+                if let Some(kind) = &scan.kind {
+                    command.arg("TYPE").arg(kind);
+                }
                 let (next, keys): (u64, Vec<Vec<u8>>) = command.query_async(&mut *conn).await?;
-                if !keys.is_empty() {
-                    let mut tx = scan.cache.begin().await?;
-                    // 每批最多 768 个绑定参数，也兼容 SQLite 的 999 参数上限。
-                    for keys in keys.chunks(256) {
-                        ensure_not_cancelled(cancel)?;
-                        let mut types = redis::pipe();
-                        for key in keys { types.cmd("TYPE").arg(key); }
-                        let kinds: Vec<String> = types.query_async(&mut *conn).await?;
-                        if kinds.len() != keys.len() { return Err(AppError::new("database", "Redis 类型回复数量不匹配")); }
-                        if let Some(mut insert) = scan_insert(&group, keys, &kinds, scan.kind.as_deref()) {
-                            insert.build().persistent(false).execute(&mut *tx).await?;
-                        }
+                let mut types = redis::pipe();
+                for key in &keys {
+                    types.cmd("TYPE").arg(key);
+                }
+                let kinds: Vec<String> = if keys.is_empty() {
+                    Vec::new()
+                } else {
+                    types.query_async(&mut *conn).await?
+                };
+                if kinds.len() != keys.len() {
+                    return Err(AppError::new("database", "Redis 类型回复数量不匹配"));
+                }
+                let extra = keys
+                    .iter()
+                    .zip(&kinds)
+                    .filter(|(key, kind)| {
+                        kind.as_str() != "none"
+                            && scan
+                                .kind
+                                .as_deref()
+                                .is_none_or(|expected| expected == kind.as_str())
+                            && !scan.seen.contains(*key)
+                    })
+                    .fold(0usize, |size, (key, kind)| {
+                        size.saturating_add(
+                            key.len()
+                                .saturating_mul(2)
+                                .saturating_add(kind.len())
+                                .saturating_add(128),
+                        )
+                    });
+                let reserved = scan.bytes.saturating_add(extra);
+                if reserved > budget {
+                    scan.limited = true;
+                } else if let Err(error) = scan
+                    .store
+                    .reserve_auxiliary(scan.execution_id, id, reserved)
+                    .await
+                {
+                    if error.code != "resource_limit" {
+                        return Err(error);
                     }
-                    tx.commit().await?;
+                    scan.limited = true;
+                } else {
+                    scan.bytes = reserved;
+                    for (key, kind) in keys.into_iter().zip(kinds) {
+                        if kind == "none"
+                            || scan
+                                .kind
+                                .as_deref()
+                                .is_some_and(|expected| expected != kind)
+                            || !scan.seen.insert(key.clone())
+                        {
+                            continue;
+                        }
+                        scan.pending.push_back((key, kind));
+                    }
                 }
                 scan.cursor = next;
-                scan.complete = next == 0;
+                scan.complete = next == 0 && !scan.limited;
             }
             if !resources.is_empty() {
-                ensure_not_cancelled(cancel)?;
+                let mut ttl_query = redis::pipe();
+                for resource in &resources {
+                    let key = STANDARD
+                        .decode(resource.key_b64.as_ref().unwrap())
+                        .map_err(|e| AppError::invalid(e.to_string()))?;
+                    ttl_query.cmd("PTTL").arg(key);
+                }
                 let ttls: Vec<i64> = ttl_query.query_async(&mut *conn).await?;
                 if ttls.len() != resources.len() {
                     return Err(AppError::new("database", "Redis TTL 回复数量不匹配"));
                 }
                 for (resource, ttl) in resources.iter_mut().zip(ttls) {
-                    resource.data = json!({"ttl_ms": ttl});
+                    resource.data = json!({"ttl_ms":ttl});
                 }
             }
-            let pending: Option<i64> = sqlx::query_scalar("SELECT 1 FROM redis_key_scan WHERE scan_id=? AND emitted=0 AND seq>? LIMIT 1")
-                .bind(&group).bind(last).fetch_optional(&scan.cache).await?;
-            let complete = scan.complete && pending.is_none();
-            if last != 0 {
-                sqlx::query("UPDATE redis_key_scan SET emitted=1 WHERE scan_id=? AND emitted=0 AND seq<=?")
-                    .bind(&group).bind(last).execute(&scan.cache).await?;
-            }
-            Ok(ResourcePage { resources, cursor: if complete { None } else { Some(id.to_string()) }, complete })
-        }.await;
-        if (fresh && result.is_err() || result.as_ref().is_ok_and(|page| page.complete))
+            let complete = scan.complete && scan.pending.is_empty();
+            Ok(ResourcePage {
+                resources,
+                cursor: if complete || (scan.limited && scan.pending.is_empty()) {
+                    None
+                } else {
+                    Some(id.to_string())
+                },
+                complete,
+            })
+        }
+        .await;
+        let limited = self.scans.get(&id).is_some_and(|scan| scan.limited);
+        if ((fresh && result.is_err()) || result.as_ref().is_ok_and(|page| page.cursor.is_none()))
             && let Some(scan) = self.scans.remove(&id)
         {
-            let cleanup = sqlx::query("DELETE FROM redis_key_scan WHERE scan_id=?")
-                .bind(id.to_string())
-                .execute(&scan.cache)
-                .await;
-            if result.is_ok() {
-                cleanup?;
-            }
+            scan.store.release_auxiliary(id).await?;
         }
-        Ok(serde_json::to_value(result?)?)
+        let mut value = serde_json::to_value(result?)?;
+        value["resource_limited"] = json!(limited);
+        Ok(value)
     }
     async fn describe(conn: &mut Conn, t: ResourceTarget) -> Result<Json> {
         let k = key(&t)?;
@@ -583,7 +803,7 @@ impl RedisSession {
             connect_database(&self.client, &self.profile, self.secret.as_deref()).await?;
         let _: String = query(&mut conn, &[b"WATCH".to_vec(), k.clone()]).await?;
         let (kind, ttl, expires_at_ms) = watched_metadata(&mut conn, &k).await?;
-        let result = browse(&mut conn, &k, &kind, sink, cancel).await?;
+        let result = browse(&mut conn, &k, &kind, sink, cancel, false).await?;
         let id = Uuid::new_v4();
         self.edits.insert(
             id,
@@ -680,6 +900,7 @@ async fn browse(
     kind: &str,
     sink: &ExecutionSink,
     cancel: &CancellationToken,
+    demand_driven: bool,
 ) -> Result<Uuid> {
     let cols: Vec<Column> = match kind {
         "string" => vec![Column::new("value", "bytes")],
@@ -697,6 +918,20 @@ async fn browse(
         _ => return Err(AppError::invalid("不支持的 Redis 类型")),
     };
     let id = sink.start(cols, "redis").await?;
+    let page_size = sink
+        .store
+        .settings()
+        .await?
+        .paging
+        .redis_value_rows
+        .clamp(1, 1000);
+    let mut produced = 0u64;
+    sink.store
+        .update_result_summary(
+            id,
+            json!({"retrieval_mode":"single_execution_stream","has_more":true,"redis_type":kind}),
+        )
+        .await?;
     match kind {
         "string" => {
             let args = vec![b"GET".to_vec(), k.to_vec()];
@@ -713,7 +948,7 @@ async fn browse(
                     b"LRANGE".to_vec(),
                     k.to_vec(),
                     off.to_string().into_bytes(),
-                    (off + 199).to_string().into_bytes(),
+                    (off + page_size as i64 - 1).to_string().into_bytes(),
                 ];
                 record_browse_command(sink, &args).await?;
                 let values: Vec<Vec<u8>> = query(c, &args).await?;
@@ -728,15 +963,24 @@ async fn browse(
                     .collect();
                 sink.append(id, rows).await?;
                 off += n as i64;
-                if n < 200 {
+                produced += n as u64;
+                if n < page_size {
                     break;
+                }
+                if demand_driven && !sink.wait_demand(id, produced, cancel).await? {
+                    return Err(AppError::cancelled());
                 }
             }
         }
         "hash" | "set" | "zset" => {
-            // 各类 SCAN 可能重复返回成员，去重键使用 field/member 的原始字节。
-            sqlx::query("CREATE TABLE IF NOT EXISTS redis_scan_seen (result_id TEXT NOT NULL, value BLOB NOT NULL, PRIMARY KEY(result_id,value))").execute(&sink.store.cache).await?;
-            let group = id.to_string();
+            let mut seen = HashSet::new();
+            let mut seen_bytes = 0usize;
+            let budget = sink
+                .store
+                .settings()
+                .await?
+                .limits
+                .result_memory_bytes_per_client as usize;
             let scan: Result<()> = async {
                 let command = match kind {
                     "hash" => "HSCAN",
@@ -751,7 +995,7 @@ async fn browse(
                         k.to_vec(),
                         cursor.to_string().into_bytes(),
                         b"COUNT".to_vec(),
-                        b"200".to_vec(),
+                        page_size.to_string().into_bytes(),
                     ];
                     record_browse_command(sink, &args).await?;
                     let (next, values): (u64, Vec<Vec<u8>>) = query(c, &args).await?;
@@ -762,17 +1006,17 @@ async fn browse(
                     let mut iter = values.into_iter();
                     while let Some(member) = iter.next() {
                         let companion = if kind == "set" { None } else { iter.next() };
-                        let added = sqlx::query(
-                            "INSERT OR IGNORE INTO redis_scan_seen(result_id,value) VALUES (?,?)",
-                        )
-                        .bind(&group)
-                        .bind(&member)
-                        .execute(&sink.store.cache)
-                        .await?
-                        .rows_affected();
-                        if added == 0 {
+                        if seen.contains(&member) {
                             continue;
                         }
+                        seen_bytes = seen_bytes.saturating_add(member.len()).saturating_add(64);
+                        if seen_bytes > budget {
+                            return Err(AppError::new("resource_limit", "Redis 扫描超过内存预算"));
+                        }
+                        sink.store
+                            .reserve_auxiliary(sink.execution_id, id, seen_bytes)
+                            .await?;
+                        seen.insert(member.clone());
                         let mut row = vec![val(member)];
                         if let Some(v) = companion {
                             row.push(if kind == "hash" {
@@ -786,7 +1030,17 @@ async fn browse(
                         }
                         rows.push(row);
                     }
-                    sink.append(id, rows).await?;
+                    let mut chunks = rows.chunks(page_size).peekable();
+                    while let Some(chunk) = chunks.next() {
+                        sink.append(id, chunk.to_vec()).await?;
+                        produced += chunk.len() as u64;
+                        if demand_driven
+                            && (next != 0 || chunks.peek().is_some())
+                            && !sink.wait_demand(id, produced, cancel).await?
+                        {
+                            return Err(AppError::cancelled());
+                        }
+                    }
                     cursor = next;
                     if cursor == 0 {
                         break;
@@ -795,12 +1049,8 @@ async fn browse(
                 Ok(())
             }
             .await;
-            let cleanup = sqlx::query("DELETE FROM redis_scan_seen WHERE result_id = ?")
-                .bind(&group)
-                .execute(&sink.store.cache)
-                .await;
+            sink.store.release_auxiliary(id).await?;
             scan?;
-            cleanup?;
         }
         _ => {}
     }
@@ -811,8 +1061,11 @@ async fn browse(
         return Err(AppError::conflict("浏览期间 key 类型或存在状态发生变化")
             .with_details(json!({"expected_type":kind,"actual_type":actual})));
     }
-    sink.finish(id, json!({"complete":true,"redis_type":kind}))
-        .await?;
+    sink.finish(
+        id,
+        json!({"complete":true,"has_more":false,"redis_type":kind}),
+    )
+    .await?;
     Ok(id)
 }
 

@@ -29,6 +29,8 @@ async fn archery_batch_is_atomic_and_credentials_belong_to_server() {
     let make = |id, instance_id| Profile {
         id,
         name: format!("instance-{instance_id}"),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadOnly,
         connection: ConnectionConfig::Archery(ArcheryConnection {
@@ -107,6 +109,18 @@ async fn archery_batch_is_atomic_and_credentials_belong_to_server() {
             )
             .await
             .is_err()
+    );
+    // 批量修改返回已提交的新 revision，后续 CAS 必须使用该快照。
+    let committed: Vec<Profile> = serde_json::from_value(result["profiles"].clone()).unwrap();
+    let renamed = committed
+        .iter()
+        .find(|profile| profile.id == first.id)
+        .unwrap()
+        .clone();
+    assert_eq!(renamed.revision, first.revision + 1);
+    assert_eq!(
+        serde_json::to_value(&renamed).unwrap(),
+        serde_json::to_value(store.profile(first.id).await.unwrap()).unwrap()
     );
     let result = store
         .apply_archery_profiles(
@@ -252,7 +266,6 @@ async fn reopened_server_preserves_independent_credential_locations() {
     }
     let root = (*store.root).clone();
     store.pool.close().await;
-    store.cache.close().await;
     drop(store);
     let store = Store::open(&root).await.unwrap();
     let servers = store.archery_servers().await.unwrap();

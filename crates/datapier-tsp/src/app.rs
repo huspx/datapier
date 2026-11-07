@@ -216,6 +216,7 @@ impl App {
             navigation: navigation::NavigationState::default(),
             icon_blobs: None,
             settings: AppSettings::default(),
+            settings_loaded: false,
             settings_epoch: 0,
             settings_save_token: None,
             settings_unsaved: false,
@@ -223,6 +224,8 @@ impl App {
             change_preview: change_preview::PreviewState::default(),
             redis_keys: Default::default(),
             redis_key_delete: Default::default(),
+            approvals: Default::default(),
+            window_data_dir: None,
             last_settings_poll: Instant::now(),
         }
     }

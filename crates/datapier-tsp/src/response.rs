@@ -27,26 +27,20 @@ impl App {
 
     pub(super) fn page(&mut self, backend: &Backend, start: u64) {
         if let Some(id) = self.result_id.clone() {
-            let archery = self
-                .profile
-                .as_ref()
-                .is_some_and(|profile| profile.is_archery());
-            let size = if archery {
-                self.result_page_size(&id)
-            } else {
-                200
-            };
-            if archery && !self.prepare_result_page(backend, &id, start) {
-                return;
-            }
+            let size = self.result_page_size(&id);
             let token = Uuid::new_v4();
-            self.page_token = Some(token);
-            self.request(
-                backend,
-                &format!("result.page/{token}"),
-                "result.page",
-                json!({"result_id":id,"start":start,"max_rows":size,"max_bytes":1048576}),
+            let tag = format!(
+                "{}:{}:result.page/{token}",
+                self.tabs[self.active].id, self.generation
             );
+            match backend.request(
+                tag,
+                "result.read",
+                json!({"result_id":id,"start":start,"max_rows":size,"max_bytes":1048576}),
+            ) {
+                Ok(()) => self.page_token = Some(token),
+                Err(error) => self.status = i18n::UiMessage::raw(error.to_string()),
+            }
         }
     }
     pub(super) fn execute_current_statement(
@@ -70,6 +64,12 @@ impl App {
     pub(super) fn response(&mut self, response: Response, backend: &Backend) {
         // 认证句柄释放属于内部清理，其 ACK 不能覆盖登录状态或结果详情。
         if response.tag == "archery-release" {
+            return;
+        }
+        // 窗口租约续期的成功回执不能覆盖用户正在查看的执行状态。
+        if matches!(response.tag.as_str(), "window.bind" | "window.active")
+            && response.result.is_ok()
+        {
             return;
         }
         if response.result.is_err()
@@ -116,19 +116,6 @@ impl App {
                     && self.archery.reauth_server.is_some()
                 {
                     self.archery.open_continuation = Some(open);
-                }
-                if let Some((token, id)) = response
-                    .tag
-                    .strip_prefix("result.pagination/")
-                    .and_then(|s| s.split_once('/'))
-                {
-                    if let Some(state) = self.workbench.query_ui.pagination.get_mut(id)
-                        && Uuid::parse_str(token).ok() == state.token
-                    {
-                        state.token = None;
-                        self.status = i18n::UiMessage::raw(e.to_string());
-                    }
-                    return;
                 }
                 if response.tag == "change.submit" {
                     self.redis_key_delete_submit_failed();
@@ -184,10 +171,6 @@ impl App {
                 return;
             }
         };
-        if response.tag.starts_with("result.pagination/") {
-            self.accept_result_pagination(&response.tag, value, backend);
-            return;
-        }
         if response.tag.starts_with("cli.")
             || (self.workbench.cli_running && response.tag == "execution.get")
         {
@@ -201,6 +184,10 @@ impl App {
         match response.tag.as_str() {
             // 事件仅提示查询任务状态；事件丢失或早于任务 ID 返回时由周期轮询补足。
             "execution.event" => {
+                if value.get("kind").and_then(Value::as_str) == Some("approval.changed") {
+                    self.approval_refresh(backend);
+                    return;
+                }
                 if value.get("kind").and_then(Value::as_str) == Some("settings.changed") {
                     self.refresh_settings(backend);
                     return;
@@ -394,6 +381,15 @@ impl App {
             "resource.list" => match serde_json::from_value::<ResourcePage>(value) {
                 Ok(page) => {
                     if self.is_redis() {
+                        let owner = self.redis_selection_scope();
+                        if self.workbench.redis_tree_owner != owner {
+                            self.resources.clear();
+                            self.workbench.redis_tree.reset(&[]);
+                            self.workbench.redis_tree_owner = owner;
+                        } else if self.workbench.redis_tree.len() != self.resources.len() {
+                            self.workbench.redis_tree.reset(&self.resources);
+                        }
+                        self.workbench.redis_tree.append(&page.resources);
                         // Core 的扫描缓存按原始 key 去重，各页只发出尚未交付的项。
                         self.resources.extend(page.resources);
                         if self.workbench.tree {
@@ -403,6 +399,8 @@ impl App {
                                 self.resources.len().saturating_sub(1) / workbench::KEY_PAGE_SIZE;
                         }
                     } else {
+                        self.workbench.redis_tree.reset(&[]);
+                        self.workbench.redis_tree_owner = None;
                         self.resources = page.resources;
                     }
                     self.cursor = page.cursor;
@@ -567,6 +565,22 @@ impl App {
                 }
                 self.detail = details.to_string();
                 self.set_detail_context("任务详情");
+                // 查询仍在运行时首批结果也可用；同一结果不能因轮询而跳回第一页。
+                if let Some(items) = value.get("results").and_then(Value::as_array) {
+                    let results: Vec<String> = items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    if self.result_id.is_none()
+                        && let Some(id) = results.first().cloned()
+                    {
+                        self.browse_result = value["method"].as_str() == Some("resource.browse");
+                        self.result_id = Some(id);
+                        self.page(backend, 0);
+                    }
+                    self.results = results;
+                }
                 if !matches!(state, "queued" | "running" | "cancelling") {
                     self.task = None;
                     if !self.is_redis() && !self.browse_result {
@@ -616,6 +630,8 @@ impl App {
                             if target_invalidated {
                                 self.target = None;
                                 self.resources.clear();
+                                self.workbench.redis_tree.reset(&[]);
+                                self.workbench.redis_tree_owner = None;
                                 self.action("list", backend);
                             } else {
                                 self.workbench.load_resource = true;
@@ -629,21 +645,6 @@ impl App {
                             ]);
                         }
                     }
-                    self.results = value
-                        .get("results")
-                        .and_then(Value::as_array)
-                        .map(|v| {
-                            v.iter()
-                                .filter_map(Value::as_str)
-                                .map(str::to_owned)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if let Some(id) = self.results.first().cloned() {
-                        self.browse_result = value["method"].as_str() == Some("resource.browse");
-                        self.result_id = Some(id);
-                        self.page(backend, 0);
-                    }
                     self.archery_auth_required(
                         value["error"]["code"].as_str(),
                         &value["error"]["details"],
@@ -654,7 +655,6 @@ impl App {
             "result.page" => match serde_json::from_value::<ResultPage>(value) {
                 Ok(mut page) => {
                     self.remember_result_start(&page);
-                    self.refresh_changed_result_plan(backend, &page);
                     if let Some(g) = &mut self.grid
                         && g.page.result.id == page.result.id
                     {

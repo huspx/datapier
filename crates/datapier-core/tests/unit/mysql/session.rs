@@ -29,6 +29,8 @@ fn fixture_profile(mode: AccessMode) -> (Profile, Option<String>) {
         Profile {
             id: Uuid::new_v4(),
             name: "mysql-fixture".into(),
+            revision: 1,
+            approval_policy: ApprovalPolicy::default(),
             provider: ProviderKind::Mysql,
             access_mode: mode,
             connection: ConnectionConfig::Direct(DirectConnection {
@@ -40,6 +42,7 @@ fn fixture_profile(mode: AccessMode) -> (Profile, Option<String>) {
                 username: "datapier".into(),
                 database: Some("datapier_fixture".into()),
                 redis_db: 0,
+                redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
             }),
@@ -245,6 +248,5 @@ async fn failed_script_preserves_completed_work_and_remaining_sql() {
     assert_eq!(count, 1);
     session.close().await.unwrap();
     store.pool.close().await;
-    store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

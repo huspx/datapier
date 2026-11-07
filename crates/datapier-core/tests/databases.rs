@@ -23,6 +23,8 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "isolated-fixture".into(),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
         provider: kind,
         access_mode: AccessMode::ReadWrite,
         connection: ConnectionConfig::Direct(DirectConnection {
@@ -39,6 +41,7 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
                 None
             },
             redis_db: 15,
+            redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
         }),
@@ -87,7 +90,6 @@ async fn result_rows(store: &Store, result: &Json) -> Vec<Vec<Value>> {
 async fn clean(store: Store) {
     let root = (*store.root).clone();
     store.pool.close().await;
-    store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -236,6 +238,17 @@ async fn mysql_cancel_does_not_kill_the_next_query() {
     )
     .await
     .unwrap();
+    // SLEEP 等未知函数按潜在写入处理；使用可证明只读的慢聚合验证 KILL 路径。
+    let mut insert = String::with_capacity(32 + 4 * 511);
+    insert.push_str("INSERT INTO dp_cancel VALUES (1)");
+    for _ in 1..511 {
+        insert.push_str(",(1)");
+    }
+    execute(&mut db, &store, &insert).await.unwrap();
+    // MySQL 临时表不能重复打开，使用独立副本构造慢查询。
+    execute(&mut db, &store, "CREATE TEMPORARY TABLE dp_cancel_b LIKE dp_cancel; INSERT INTO dp_cancel_b SELECT value FROM dp_cancel; CREATE TEMPORARY TABLE dp_cancel_c LIKE dp_cancel; INSERT INTO dp_cancel_c SELECT value FROM dp_cancel")
+        .await
+        .unwrap();
     let cancel = CancellationToken::new();
     let signal = cancel.clone();
     tokio::spawn(async move {
@@ -245,7 +258,7 @@ async fn mysql_cancel_does_not_kill_the_next_query() {
     let interrupted = db
         .call(
             "execution.run",
-            json!({"text":"SELECT 1 FROM dp_cancel WHERE SLEEP(15)"}),
+            json!({"text":"SELECT COUNT(*) FROM dp_cancel a CROSS JOIN dp_cancel_b b CROSS JOIN dp_cancel_c c WHERE ABS(a.value + b.value + c.value) > 0; SELECT 0"}),
             &sink(&store).await,
             &cancel,
         )
@@ -259,6 +272,47 @@ async fn mysql_cancel_does_not_kill_the_next_query() {
         .await
         .unwrap();
     assert_eq!(result_rows(&store, &after).await[0][0].text(), "42");
+    db.close().await.unwrap();
+    clean(store).await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离的 MySQL，验证取消后的已发送写入收尾"]
+async fn mysql_cancel_drains_sent_write_without_replay() {
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let mut db = ProviderSession::connect(profile, secret).await.unwrap();
+    execute(
+        &mut db,
+        &store,
+        "CREATE TEMPORARY TABLE dp_cancel_write(value INT)",
+    )
+    .await
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let signal = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        signal.cancel();
+    });
+    let completed = db
+        .call(
+            "execution.run",
+            json!({"text":"INSERT INTO dp_cancel_write SELECT SLEEP(0.6)"}),
+            &sink(&store).await,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(cancel.is_cancelled());
+    assert_eq!(completed["affected_rows"], 1);
+    let after = execute(
+        &mut db,
+        &store,
+        "SELECT COUNT(*) AS total FROM dp_cancel_write",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result_rows(&store, &after).await[0][0].text(), "1");
     db.close().await.unwrap();
     clean(store).await;
 }

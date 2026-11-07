@@ -1,11 +1,16 @@
-//! 单一可执行文件的入口：分派终端界面与 Engine；当前终端界面仅提供 TSP。
+//! 单一可执行文件：普通终端配置、Tern 工作台、MCP stdio 与共享 Engine。
 
 use clap::{Parser, Subcommand};
 use datapier_core::Result;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Parser)]
-#[command(name = "datapier", version, about = "Tern 原生 MySQL / Redis 工作台")]
+#[command(
+    name = "datapier",
+    version,
+    about = "面向开发者与 Agent 的 MySQL / Redis 工作台"
+)]
 struct Arguments {
     #[arg(long, global = true, env = "DATAPIER_DATA_DIR")]
     data_dir: Option<PathBuf>,
@@ -14,10 +19,24 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// 打开 Tern TSP 工作台
+    /// 在普通终端管理数据源、认证与权限
     Tui {
         #[arg(long, default_value = "default")]
         workspace: String,
+    },
+    /// 打开 Tern TSP 工作台
+    Tsp {
+        #[arg(long, default_value = "default")]
+        workspace: String,
+        #[arg(long, hide = true)]
+        window_bridge: bool,
+        #[arg(long, hide = true, requires = "window_bridge")]
+        bridge_payload: Option<String>,
+    },
+    /// 为标准 MCP client 提供本机 stdio 接口
+    Mcp {
+        #[arg(long = "allow-connection")]
+        allow_connections: Vec<Uuid>,
     },
     /// 启动本机共享数据库内核
     Engine,
@@ -38,17 +57,39 @@ fn run() -> Result<()> {
         None => datapier_engine::default_data_dir()?,
     };
     match args.command {
-        Command::Tui { workspace } => datapier_tsp::run(root, workspace),
-        Command::Engine => {
-            // stdout 可能承载调用方协议，日志固定写 stderr；Engine 子进程的 stdio 由平台层隔离。
+        Command::Tsp {
+            workspace,
+            window_bridge: false,
+            ..
+        } => datapier_tsp::run(root, workspace),
+        command => {
+            // MCP stdout 仅承载协议；window bridge stdout 仅输出一个 JSON 响应。
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
                 .with_writer(std::io::stderr)
-                .init();
-            tokio::runtime::Builder::new_multi_thread()
+                .try_init()
+                .map_err(|error| datapier_core::AppError::new("logging", error.to_string()))?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .build()?
-                .block_on(datapier_engine::run(root))
+                .build()?;
+            runtime.block_on(async move {
+                match command {
+                    Command::Tui { workspace } => datapier_tui::run(root, workspace).await,
+                    Command::Mcp { allow_connections } => {
+                        datapier_mcp::run(root, allow_connections).await
+                    }
+                    Command::Engine => datapier_engine::run(root).await,
+                    Command::Tsp { bridge_payload, .. } => {
+                        let payload = bridge_payload
+                            .map(|text| serde_json::from_str(&text))
+                            .transpose()?
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let response = datapier_tsp::window_bridge(root, payload).await?;
+                        println!("{}", serde_json::to_string(&response)?);
+                        Ok(())
+                    }
+                }
+            })
         }
     }
 }

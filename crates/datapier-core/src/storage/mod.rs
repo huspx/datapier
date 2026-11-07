@@ -1,16 +1,14 @@
-//! SQLite 配置与结果缓存、外置字段文件和系统凭据访问。
-//! 结果行的追加、分页投影和释放按结果 ID 串行化；字段引用不保活所属结果。
+//! SQLite 配置、会话内结果和系统凭据访问。
 //! 凭据不写入 SQLite；原生读取使用有界独立线程，写入和删除在线程池完成。
 mod archery;
+mod authorization;
 mod migration;
 mod profiles;
 mod results;
 mod tasks;
-mod values;
 
 use crate::model::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::TryStreamExt;
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -20,54 +18,22 @@ use sqlx::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex},
+    sync::Arc,
     time::Duration,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::{Mutex, RwLock},
-};
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-/// 共享的持久化句柄；克隆共享连接池、会话内凭据和结果操作锁。
+/// 克隆共享配置连接池、凭据与有界内存结果。
 #[derive(Clone)]
 pub struct Store {
     pub pool: SqlitePool,
-    pub cache: SqlitePool,
     pub root: Arc<PathBuf>,
     secrets: Arc<RwLock<HashMap<Uuid, String>>>,
     archery_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
     archery_totp_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
-    result_gates: Arc<StdMutex<HashMap<Uuid, ResultGate>>>,
+    results: Arc<Mutex<results::ResultStore>>,
     profile_gate: Arc<Mutex<()>>,
-}
-
-struct ResultGate {
-    lock: Arc<Mutex<()>>,
-    users: usize,
-}
-
-struct ResultGateRegistration {
-    id: Uuid,
-    gates: Arc<StdMutex<HashMap<Uuid, ResultGate>>>,
-}
-
-impl Drop for ResultGateRegistration {
-    fn drop(&mut self) {
-        let mut gates = self.gates.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(gate) = gates.get_mut(&self.id) {
-            gate.users -= 1;
-            if gate.users == 0 {
-                gates.remove(&self.id);
-            }
-        }
-    }
-}
-
-struct ResultGuard {
-    // 字段按声明顺序释放，先解锁再移除最后一个登记。
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    _registration: ResultGateRegistration,
 }
 
 impl Store {
@@ -75,25 +41,11 @@ impl Store {
     /// 调用方负责确保目录权限；不完整或较新 schema 及 I/O 错误会使打开失败。
     /// 打开失败时，返回前等待已建立的连接池关闭，释放数据库文件句柄。
     pub async fn open(root: &Path) -> Result<Self> {
-        tokio::fs::create_dir_all(root.join("values")).await?;
+        tokio::fs::create_dir_all(root).await?;
         let root = tokio::fs::canonicalize(root).await?;
         let pool = open_database(&root.join("datapier.sqlite3")).await?;
-        let cache = match open_database(&root.join("cache.sqlite3")).await {
-            Ok(cache) => cache,
-            Err(error) => {
-                pool.close().await;
-                return Err(error);
-            }
-        };
         let initialized: Result<()> = async {
             migration::preflight_config(&pool).await?;
-            preflight(&cache, true).await?;
-            migrate(
-                &cache,
-                include_str!("../../migrations/0001_cache.sql"),
-                true,
-            )
-            .await?;
             migration::migrate_config(&pool).await?;
             Ok(())
         }
@@ -101,17 +53,15 @@ impl Store {
         if let Err(error) = initialized {
             // Pool 的 drop 不等待 SQLite worker 退出，Windows 会继续占用文件。
             pool.close().await;
-            cache.close().await;
             return Err(error);
         }
         let store = Self {
             pool,
-            cache,
             root: Arc::new(root),
             archery_secrets: Arc::new(RwLock::new(HashMap::new())),
             archery_totp_secrets: Arc::new(RwLock::new(HashMap::new())),
             secrets: Arc::new(RwLock::new(HashMap::new())),
-            result_gates: Arc::new(StdMutex::new(HashMap::new())),
+            results: Arc::new(Mutex::new(results::ResultStore::default())),
             profile_gate: Arc::new(Mutex::new(())),
         };
         let validated: Result<()> = async {
@@ -128,7 +78,6 @@ impl Store {
         .await;
         if let Err(error) = validated {
             store.pool.close().await;
-            store.cache.close().await;
             return Err(error);
         }
         Ok(store)
@@ -136,19 +85,88 @@ impl Store {
 
     /// 读取应用全局设置；无效的持久化值会返回错误。
     pub async fn settings(&self) -> Result<AppSettings> {
-        let payload: String = sqlx::query_scalar("SELECT payload FROM app_settings WHERE id=1")
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(serde_json::from_str(&payload)?)
+        let (payload, revision): (String, i64) =
+            sqlx::query_as("SELECT payload,revision FROM app_settings WHERE id=1")
+                .fetch_one(&self.pool)
+                .await?;
+        let mut settings: AppSettings = serde_json::from_str(&payload)?;
+        settings.revision = revision as u64;
+        settings.validate()?;
+        Ok(settings)
     }
 
     /// 原子替换应用全局设置。
     pub async fn set_settings(&self, settings: &AppSettings) -> Result<()> {
-        sqlx::query("UPDATE app_settings SET payload=? WHERE id=1")
-            .bind(serde_json::to_string(settings)?)
-            .execute(&self.pool)
-            .await?;
+        settings.validate()?;
+        let next = settings
+            .revision
+            .checked_add(1)
+            .filter(|v| *v <= i64::MAX as u64)
+            .ok_or_else(|| AppError::invalid("设置版本溢出"))?;
+        let updated =
+            sqlx::query("UPDATE app_settings SET payload=?,revision=? WHERE id=1 AND revision=?")
+                .bind(serde_json::to_string(settings)?)
+                .bind(next as i64)
+                .bind(settings.revision as i64)
+                .execute(&self.pool)
+                .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::conflict("设置已更新，请重新载入"));
+        }
+        self.cleanup_history().await?;
         Ok(())
+    }
+
+    /// 预览旧版本结果缓存；不会打开旧数据库或跟随符号链接。
+    pub async fn retired_cache_preview(&self) -> Result<Json> {
+        let mut paths = Vec::new();
+        let mut bytes = 0u64;
+        for name in [
+            "cache.sqlite3",
+            "cache.sqlite3-wal",
+            "cache.sqlite3-shm",
+            "values",
+        ] {
+            let path = self.root.join(name);
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+            paths.push(name.to_owned());
+            let mut stack = vec![path];
+            while let Some(path) = stack.pop() {
+                let meta = tokio::fs::symlink_metadata(&path).await?;
+                if meta.is_file() {
+                    bytes = bytes.saturating_add(meta.len());
+                } else if meta.is_dir() {
+                    let mut entries = tokio::fs::read_dir(path).await?;
+                    while let Some(entry) = entries.next_entry().await? {
+                        stack.push(entry.path());
+                    }
+                }
+            }
+        }
+        Ok(json!({"paths": paths, "bytes": bytes}))
+    }
+    /// 显式删除预览中的退休缓存，不触及其他数据。
+    pub async fn clear_retired_cache(&self) -> Result<Json> {
+        let preview = self.retired_cache_preview().await?;
+        for name in preview["paths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+        {
+            let path = self.root.join(name);
+            let meta = tokio::fs::symlink_metadata(&path).await?;
+            if meta.is_dir() {
+                tokio::fs::remove_dir_all(path).await?;
+            } else {
+                tokio::fs::remove_file(path).await?;
+            }
+        }
+        Ok(preview)
     }
 
     /// 加载工作区快照及版本；不存在时返回版本零和空状态。
@@ -263,235 +281,6 @@ async fn open_database(path: &Path) -> Result<SqlitePool> {
         .max_connections(4)
         .connect_with(options)
         .await?)
-}
-async fn preflight(pool: &SqlitePool, cache: bool) -> Result<()> {
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(pool)
-        .await?;
-    if version > (if cache { 1 } else { 2 }) || version < 0 {
-        return Err(AppError::new("storage_version", "数据目录来自较新版本"));
-    }
-    if version == 0 {
-        let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
-                .fetch_one(pool)
-                .await?;
-        if count != 0 {
-            return Err(AppError::new(
-                "storage_version",
-                "空版本数据库含有部分 schema",
-            ));
-        }
-        return Ok(());
-    }
-    let names: &[(&str, &str)] = if cache {
-        &[
-            ("table", "results"),
-            ("table", "result_rows"),
-            ("table", "value_files"),
-            ("index", "results_execution"),
-            ("index", "value_files_result"),
-        ]
-    } else {
-        &[
-            ("table", "profiles"),
-            ("table", "workspaces"),
-            ("table", "executions"),
-            ("table", "app_settings"),
-            ("index", "executions_workspace"),
-        ]
-    };
-    for (kind, name) in names {
-        let found: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type=? AND name=?")
-                .bind(*kind)
-                .bind(*name)
-                .fetch_one(pool)
-                .await?;
-        if found != 1 {
-            return Err(AppError::new("storage_version", "数据目录 schema 不完整"));
-        }
-    }
-    let columns: &[(&str, &[&str])] = if cache {
-        &[
-            (
-                "results",
-                &[
-                    "id",
-                    "execution_id",
-                    "columns",
-                    "kind",
-                    "row_count",
-                    "complete",
-                    "summary",
-                ],
-            ),
-            ("result_rows", &["result_id", "row_no", "payload"]),
-            ("value_files", &["id", "result_id"]),
-        ]
-    } else {
-        &[
-            ("workspaces", &["id", "revision", "payload"]),
-            ("app_settings", &["id", "payload"]),
-            (
-                "executions",
-                &[
-                    "id",
-                    "owner",
-                    "workspace_id",
-                    "method",
-                    "params",
-                    "state",
-                    "sent",
-                    "may_write",
-                    "summary",
-                    "error",
-                    "created_at",
-                    "updated_at",
-                ],
-            ),
-        ]
-    };
-    for (table, fields) in columns {
-        for field in *fields {
-            let found: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM pragma_table_info(?) WHERE name=?")
-                    .bind(*table)
-                    .bind(*field)
-                    .fetch_one(pool)
-                    .await?;
-            if found != 1 {
-                return Err(AppError::new("storage_version", "数据目录 schema 不完整"));
-            }
-        }
-    }
-    let profile_columns = if cache {
-        &[][..]
-    } else if version == 2 {
-        &[
-            "id",
-            "name",
-            "payload",
-            "credential_saved",
-            "archery_server_id",
-            "archery_instance_id",
-        ][..]
-    } else {
-        &["id", "name", "payload", "credential_saved"][..]
-    };
-    for column in profile_columns {
-        let found: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pragma_table_info('profiles') WHERE name=?")
-                .bind(*column)
-                .fetch_one(pool)
-                .await?;
-        if found != 1 {
-            return Err(AppError::new("storage_version", "连接表 schema 不完整"));
-        }
-    }
-    if !cache && version == 1 {
-        let extra: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name IN ('archery_servers','profiles_archery_instance','profiles_archery_insert','profiles_archery_update')").fetch_one(pool).await?;
-        let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM pragma_table_info('profiles') WHERE name IN ('archery_server_id','archery_instance_id')").fetch_one(pool).await?;
-        if extra != 0 || columns != 0 {
-            return Err(AppError::new("storage_version", "配置 schema 升级不完整"));
-        }
-    }
-    if !cache && version == 2 {
-        for (kind, name) in [
-            ("table", "archery_servers"),
-            ("index", "profiles_archery_instance"),
-            ("trigger", "profiles_archery_insert"),
-            ("trigger", "profiles_archery_update"),
-        ] {
-            let found: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type=? AND name=?")
-                    .bind(kind)
-                    .bind(name)
-                    .fetch_one(pool)
-                    .await?;
-            if found != 1 {
-                return Err(AppError::new("storage_version", "数据目录 schema 不完整"));
-            }
-        }
-        for column in [
-            "id",
-            "name",
-            "base_url",
-            "username",
-            "http_tls",
-            "revision",
-            "credential_saved",
-        ] {
-            let found: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pragma_table_info('archery_servers') WHERE name=?",
-            )
-            .bind(column)
-            .fetch_one(pool)
-            .await?;
-            if found != 1 {
-                return Err(AppError::new("storage_version", "服务表 schema 不完整"));
-            }
-        }
-        let execution_sql: String = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='executions'",
-        )
-        .fetch_one(pool)
-        .await?;
-        if !execution_sql.contains("wait_stopped") {
-            return Err(AppError::new("storage_version", "任务状态 schema 不完整"));
-        }
-    }
-    Ok(())
-}
-
-async fn migrate(pool: &SqlitePool, schema: &'static str, cache: bool) -> Result<()> {
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(pool)
-        .await?;
-    if version > 1 {
-        return Err(AppError::new(
-            "storage_version",
-            "数据目录来自较新版本，拒绝降级打开",
-        ));
-    }
-    if version == 0 {
-        let mut tx = pool.begin().await?;
-        sqlx::raw_sql(schema).execute(&mut *tx).await?;
-        sqlx::query("PRAGMA user_version=1")
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-    }
-    // 基线必须包含完整对象集合，不能只凭版本号接受部分 schema。
-    let required: &[(&str, &str)] = if cache {
-        &[
-            ("table", "results"),
-            ("table", "result_rows"),
-            ("table", "value_files"),
-            ("index", "results_execution"),
-            ("index", "value_files_result"),
-        ]
-    } else {
-        &[
-            ("table", "profiles"),
-            ("table", "workspaces"),
-            ("table", "executions"),
-            ("table", "app_settings"),
-            ("index", "executions_workspace"),
-        ]
-    };
-    for (kind, name) in required {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type=? AND name=?")
-                .bind(*kind)
-                .bind(*name)
-                .fetch_one(pool)
-                .await?;
-        if exists != 1 {
-            return Err(AppError::new("storage_version", "数据目录 schema 不完整"));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

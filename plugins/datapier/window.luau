@@ -1,4 +1,7 @@
 local bootstrap = require("./lib/bootstrap")
+local window_bridge = require("./lib/window_bridge")
+
+window_bridge.start()
 
 tern.command({
   id = "new-datapier",

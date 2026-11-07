@@ -8,7 +8,7 @@ async fn interleaved_events_and_responses_do_not_hold_client_open() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":2}}),
+            &json!({"id":open["id"],"result":{"protocol_version":3}}),
         )
         .await
         .unwrap();
@@ -24,7 +24,9 @@ async fn interleaved_events_and_responses_do_not_hold_client_open() {
             .unwrap();
         let _ = protocol::read(&mut peer).await;
     });
-    let client = Client::handshake(Box::new(stream)).await.unwrap();
+    let client = Client::handshake(Box::new(stream), ClientOptions::default())
+        .await
+        .unwrap();
     let mut events = client.subscribe_events();
     let one = client.request("one", json!({}));
     let two = client.request("two", json!({}));
@@ -50,7 +52,7 @@ async fn oversized_request_preserves_concurrent_requests_and_events() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":2}}),
+            &json!({"id":open["id"],"result":{"protocol_version":3}}),
         )
         .await
         .unwrap();
@@ -68,7 +70,9 @@ async fn oversized_request_preserves_concurrent_requests_and_events() {
             .unwrap();
         let _ = protocol::read(&mut peer).await;
     });
-    let client = Client::handshake(Box::new(stream)).await.unwrap();
+    let client = Client::handshake(Box::new(stream), ClientOptions::default())
+        .await
+        .unwrap();
     let mut events = client.subscribe_events();
     let first_client = client.clone();
     let first = tokio::spawn(async move { first_client.request("first", json!({})).await });
@@ -98,7 +102,7 @@ async fn cancelled_oversized_request_does_not_interrupt_writer() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":2}}),
+            &json!({"id":open["id"],"result":{"protocol_version":3}}),
         )
         .await
         .unwrap();
@@ -119,7 +123,9 @@ async fn cancelled_oversized_request_does_not_interrupt_writer() {
             .unwrap();
         let _ = protocol::read(&mut peer).await;
     });
-    let client = Client::handshake(Box::new(stream)).await.unwrap();
+    let client = Client::handshake(Box::new(stream), ClientOptions::default())
+        .await
+        .unwrap();
     let first_client = client.clone();
     let first = tokio::spawn(async move {
         first_client
@@ -147,11 +153,14 @@ async fn concurrent_last_drops_close_a_blocked_writer() {
     use tokio::io::AsyncReadExt;
 
     let (stream, mut peer) = tokio::io::duplex(64);
-    let handshake = tokio::spawn(Client::handshake(Box::new(stream)));
+    let handshake = tokio::spawn(Client::handshake(
+        Box::new(stream),
+        ClientOptions::default(),
+    ));
     let open = protocol::read(&mut peer).await.unwrap();
     protocol::write(
         &mut peer,
-        &json!({"id":open["id"],"result":{"protocol_version":2}}),
+        &json!({"id":open["id"],"result":{"protocol_version":3}}),
     )
     .await
     .unwrap();
@@ -199,7 +208,7 @@ async fn dropping_last_client_closes_a_stalled_heartbeat() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":2}}),
+            &json!({"id":open["id"],"result":{"protocol_version":3}}),
         )
         .await
         .unwrap();
@@ -208,7 +217,9 @@ async fn dropping_last_client_closes_a_stalled_heartbeat() {
         heartbeat_tx.send(()).unwrap();
         assert!(protocol::read(&mut peer).await.is_err());
     });
-    let client = Client::handshake(Box::new(stream)).await.unwrap();
+    let client = Client::handshake(Box::new(stream), ClientOptions::default())
+        .await
+        .unwrap();
     let mut events = client.subscribe_events();
     tokio::time::timeout(Duration::from_secs(12), heartbeat_rx)
         .await
@@ -286,7 +297,7 @@ async fn client_rejects_v1_engine_and_sends_no_business_request() {
     let server = tokio::spawn(async move {
         let open = protocol::read(&mut peer).await.unwrap();
         assert_eq!(open["method"], "session.open");
-        assert_eq!(open["params"]["protocol_version"], 2);
+        assert_eq!(open["params"]["protocol_version"], 3);
         protocol::write(
             &mut peer,
             &json!({"id":open["id"],"result":{"protocol_version":1}}),
@@ -300,7 +311,7 @@ async fn client_rejects_v1_engine_and_sends_no_business_request() {
                 .is_err()
         );
     });
-    let error = match Client::handshake(Box::new(stream)).await {
+    let error = match Client::handshake(Box::new(stream), ClientOptions::default()).await {
         Ok(_) => panic!("v1 Engine must be rejected"),
         Err(error) => error,
     };

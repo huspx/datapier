@@ -175,6 +175,11 @@ function sqlLineButtons(tab, parsed) {
 }
 function queryPanel(tab) {
   queryTab();
+  const resultId = `sql:${tab.id}`;
+  const resultRows = orders.filter(row => row.status === 'paid');
+  const resultPageRows = resultPageSlice(resultRows, resultId).filter(row =>
+    Object.values(row).some(value => String(value).toLowerCase().includes(state.resultFilter.toLowerCase()))
+  );
   return `<section class="sql-workbench ${
     tab.execution || tab.resultFixture ? 'has-sql-results' : ''
   }"><div class="toolbar"><button class="primary row" data-action="sql-all">${icon('play')} ${
@@ -220,20 +225,14 @@ function queryPanel(tab) {
       }"></div><div class="table-wrap">${
         simpleTable(
           ['id', 'order_no', 'status', 'total'].filter(c => !state.hiddenColumns['result']?.includes(c)),
-          orders.filter(row =>
-            row.status === 'paid' && Object.values(row).some(v =>
-              String(v).toLowerCase().includes(
-                state.resultFilter.toLowerCase(),
-              )
-            )
-          ).map(row =>
+          resultPageRows.map(row =>
             ['id', 'order_no', 'status', 'total'].filter(c => !state.hiddenColumns['result']?.includes(c)).map(c =>
               row[c]
             )
           ),
           true,
         )
-      }</div></section>`
+      }</div>${resultPager(resultId, resultRows.length, { live: true, visible: resultPageRows.length })}</section>`
       : ''
   }</section>`;
 }

@@ -154,9 +154,9 @@ function formOverlay(kind) {
         h(t('binaryColumns'))
       } <span style="color:var(--danger,red)">*</span>${
         field('transfer-binary', '[]', true)
-      }</label></div></details></div><p class="muted small">${
-        h(t('requestPreviewOnly'))
-      }</p><p id="request-preview" class="notice" hidden></p>`,
+      }</label></div></details></div>${
+        kind === 'import' ? '' : `<p class="muted small">${h(t('exportScope'))}</p>`
+      }<p class="muted small">${h(t('requestPreviewOnly'))}</p><p id="request-preview" class="notice" hidden></p>`,
       `<span class="spacer"></span>${
         kind === 'export'
           ? ''
@@ -168,7 +168,7 @@ function formOverlay(kind) {
       }${
         kind === 'import'
           ? ''
-          : `<button class="primary" data-action="request-export">${h(t('exportFull'))}</button>`
+          : `<button class="primary" data-action="request-export">${h(t('previewExport'))}</button>`
       }`,
     );
   }

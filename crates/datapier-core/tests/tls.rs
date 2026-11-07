@@ -3,7 +3,7 @@
 //! DATAPIER_TLS_REDIS_PORT、DATAPIER_TLS_CA、DATAPIER_TLS_WRONG_CA。
 //! DATAPIER_TLS_BAD_HOST 默认使用 127.1：它连接同一回环服务，
 //! 但不匹配仅包含 IP 127.0.0.1 和 DNS localhost 的证书，用于区分连通与身份验证。
-//! MySQL 5.7 测试使用上述 MySQL 端口和密码，服务端须启用 require_secure_transport。
+//! MySQL 5.7 测试使用 DATAPIER_TLS_MYSQL57_PORT、DATAPIER_TLS_MYSQL57_SECRET，服务端须启用 require_secure_transport。
 use datapier_core::{ExecutionSink, Store, model::*, providers::ProviderSession};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -31,6 +31,8 @@ async fn exercise(kind: ProviderKind) {
     let mut profile = Profile {
         id: Uuid::new_v4(),
         name: "tls-fixture".into(),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
         provider: kind,
         access_mode: AccessMode::ReadWrite,
         connection: ConnectionConfig::Direct(DirectConnection {
@@ -43,6 +45,7 @@ async fn exercise(kind: ProviderKind) {
             },
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: TlsConfig {
                 enabled: true,
                 ca_path: Some(env("DATAPIER_TLS_CA")),
@@ -135,7 +138,6 @@ async fn exercise(kind: ProviderKind) {
         "identity failed for unrelated reason: {err}"
     );
     store.pool.close().await;
-    store.cache.close().await;
 }
 
 #[tokio::test]
@@ -150,19 +152,22 @@ async fn mysql_57_secure_transport_requires_and_negotiates_tls() {
     let mut profile = Profile {
         id: Uuid::new_v4(),
         name: "mysql-57-secure-transport".into(),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: ConnectionConfig::Direct(DirectConnection {
             host: "127.0.0.1".into(),
-            port: env("DATAPIER_TLS_MYSQL_PORT").parse().unwrap(),
+            port: env("DATAPIER_TLS_MYSQL57_PORT").parse().unwrap(),
             username: "root".into(),
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
         }),
     };
-    let secret = Some(env("DATAPIER_TLS_MYSQL_SECRET"));
+    let secret = Some(env("DATAPIER_TLS_MYSQL57_SECRET"));
     let err = match ProviderSession::connect(profile.clone(), secret.clone()).await {
         Ok(_) => panic!("secure transport server accepted a plaintext connection"),
         Err(err) => err,
@@ -177,6 +182,7 @@ async fn mysql_57_secure_transport_requires_and_negotiates_tls() {
     );
 
     profile.direct_mut().unwrap().tls.enabled = true;
+    profile.direct_mut().unwrap().tls.ca_path = Some(env("DATAPIER_TLS_CA"));
     let mut session = ProviderSession::connect(profile, secret).await.unwrap();
     let root =
         TempStore(std::env::temp_dir().join(format!("datapier-tls-test-{}", Uuid::new_v4())));
@@ -231,7 +237,6 @@ async fn mysql_57_secure_transport_requires_and_negotiates_tls() {
     );
     session.close().await.unwrap();
     store.pool.close().await;
-    store.cache.close().await;
 }
 
 #[tokio::test]

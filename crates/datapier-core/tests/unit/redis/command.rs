@@ -28,3 +28,17 @@ fn authentication_detection_respects_command_boundaries_and_escapes() {
     assert!(!redis_contains_auth("HELLO 3 SETNAME authless").unwrap());
     assert!(redis_contains_auth("AUTH 'unfinished").is_err());
 }
+
+#[test]
+fn analysis_tracks_selected_databases_and_rejects_unknown_scope() {
+    let analysis =
+        analyze_command("GET key\nSELECT 3\nSET key value\nMULTI\nDEL key\nEXEC").unwrap();
+    assert_eq!(analysis["databases"], json!([3]));
+    assert_eq!(analysis["change_database"], 3);
+    assert_eq!(analysis["may_write"], true);
+    assert_eq!(analysis["dangerous"], true);
+    assert_eq!(analysis["commands"][1]["select_database"], 3);
+    assert!(analyze_command("EVAL 'return 1' 0").is_err());
+    assert!(analyze_command("COPY a b DB 2").is_err());
+    assert!(analyze_command("SELECT invalid").is_err());
+}

@@ -9,8 +9,12 @@ async fn duplex_sessions_forward_only_owner_events_and_close() {
     let (second, second_server) = tokio::io::duplex(4096);
     let first_handler = tokio::spawn(client(engine.clone(), owner, Box::new(first_server)));
     let second_handler = tokio::spawn(client(engine.clone(), other, Box::new(second_server)));
-    let first = crate::Client::handshake(Box::new(first)).await.unwrap();
-    let second = crate::Client::handshake(Box::new(second)).await.unwrap();
+    let first = crate::Client::handshake(Box::new(first), crate::ClientOptions::default())
+        .await
+        .unwrap();
+    let second = crate::Client::handshake(Box::new(second), crate::ClientOptions::default())
+        .await
+        .unwrap();
     let mut first_events = first.subscribe_events();
     let mut second_events = second.subscribe_events();
     let first_task = Uuid::new_v4();
@@ -52,9 +56,10 @@ async fn saturated_duplex_releases_lease_and_preserves_dispatch_gate() {
     let other = Uuid::new_v4();
     let (other_peer, other_stream) = tokio::io::duplex(4096);
     let other_handler = tokio::spawn(client(engine.clone(), other, Box::new(other_stream)));
-    let other_client = crate::Client::handshake(Box::new(other_peer))
-        .await
-        .unwrap();
+    let other_client =
+        crate::Client::handshake(Box::new(other_peer), crate::ClientOptions::default())
+            .await
+            .unwrap();
     for method in [Some("session.heartbeat"), None, Some("session.close")] {
         let owner = Uuid::new_v4();
         let (mut peer, stream) = tokio::io::duplex(64);
@@ -67,13 +72,13 @@ async fn saturated_duplex_releases_lease_and_preserves_dispatch_gate() {
         ));
         protocol::write(
             &mut peer,
-            &json!({"id":"open","method":"session.open","params":{"protocol_version":2}}),
+            &json!({"id":"open","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
         )
         .await
         .unwrap();
         assert_eq!(
             protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-            2
+            3
         );
         let mut tokens = Vec::new();
         for may_write in [false, true] {
@@ -138,6 +143,8 @@ async fn disconnect_cancels_profile_connection_waits_and_releases_profile_lock()
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "stalled".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: model::ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: model::ConnectionConfig::Direct(model::DirectConnection {
@@ -146,6 +153,7 @@ async fn disconnect_cancels_profile_connection_waits_and_releases_profile_lock()
             username: "test".into(),
             database: Some("test".into()),
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -209,6 +217,8 @@ async fn disconnect_cancels_detached_profile_reads() {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "stalled".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: model::ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: model::ConnectionConfig::Direct(model::DirectConnection {
@@ -217,6 +227,7 @@ async fn disconnect_cancels_detached_profile_reads() {
             username: "test".into(),
             database: Some("test".into()),
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -264,6 +275,8 @@ async fn disconnect_finishes_running_profile_test_record() {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "fixture".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: model::ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: model::ConnectionConfig::Direct(model::DirectConnection {
@@ -272,6 +285,7 @@ async fn disconnect_finishes_running_profile_test_record() {
             username: "datapier".into(),
             database: Some("datapier_fixture".into()),
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -359,6 +373,8 @@ async fn cancelled_profile_save_keeps_open_snapshot_consistent() {
     let mut profile = Profile {
         id: Uuid::new_v4(),
         name: "old".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: model::ProviderKind::Mysql,
         access_mode: AccessMode::ReadWrite,
         connection: model::ConnectionConfig::Direct(model::DirectConnection {
@@ -367,6 +383,7 @@ async fn cancelled_profile_save_keeps_open_snapshot_consistent() {
             username: "test".into(),
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -433,7 +450,6 @@ async fn cancelled_profile_save_keeps_open_snapshot_consistent() {
         ("new", Some("new-secret"))
     );
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }

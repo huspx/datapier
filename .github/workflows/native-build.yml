@@ -71,6 +71,8 @@ jobs:
           result = subprocess.run([str(binary), '--version'], capture_output=True, text=True, check=True)
           if result.stdout.strip() != 'datapier ' + os.environ['PRODUCT_VERSION']:
               raise RuntimeError('Native CLI smoke failed')
+          for command in ('tui', 'tsp', 'mcp', 'engine'):
+              subprocess.run([str(binary), command, '--help'], capture_output=True, text=True, check=True)
       - name: Package binary
         env:
           BUILD_TARGET: ${{ inputs.target }}

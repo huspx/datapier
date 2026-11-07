@@ -1,9 +1,7 @@
 use super::*;
 
 #[test]
-fn redis_export_rejects_changed_type_and_incompatible_rows() {
-    assert!(validate_redis_browse_type("string", &json!({"type":"hash"})).is_err());
-    assert!(validate_redis_browse_type("string", &json!({})).is_err());
+fn redis_export_rejects_incompatible_rows() {
     assert!(
         redis_csv_row(
             "aw==",

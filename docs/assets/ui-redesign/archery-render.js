@@ -226,7 +226,7 @@ function renderArchery() {
           } · ${az('已返回', 'Returned')}: ${cliValues.length}</span><div class="pager-controls"><label>${
             az('每页', 'Per page')
           } <select data-cli-page-size aria-label="${az('结果每页行数', 'Result page size')}">${
-            [20, 50, 100].map(n => `<option value="${n}" ${cliSize === n ? 'selected' : ''}>${n}</option>`).join('')
+            resultPageSizes.map(n => `<option value="${n}" ${cliSize === n ? 'selected' : ''}>${n}</option>`).join('')
           }</select></label>${
             aib(
               'back',
@@ -373,7 +373,7 @@ function renderArchery() {
           }<div class="pager-controls"><label class="page-size-control">${
             az('每页', 'Per page')
           } <select data-result-page-size aria-label="${az('结果每页行数', 'Result page size')}">${
-            [20, 50, 100].map(n => `<option value="${n}" ${ap.resultPageSize === n ? 'selected' : ''}>${n}</option>`)
+            resultPageSizes.map(n => `<option value="${n}" ${ap.resultPageSize === n ? 'selected' : ''}>${n}</option>`)
               .join('')
           }</select></label>${
             aib(

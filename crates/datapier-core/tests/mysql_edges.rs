@@ -18,6 +18,8 @@ impl Fixture {
         let profile = Profile {
             id: Uuid::new_v4(),
             name: "isolated-fixture".into(),
+            revision: 1,
+            approval_policy: ApprovalPolicy::default(),
             provider: ProviderKind::Mysql,
             access_mode: AccessMode::ReadWrite,
             connection: ConnectionConfig::Direct(DirectConnection {
@@ -29,6 +31,7 @@ impl Fixture {
                 username: "datapier".into(),
                 database: Some("datapier_fixture".into()),
                 redis_db: 0,
+                redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
             }),
@@ -69,7 +72,6 @@ impl Fixture {
         self.db.close().await.unwrap();
         let root = (*self.store.root).clone();
         self.store.pool.close().await;
-        self.store.cache.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
@@ -1055,7 +1057,7 @@ async fn preview_json_check_and_write_match_server_version() {
 #[ignore = "需要非 strict 默认模式的隔离 MySQL 5.7、8.0 或 8.4"]
 async fn structured_writes_reject_overlong_text_on_non_strict_server() {
     let mut f = Fixture::open().await;
-    let mode = f.sql("SELECT @@GLOBAL.sql_mode").await.unwrap();
+    let mode = f.sql("SELECT @@SESSION.sql_mode").await.unwrap();
     let mode = f.rows(&mode).await;
     let Value::Text(mode) = &mode[0][0] else {
         panic!("缺少 SQL 模式")
@@ -1126,6 +1128,21 @@ async fn structured_writes_reject_overlong_text_on_non_strict_server() {
         ))
         .await
         .unwrap();
+        let warning_count = f.sql("show /* count */ count(*) warnings").await.unwrap();
+        assert_eq!(f.rows(&warning_count).await[0][0].text(), "1");
+        let warnings = f.sql("/* diagnostics */ sHoW wArNiNgS").await.unwrap();
+        let warnings = f.rows(&warnings).await;
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0][0].text(), "Warning");
+        assert_eq!(warnings[0][1].text(), "1265");
+        let error_count = f.sql("SHOW COUNT(*) ERRORS").await.unwrap();
+        assert_eq!(f.rows(&error_count).await[0][0].text(), "0");
+        let errors = f.sql("SHOW ERRORS").await.unwrap();
+        let error_result: Uuid = serde_json::from_value(errors["results"][0].clone()).unwrap();
+        let error_meta = f.store.result_meta(error_result).await.unwrap();
+        assert_eq!(error_meta.kind, "columns_unknown");
+        assert_eq!(error_meta.summary["columns_known"], false);
+        assert!(f.rows(&errors).await.is_empty());
         let result = f
             .sql(&format!(
                 "SELECT CHAR_LENGTH(value) FROM `{table}` WHERE id=4"
@@ -1133,6 +1150,14 @@ async fn structured_writes_reject_overlong_text_on_non_strict_server() {
             .await
             .unwrap();
         assert_eq!(f.rows(&result).await[0][0], Value::Integer("100".into()));
+        let batch = f
+            .sql(&format!(
+                "INSERT INTO `{table}` (id,value) VALUES (6, '{}'); SHOW WARNINGS",
+                "x".repeat(101)
+            ))
+            .await
+            .unwrap();
+        assert_eq!(f.rows(&batch).await[0][1].text(), "1265");
         f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
     }
     f.close().await;
@@ -1183,10 +1208,10 @@ async fn mysql_tls_requires_trusted_chain_and_matching_identity() {
 
 #[tokio::test]
 #[ignore = "需要隔离 MySQL 和 CREATE ROUTINE 权限"]
-async fn call_cache_failure_reports_unknown_without_reclassifying_later_select() {
+async fn releasing_call_result_still_drains_later_write() {
     let mut f = Fixture::open().await;
-    let table = name("dp_call_cache");
-    let procedure = name("dp_call_cache_proc");
+    let table = name("dp_call_release");
+    let procedure = name("dp_call_release_proc");
     f.sql(&format!(
         "CREATE TABLE `{table}` (id INT PRIMARY KEY, value INT NOT NULL) ENGINE=InnoDB"
     ))
@@ -1195,67 +1220,62 @@ async fn call_cache_failure_reports_unknown_without_reclassifying_later_select()
     f.sql(&format!("INSERT INTO `{table}` VALUES (1, 0)"))
         .await
         .unwrap();
-    f.sql(&format!("CREATE PROCEDURE `{procedure}`() BEGIN SELECT value FROM `{table}`; UPDATE `{table}` SET value=value+1 WHERE id=1; END")).await.unwrap();
-    // 只破坏缓存写入，配置库仍可记录发送状态和查询执行记录。
-    sqlx::query("CREATE TRIGGER fail_result_rows BEFORE INSERT ON result_rows BEGIN SELECT RAISE(FAIL, 'injected cache failure'); END")
-        .execute(&f.store.cache).await.unwrap();
+    f.sql(&format!("CREATE PROCEDURE `{procedure}`() BEGIN SELECT value FROM `{table}` CROSS JOIN information_schema.COLUMNS LIMIT 100; UPDATE `{table}` SET value=value+1 WHERE id=1; END")).await.unwrap();
     let task = f
         .store
         .create_task(Uuid::new_v4(), "fixture", "execution.run", json!({}), false)
         .await
         .unwrap();
-    let error =
-        f.db.call(
-            "execution.run",
-            json!({"text":format!("CALL `{procedure}`()")}),
-            &ExecutionSink::new(f.store.clone(), task.id),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-    let recorded = f.store.task(task.id).await.unwrap();
-    assert!(recorded.sent && recorded.may_write);
-    assert_eq!(error.code, "outcome_unknown");
-    assert_eq!(error.details["statements"][0]["status"], "outcome_unknown");
-    assert!(
-        error.details["local_error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("injected cache failure")
-    );
-    assert_eq!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), f.sql("SELECT 1"))
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "connection_closed"
-    );
-    // 中断结果流的连接不可再用；新会话用于独立核对，不重放原 CALL。
-    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+    let replacement = ProviderSession::connect(f.profile.clone(), f.secret.clone())
         .await
         .unwrap();
-    let task_error = f
-        .sql(&format!(
-            "UPDATE `{table}` SET value=7 WHERE id=1; SELECT value FROM `{table}`"
-        ))
+    let mut worker = std::mem::replace(&mut f.db, replacement);
+    let store = f.store.clone();
+    let task_id = task.id;
+    let call_sql = format!("CALL `{procedure}`()");
+    let handle = tokio::spawn(async move {
+        let result = worker
+            .call(
+                "execution.run",
+                json!({"text":call_sql}),
+                &ExecutionSink::new(store, task_id),
+                &CancellationToken::new(),
+            )
+            .await;
+        (worker, result)
+    });
+    let id = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(id) = f.store.result_ids(task.id).await.unwrap().first().copied() {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.store.wait_result_rows(id, 100),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let page = f.store.result_page(id, 0, 100, 1024 * 1024).await.unwrap();
+    assert_eq!(page.rows.len(), 100);
+    assert!(!page.result.complete);
+    f.store.release_result(id).await.unwrap();
+    let (mut worker, result) = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
         .await
-        .unwrap_err();
-    assert_ne!(task_error.code, "outcome_unknown");
-    assert_eq!(task_error.details["statements"][0]["status"], "executed");
-    assert_eq!(task_error.details["statements"][1]["status"], "failed");
-    sqlx::query("DROP TRIGGER fail_result_rows")
-        .execute(&f.store.cache)
-        .await
+        .unwrap()
         .unwrap();
-    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
-        .await
-        .unwrap();
+    result.unwrap();
+    worker.close().await.unwrap();
     let result = f
         .sql(&format!("SELECT value FROM `{table}` WHERE id=1"))
         .await
         .unwrap();
-    assert_eq!(f.rows(&result).await[0][0], Value::Integer("7".into()));
+    assert_eq!(f.rows(&result).await[0][0], Value::Integer("1".into()));
     f.sql(&format!("DROP PROCEDURE `{procedure}`"))
         .await
         .unwrap();

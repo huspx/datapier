@@ -1,0 +1,19 @@
+.result-pager {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.result-pager > span:first-child {
+  min-width: 0;
+}
+.result-page-button.icon-button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 5px;
+  border-color: transparent;
+  background: transparent;
+}
+.result-page-button.icon-button:hover:not(:disabled) {
+  background: var(--hover);
+}

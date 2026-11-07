@@ -14,6 +14,8 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "凭据服务隔离验收".into(),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadOnly,
         connection: ConnectionConfig::Direct(DirectConnection {
@@ -22,6 +24,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
             username: "datapier-test".into(),
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
         }),
@@ -59,6 +62,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         // 未提供新密码时只更新配置，省略 save_secret 不应清除既有凭据。
         assert!(reopened.save_profile(&profile, None, false).await.unwrap());
         assert_eq!(entry.get_secret().unwrap(), secret.as_bytes());
+        let profile = reopened.profile(profile.id).await.unwrap();
         assert!(
             !reopened
                 .save_profile(&profile, Some("session-only".into()), false)
@@ -76,14 +80,12 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         reopened.delete_profile(profile.id).await.unwrap();
         assert_eq!(reopened.secret(profile.id).await.unwrap(), None);
         reopened.pool.close().await;
-        reopened.cache.close().await;
     })
     .catch_unwind()
     .await;
     let cleanup = store.delete_profile(profile.id).await;
     let native_cleanup = entry.delete_credential();
     store.pool.close().await;
-    store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);

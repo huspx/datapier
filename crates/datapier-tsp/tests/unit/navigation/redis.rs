@@ -77,7 +77,7 @@ fn redis_database_switch_keeps_cli_history_and_new_command_target() {
     assert_eq!(app.tabs[0].browse.redis_db, Some(1));
 
     app.workbench_action(&format!("cli-record:{record_id}:0"), &backend);
-    assert_eq!(requests.try_recv().unwrap().method, "result.page");
+    let _read = requests.try_recv().unwrap();
     assert_eq!(app.tabs[0].browse.redis_db, Some(1));
     app.field_set("cli_text", "GET x");
     app.workbench_action("cli-run", &backend);

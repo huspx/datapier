@@ -5,6 +5,9 @@ impl App {
         if self.tab_close.is_some() {
             return;
         }
+        if self.approval_action(name, backend) {
+            return;
+        }
         if self.empty_context_action(name, backend) {
             return;
         }
@@ -220,11 +223,13 @@ impl App {
                         if name == "list" {
                             self.cursor = None;
                             self.resources.clear();
+                            self.workbench.redis_tree.reset(&[]);
+                            self.workbench.redis_tree_owner = None;
                             self.redis_prune_key_selection();
                             self.workbench.scan_dirty = false;
                             self.workbench.key_page = 0;
                         }
-                        self.request(backend,&format!("resource.list/{token}"),"resource.list",json!({"session_id":s,"database":self.database,"cursor":if name == "more" {self.cursor.clone()} else {None},"pattern":self.field("pattern"),"type":if self.field("type").is_empty(){None}else{Some(self.field("type"))},"limit":200}));
+                        self.request(backend,&format!("resource.list/{token}"),"resource.list",json!({"session_id":s,"database":self.database,"cursor":if name == "more" {self.cursor.clone()} else {None},"pattern":self.field("pattern"),"type":if self.field("type").is_empty(){None}else{Some(self.field("type"))},"limit":self.settings.paging.redis_key_batch}));
                     }
                 }
             }
@@ -306,44 +311,31 @@ impl App {
                     );
                 }
             }
-            "next" | "previous" if self.profile.as_ref().is_some_and(|p| p.is_archery()) => {
-                if self.paste_preview.is_some() || self.page_token.is_some() {
-                    return;
-                }
-                let target = self
-                    .result_id
-                    .as_ref()
-                    .and_then(|id| self.workbench.query_ui.pagination.get(id))
-                    .and_then(|state| {
-                        let current = self.grid.as_ref()?.page.start;
-                        let index = state.starts.iter().position(|start| *start == current)?;
-                        let index = if name == "next" {
-                            index.checked_add(1)?
-                        } else {
-                            index.checked_sub(1)?
-                        };
-                        state.starts.get(index).copied()
-                    });
-                if let Some(start) = target {
-                    self.page(backend, start);
-                }
-            }
-            "next" => {
-                if self.paste_preview.is_some() {
-                    self.status = "请先确认或丢弃粘贴预览".into();
-                } else if let Some(g) = &self.grid
-                    && let Some(next) = g.page.next
+            "next" | "previous" => {
+                if self.has_live_drafts() {
+                    self.status = "请先提交或丢弃待提交变更与粘贴预览".into();
+                } else if self.page_token.is_none()
+                    && let Some(grid) = &self.grid
                 {
-                    let start = g.page.start;
-                    self.page_history.push(start);
-                    self.page(backend, next);
-                }
-            }
-            "previous" => {
-                if self.paste_preview.is_some() {
-                    self.status = "请先确认或丢弃粘贴预览".into();
-                } else if let Some(start) = self.page_history.pop() {
-                    self.page(backend, start);
+                    let start = grid.page.start;
+                    let destination = if name == "next" {
+                        grid.page.next
+                    } else {
+                        self.result_id
+                            .as_ref()
+                            .and_then(|id| self.workbench.query_ui.pagination.get(id))
+                            .and_then(|state| {
+                                state
+                                    .starts
+                                    .iter()
+                                    .copied()
+                                    .filter(|value| *value < start)
+                                    .max()
+                            })
+                    };
+                    if let Some(destination) = destination {
+                        self.page(backend, destination);
+                    }
                 }
             }
             "new-tab" => self.create_query_tab(),
@@ -672,6 +664,78 @@ impl App {
                             entry.values.insert(column.name.clone(), after);
                         }
                         rows.extend(updates.into_values());
+                    }
+                }
+                if rows.iter().any(|row| row.operation != "insert") {
+                    let Some(grid) = self.grid.as_ref().filter(|grid| grid.editable) else {
+                        self.status = "请重新打开表编辑基线".into();
+                        return;
+                    };
+                    let Some(schema) = self.schema.clone().and_then(|value| {
+                        serde_json::from_value::<datapier_core::model::TableSchema>(value).ok()
+                    }) else {
+                        self.status = "请重新打开表编辑基线".into();
+                        return;
+                    };
+                    let Some(keys) = schema.keys.first().filter(|keys| !keys.is_empty()) else {
+                        self.status = "表没有可靠行标识".into();
+                        return;
+                    };
+                    let columns = &grid.page.result.columns;
+                    for change in rows.iter_mut().filter(|row| row.operation != "insert") {
+                        if !matches!(change.operation.as_str(), "update" | "delete")
+                            || change.key.len() != keys.len()
+                            || keys.iter().any(|key| !change.key.contains_key(key))
+                            || change.key.values().any(|value| {
+                                matches!(
+                                    value,
+                                    datapier_core::model::Value::Null
+                                        | datapier_core::model::Value::Missing
+                                        | datapier_core::model::Value::Large { .. }
+                                )
+                            })
+                        {
+                            self.status = "恢复数据的行标识不匹配".into();
+                            return;
+                        }
+                        let mut matched = None;
+                        for row in &grid.page.rows {
+                            if row.len() != columns.len() {
+                                self.status = "编辑基线列数不匹配".into();
+                                return;
+                            }
+                            let before: BTreeMap<_, _> = columns
+                                .iter()
+                                .zip(row)
+                                .map(|(column, value)| (column.name.clone(), value.clone()))
+                                .collect();
+                            if before.len() != row.len() {
+                                self.status = "编辑基线包含重复列名".into();
+                                return;
+                            }
+                            if change
+                                .key
+                                .iter()
+                                .all(|(key, value)| before.get(key) == Some(value))
+                            {
+                                if matched.is_some() {
+                                    self.status = "恢复数据的行标识不唯一".into();
+                                    return;
+                                }
+                                matched = Some(before);
+                            }
+                        }
+                        let Some(before) = matched else {
+                            self.status = "恢复目标不在当前页，请加载对应行".into();
+                            return;
+                        };
+                        if (!change.before.is_empty() && change.before != before)
+                            || change.values.keys().any(|key| !before.contains_key(key))
+                        {
+                            self.status = "恢复数据与当前行基线不一致".into();
+                            return;
+                        }
+                        change.before = before;
                     }
                 }
                 self.pending_rows = rows;

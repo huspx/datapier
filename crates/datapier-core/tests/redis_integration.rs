@@ -3,10 +3,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use datapier_core::{
     ExecutionSink, Store, execution::transfer, model::*, providers::ProviderSession,
 };
-use futures_util::StreamExt;
 use redis::{Client, aio::MultiplexedConnection};
 use serde_json::{Value as Json, json};
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -30,6 +29,8 @@ impl Fixture {
         let profile = Profile {
             id: Uuid::new_v4(),
             name: "redis-integration".into(),
+            revision: 1,
+            approval_policy: ApprovalPolicy::Dangerous,
             provider: ProviderKind::Redis,
             access_mode: AccessMode::ReadWrite,
             connection: ConnectionConfig::Direct(DirectConnection {
@@ -38,6 +39,7 @@ impl Fixture {
                 username: String::new(),
                 database: None,
                 redis_db: 15,
+                redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
             }),
@@ -139,7 +141,6 @@ impl Fixture {
         drop(self.client);
         let root = (*self.store.root).clone();
         self.store.pool.close().await;
-        self.store.cache.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
@@ -497,77 +498,33 @@ async fn expiration_invalidates_watch_and_read_only_rejects_writes() {
 }
 
 #[tokio::test]
-#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
-async fn export_does_not_publish_when_key_type_changes_during_browse() {
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
+async fn export_does_not_publish_when_scan_exceeds_memory_budget() {
     let mut f = Fixture::new().await;
-    let target = f.target(b"race", "string");
-    let key = raw_key(&target);
-    let _: () = redis::cmd("SET")
-        .arg(&key)
-        .arg("original")
-        .query_async(&mut f.raw)
-        .await
-        .unwrap();
-    let mut monitor = f.client.get_async_monitor().await.unwrap();
+    let mut settings = f.store.settings().await.unwrap();
+    settings.limits.result_memory_bytes_per_client = 1024 * 1024;
+    f.store.set_settings(&settings).await.unwrap();
+    let mut pipe = redis::pipe();
+    for index in 0..160 {
+        let key = f.target(
+            format!("{index:04}{}", "x".repeat(8192)).as_bytes(),
+            "string",
+        );
+        pipe.cmd("SET").arg(raw_key(&key)).arg("value").ignore();
+    }
+    pipe.query_async::<()>(&mut f.raw).await.unwrap();
     let sink = f.sink().await;
-    let mut lock = f.store.cache.acquire().await.unwrap();
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *lock)
-        .await
-        .unwrap();
-    let path: PathBuf = f.store.root.join("changed-type.json");
-    let export_path = path.clone();
-    let export_target = target.clone();
-    let mut exporting = ProviderSession::connect(f.profile.clone(), None)
-        .await
-        .unwrap();
-    let job = tokio::spawn(async move {
-        let result = transfer::run(
-            &mut exporting,
-            "transfer.export",
-            json!({"format":"json","path":export_path,"target":export_target}),
-            &sink,
-            &CancellationToken::new(),
-        )
-        .await;
-        (result, exporting)
-    });
-    let mut messages = monitor.on_message::<String>();
-    let key_text = String::from_utf8(key.clone()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let line = messages.next().await.expect("monitor disconnected");
-            if line.contains("\"PTTL\"") && line.contains(&key_text) && !line.contains(" lua]") {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("browse did not reach PTTL");
-    let _: () = redis::pipe()
-        .atomic()
-        .cmd("DEL")
-        .arg(&key)
-        .ignore()
-        .cmd("HSET")
-        .arg(&key)
-        .arg("field")
-        .arg("value")
-        .ignore()
-        .query_async(&mut f.raw)
-        .await
-        .unwrap();
-    sqlx::query("ROLLBACK").execute(&mut *lock).await.unwrap();
-    drop(lock);
-    let (result, mut exporting) = tokio::time::timeout(Duration::from_secs(10), job)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.is_err(), "changed key type must fail export");
-    assert!(!path.exists(), "failed export must not publish final file");
-    exporting.close().await.unwrap();
-    drop(messages);
-    drop(monitor);
+    let path = f.store.root.join("limited-export.json");
+    let result = transfer::run(
+        &mut f.session,
+        "transfer.export",
+        json!({"format":"json","path":path,"pattern":format!("{}*", f.prefix)}),
+        &sink,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().code, "resource_limit");
+    assert!(!path.exists(), "受限导出不能发布为完整文件");
     f.close().await;
 }
 
@@ -1355,5 +1312,59 @@ async fn cancelled_read_discards_connection_and_next_read_reconnects() {
         .await
         .unwrap();
     assert_eq!(rows, vec![vec![binary(b"alive")]]);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 DATAPIER_TEST_REDIS_PORT 和隔离的 Redis 实例"]
+async fn database_discovery_does_not_change_command_database_or_transaction() {
+    let mut f = Fixture::new().await;
+    let sink = f.sink().await;
+    let cancel = CancellationToken::new();
+    f.session
+        .call(
+            "execution.run",
+            json!({"text":"SELECT 1\nMULTI"}),
+            &sink,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let discovery = f
+        .session
+        .call("database.list", json!({}), &sink, &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(
+        discovery["state"].as_str(),
+        Some("known" | "unknown")
+    ));
+    if discovery["state"] == "known" {
+        assert_eq!(discovery["source"], "server_config");
+    }
+    let info = f
+        .session
+        .call("connection.info", json!({}), &sink, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(info["database"], 1);
+    assert_eq!(info["browse_database"], 15);
+    assert_eq!(info["transaction"], true);
+    f.session
+        .call("execution.run", json!({"text":"DISCARD"}), &sink, &cancel)
+        .await
+        .unwrap();
+    let mut profile = f.profile.clone();
+    if let ConnectionConfig::Direct(direct) = &mut profile.connection {
+        direct.redis_databases_override = Some(3);
+    }
+    let mut manual = ProviderSession::connect(profile, None).await.unwrap();
+    let result = manual
+        .call("database.list", json!({}), &sink, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(result["source"], "manual_override");
+    assert_eq!(result["databases"], json!(["0", "1", "2"]));
+    manual.close().await.unwrap();
     f.close().await;
 }
