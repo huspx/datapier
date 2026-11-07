@@ -223,7 +223,10 @@ impl App {
         }
         if let Some(rest) = name.strip_prefix("field:") {
             if let Some((field, value)) = rest.split_once(':')
-                && matches!(field, "provider" | "type" | "access" | "tls" | "format")
+                && matches!(
+                    field,
+                    "provider" | "type" | "access" | "tls" | "format" | "external_mode"
+                )
             {
                 if field == "provider" {
                     if self.connection_form_busy() {
@@ -635,6 +638,7 @@ impl App {
                 {
                     self.redis_changes.truncate(start);
                     self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+                    self.draft_revision = self.draft_revision.wrapping_add(1);
                     self.workbench.redis_undo_groups.pop();
                     self.detail =
                         serde_json::to_string_pretty(&self.redis_changes).unwrap_or_default();

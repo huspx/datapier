@@ -39,7 +39,6 @@ pub(super) fn settings_is_mcp(group: &str, key: &str) -> bool {
         || (group == "limits"
             && matches!(key, "mcp_response_rows" | "running_tasks_per_mcp_client"))
 }
-
 fn settings_field(group: &str, key: &str) -> String {
     format!("settings-{group}-{key}")
 }
@@ -99,6 +98,32 @@ impl App {
         self.field_set(
             "settings-approval-default_policy",
             settings_text(&value["approval"]["default_policy"]),
+        );
+        let limits = self.settings.editing.clone();
+        for (name, value) in [
+            ("editing_plan_items", limits.max_plan_items),
+            ("editing_plan_bytes", limits.max_plan_bytes),
+            ("editing_value_bytes", limits.max_value_bytes),
+            ("editing_text_bytes", limits.max_text_editor_bytes),
+            ("editing_preview_rows", limits.preview_rows),
+        ] {
+            self.field_set(name, value.to_string());
+        }
+        let editor = self.settings.external_editor.clone();
+        self.field_set(
+            "external_mode",
+            editor.as_ref().map_or("disabled", |e| match e.mode {
+                datapier_core::model::editing::ExternalEditorMode::Gui => "gui",
+                datapier_core::model::editing::ExternalEditorMode::Terminal => "terminal",
+            }),
+        );
+        self.field_set(
+            "external_program",
+            editor.as_ref().map_or("", |e| e.program.as_str()),
+        );
+        self.field_set(
+            "external_args",
+            editor.map_or_else(String::new, |e| e.args.join("\n")),
         );
     }
     fn mcp_rules_request(
@@ -190,7 +215,7 @@ impl App {
             self.field_set("settings-error", error.to_string());
             self.settings_unsaved = true;
             self.status = i18n::UiMessage::template(
-                "语言选择仅应用于本次会话，未保存: {error}",
+                "设置仅应用于本次会话，未保存: {error}",
                 vec![("error", i18n::UiArg::Raw(error.to_string()))],
             );
         }
@@ -257,6 +282,9 @@ impl App {
     }
 
     pub(super) fn application_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if self.editing_files_action(name, backend) {
+            return true;
+        }
         if name == "archery-sql-check" {
             if !self.profile.as_ref().is_some_and(|profile| {
                 profile.is_archery()
@@ -462,6 +490,8 @@ impl App {
         }
         if name == "app-settings" {
             if self.finish_inline(true) {
+                self.field_set("editing_file_path", "");
+                self.editing_files_list(backend, 0);
                 self.workbench.overlay = Some("settings".into());
                 self.refresh_archery_servers(backend);
                 self.settings_load_fields();
@@ -484,6 +514,64 @@ impl App {
         if name == "query-result-close" {
             // 隐藏结果不等于取消任务；任务和独立结果引用继续由所属 tab 管理。
             self.workbench.query_ui.results_hidden = true;
+            return true;
+        }
+        if name == "editing-settings-save" {
+            use datapier_core::model::editing::{
+                EditingLimits, ExternalEditorConfig, ExternalEditorMode,
+            };
+            let parsed = (|| -> Result<(EditingLimits, Option<ExternalEditorConfig>)> {
+                let number = |name: &str| {
+                    self.field(name)
+                        .parse::<usize>()
+                        .map_err(|_| AppError::invalid("编辑限制必须为正整数"))
+                };
+                let limits = EditingLimits {
+                    max_plan_items: number("editing_plan_items")?,
+                    max_plan_bytes: number("editing_plan_bytes")?,
+                    max_value_bytes: number("editing_value_bytes")?,
+                    max_text_editor_bytes: number("editing_text_bytes")?,
+                    preview_rows: number("editing_preview_rows")?,
+                };
+                limits.validate()?;
+                let editor = match self.field("external_mode") {
+                    "disabled" => None,
+                    mode @ ("gui" | "terminal") => {
+                        let config = ExternalEditorConfig {
+                            mode: if mode == "gui" {
+                                ExternalEditorMode::Gui
+                            } else {
+                                ExternalEditorMode::Terminal
+                            },
+                            program: self.field("external_program").to_owned(),
+                            args: if self.field("external_args").is_empty() {
+                                Vec::new()
+                            } else {
+                                self.field("external_args")
+                                    .split('\n')
+                                    .map(str::to_owned)
+                                    .collect()
+                            },
+                        };
+                        config.validate()?;
+                        Some(config)
+                    }
+                    _ => return Err(AppError::invalid("请选择外部编辑器模式")),
+                };
+                Ok((limits, editor))
+            })();
+            match parsed {
+                Ok((limits, editor)) => {
+                    self.settings.editing = limits;
+                    self.settings.external_editor = editor;
+                    self.settings_epoch = self.settings_epoch.wrapping_add(1);
+                    self.settings_unsaved = true;
+                    if self.settings_save_token.is_none() {
+                        self.save_settings(backend);
+                    }
+                }
+                Err(error) => self.status = i18n::UiMessage::local(error.message),
+            }
             return true;
         }
         if let Some(id) = name.strip_prefix("mcp-rules-load:") {

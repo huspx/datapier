@@ -28,11 +28,13 @@ use uuid::Uuid;
 
 mod archery;
 mod discovery;
+mod editing;
 mod mcp;
 mod results;
 mod rpc;
 mod session;
 mod tasks;
+mod workspaces;
 #[cfg(test)]
 use datapier_core::model::AccessMode;
 use session::client;
@@ -115,11 +117,14 @@ struct State {
     unpersisted: HashMap<Uuid, UnpersistedCompletion>,
     profile_locks: HashMap<Uuid, Arc<AsyncMutex<()>>>,
     archery: archery::ArcheryState,
+    editing: editing::EditingState,
+    workspace_uploads: workspaces::WorkspaceUploadState,
 }
 impl State {
     fn stop_if_idle(&mut self) -> bool {
         if self.clients.is_empty()
             && self.tasks.is_empty()
+            && self.workspace_uploads.is_empty()
             && !self.archery.has_persistent_operations()
             && self.idle.elapsed() >= Duration::from_secs(30)
         {
@@ -194,6 +199,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
     let mut listener = platform::Listener::bind(&endpoint)?;
     let store = Store::open(&root).await?;
     store.recover_tasks().await?;
+    store.recover_edit_files().await?;
     let engine = Arc::new(Engine {
         id: Uuid::new_v4(),
         store,
@@ -215,18 +221,21 @@ pub async fn run(root: PathBuf) -> Result<()> {
             unpersisted: HashMap::new(),
             profile_locks: HashMap::new(),
             archery: archery::ArcheryState::default(),
+            editing: editing::EditingState::default(),
+            workspace_uploads: Default::default(),
         }),
     });
     let descriptor = root.join("engine.json");
     std::fs::write(
         &descriptor,
         serde_json::to_vec(
-            &json!({"protocol_version":3,"engine_id":engine.id,"endpoint":endpoint}),
+            &json!({"protocol_version":crate::protocol::VERSION,"engine_id":engine.id,"endpoint":endpoint}),
         )?,
     )?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut history_tick = tokio::time::interval(Duration::from_secs(60));
     let mut history_cleanup: Option<tokio::task::JoinHandle<()>> = None;
+    let mut editing_cleanup: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -248,10 +257,20 @@ pub async fn run(root: PathBuf) -> Result<()> {
                 // 与 register 共用临界区，先停止接入再收尾，防止最后一次检查后接入新会话。
                 let stop = engine.state.lock().unwrap().stop_if_idle();
                 if stop { break; }
+                if editing_cleanup.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
+                    let engine = engine.clone();
+                    editing_cleanup = Some(tokio::spawn(async move {
+                        if let Err(error) = engine.editing_sweep().await { tracing::warn!("编辑会话回收失败: {error}"); }
+                    }));
+                }
             }
         }
     }
     if let Some(cleanup) = history_cleanup {
+        cleanup.abort();
+        let _ = cleanup.await;
+    }
+    if let Some(cleanup) = editing_cleanup {
         cleanup.abort();
         let _ = cleanup.await;
     }
@@ -419,6 +438,9 @@ impl Engine {
         self.disconnect_archery(owner).await;
         for (id, cancel, transition) in tasks {
             self.cancel_if_safe(id, cancel, transition).await;
+        }
+        if let Err(error) = self.editing_disconnect(owner).await {
+            tracing::warn!("清理客户端编辑会话失败: {error}");
         }
         for (id, db) in databases {
             let engine = self.clone();

@@ -321,7 +321,7 @@ fn row_menu(app: &App, cell: Cell, redis: bool, editable: bool, include_cell: bo
     }
     if writable(app)
         && ((redis && app.browse_result && app.edit_token.is_some())
-            || (!app.is_redis() && editable && app.can_copy_insert()))
+            || (!app.is_redis() && editable && app.workbench_can_operate("delete")))
     {
         actions = actions.menu(ui::MenuEntry::Separator).menu(
             ui::MenuItem::new(

@@ -351,6 +351,42 @@ pub fn settings(settings: &Value) -> Form {
             "历史最大条数（空为不限制）",
             "History maximum entries (empty unlimited)",
         ),
+        (
+            "editing.max_plan_items",
+            "最大计划条目",
+            "Maximum plan items",
+        ),
+        (
+            "editing.max_plan_bytes",
+            "最大计划字节",
+            "Maximum plan bytes",
+        ),
+        (
+            "editing.max_value_bytes",
+            "最大单值字节",
+            "Maximum value bytes",
+        ),
+        (
+            "editing.max_text_editor_bytes",
+            "文本编辑器字节上限",
+            "Text editor byte limit",
+        ),
+        ("editing.preview_rows", "预览行数", "Preview rows"),
+        (
+            "external_editor.mode",
+            "外部编辑器模式",
+            "External editor mode",
+        ),
+        (
+            "external_editor.program",
+            "外部编辑器程序",
+            "External editor program",
+        ),
+        (
+            "external_editor.args",
+            "参数（JSON 数组，包含 {file}）",
+            "Arguments (JSON array containing {file})",
+        ),
     ];
     Form {
         fields: specs
@@ -360,6 +396,16 @@ pub fn settings(settings: &Value) -> Form {
                 let f = field(path, zh, en, v);
                 match path {
                     "language" => f.choices(&["system", "zh-CN", "en"]),
+                    "external_editor.mode" => {
+                        let mut f = f;
+                        if v.is_null() {
+                            f.value = "disabled".into();
+                        }
+                        f.choices(&["disabled", "gui", "terminal"])
+                    }
+                    "external_editor.args" if v.is_null() => {
+                        Field::new(path, zh, en, "[\"{file}\"]")
+                    }
                     "approval.default_policy" => f.choices(&["dangerous", "all_writes"]),
                     _ if v.is_boolean() => f.choices(&["false", "true"]),
                     _ => f,
@@ -371,6 +417,9 @@ pub fn settings(settings: &Value) -> Form {
 pub fn settings_value(f: &Form, original: &Value) -> Result<Value, String> {
     let mut out = original.clone();
     for field in &f.fields {
+        if field.key.starts_with("external_editor.") {
+            continue;
+        }
         let mut parent = &mut out;
         let parts: Vec<_> = field.key.split('.').collect();
         for part in &parts[..parts.len() - 1] {
@@ -401,6 +450,15 @@ pub fn settings_value(f: &Form, original: &Value) -> Result<Value, String> {
         };
         parent[key] = value;
     }
+    out["external_editor"] = match f.get("external_editor.mode") {
+        "disabled" => Value::Null,
+        mode @ ("gui" | "terminal") => {
+            let args: Vec<String> = serde_json::from_str(f.get("external_editor.args"))
+                .map_err(|error| format!("外部编辑器参数必须是字符串数组: {error}"))?;
+            json!({"mode":mode,"program":f.get("external_editor.program"),"args":args})
+        }
+        _ => return Err("外部编辑器模式无效".into()),
+    };
     Ok(out)
 }
 pub fn rules(rules: &[Value], profile: &Value) -> Form {

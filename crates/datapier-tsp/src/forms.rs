@@ -220,11 +220,33 @@ impl Workbench {
 }
 
 fn columns(app: &App) -> Vec<Column> {
-    app.schema
+    let mut columns: Vec<Column> = app
+        .schema
         .as_ref()
         .and_then(|schema| schema.get("columns"))
         .and_then(|columns| serde_json::from_value(columns.clone()).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if app
+        .target
+        .as_ref()
+        .is_some_and(|target| target.kind == "view")
+    {
+        let writable = app
+            .schema
+            .as_ref()
+            .and_then(|schema| schema.pointer("/details/view_mapping/writable"))
+            .and_then(Value::as_array);
+        for column in &mut columns {
+            if !writable.is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.as_str() == Some(column.name.as_str()))
+            }) {
+                column.generated = true;
+            }
+        }
+    }
+    columns
 }
 
 fn value_text(value: &DataValue) -> Option<String> {

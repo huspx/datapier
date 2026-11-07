@@ -1,68 +1,130 @@
 use super::*;
 use crate::workspace::finish_after_input_closed;
 
+// 模拟分块服务并保留完整保存结果，让退出测试检查用户可恢复的草稿。
+fn scripted_workspace_service(
+    mut requests: tokio::sync::mpsc::Receiver<crate::backend::Request>,
+    replies: tokio::sync::mpsc::Sender<crate::backend::Response>,
+    conflict: bool,
+    commit_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+) -> std::thread::JoinHandle<(String, Workspace)> {
+    std::thread::spawn(move || {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let mut conflict_pending = conflict;
+        let mut gate = commit_gate;
+        let mut destination = String::new();
+        let mut bytes = Vec::new();
+        let mut expected_bytes = 0;
+        let upload_id = Uuid::new_v4();
+        loop {
+            let request = requests.blocking_recv().expect("workspace service request");
+            let result = match request.method.as_str() {
+                "workspace.save.begin" if conflict_pending => {
+                    conflict_pending = false;
+                    assert_eq!(request.params["workspace_id"], "conflicting-workspace");
+                    assert_eq!(request.params["expected_revision"], 3);
+                    Err(AppError::conflict("stale workspace"))
+                }
+                "workspace.save.begin" => {
+                    destination = request.params["workspace_id"].as_str().unwrap().to_owned();
+                    assert_eq!(
+                        request.params["expected_revision"],
+                        if conflict { 0 } else { 7 }
+                    );
+                    if conflict {
+                        assert_eq!(request.params["copy_from"], "conflicting-workspace");
+                    }
+                    expected_bytes = request.params["bytes"].as_u64().unwrap() as usize;
+                    Ok(json!({"upload_id": upload_id, "chunk_bytes": 64}))
+                }
+                "workspace.save.append" => {
+                    assert_eq!(request.params["upload_id"], json!(upload_id));
+                    assert_eq!(request.params["offset"], bytes.len());
+                    bytes.extend(
+                        STANDARD
+                            .decode(request.params["data_b64"].as_str().unwrap())
+                            .unwrap(),
+                    );
+                    Ok(json!({"received": bytes.len()}))
+                }
+                "workspace.save.commit" => {
+                    assert_eq!(bytes.len(), expected_bytes);
+                    if let Some((ready, release)) = gate.take() {
+                        ready.send(()).unwrap();
+                        release.recv().unwrap();
+                    }
+                    Ok(json!({"revision": if conflict { 1 } else { 8 }, "bytes": bytes.len()}))
+                }
+                "workspace.save.read" => {
+                    let offset = request.params["offset"].as_u64().unwrap() as usize;
+                    let end = (offset + 64).min(bytes.len());
+                    Ok(
+                        json!({"data_b64": STANDARD.encode(&bytes[offset..end]), "next": if end < bytes.len() { Some(end) } else { None }, "total_bytes": bytes.len()}),
+                    )
+                }
+                "workspace.activate" => {
+                    assert_eq!(request.params["workspace_id"], destination);
+                    assert_eq!(
+                        request.params["expected_workspace_id"],
+                        "conflicting-workspace"
+                    );
+                    Ok(json!({"workspace_id": destination}))
+                }
+                "workspace.save.close" => {
+                    let saved = serde_json::from_slice(&bytes).expect("saved workspace");
+                    return (destination, saved);
+                }
+                method => panic!("unexpected workspace service request: {method}"),
+            };
+            replies
+                .blocking_send(Response {
+                    tag: request.tag,
+                    result,
+                })
+                .expect("send workspace response");
+        }
+    })
+}
+
 #[test]
 fn closing_input_waits_for_workspace_save_acknowledgment() {
-    let (mut backend, mut requests, replies) = Backend::scripted();
-    let worker_replies = replies.clone();
-    let worker = std::thread::spawn(move || {
-        let request = requests.blocking_recv().expect("workspace save request");
-        worker_replies
-            .blocking_send(Response {
-                tag: request.tag.clone(),
-                result: Ok(json!({"revision": 8})),
-            })
-            .expect("send save acknowledgment");
-        request
+    let (mut backend, requests, replies) = Backend::scripted();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = scripted_workspace_service(requests, replies, false, Some((ready_tx, release_rx)));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        let mut app = App::new("closing-workspace".into());
+        app.workspace_loaded = true;
+        app.revision = 7;
+        app.tabs[0].query = Editor::new("SELECT 42");
+        app.dirty = true;
+        let result = finish_after_input_closed(&mut app, &mut backend);
+        done_tx
+            .send((result, app.revision, app.saving, app.dirty))
+            .unwrap();
     });
-    let mut app = App::new("closing-workspace".into());
-    app.workspace_loaded = true;
-    app.revision = 7;
-    app.tabs[0].query = Editor::new("SELECT 42");
-    app.dirty = true;
-
-    finish_after_input_closed(&mut app, &mut backend).expect("save acknowledged before close");
-    let request = worker.join().expect("scripted worker");
-    assert_eq!(request.tag, "workspace.save");
-    assert_eq!(request.method, "workspace.save");
-    assert_eq!(request.params["workspace_id"], "closing-workspace");
-    assert_eq!(request.params["expected_revision"], 7);
-    let saved: Workspace =
-        serde_json::from_value(request.params["state"].clone()).expect("saved workspace");
+    ready_rx.recv().unwrap();
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err()
+    );
+    release_tx.send(()).unwrap();
+    let (result, revision, saving, dirty) = done_rx.recv().unwrap();
+    result.expect("save acknowledged before close");
+    closer.join().unwrap();
+    let (destination, saved) = worker.join().expect("scripted worker");
+    assert_eq!(destination, "closing-workspace");
     assert_eq!(saved.tabs[0].query.text, "SELECT 42");
-    assert_eq!(app.revision, 8);
-    assert!(!app.saving);
-    assert!(!app.dirty);
+    assert_eq!(revision, 8);
+    assert!(!saving && !dirty);
 }
 
 #[test]
 fn closing_input_saves_a_copy_after_a_conflict() {
-    let (mut backend, mut requests, replies) = Backend::scripted();
-    let worker_replies = replies.clone();
-    let worker = std::thread::spawn(move || {
-        let original = requests.blocking_recv().expect("original save request");
-        worker_replies
-            .blocking_send(Response {
-                tag: original.tag.clone(),
-                result: Err(AppError::conflict("stale workspace")),
-            })
-            .expect("send conflict");
-        let copy = requests.blocking_recv().expect("copy save request");
-        worker_replies
-            .blocking_send(Response {
-                tag: copy.tag.clone(),
-                result: Ok(json!({"revision": 1})),
-            })
-            .expect("send copy acknowledgment");
-        let followup = requests.blocking_recv().expect("follow-up save request");
-        worker_replies
-            .blocking_send(Response {
-                tag: followup.tag.clone(),
-                result: Ok(json!({"revision": 2})),
-            })
-            .expect("send follow-up acknowledgment");
-        (original, copy, followup)
-    });
+    let (mut backend, requests, replies) = Backend::scripted();
+    let worker = scripted_workspace_service(requests, replies, true, None);
     let mut app = App::new("conflicting-workspace".into());
     app.workspace_loaded = true;
     app.revision = 3;
@@ -70,27 +132,12 @@ fn closing_input_saves_a_copy_after_a_conflict() {
     app.dirty = true;
 
     finish_after_input_closed(&mut app, &mut backend).expect("conflict recovered before close");
-    let (original, copy, followup) = worker.join().expect("scripted worker");
-    assert_eq!(original.tag, "workspace.save");
-    assert_eq!(original.params["workspace_id"], "conflicting-workspace");
-    assert_eq!(original.params["expected_revision"], 3);
-    assert_eq!(copy.tag, "workspace.copy");
-    assert_eq!(copy.method, "workspace.save");
-    let copy_id = copy.params["workspace_id"].as_str().expect("copy id");
+    let (copy_id, saved) = worker.join().expect("scripted worker");
     assert!(copy_id.starts_with("conflicting-workspace-copy-"));
-    assert_eq!(copy.params["expected_revision"], 0);
-    let saved: Workspace =
-        serde_json::from_value(copy.params["state"].clone()).expect("saved copy");
     assert_eq!(saved.tabs[0].query.text, "SELECT 99");
-    assert_eq!(followup.tag, "workspace.save");
-    assert_eq!(followup.method, "workspace.save");
-    assert_eq!(followup.params["workspace_id"], copy_id);
-    assert_eq!(followup.params["expected_revision"], 1);
     assert_eq!(app.workspace_id, copy_id);
-    assert_eq!(app.revision, 2);
-    assert!(!app.save_blocked);
-    assert!(!app.saving);
-    assert!(!app.dirty);
+    assert_eq!(app.revision, 1);
+    assert!(!app.save_blocked && !app.saving && !app.dirty);
 }
 
 #[test]

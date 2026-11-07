@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol;
 
-async fn engine() -> (Arc<Engine>, PathBuf) {
+pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
     let root = std::env::temp_dir().join(format!("datapier-engine-test-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let store = Store::open(&root).await.unwrap();
@@ -23,6 +23,8 @@ async fn engine() -> (Arc<Engine>, PathBuf) {
         unpersisted: HashMap::new(),
         profile_locks: HashMap::new(),
         archery: Default::default(),
+        editing: Default::default(),
+        workspace_uploads: Default::default(),
     };
     (
         Arc::new(Engine {
@@ -45,3 +47,24 @@ mod sessions;
 
 #[path = "archery.rs"]
 mod archery_tests;
+
+#[tokio::test]
+async fn schema_conflict_and_cancelled_results_keep_their_task_terminal_state() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    for (business, terminal) in [("conflict", "failed"), ("cancelled", "cancelled")] {
+        let task = engine
+            .store
+            .create_task(owner, "test", "schema.execute", json!({}), false)
+            .await
+            .unwrap();
+        let result = Ok(json!({"state":business,"steps":[{"state":"not_sent"}]}));
+        engine.finish_task(owner, task.id, &result, None).await;
+        let recorded = engine.store.task(task.id).await.unwrap();
+        assert_eq!(recorded.state, terminal);
+        assert_eq!(recorded.summary["steps"][0]["state"], "not_sent");
+        assert_eq!(recorded.error.unwrap().code, business);
+    }
+    engine.store.pool.close().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}

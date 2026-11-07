@@ -96,7 +96,15 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
     let mut quitting = false;
     let mut clipboard = clipboard::Clipboard::default();
     let mut revealed_tab = None;
+    let mut retained_value_sources = std::collections::BTreeSet::new();
     loop {
+        if app.workspace_loaded
+            && !app.tabs.is_empty()
+            && app.advanced_schema.is_none()
+            && let Some(draft) = app.tabs[app.active].schema_draft.take()
+        {
+            app.advanced_schema_restore(&backend, draft);
+        }
         changed |= app.navigation_poll_drop(&backend);
         clipboard.observe_redis_context(&app);
         while let Some(mut reply) = backend.receive() {
@@ -114,6 +122,18 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             clipboard.observe_redis_context(&app);
             changed = true;
         }
+        app.release_retired_value_sources(&backend, &mut retained_value_sources);
+        app.workspace_restore_poll(&backend);
+        if let Some(png) = app.advanced_value_take_png() {
+            match session.blob(png, Some("image/png")) {
+                Ok(blob) => app.advanced_value.image_blob = Some(blob),
+                Err(error) => app.status = i18n::UiMessage::raw(error.to_string()),
+            }
+            changed = true;
+        }
+        app.advanced_value_release_previews(&backend);
+        app.sync_draft_scope(&backend);
+        app.replace_poll(&backend);
         changed |= clipboard.expire(&mut app);
         if app.last_settings_poll.elapsed() >= Duration::from_secs(5) {
             app.last_settings_poll = Instant::now();
@@ -240,6 +260,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     app.status = i18n::UiMessage::raw(error.to_string());
                 }
             }
+            Ok(Some(Input::Msg(_, _) | Input::Key(_))) if app.workspace_switch_pending() => {}
             Ok(Some(Input::Msg(message, event))) => {
                 if window_bound
                     && !matches!(message, Msg::Focus(_))
@@ -363,7 +384,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         }
                     }
                     message @ (Msg::Edit(..) | Msg::Undo(..)) => {
-                        app.dispatch_editor_message(message)
+                        app.dispatch_guarded_editor_message(message, &backend);
                     }
                     Msg::Profile(index) => {
                         if app.finish_inline(true) {
@@ -527,6 +548,11 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     continue;
                 }
                 if app.focus == "grid" {
+                    if app.restore_rows.is_some() {
+                        app.status = i18n::UiMessage::key("正在恢复行草稿，请等待完成");
+                        changed = true;
+                        continue;
+                    }
                     if key.is("enter") || key.is("f2") {
                         if app.is_redis() {
                             app.workbench_redis_edit(&backend);
@@ -552,6 +578,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             grid.navigate(nav, key.shift);
                         } else if key.is("ctrl+z") || key.is("meta+z") {
                             grid.undo();
+                            app.draft_revision = app.draft_revision.wrapping_add(1);
                             app.dirty = true;
                         } else if key.name == "paste"
                             && let Some(text) = key.text.as_deref()
@@ -584,17 +611,79 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                                     app.set_detail_context("粘贴预览");
                                     app.paste_preview = Some(preview);
                                     app.workbench.overlay = Some("preview".into());
+                                    app.guard_draft_scope(
+                                        &backend,
+                                        workbench::DraftScopeAction::Protect,
+                                    );
                                 }
                                 Err(e) => app.status = workbench::grid_error(e),
                             }
                         }
                     }
                 } else {
-                    app.input_key(&key);
+                    let editing = app.draft_input_field(&app.focus)
+                        && (key.typed().is_some()
+                            || matches!(
+                                key.name.as_str(),
+                                "backspace" | "delete" | "paste" | "enter"
+                            ));
+                    if !editing || app.draft_scope_ready() {
+                        app.input_key(&key);
+                    } else {
+                        app.guard_draft_scope(
+                            &backend,
+                            workbench::DraftScopeAction::Key(app.focus.clone(), key.clone()),
+                        );
+                    }
                 }
                 changed = true;
             }
             Ok(Some(Input::Event(event))) => match event {
+                tern_sdk::Event::Action(action)
+                    if action.act == "datapier-window-bind"
+                        && window_node.as_deref() == Some(action.id.as_str()) =>
+                {
+                    // 仅处理发给本 surface 节点的 action；进程存活本身不能证明窗口存在。
+                    if let Err(error) = backend.request(
+                        "window.bind",
+                        "ui.window.bind",
+                        json!({"nonce":window_nonce}),
+                    ) {
+                        app.status = i18n::UiMessage::raw(error.to_string());
+                    }
+                }
+                tern_sdk::Event::Action(action)
+                    if window_node.as_deref() == Some(action.id.as_str())
+                        && (action.act.starts_with("datapier-editor-launched:")
+                            || action.act.starts_with("datapier-editor-failed:")) =>
+                {
+                    let launched = action.act.starts_with("datapier-editor-launched:");
+                    let id = action
+                        .act
+                        .split_once(':')
+                        .and_then(|(_, id)| Uuid::parse_str(id).ok());
+                    let mut matched = false;
+                    if id.is_some() && id == app.advanced_files.terminal_handoff {
+                        app.advanced_files.terminal_handoff = None;
+                        matched = true;
+                    } else if let Some(id) = id
+                        && let Some(tab) = app
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.runtime.advanced_files.terminal_handoff == Some(id))
+                    {
+                        tab.runtime.advanced_files.terminal_handoff = None;
+                        matched = true;
+                    }
+                    if matched {
+                        app.status = if launched {
+                            i18n::UiMessage::key("终端编辑器已启动，请明确读取修改")
+                        } else {
+                            i18n::UiMessage::key("终端编辑器启动失败，文件已保留，可重试")
+                        };
+                        changed = true;
+                    }
+                }
                 tern_sdk::Event::Resize(_) => {
                     changed |= app.update_viewport(session.caps());
                 }

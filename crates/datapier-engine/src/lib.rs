@@ -231,7 +231,7 @@ impl Client {
             inner,
         };
         let handshake = match client
-            .request("session.open", json!({"protocol_version":3,"client_kind":options.kind,"workspace":options.workspace,"allow_connections":options.allow_connections}))
+            .request("session.open", json!({"protocol_version":protocol::VERSION,"client_kind":options.kind,"workspace":options.workspace,"allow_connections":options.allow_connections}))
             .await
         {
             Ok(value) => value,
@@ -240,7 +240,7 @@ impl Client {
                 return Err(e);
             }
         };
-        if handshake.get("protocol_version").and_then(Value::as_u64) != Some(3) {
+        if handshake.get("protocol_version").and_then(Value::as_u64) != Some(protocol::VERSION) {
             client.inner.shutdown.cancel();
             return Err(AppError::new(
                 "protocol_incompatible",

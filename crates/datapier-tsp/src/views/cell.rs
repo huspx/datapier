@@ -75,6 +75,7 @@ pub(super) fn cell_drawer(app: &App) -> Node<Msg> {
         .child(html::span(crate::i18n::tr("当前行").into_owned()).class("label"))
         .child(html::span(identity.join(" · ")).class("mono"))
         .child(ui::field(crate::i18n::tr("字段").into_owned()).child(selector));
+    drawer = drawer.child(button("高级值编辑", "advanced-value-open"));
     if writable(app) && grid.editable && !grid.page.result.columns[cell.column].generated {
         drawer = drawer
             .child(field(app, "cell", "值"))

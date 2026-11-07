@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
+mod editing;
 
 pub(super) struct ResultStore {
     entries: HashMap<Uuid, MemoryResult>,
@@ -51,6 +52,12 @@ impl Default for ResultStore {
         }
     }
 }
+fn decoded_value_memory_bound(raw: &[u8]) -> usize {
+    let mut estimate = crate::model::editing::JsonMemoryEstimate::default();
+    estimate.feed(raw);
+    raw.len().saturating_add(estimate.heap_bound())
+}
+
 impl ResultStore {
     fn expire(&mut self, idle: Duration) {
         let ids: Vec<Uuid> = self
@@ -568,17 +575,41 @@ impl Store {
         self.results.lock().await.auxiliary.remove(&handle);
         Ok(())
     }
-    pub async fn read_value(&self, id: Uuid) -> Result<Value> {
+    /// 计算缓存字段解码及编码的空间上界，不分配完整 JSON 树。
+    pub async fn cached_value_memory_bound(&self, id: Uuid) -> Result<usize> {
         let idle = self.settings().await?.limits.result_idle_seconds;
         let mut state = self.results.lock().await;
         state.expire(Duration::from_secs(idle));
+        let (_, raw) = state.values.get(&id).ok_or_else(missing)?;
+        Ok(decoded_value_memory_bound(raw))
+    }
+
+    /// 只读取查询缓存；调用方的预留上界不能扩大服务器内存限制。
+    pub async fn read_cached_value_bounded(&self, id: Uuid, budget: usize) -> Result<Value> {
+        let limits = self.settings().await?.limits;
+        let budget = budget.min(limits.result_memory_bytes_per_client);
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(limits.result_idle_seconds));
         let (result, raw) = state.values.get(&id).ok_or_else(missing)?;
         let result = *result;
+        if decoded_value_memory_bound(raw) > budget {
+            return Err(AppError::new(
+                "resource_limit",
+                "字段解码超过客户端内存预算",
+            ));
+        }
         let value = serde_json::from_slice(raw)?;
-        if let Some(r) = state.entries.get_mut(&result) {
-            r.touched = std::time::Instant::now();
+        if let Some(result) = state.entries.get_mut(&result) {
+            result.touched = std::time::Instant::now();
         }
         Ok(value)
+    }
+
+    pub async fn read_value(&self, id: Uuid) -> Result<Value> {
+        if let Some(value) = self.read_draft_value(id).await? {
+            return Ok(value);
+        }
+        self.read_cached_value_bounded(id, usize::MAX).await
     }
     pub async fn large_value(&self, id: Uuid, offset: u64, max_bytes: usize) -> Result<Json> {
         self.large_value_inner(id, offset, max_bytes, true).await

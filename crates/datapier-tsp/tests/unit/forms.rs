@@ -114,11 +114,28 @@ fn database_diagnostics_remain_untranslated_even_with_validation_details() {
 
 #[test]
 fn insert_requires_schema_values_but_accepts_empty_text_and_null() {
-    let (backend, _, _) = Backend::scripted();
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = App::new("insert-validation".into());
+    app.profile_form(None);
+    app.field_set("access", "read_write");
+    app.profile = Some(app.form_profile().unwrap());
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.target = Some(ResourceTarget {
+        database: Some("fixture".into()),
+        name: "rows".into(),
+        kind: "table".into(),
+        key_b64: None,
+    });
+    app.browse_result = true;
+    app.grid = Some(GridState::new(serde_json::from_value(json!({
+        "result":{"id":Uuid::new_v4(),"execution_id":Uuid::new_v4(),"columns":[],"kind":"rows","row_count":0,"complete":true,"summary":{}},
+        "rows":[],"start":0,"next":null
+    })).unwrap(), true));
     let mut required = Column::new("required", "text");
     required.nullable = false;
-    app.schema = Some(json!({"columns":[required, Column::new("optional", "text")]}));
+    app.schema = Some(
+        json!({"columns":[required, Column::new("optional", "text")],"engine":"InnoDB","keys":[["required"]]}),
+    );
     app.edit_token = Some(json!("token"));
     app.init_sql_form("row");
     app.dirty = false;
@@ -130,7 +147,17 @@ fn insert_requires_schema_values_but_accepts_empty_text_and_null() {
         "sql-form-row-0"
     );
     app.workbench.sql_forms.row[0].mode = RowMode::Value;
-    app.sql_form_action("sql-row-add", &backend);
+    app.action("sql-row-add", &backend);
+    assert!(app.pending_rows.is_empty());
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     assert_eq!(
         app.pending_rows[0].values.get("required"),
         Some(&DataValue::Text(String::new()))

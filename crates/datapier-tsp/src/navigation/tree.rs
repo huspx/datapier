@@ -301,6 +301,36 @@ impl App {
             }
             return true;
         }
+        if let Some(rest) = name.strip_prefix("navigation-triggers:") {
+            if let Some((database, index)) = rest.rsplit_once(':') {
+                let resource = self
+                    .profile
+                    .as_ref()
+                    .and_then(|profile| self.navigation.databases.get(&profile.id))
+                    .and_then(|tree| tree.nodes.get(database))
+                    .and_then(|node| {
+                        index
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| node.resources.get(index))
+                    })
+                    .filter(|resource| resource.kind == "table")
+                    .cloned();
+                if let Some(resource) = resource {
+                    self.list_triggers(
+                        backend,
+                        ResourceTarget {
+                            database: Some(database.into()),
+                            name: resource.name,
+                            key_b64: None,
+                            kind: "table".into(),
+                        },
+                        None,
+                    );
+                }
+            }
+            return true;
+        }
         let resource_action = if let Some(rest) = name.strip_prefix("navigation-resource-section:")
         {
             rest.split_once(':').and_then(|(section, rest)| {

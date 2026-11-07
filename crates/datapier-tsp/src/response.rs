@@ -1,6 +1,103 @@
 use super::*;
 
 impl App {
+    /// 事件是失效提示；只按作用域处理本窗口的标签，不从事件载荷恢复数据。
+    fn editing_event(&mut self, kind: &str, payload: &Value, backend: &Backend) {
+        if kind == "value_file.changed" {
+            self.editing_files_changed(backend);
+            return;
+        }
+        let profile_id = payload["scope"]["profile_id"]
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        if kind == "schema.changed" && profile_id.is_none() {
+            return;
+        }
+        let database = payload["scope"]["database"].as_str();
+        let id = payload["id"].as_str().unwrap_or("");
+        let old = self.active;
+        for index in 0..self.tabs.len() {
+            if profile_id.is_some_and(|id| self.tabs[index].profile_id != Some(id)) {
+                continue;
+            }
+            self.switch_tab(index);
+            if database.is_some_and(|db| self.database.as_deref() != Some(db)) {
+                continue;
+            }
+            if kind == "schema.changed" {
+                self.workbench.schema_invalidated_task |=
+                    self.operation_pending || self.task.is_some();
+                let previous = self.generation;
+                self.generation = self.generation.wrapping_add(1);
+                let original = self
+                    .workbench
+                    .value_schema_generations
+                    .filter(|(_, current)| *current == previous)
+                    .map_or(previous, |(original, _)| original);
+                self.workbench.value_schema_generations = Some((original, self.generation));
+                self.scan_token = None;
+                self.page_token = None;
+                self.result_id = None;
+                self.page_history.clear();
+                self.resources.clear();
+                self.schema = None;
+                self.edit_token = None;
+                self.preview = None;
+                self.preview_pending = None;
+                self.draft_revision = self.draft_revision.wrapping_add(1);
+                self.advanced_replace.invalidate();
+                if let Some(schema) = &mut self.advanced_schema {
+                    schema.invalidate_schema();
+                }
+                if let Some(grid) = &mut self.grid {
+                    grid.editable = false;
+                }
+                self.advanced_value_schema_invalidated();
+                self.status = i18n::UiMessage::key("结构已变化，请重新读取并确认草稿");
+                if let Some(request) = self
+                    .advanced_schema
+                    .as_mut()
+                    .and_then(|schema| schema.describe(true))
+                {
+                    self.advanced_schema_send(backend, request);
+                } else if self.view == "data"
+                    && !self.has_live_drafts()
+                    && self.advanced_value.session.is_none()
+                    && self.task.is_none()
+                    && !self.operation_pending
+                    && let Some(target) = self.target.clone()
+                {
+                    self.load_target(target, backend);
+                }
+            } else if kind == "edit_plan.changed" {
+                let request = self
+                    .advanced_schema
+                    .as_mut()
+                    .and_then(|schema| schema.refresh_plan(id));
+                if let Some(request) = request {
+                    self.advanced_schema_send(backend, request);
+                }
+                let route = format!("{}:{}", self.tabs[self.active].id, self.generation);
+                self.advanced_replace
+                    .refresh_plan_event(id, backend, &route);
+            }
+        }
+        self.switch_tab(old);
+        if kind == "schema.changed" {
+            if self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| Some(profile.id) == profile_id)
+            {
+                self.navigation_load_tree(backend, true);
+            } else {
+                if let Some(profile_id) = profile_id {
+                    self.navigation.databases.remove(&profile_id);
+                }
+            }
+        }
+    }
+
     pub(super) fn archery_auth_required(
         &mut self,
         code: Option<&str>,
@@ -62,6 +159,13 @@ impl App {
         }
     }
     pub(super) fn response(&mut self, response: Response, backend: &Backend) {
+        if response.tag.starts_with("workspace.load/")
+            || response.tag.starts_with("workspace.load.read/")
+            || response.tag == "workspace.load.cleanup"
+        {
+            self.workspace_load_response(response, backend);
+            return;
+        }
         // 认证句柄释放属于内部清理，其 ACK 不能覆盖登录状态或结果详情。
         if response.tag == "archery-release" {
             return;
@@ -167,6 +271,7 @@ impl App {
                         | "transfer.export"
                 ) {
                     self.operation_pending = false;
+                    self.workbench.schema_invalidated_task = false;
                 }
                 return;
             }
@@ -184,6 +289,13 @@ impl App {
         match response.tag.as_str() {
             // 事件仅提示查询任务状态；事件丢失或早于任务 ID 返回时由周期轮询补足。
             "execution.event" => {
+                if let Some(
+                    kind @ ("schema.changed" | "edit_plan.changed" | "value_file.changed"),
+                ) = value.get("kind").and_then(Value::as_str)
+                {
+                    self.editing_event(kind, &value["payload"], backend);
+                    return;
+                }
                 if value.get("kind").and_then(Value::as_str) == Some("approval.changed") {
                     self.approval_refresh(backend);
                     return;
@@ -223,12 +335,7 @@ impl App {
                 self.refresh_settings(backend);
                 self.refresh_archery_servers(backend);
                 self.request(backend, "profile.list", "profile.list", json!({}));
-                self.request(
-                    backend,
-                    "workspace.load",
-                    "workspace.load",
-                    json!({"workspace_id":self.workspace_id}),
-                );
+                self.start_workspace_load(backend);
             }
             "profile.list" => {
                 self.profiles =
@@ -255,41 +362,15 @@ impl App {
                 self.status = i18n::UiMessage::raw(value.to_string());
             }
             "workspace.load" => {
-                self.revision = value["revision"].as_u64().unwrap_or(0);
-                if self.dirty {
-                    if let Ok(state) = serde_json::from_value::<Workspace>(value["state"].clone()) {
-                        self.tabs.extend(state.tabs);
-                        self.migrate_cli_queries();
-                    }
-                } else if let Ok(state) =
-                    serde_json::from_value::<Workspace>(value["state"].clone())
-                {
-                    self.navigation.expanded = state.navigation_expanded;
-                    self.empty_context = state.empty_context;
-                    self.tabs = state.tabs;
-                    self.active = state.active.min(self.tabs.len().saturating_sub(1));
-                    self.migrate_cli_queries();
-                    if !self.tabs.is_empty() {
-                        self.restore_browse();
-                        self.profile = self.tabs[self.active]
-                            .profile_id
-                            .and_then(|id| self.profiles.iter().find(|p| p.id == id).cloned());
-                        if !self.workspace_interacted {
-                            self.focus_current_tab();
-                            self.restore_focus_pending = self.profile.is_none()
-                                && self.tabs[self.active].profile_id.is_some();
-                        }
-                        if !self.tabs[self.active].pending.is_null() {
-                            self.detail = format!(
-                                "恢复的编辑意图（基线已失效，请刷新并重新确认）：{}",
-                                self.tabs[self.active].pending
-                            );
-                            self.set_recovery_detail_context();
-                        }
-                    }
-                    self.restore_empty_context(false);
+                let result = value["revision"]
+                    .as_u64()
+                    .ok_or_else(|| AppError::invalid("工作区版本无效"))
+                    .and_then(|revision| {
+                        self.restore_workspace_state(revision, value["state"].clone())
+                    });
+                if let Err(error) = result {
+                    self.status = i18n::UiMessage::raw(error.to_string());
                 }
-                self.workspace_loaded = true;
             }
             "workspace.save" => {
                 self.revision = value["revision"].as_u64().unwrap_or(self.revision);
@@ -460,7 +541,9 @@ impl App {
                     });
                     let editable = writable
                         && (self.is_redis()
-                            || (self.target.as_ref().is_some_and(|t| t.kind == "table")
+                            || (["insert", "update", "delete"]
+                                .iter()
+                                .any(|op| self.sql_operation_allowed(op))
                                 && self
                                     .schema
                                     .as_ref()
@@ -566,7 +649,9 @@ impl App {
                 self.detail = details.to_string();
                 self.set_detail_context("任务详情");
                 // 查询仍在运行时首批结果也可用；同一结果不能因轮询而跳回第一页。
-                if let Some(items) = value.get("results").and_then(Value::as_array) {
+                if !self.workbench.schema_invalidated_task
+                    && let Some(items) = value.get("results").and_then(Value::as_array)
+                {
                     let results: Vec<String> = items
                         .iter()
                         .filter_map(Value::as_str)
@@ -582,6 +667,7 @@ impl App {
                     self.results = results;
                 }
                 if !matches!(state, "queued" | "running" | "cancelling") {
+                    self.workbench.schema_invalidated_task = false;
                     self.task = None;
                     if !self.is_redis() && !self.browse_result {
                         self.refresh_query_mode(backend);
@@ -612,9 +698,11 @@ impl App {
                                 self.tabs[self.active].layout = g.settings;
                             }
                             self.pending_rows.clear();
+                            self.pending_edit_files.clear();
                             self.redis_changes.clear();
                             self.redis_changes_revision =
                                 self.redis_changes_revision.wrapping_add(1);
+                            self.draft_revision = self.draft_revision.wrapping_add(1);
                             self.clear_redis_edit_state();
                             self.workbench.overlay = None;
                             self.tabs[self.active].pending = Value::Null;
@@ -691,6 +779,33 @@ impl App {
                                 )
                                 .ok()
                             });
+                        let columns = columns.map(|mut columns| {
+                            if self
+                                .target
+                                .as_ref()
+                                .is_some_and(|target| target.kind == "view")
+                            {
+                                let writable = self
+                                    .schema
+                                    .as_ref()
+                                    .and_then(|schema| {
+                                        schema.pointer("/details/view_mapping/writable")
+                                    })
+                                    .and_then(Value::as_array);
+                                for column in &mut columns {
+                                    if !self.sql_operation_allowed("update")
+                                        || !writable.is_some_and(|items| {
+                                            items.iter().any(|item| {
+                                                item.as_str() == Some(column.name.as_str())
+                                            })
+                                        })
+                                    {
+                                        column.generated = true;
+                                    }
+                                }
+                            }
+                            columns
+                        });
                         let merged = columns.as_deref().is_some_and(|columns| {
                             grid::merge_table_columns(&mut page, columns).is_ok()
                         });

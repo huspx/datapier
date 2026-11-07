@@ -1,5 +1,39 @@
 use super::*;
 #[test]
+fn transaction_control_requires_a_single_complete_statement() {
+    for (sql, expected) in [
+        ("BEGIN WORK;", TransactionControl::Begin),
+        ("start transaction", TransactionControl::Begin),
+        (" COMMIT\tWORK ; ", TransactionControl::Commit),
+        ("ROLLBACK WORK", TransactionControl::Rollback),
+        ("SET autocommit=1", TransactionControl::AutocommitOn),
+        (
+            "set SESSION autocommit = ON;",
+            TransactionControl::AutocommitOn,
+        ),
+        (
+            "SET @@session.autocommit=1",
+            TransactionControl::AutocommitOn,
+        ),
+    ] {
+        assert_eq!(transaction_control(sql), Some(expected), "{sql}");
+    }
+    for sql in [
+        "COMMIT; INSERT INTO t VALUES (1)",
+        "ROLLBACK; DROP TABLE t",
+        "COMMIT;;",
+        "COMMIT AND CHAIN",
+        "/*! COMMIT */",
+        "SET autocommit=1; DROP TABLE t",
+        "SET GLOBAL autocommit=1",
+        "SET autocommit=0",
+        "SET autocommit=1, sql_mode=''",
+        "SET autocommit=ON /* comment */",
+    ] {
+        assert_eq!(transaction_control(sql), None, "{sql}");
+    }
+}
+#[test]
 fn quoted_delimiters_and_comments() {
     let (first, rest) = next_statement("SELECT '中;😀', `x;y` /* ; */; SELECT 2", "").unwrap();
     assert_eq!(first, "SELECT '中;😀', `x;y` /* ; */");

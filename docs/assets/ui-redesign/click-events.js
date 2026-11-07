@@ -154,6 +154,27 @@ document.addEventListener('click', event => {
   }
   const action = button.dataset.action;
   if (!action) return;
+  if (action.startsWith('advanced-demo:')) {
+    state.advancedDemoMode = action.slice('advanced-demo:'.length);
+    render();
+    return;
+  }
+  if (action === 'schema-design-demo') {
+    state.schemaDemoPlanned = !state.schemaDemoPlanned;
+    render();
+    return;
+  }
+  if (action === 'replace-design-demo') {
+    state.replaceDemoPlanned = !state.replaceDemoPlanned;
+    state.replaceDemoExcluded = false;
+    render();
+    return;
+  }
+  if (action === 'replace-design-exclude') {
+    state.replaceDemoExcluded = !state.replaceDemoExcluded;
+    render();
+    return;
+  }
   if (action === 'shortcut-help') {
     state.menu = null;
     state.overlay = 'shortcut-help';

@@ -60,13 +60,13 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
     let handler = tokio::spawn(client(engine.clone(), Uuid::new_v4(), Box::new(stream)));
     protocol::write(
         &mut peer,
-        &json!({"id":"open","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
+        &json!({"id":"open","method":"session.open","params":{"protocol_version":crate::protocol::VERSION,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
     )
     .await
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        3
+        4
     );
     protocol::write(
         &mut peer,

@@ -2,6 +2,7 @@
 local M = {}
 local busy = false
 local seen = {}
+local editor_attempts = {}
 
 local function find_marker(value)
   if type(value) == "string" then
@@ -37,7 +38,7 @@ local function find_node(node)
   if node.id ~= nil and node.p then
     local marker = find_marker(node.p)
     if marker then
-      return { id = node.id, nonce = marker.nonce, data_dir = marker.data_dir }
+      return { id = node.id, nonce = marker.nonce, data_dir = marker.data_dir, editor_handoff = marker.editor_handoff }
     end
   end
   if type(node.c) == "table" then
@@ -72,6 +73,64 @@ local function executable()
     return binary
   end
   return "datapier"
+end
+-- 路径通过内部 Base64 参数传递，避免依赖用户默认 shell 的引用规则。
+local function base64(text)
+  local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  local parts = {}
+  for index = 1, #text, 3 do
+    local a, b, c = text:byte(index), text:byte(index + 1), text:byte(index + 2)
+    local n = a * 65536 + (b or 0) * 256 + (c or 0)
+    local first = math.floor(n / 262144) % 64 + 1
+    local second = math.floor(n / 4096) % 64 + 1
+    local third = math.floor(n / 64) % 64 + 1
+    local fourth = n % 64 + 1
+    table.insert(
+      parts,
+      alphabet:sub(first, first)
+        .. alphabet:sub(second, second)
+        .. (if b then alphabet:sub(third, third) else "=")
+        .. (if c then alphabet:sub(fourth, fourth) else "=")
+    )
+  end
+  return table.concat(parts)
+end
+
+local function launch_editor(cx, pane, node)
+  local handoff = node.editor_handoff
+  if type(handoff) ~= "string" or #handoff ~= 36 or handoff:find("[^%x%-]") then
+    return
+  end
+  local key = tostring(pane) .. ":" .. node.nonce
+  local previous = editor_attempts[key]
+  if not previous or previous.handoff ~= handoff then
+    local ok, problem = pcall(function()
+      local binary = executable()
+      local directory, name = binary:match("^(.*)[/\\]([^/\\]+)$")
+      name = name or binary
+      local windows = tern.runtime.os == "windows"
+      if name:lower() ~= (if windows then "datapier.exe" else "datapier") then
+        error("编辑器 helper 需要 Datapier 原生程序")
+      end
+      local program = if directory then (if windows then ".\\datapier.exe" else "./datapier") else "datapier"
+      cx.hosts:terminal("local", {
+        cwd = directory,
+        command = program .. " value-editor --handoff " .. handoff .. " --data-dir-b64 " .. base64(node.data_dir),
+      })
+    end)
+    previous = { handoff = handoff, ok = ok }
+    editor_attempts[key] = previous
+    if not ok then
+      cx:toast("error", "Datapier 编辑器启动失败", tostring(problem))
+    end
+  end
+  pcall(function()
+    cx.session:event(pane, {
+      ev = "action",
+      id = node.id,
+      act = (if previous.ok then "datapier-editor-launched:" else "datapier-editor-failed:") .. handoff,
+    })
+  end)
 end
 
 local function notify(cx, pane, node, notifications)
@@ -134,6 +193,7 @@ local function sync_panes(cx, panes, index)
           local ok, response = pcall(tern.json.decode, result.stdout)
           if ok and type(response) == "table" and response.bound == true and response.pane_id == tostring(pane) then
             notify(fresh, pane, current, response.notifications)
+            launch_editor(fresh, pane, current)
           end
         end
         sync_panes(fresh, panes, index + 1)
@@ -167,6 +227,11 @@ function M.start()
     for key in pairs(seen) do
       if key:sub(1, #prefix) == prefix then
         seen[key] = nil
+      end
+    end
+    for key in pairs(editor_attempts) do
+      if key:sub(1, #prefix) == prefix then
+        editor_attempts[key] = nil
       end
     end
   end)

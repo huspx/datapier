@@ -4,7 +4,9 @@
 mod batch_delete;
 pub(crate) mod command;
 mod edit;
+mod replace;
 mod transfer;
+mod values;
 
 use crate::{ExecutionSink, model::*};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -161,7 +163,31 @@ struct Edit {
     conn: Conn,
     key: Vec<u8>,
     kind: String,
+    result_id: Uuid,
     expires_at_ms: Option<i64>,
+    field_expiries: HashMap<Vec<u8>, Option<i64>>,
+    field_expiry_supported: Option<bool>,
+    field_budget: usize,
+    field_owner: Uuid,
+    field_store: crate::Store,
+    field_handle: Uuid,
+}
+
+impl Drop for Edit {
+    fn drop(&mut self) {
+        if self.field_budget == 0 {
+            return;
+        }
+        // 提交 future 在发送前被取消时也可能丢弃已消费的令牌；不能遗留预算。
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let store = self.field_store.clone();
+            let id = self.field_handle;
+            drop(runtime.spawn(async move {
+                // release_auxiliary 当前只删除内存登记，不涉及可能失败的外部 I/O。
+                let _ = store.release_auxiliary(id).await;
+            }));
+        }
+    }
 }
 // 导入先写入有期限的临时 key，完成后才尝试发布到目标 key。
 // 同一脚本先检查对象内的随机标记，再操作该对象；单独的标记 key 无法证明数据未被替换。
@@ -236,6 +262,7 @@ pub struct RedisSession {
     command_dead: bool,
     edits: HashMap<Uuid, Edit>,
     batch_edits: HashMap<Uuid, batch_delete::BatchEdit>,
+    replace_plans: HashMap<Uuid, replace::ReplacePlan>,
     imports: HashMap<Uuid, Import>,
     scans: HashMap<Uuid, KeyScan>,
 }
@@ -367,6 +394,7 @@ impl RedisSession {
             command_dead: false,
             edits: HashMap::new(),
             batch_edits: HashMap::new(),
+            replace_plans: HashMap::new(),
             imports: HashMap::new(),
             scans: HashMap::new(),
         })
@@ -382,12 +410,22 @@ impl RedisSession {
     /// 释放编辑和命令连接，清理扫描缓存及导入临时 key，再关闭普通连接。
     /// 清理失败时仍尝试其余清理，并返回第一个错误。
     pub async fn close(&mut self) -> Result<()> {
-        self.edits.clear();
+        let mut failure = None;
+        for (_, mut edit) in std::mem::take(&mut self.edits) {
+            match edit.field_store.release_auxiliary(edit.field_handle).await {
+                Ok(()) => edit.field_budget = 0,
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
         self.batch_edits.clear();
+        self.replace_plans.clear();
         self.browser_conn = None;
         self.command_conn = None;
         self.command_dead = true;
-        let mut failure = None;
         for (id, scan) in std::mem::take(&mut self.scans) {
             if let Err(error) = scan.store.release_auxiliary(id).await
                 && failure.is_none()
@@ -507,17 +545,32 @@ impl RedisSession {
             return result;
         }
         match method {
+            "replace.prepare" => self.replace_prepare(&p, cancel).await,
+            "replace.read" => self.replace_read(&p, cancel),
+            "replace.update" => self.replace_update(&p, cancel),
+            "replace.submit" => self.replace_submit(&p, sink, cancel).await,
+            "replace.discard" => self.replace_discard(&p, cancel),
+            "value.snapshot" => self.value_snapshot(&p).await,
+            "value.verify" => {
+                self.value_verify(&p).await?;
+                Ok(json!({"verified":true}))
+            }
             "change.open" if p.get("targets").is_some() => self.open_batch_delete(&p, cancel).await,
             "change.open" => self.open_edit(&p, sink, cancel).await,
             "change.discard" => {
                 let id = uuid(&p)?;
-                if self.edits.remove(&id).is_none() && self.batch_edits.remove(&id).is_none() {
+                if let Some(mut edit) = self.edits.remove(&id) {
+                    edit.field_store
+                        .release_auxiliary(edit.field_handle)
+                        .await?;
+                    edit.field_budget = 0;
+                } else if self.batch_edits.remove(&id).is_none() {
                     return Err(AppError::invalid("编辑令牌已失效"));
                 }
                 Ok(json!({"discarded":true}))
             }
             "change.preview" if self.is_batch_request(&p)? => self.preview_batch_delete(&p, cancel),
-            "change.preview" => self.preview(&p, cancel),
+            "change.preview" => self.preview(&p, cancel).await,
             "change.submit" if self.is_batch_request(&p)? => {
                 self.submit_batch_delete(&p, sink, cancel).await
             }
@@ -805,13 +858,21 @@ impl RedisSession {
         let (kind, ttl, expires_at_ms) = watched_metadata(&mut conn, &k).await?;
         let result = browse(&mut conn, &k, &kind, sink, cancel, false).await?;
         let id = Uuid::new_v4();
+        let field_owner = sink.store.task(sink.execution_id).await?.owner;
         self.edits.insert(
             id,
             Edit {
                 conn,
                 key: k,
                 kind: kind.clone(),
+                result_id: result,
                 expires_at_ms,
+                field_expiries: HashMap::new(),
+                field_expiry_supported: None,
+                field_budget: 0,
+                field_owner,
+                field_store: sink.store.clone(),
+                field_handle: id,
             },
         );
         Ok(

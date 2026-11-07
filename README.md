@@ -2,7 +2,7 @@
 
 面向开发者与 AI agent 的多数据库工作台。统一连接、资源浏览、查询和数据编辑体验，保留不同数据库的数据模型与操作语义。
 
-当前开发版本为 **0.2.0**，提供 MySQL／Redis 直连、Archery 只读来源、普通终端 TUI、Tern 工作台和 MCP stdio 接入，已完成本轮 **macOS arm64** 实施与适用运行验收；正式发布版本仍为 0.1.0。其他平台保留实现与 CI 配置，未声明运行已验收，详见[0.2.0 技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)。
+当前开发版本为 **0.3.0**，在 MySQL／Redis 直连、Archery 只读来源、普通终端 TUI、Tern 工作台和 MCP stdio 基础上增加结构设计、批量替换与高级值编辑。正式发布版本仍为 0.1.0；本版已执行与未覆盖的验收见 [0.3.0 技术方案](docs/technical-design-0.3.0.md#132-本次完成状态)。
 
 ## 当前开发功能
 
@@ -10,8 +10,10 @@
 
 - **连接与工作区**：认证、TLS、数据库选择、只读／读写模式，多 tab、最近连接、草稿与布局恢复；多个 UI 共享 Engine。应用语言支持跟随系统、简体中文和英文，偏好按数据目录全局持久化并同步多窗口。
 - **原生工作台**：共享连接导航与收展状态，MySQL database 进入资源树并按需展开；Redis 自动探测逻辑 DB 数量，探测失败显示未知，可手动覆盖。颜色跟随 TSP 主题。
-- **MySQL**：支持 5.7／8.0／8.4；浏览 database、表、视图、字段及真实列注释、索引、约束和 DDL；过滤、多列排序、分页、可靠唯一键定位的基表增删改，以及二次确认后的数据库／表删除。
-- **Redis**：单节点 DB 选择，SCAN 增量浏览与 pattern／type 过滤；列表或按 `:` 分段的多级 key 树，目录默认折叠、逐级展开；key 多选、具名右键操作及共同 WATCH 基线的批量删除草稿。String、Hash、List、Set、ZSet 的查看和编辑，复合条目多选复制／删除、key 重命名／删除、TTL 管理及完整原始 value 复制。
+- **MySQL**：支持 5.7／8.0／8.4；浏览完整结构，设计表、字段、索引、外键、CHECK 与表选项，草拟视图和触发器。先预览冻结 DDL，再通过独立连接执行并读回；保留版本限制和元数据不完整原因。可证明单一基表映射的视图分别开放插入、更新和删除，DML 仍发往视图并遵守 CHECK OPTION。
+- **Redis**：单节点 DB 选择，SCAN 增量浏览与 pattern／type 过滤；列表和分段 key 树，String、Hash、List、Set、ZSet 的查看与编辑。内容及身份替换冻结共同 WATCH 基线，拒绝碰撞，保留 TTL／field 期限与 ZSet score；首错停止并报告已生效项。
+- **批量查找替换**：MySQL 支持选中行、当前页和当前筛选范围，Redis 支持已选 key 的内容与 key／field／member 身份。文本和正则预览可逐项排除；提交只处理准备时冻结的目标，收集失败不能提交前缀。
+- **高级值与文件**：Text／Hex／JSON／XML 编辑、校验与受控格式化，PNG／JPEG／GIF／WebP 首帧和 SVG 静态预览；单值按真实字节导入导出。GUI／终端外部编辑器使用 argv 启动，显式读取修改后回填草稿，数据库提交仍须另行确认。遗留编辑文件可在设置中发现、导出和清理。
 - **查询与命令**：执行全文、选区或当前 SQL，SQL 高亮、行号和逐语句执行，普通 `EXPLAIN FORMAT=JSON`、纯 Rust 选区格式化及撤销；首次执行前隐藏结果面板，保留执行状态、取消／停止等待、结果、错误、历史和查询文件。
 - **数据 grid**：MySQL 列宽按当前页内容与可用空间自适应，自动列宽上限 480px，原位编辑期间保持列宽；支持手动列宽、隐藏／冻结列、单格与 Shift 矩形选择、行号单选和 Shift 连选，以及按 UI 系统使用 Command／Ctrl 增选。支持单元格／矩形选区和选中行复制、MySQL 基表 INSERT 复制、原位文本编辑和长值／JSON／NULL 编辑，直接预览真实变更 SQL／Redis 命令、有序参数、撤销、丢弃及冲突反馈。
 - **数据交换**：单文件 CSV／JSON 导入导出、列映射与失败记录。查询结果仅保留在有界会话内存；安全只读来源导出时显式重新查询并流式写入，其他结果仅导出仍保留的数据并说明范围。
@@ -20,20 +22,20 @@
 - **MCP 与普通终端**：`datapier tui` 在普通终端管理数据源、认证和设置；`datapier mcp` 提供 23 个 stdio tools。访问受保存的可见范围、连接模式及可选细粒度权限约束；危险操作需要审批，审批不能扩大权限。TSP 使用窗口内 toast 提醒，通过 MCP 待办入口处理审批和认证；系统通知与通知点击定位留待后续版本。
 - **实时分页**：MySQL 表和安全只读 SQL 默认每页 100 行，翻页重新读取；总数需显式统计。不能安全重放的语句只执行一次并分批读取，历史不保存结果行。
 
-从 0.1.x 升级前退出所有旧客户端和 Engine，并备份一致的数据目录。0.2.0 使用配置 schema 3 和 IPC v3，不能与旧版本混用；旧结果缓存默认保留但不再恢复为查询结果，回退需恢复升级前备份。详见[升级与回退](docs/technical-design-0.2.0.md#11-持久化与升级)。
+从 0.1.x／0.2.0 升级前退出所有旧客户端和 Engine，并备份一致的数据目录。0.3.0 使用配置 schema 4 和 IPC v4，不能与旧版本混用；保留连接、权限、历史、工作区及凭据账户名，旧结果缓存不恢复。回退须先导出需要保留的编辑文件，再恢复升级前备份；详见[升级与文件持久化](docs/technical-design-0.3.0.md#93-配置-schema-4-与工作区)。
 
 Archery SQL 检查取决于平台权限和配置；例如 v1.8.4 需管理员将账号 ID 加入 `api_user_whitelist` 并授予 SQL 提交权限。基础 Web 查询不要求这两项，详见[技术方案](docs/technical-design-0.1.1.md#65-mysql-上线-sql-检查)。
 
-直连 MySQL 和 Redis 按单节点设计。视图与任意 SQL 结果提供只读浏览；直连读写连接仍可显式执行写 SQL。Redis Cluster／Sentinel、鼠标拖拽列宽、鼠标框选和连续虚拟滚动不在当前范围内。
+直连 MySQL 和 Redis 按单节点设计。任意 SQL 结果及无法证明映射的视图仍只读；直连读写连接可显式执行写 SQL。Redis Cluster／Sentinel、分区管理、在线 schema 迁移编排、鼠标拖拽列宽、鼠标框选和连续虚拟滚动不在当前范围内。显式生成的媒体预览会交给 Tern blob 缓存；数据库原值与查询结果仍只保留在 Engine 有界内存。
 
 ## 安装与运行
 
 正式发布的版本为 0.1.0：从 [GitHub Releases](https://github.com/huspx/datapier/releases) 下载 `datapier-plugin-0.1.0.zip`，解压后在解压目录执行 `tern plugin install ./datapier`，然后在 Tern 命令面板选择 `New Datapier block`。该 plugin 自动下载并校验对应程序；运行基线为 Tern 0.9.9。
 
-0.2.0 尚未正式发布。取得与操作系统和架构匹配的候选二进制归档后，可手工解包直接运行，无须 Rust 或 Tern。以下以 Unix 的 tar.gz 为例，将归档和路径替换为实际位置；Windows 使用对应 zip 与 `datapier.exe`：
+0.3.0 尚未正式发布。取得与操作系统和架构匹配的候选二进制归档后，可手工解包直接运行，无须 Rust 或 Tern。以下以 Unix 的 tar.gz 为例，将归档和路径替换为实际位置；Windows 使用对应 zip 与 `datapier.exe`：
 
 ```sh
-tar -xzf /absolute/path/to/datapier-0.2.0-TARGET.tar.gz -C /absolute/path/to/install-directory
+tar -xzf /absolute/path/to/datapier-0.3.0-TARGET.tar.gz -C /absolute/path/to/install-directory
 /absolute/path/to/install-directory/datapier tui
 ```
 
@@ -86,9 +88,9 @@ tar -xzf /absolute/path/to/datapier-0.2.0-TARGET.tar.gz -C /absolute/path/to/ins
 | Linux | x86-64、arm64 | GNU／glibc |
 | Windows | x86-64、arm64 | MSVC |
 
-六种组合作为实现与构建目标保留；本轮 0.2.0 仅验证 **macOS arm64**，其余五个原生目标及六目标 CI 不作为本轮实施验收门禁，未验证的平台不声明运行已验收。CI 使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
+六种组合作为实现与构建目标保留；本版实际构建与原生运行证据分别记录，不能用历史验收或 CI 编译代替运行验收。CI 使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
 
-当前最低设计基线为 **Tern 0.9.9 与 tern-sdk 0.2.0**；本候选的原生运行使用 Tern 0.9.12，尚不能据此证明在 0.9.9 上通过。直连数据库验收范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点。数据库服务可以运行在独立服务器上；实际验证及未完成项见[0.2.0 技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)。
+当前开发验收基线为 **macOS arm64、Tern 0.9.12 与 tern-sdk 0.2.0**；本次不验证其他平台或 Tern 0.9.9。直连数据库验收范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点，数据库服务可以运行在独立服务器上。本版证据见 [0.3.0 验收记录](docs/technical-design-0.3.0.md#132-本次完成状态)；0.1.x 文档保留各自历史运行结果。
 
 ## 架构设计
 
@@ -123,8 +125,8 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 |---|---|
 | 0.1.0 | MySQL／Redis 基础数据库工作台 |
 | 0.1.1 | Archery 只读访问与 MySQL 上线 SQL 检查，历史开发记录 |
-| 0.2.0 | MCP stdio 与审批、独立 TUI 数据源管理、实时分页与结果不落盘，验收中 |
-| 0.3.0 | 结构设计、可更新视图、批量修改与高级值编辑，方案已编写，尚未实施 |
+| 0.2.0 | MCP stdio 与审批、独立 TUI 数据源管理、实时分页与结果不落盘 |
+| 0.3.0 | 结构设计、批量修改、高级值与外部编辑器，当前开发版本 |
 | 0.4.0 | 数据交换、迁移与项目文件 |
 | 0.5.0 | 分析展示、显示规则与数据库维护 |
 
@@ -136,7 +138,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 - [0.1.0 技术方案](docs/technical-design-0.1.0.md)：模块、IPC、数据模型、数据库实现、分发及验收要求。
 - [0.1.1 技术方案](docs/technical-design-0.1.1.md)：Archery 来源、升级边界和当前验收记录。
 - [0.2.0 技术方案](docs/technical-design-0.2.0.md)：MCP 工具、独立配置、权限与审批、实时查询、升级设计及验收状态。
-- [0.3.0 技术方案](docs/technical-design-0.3.0.md)：结构设计、可更新视图、批量替换、高级值与外部编辑器设计，尚未实施。
+- [0.3.0 技术方案](docs/technical-design-0.3.0.md)：结构设计、可更新视图、批量替换、高级值、外部编辑器及当前运行验收范围。
 - [UI 设计规范](docs/ui-guidelines.md)、[交互设计稿](docs/ui-redesign.html)及[设计说明](docs/ui-redesign.md)：通用视觉与组件约定、界面交互、文字约束和视觉对照要求。
 - [贡献指南](CONTRIBUTING.md)：文档职责、开发环境、编码与模块边界、隔离验证及 PR 说明。
 - [发布指南](RELEASING.md)：产品版本来源与派生、发布前检查、原生组包及人工发布核对。
@@ -145,7 +147,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 
 本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。
 
-已执行与待完成的 0.2.0 验收见[技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)。
+本版已执行和未覆盖的验收见 [0.3.0 技术方案](docs/technical-design-0.3.0.md#132-本次完成状态)；0.2.0 的历史状态保留在[对应技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)。
 
 ## 许可证
 

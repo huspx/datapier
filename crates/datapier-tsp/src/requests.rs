@@ -59,6 +59,34 @@ impl App {
     // 异步响应先按 tab 和 generation 路由，任务、分页等再核对各自的 ID，
     // 避免迟到响应覆盖切换后的上下文；处理后台 tab 后恢复原活动 tab。
     pub(super) fn routed_response(&mut self, mut response: Response, backend: &Backend) {
+        if let Some((tab, token)) = response
+            .tag
+            .strip_prefix("draft-scope-release/")
+            .and_then(|tag| tag.split_once('/'))
+            && let (Ok(tab), Ok(token)) = (Uuid::parse_str(tab), Uuid::parse_str(token))
+        {
+            if let Some(index) = self.tabs.iter().position(|item| item.id == tab) {
+                let active = self.active;
+                self.switch_tab(index);
+                self.draft_scope_release_response(token, &response.result);
+                self.switch_tab(active);
+            }
+            return;
+        }
+        if response.tag.starts_with("workspace.upload.") {
+            self.workspace_upload_response(response, backend);
+            return;
+        }
+        if response.tag.starts_with("advanced-value-retired/") {
+            if let Err(error) = response.result {
+                self.status = i18n::UiMessage::raw(error.to_string());
+            }
+            return;
+        }
+        if response.tag.starts_with("editing-files/") {
+            self.editing_files_response(response, backend);
+            return;
+        }
         if let Some(token) = response.tag.strip_prefix("archery-servers-global/") {
             if Uuid::parse_str(token).ok() != self.server_list_token {
                 return;
@@ -145,25 +173,42 @@ impl App {
             });
         if let Some((id, generation, tag)) = route {
             let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+                if response.tag.contains(":advanced-value/") {
+                    self.advanced_value_release_stale_preview(backend, &response.result);
+                }
                 return;
             };
             if self.tab_is_closing(id) {
+                if response.tag.contains(":advanced-value/") {
+                    self.advanced_value_release_stale_preview(backend, &response.result);
+                }
                 return;
             }
             let old = self.active;
             let old_status = (index != old).then(|| self.status.clone());
             self.switch_tab(index);
             if generation == self.generation {
-                if self.redis_row_delete_response(&tag, &response.result) {
+                if tag.strip_prefix("draft-scope/").is_some_and(|token| {
+                    self.draft_scope_response(token, &response.result, backend)
+                }) || self.workspace_restore_response(&tag, &response.result, backend)
+                    || self.advanced_schema_response(&tag, &response.result, backend)
+                    || self.advanced_value_response(&tag, &response.result, backend)
+                    || self.replace_response(&tag, &response.result, backend)
+                    || self.redis_row_delete_response(&tag, &response.result)
+                {
                 } else if let Some(token) = tag.strip_prefix("change.preview/") {
                     self.change_preview_response(token, &response.result);
                 } else if let Some(token) = tag.strip_prefix("diagnostics.task/") {
                     self.diagnostic_task_response(token, &response.result);
                 } else if let Some(task) = tag.strip_prefix("execution.get/") {
-                    if self.task.as_deref() == Some(task) {
+                    if !self.advanced_schema_task_response(task, &response.result, backend)
+                        && self.task.as_deref() == Some(task)
+                    {
                         response.tag = "execution.get".into();
                         self.response(response, backend);
                     }
+                } else if let Some(token) = tag.strip_prefix("trigger-list/") {
+                    self.trigger_list_response(token, &response.result);
                 } else if let Some(token) = tag.strip_prefix("resource.list/") {
                     if Uuid::parse_str(token).ok() == self.scan_token {
                         self.scan_token = None;
@@ -234,6 +279,35 @@ impl App {
                     }
                 } else {
                     response.tag = tag;
+                    self.response(response, backend);
+                }
+            } else if tag.starts_with("advanced-value/") {
+                if self.workbench.value_schema_generations == Some((generation, self.generation)) {
+                    self.advanced_value_response(&tag, &response.result, backend);
+                } else {
+                    self.advanced_value_release_stale_preview(backend, &response.result);
+                }
+            } else if self.workbench.value_schema_generations == Some((generation, self.generation))
+            {
+                if tag.starts_with("replace/") {
+                    self.replace_response(&tag, &response.result, backend);
+                } else if tag.starts_with("schema/") {
+                    self.advanced_schema_response(&tag, &response.result, backend);
+                } else if matches!(
+                    tag.as_str(),
+                    "execution.start"
+                        | "archery.sql_check"
+                        | "resource.browse"
+                        | "change.submit"
+                        | "transfer.import"
+                        | "transfer.export"
+                ) {
+                    response.tag = tag;
+                    self.response(response, backend);
+                } else if let Some(task) = tag.strip_prefix("execution.get/")
+                    && self.task.as_deref() == Some(task)
+                {
+                    response.tag = "execution.get".into();
                     self.response(response, backend);
                 }
             }

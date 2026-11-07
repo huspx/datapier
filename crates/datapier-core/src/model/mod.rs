@@ -1,6 +1,9 @@
 //! Core 与调用方共享的连接、类型化值、结果和任务模型。
 
+pub mod editing;
 pub mod preview;
+pub mod replace;
+pub mod schema;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -126,6 +129,10 @@ pub enum LanguagePreference {
 pub struct AppSettings {
     pub revision: u64,
     pub language: LanguagePreference,
+    #[serde(default)]
+    pub editing: editing::EditingLimits,
+    #[serde(default)]
+    pub external_editor: Option<editing::ExternalEditorConfig>,
     pub mcp: McpSettings,
     pub paging: PagingSettings,
     pub archery: ArcherySettings,
@@ -200,6 +207,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             revision: 1,
+            editing: editing::EditingLimits::default(),
+            external_editor: None,
             language: LanguagePreference::default(),
             mcp: McpSettings::default(),
             paging: PagingSettings::default(),
@@ -261,6 +270,10 @@ impl Default for NotificationSettings {
 }
 impl AppSettings {
     pub fn validate(&self) -> Result<()> {
+        self.editing.validate()?;
+        if let Some(editor) = &self.external_editor {
+            editor.validate()?;
+        }
         let p = &self.paging;
         let l = &self.limits;
         if self.revision == 0
@@ -317,6 +330,7 @@ pub enum ClientKind {
     Tsp,
     Mcp,
     WindowBridge,
+    ValueEditor,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

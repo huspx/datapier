@@ -96,6 +96,47 @@ pub(super) struct CliRecord {
     pub result_page_histories: Vec<Vec<u64>>,
 }
 
+#[derive(Clone)]
+pub(super) enum DraftScopeAction {
+    Action(String),
+    Edit(Msg),
+    EditBatch {
+        field: String,
+        original: String,
+        text: String,
+        cursor: usize,
+        anchor: usize,
+    },
+    Key(String, tern_sdk::Key),
+    Protect,
+}
+
+#[derive(Clone)]
+pub(super) struct DraftScopePending {
+    pub profile: Uuid,
+    pub session: Value,
+    pub target: Value,
+    pub generation: u64,
+    pub edit_token: Option<Value>,
+    pub result_id: Option<String>,
+    pub overlay: Option<String>,
+    pub grid_focus: Option<Cell>,
+    pub revision: u64,
+    pub request: Option<Uuid>,
+    pub error: Option<AppError>,
+    pub actions: Vec<DraftScopeAction>,
+}
+
+#[derive(Clone)]
+pub(super) struct DraftScopeRelease {
+    pub profile: Uuid,
+    pub session: Value,
+    pub target: Value,
+    pub revision: u64,
+    pub request: Option<Uuid>,
+    pub retry_at: Instant,
+}
+
 /// 工作台的临时界面状态；数据库基线和草稿仍由 App 管理。
 #[derive(Clone)]
 pub(super) struct Workbench {
@@ -104,6 +145,14 @@ pub(super) struct Workbench {
     pub sql_mode: Option<editor::MysqlMode>,
     pub section: String,
     pub overlay: Option<String>,
+    pub trigger_list: Option<crate::advanced::schema_controller::TriggerList>,
+    pub draft_scope: Option<(Uuid, Value, Value, u64, Option<Value>)>,
+    pub(super) draft_scope_pending: Option<DraftScopePending>,
+    pub(super) draft_scope_recovery: Vec<DraftScopePending>,
+    pub(super) draft_scope_releases: Vec<DraftScopeRelease>,
+    pub draft_scope_serial: u64,
+    pub value_schema_generations: Option<(u64, u64)>,
+    pub schema_invalidated_task: bool,
     pub(super) diagnostic_task_request: Option<(Uuid, String)>,
     delete_rows: Option<DeleteRowsConfirmation>,
     pub(super) redis_row_pending: Option<crate::redis_rows::RedisRowPending>,
@@ -169,6 +218,14 @@ impl Default for Workbench {
             sql_mode: None,
             section: "data".into(),
             overlay: None,
+            trigger_list: None,
+            draft_scope: None,
+            draft_scope_pending: None,
+            draft_scope_recovery: Vec::new(),
+            draft_scope_releases: Vec::new(),
+            draft_scope_serial: 0,
+            value_schema_generations: None,
+            schema_invalidated_task: false,
             diagnostic_task_request: None,
             delete_rows: None,
             redis_row_pending: None,

@@ -123,10 +123,161 @@ function modal(title, body, foot = '') {
     || `<span class="spacer"></span><button class="button" data-action="close-modal">${h(t('close'))}</button>`
   }</footer></section></div>`;
 }
+// 固定示例只切换设计状态，不生成执行凭据或访问数据库。
+function editingDesignDemo(kind) {
+  const en = language !== 'zh-CN';
+  const text = (zh, english) => en ? english : zh;
+  const notice = `<p class="muted">${
+    text(
+      '交互设计示例；不连接数据库，不执行 SQL。',
+      'Interactive design sample; no database connection or SQL execution.',
+    )
+  }</p>`;
+  if (kind === 'schema-design') {
+    const planned = Boolean(state.schemaDemoPlanned);
+    const body = `<p><strong>commerce.orders</strong> · MySQL 8.0 · InnoDB</p>
+      <p>${
+      text(
+        '完整性：完整；可设计字段、索引、外键、CHECK 和表选项。',
+        'Complete metadata; columns, indexes, foreign keys, CHECK and table options are available.',
+      )
+    }</p>
+      <section class="detail-section"><h3>${t('field')}</h3><div class="fields">
+      <label>${text('名称', 'Name')}<input value="status" readonly></label>
+      <label>${t('type')}<input value="VARCHAR(32)" readonly></label>
+      <label>${text('默认值 · literal', 'Default · literal')}<input value="pending" readonly></label>
+      <label>${text('注释', 'Comment')}<input value="Order status" readonly></label></div></section>
+      <section class="detail-section"><h3>${text('索引与约束', 'Indexes and constraints')}</h3>${
+      simpleTable([text('名称', 'Name'), t('type'), t('field')], [['PRIMARY', 'PRIMARY KEY', 'id'], [
+        'idx_status',
+        'INDEX',
+        'status',
+      ]])
+    }</section>
+      <p>ALGORITHM: DEFAULT · LOCK: DEFAULT</p>
+      ${
+      planned
+        ? `<section class="detail-section"><h3>${text('变更预览', 'Change preview')}</h3><pre class="preview-code">${
+          h("ALTER TABLE `commerce`.`orders` MODIFY COLUMN `status` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT 'Order status';")
+        }</pre><p>${
+          text(
+            'DDL 可能隐式提交。执行前重新核对基线，执行后读回实际结构。',
+            'DDL may commit implicitly. Recheck the baseline before execution and read back the actual schema afterward.',
+          )
+        }</p></section>`
+        : ''
+    }${notice}`;
+    return modal(
+      text('结构设计', 'Schema design'),
+      body,
+      `<button class="button" data-action="schema-design-demo">${
+        planned ? text('丢弃计划', 'Discard plan') : text('生成计划并预览', 'Plan and preview')
+      }</button><span class="spacer"></span><button class="button" disabled>${
+        text('提交', 'Submit')
+      }</button><button class="button" data-action="close-modal">${t('close')}</button>`,
+    );
+  }
+  const planned = Boolean(state.replaceDemoPlanned);
+  const excluded = Boolean(state.replaceDemoExcluded);
+  const body = `<p><strong>commerce.orders</strong> · ${
+    text('选中行：2；字段：status', 'Selected rows: 2; column: status')
+  }</p>
+    <p>${
+    text(
+      '范围在准备时冻结；预览中排除的项目不会提交。',
+      'The scope is frozen on preparation; excluded items are never submitted.',
+    )
+  }</p>
+    <label>${text('查找 · 文本', 'Find · text')}<input value="pending" readonly></label>
+    <label>${text('替换为', 'Replace with')}<input value="paid" readonly></label>
+    ${
+    planned
+      ? `<section class="detail-section"><h3>${text('冻结预览', 'Frozen preview')}</h3>${
+        simpleTable(['id', text('原值', 'Before'), text('新值', 'After'), text('状态', 'State')], [[
+          '10422',
+          'pending',
+          'paid',
+          excluded ? text('已排除', 'Excluded') : text('已包含', 'Included'),
+        ]])
+      }<button class="button" data-action="replace-design-exclude" aria-pressed="${excluded}">${
+        excluded ? text('包含此项', 'Include item') : text('排除此项', 'Exclude item')
+      }</button><p>${text('将提交', 'Included')}: ${excluded ? 0 : 1}</p><pre class="preview-code">${
+        h('UPDATE `commerce`.`orders` SET `status` = ? WHERE `id` = ? AND BINARY `status` = BINARY ?;\n["paid", 10422, "pending"]')
+      }</pre><p>${
+        text(
+          '提交前校验冻结的行身份和原值；此处的 SQL 与参数仅为示例。',
+          'Recheck frozen row identity and original values before submission; SQL and parameters here are illustrative.',
+        )
+      }</p></section>`
+      : ''
+  }${notice}`;
+  return modal(
+    text('批量查找替换', 'Batch find and replace'),
+    body,
+    `<button class="button" data-action="replace-design-demo">${
+      planned
+        ? text('丢弃计划并修改条件', 'Discard plan and change criteria')
+        : text('准备并预览', 'Prepare and preview')
+    }</button><span class="spacer"></span><button class="button" disabled>${
+      text('提交', 'Submit')
+    }</button><button class="button" data-action="close-modal">${t('close')}</button>`,
+  );
+}
 function overlay() {
   if (!state.overlay) return '';
   if (serverForm || serverDelete || connectionDelete || authStage) {
     return '';
+  }
+  if (['schema-design', 'replace-design'].includes(state.overlay)) {
+    return editingDesignDemo(state.overlay);
+  }
+  if (state.overlay === 'advanced-value') {
+    const en = language !== 'zh-CN';
+    const mode = state.advancedDemoMode || 'text';
+    const modes = [['text', en ? 'Text' : '文本'], ['hex', 'Hex'], ['json', 'JSON'], ['xml', 'XML'], [
+      'image',
+      en ? 'Image' : '图片',
+    ]];
+    const sample = mode === 'hex'
+      ? '65 78 61 6d 70 6c 65'
+      : mode === 'json'
+      ? '{"example": true}'
+      : mode === 'xml'
+      ? '<example/>'
+      : 'example value';
+    return modal(
+      en ? 'Advanced value editor' : '高级值编辑',
+      `<div class="row">${
+        modes.map(([id, label]) =>
+          `<button class="button" data-action="advanced-demo:${id}" aria-pressed="${mode === id}">${label}</button>`
+        ).join('')
+      }</div>
+      <button class="button" data-action="close-modal">${en ? 'Close' : '关闭'}</button>
+      ${
+        mode === 'image'
+          ? `<p>${
+            en ? 'Generated images are cached by the host.' : '生成的图片会被宿主缓存。'
+          }</p><button class="button" disabled>${en ? 'Generate preview' : '生成预览'}</button>`
+          : `<label>${en ? 'Value' : '值'}<textarea rows="3">${h(sample)}</textarea></label>`
+      }
+      <div class="row">${
+        ['json', 'xml'].includes(mode)
+          ? `<button class="button" disabled>${en ? 'Validate' : '校验'}</button><button class="button" disabled>${
+            en ? 'Format' : '格式化'
+          }</button>`
+          : ''
+      }<button class="button" disabled>${en ? 'Previous' : '上一页'}</button><button class="button" disabled>${
+        en ? 'Next' : '下一页'
+      }</button><button class="button" disabled>${
+        en ? 'Apply changes' : '应用修改'
+      }</button><button class="button" disabled>${en ? 'Stage draft' : '加入草稿'}</button></div>
+      <label>${en ? 'File path' : '文件路径'}<input type="text"></label>
+      <div class="row"><button class="button" disabled>${
+        en ? 'Overwrite: off' : '覆盖：未启用'
+      }</button><button class="button" disabled>${en ? 'Export' : '导出'}</button><button class="button" disabled>${
+        en ? 'Import' : '导入'
+      }</button><button class="button" disabled>${en ? 'Prepare external edit' : '准备外部编辑'}</button></div>`,
+    );
   }
   if (state.overlay === 'columns') {
     const key = state.columnsTarget;

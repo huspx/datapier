@@ -25,13 +25,13 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
     let handler = tokio::spawn(client(engine.clone(), owner, Box::new(stream)));
     protocol::write(
         &mut peer,
-        &json!({"id":"2","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
+        &json!({"id":"2","method":"session.open","params":{"protocol_version":crate::protocol::VERSION,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
     )
     .await
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        3
+        4
     );
     assert!(engine.state.lock().unwrap().clients.contains(&owner));
     protocol::write(
@@ -477,6 +477,67 @@ async fn state_events_are_isolated_ordered_and_stop_on_disconnect() {
         Err(broadcast::error::TryRecvError::Empty)
     ));
     engine.disconnect(other).await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn workspace_activation_requires_saved_target_and_matching_context() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    assert!(engine.register(owner));
+    assert_eq!(
+        engine
+            .dispatch(
+                owner,
+                "workspace.activate",
+                json!({"workspace_id":"copy","expected_workspace_id":"default"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    engine
+        .store
+        .workspace_save("copy", 0, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .dispatch(
+                owner,
+                "workspace.activate",
+                json!({"workspace_id":"copy","expected_workspace_id":"other"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "stale_revision"
+    );
+    assert_eq!(
+        engine
+            .dispatch(
+                owner,
+                "workspace.activate",
+                json!({"workspace_id":"copy","expected_workspace_id":"default"})
+            )
+            .await
+            .unwrap()["workspace_id"],
+        "copy"
+    );
+    assert_eq!(
+        engine
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&owner)
+            .unwrap()
+            .workspace,
+        "copy"
+    );
+    engine.disconnect(owner).await;
     drop(engine);
     let _ = std::fs::remove_dir_all(root);
 }

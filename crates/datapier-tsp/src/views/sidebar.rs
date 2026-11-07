@@ -354,6 +354,15 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                     )
                                     .icon("copy"),
                                 );
+                            if resource.kind == "table" {
+                                menu = menu.menu(
+                                    ui::MenuItem::new(
+                                        "triggers",
+                                        crate::i18n::tr("触发器").into_owned(),
+                                    )
+                                    .icon("code"),
+                                );
+                            }
                             if resource.kind == "table"
                                 && !app
                                     .profile
@@ -395,6 +404,13 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                     "ddl",
                                     Msg::Action(format!(
                                         "navigation-resource-section:ddl:{}:{index}",
+                                        database.name
+                                    )),
+                                )
+                                .on_action(
+                                    "triggers",
+                                    Msg::Action(format!(
+                                        "navigation-triggers:{}:{index}",
                                         database.name
                                     )),
                                 )

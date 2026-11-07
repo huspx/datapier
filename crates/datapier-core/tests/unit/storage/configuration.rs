@@ -40,7 +40,7 @@ async fn schema_one_migrates_without_creating_result_cache() {
             .fetch_one(&store.pool)
             .await
             .unwrap(),
-        3
+        4
     );
     assert!(!root.join("cache.sqlite3").exists());
     assert!(!root.join("values").exists());

@@ -64,12 +64,12 @@ impl App {
         }
         Ok(())
     }
-    pub(super) fn workbench_can_edit(&self) -> bool {
+    pub(crate) fn workbench_can_operate(&self, operation: &str) -> bool {
         self.profile.as_ref().is_some_and(|p| {
             p.access_mode == AccessMode::ReadWrite && p.capabilities().edit.is_supported()
         }) && self.browse_result
             && self.edit_token.is_some()
-            && self.target.as_ref().is_some_and(|t| t.kind == "table")
+            && self.sql_operation_allowed(operation)
             && self.schema.as_ref().is_some_and(|schema| {
                 schema
                     .get("engine")
@@ -85,6 +85,9 @@ impl App {
                         })
             })
             && self.grid.as_ref().is_some_and(|g| g.editable)
+    }
+    pub(super) fn workbench_can_edit(&self) -> bool {
+        self.workbench_can_operate("update")
     }
     /// 确认弹窗展示的冻结行数。
     pub(crate) fn delete_rows_count(&self) -> usize {
@@ -117,7 +120,7 @@ impl App {
             self.status = UiMessage::key("请先恢复或丢弃已保存的编辑意图");
             return;
         }
-        if !self.workbench_can_edit() || !self.can_copy_insert() {
+        if !self.workbench_can_operate("delete") {
             self.status = UiMessage::key("当前结果没有可用的编辑基线或可靠键");
             return;
         }
@@ -181,8 +184,7 @@ impl App {
         let Some(pending) = self.workbench.delete_rows.take() else {
             return;
         };
-        let valid_context = self.workbench_can_edit()
-            && self.can_copy_insert()
+        let valid_context = self.workbench_can_operate("delete")
             && self.workbench.inline.is_none()
             && self.paste_preview.is_none()
             && self.page_token.is_none()
@@ -240,6 +242,7 @@ impl App {
             return;
         }
         self.pending_rows.extend(changes);
+        self.draft_revision = self.draft_revision.wrapping_add(1);
         self.detail = serde_json::to_string_pretty(&self.pending_rows).unwrap_or_default();
         self.set_detail_context("草稿详情");
         self.dirty = true;
@@ -277,11 +280,15 @@ impl App {
             self.status = UiMessage::key("该列不可编辑");
             return;
         }
+        if !self.guard_draft_scope(backend, DraftScopeAction::Action("inline-begin".into())) {
+            return;
+        }
         if self.workbench.overlay.as_deref() == Some("cell") {
             self.workbench.overlay = None;
             self.workbench.cell_target = None;
             self.workbench.cell_fields_open = false;
         }
+        let grid = self.grid.as_ref().unwrap();
         let large = matches!(grid.value(cell), Some(DataValue::Large { .. }));
         if !large {
             match grid.cell_edit_text(cell) {
@@ -344,6 +351,7 @@ impl App {
             });
         match result {
             Ok(()) => {
+                self.draft_revision = self.draft_revision.wrapping_add(1);
                 self.dirty = true;
                 self.workbench.inline = None;
                 self.workbench.focus_request = Some(String::new());

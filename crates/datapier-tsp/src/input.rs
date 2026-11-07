@@ -112,7 +112,24 @@ impl App {
         }
     }
 
+    pub(super) fn dispatch_guarded_editor_message(&mut self, message: Msg, backend: &Backend) {
+        let editing = match &message {
+            Msg::Edit(name, from, to, text, ..) => {
+                (from != to || !text.is_empty()) && self.draft_input_field(name)
+            }
+            _ => false,
+        };
+        if !editing || self.draft_scope_ready() {
+            self.dispatch_editor_message(message);
+        } else {
+            self.guard_draft_scope(backend, workbench::DraftScopeAction::Edit(message));
+        }
+    }
+
     pub(super) fn dispatch_editor_message(&mut self, message: Msg) {
+        if self.advanced_schema_edit(&message) || self.advanced_value_edit(&message) {
+            return;
+        }
         if self.workbench.overlay.as_deref() == Some("profile") && self.connection_form_busy() {
             return;
         }

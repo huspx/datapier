@@ -144,7 +144,10 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
     {
         control = control.error(error.message.render().into_owned());
     }
-    if matches!(name, "cell" | "redis_value" | "redis_member" | "cli_text") {
+    if matches!(
+        name,
+        "cell" | "redis_value" | "redis_member" | "cli_text" | "external_args"
+    ) {
         control
             .child(
                 ui::editor()

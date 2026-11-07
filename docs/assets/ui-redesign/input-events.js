@@ -316,6 +316,14 @@ document.addEventListener('change', event => {
       render();
       return;
     }
+    if (['advanced-value', 'schema-design', 'replace-design'].includes(kind)) {
+      state.overlay = kind;
+      state.schemaDemoPlanned = false;
+      state.replaceDemoPlanned = false;
+      state.replaceDemoExcluded = false;
+      render();
+      return;
+    }
     if (['query-editor', 'query-result', 'ddl'].includes(kind)) {
       state.provider = 'mysql';
       if (kind === 'ddl') {

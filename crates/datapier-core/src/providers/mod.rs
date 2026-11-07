@@ -49,6 +49,12 @@ impl ProviderSession {
             Self::Archery(s) => s.profile(),
         }
     }
+    /// 使结构相关令牌失效，保留查询连接及其事务。
+    pub fn invalidate_editing_metadata(&mut self) {
+        if let Self::Mysql(session) = self {
+            session.invalidate_editing_metadata();
+        }
+    }
     /// 在当前会话上执行 provider 方法；取消信号不保证服务端操作已撤销。
     pub async fn call(
         &mut self,

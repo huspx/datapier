@@ -165,7 +165,7 @@ impl Engine {
             "mcp.get_server_info" => {
                 let settings = self.store.settings().await?;
                 Ok(
-                    json!({"version":env!("CARGO_PKG_VERSION"),"engine_id":self.id,"protocol_version":3,
+                    json!({"version":env!("CARGO_PKG_VERSION"),"engine_id":self.id,"protocol_version":crate::protocol::VERSION,
                     "capabilities":{"tools":true,"transport":"stdio","transactions":true},
                     "limits":settings.limits,"fine_grained_access":settings.mcp.fine_grained_access}),
                 )

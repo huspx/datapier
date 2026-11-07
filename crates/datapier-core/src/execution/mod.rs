@@ -1,5 +1,6 @@
 //! 执行结果、发送阶段控制和数据交换。
 
+pub mod replace;
 pub mod transfer;
 use crate::{Result, Store, model::*};
 use serde_json::Value as Json;

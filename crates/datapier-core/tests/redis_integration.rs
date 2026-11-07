@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use datapier_core::{
     ExecutionSink, Store, execution::transfer, model::*, providers::ProviderSession,
 };
+use futures_util::FutureExt;
 use redis::{Client, aio::MultiplexedConnection};
 use serde_json::{Value as Json, json};
 use std::time::Duration;
@@ -1367,4 +1368,346 @@ async fn database_discovery_does_not_change_command_database_or_transaction() {
     assert_eq!(result["databases"], json!(["0", "1", "2"]));
     manual.close().await.unwrap();
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated Redis instance"]
+async fn value_hash_update_preserves_field_expiry_and_rejects_conflicts() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"advanced-hash", "hash");
+    let key = raw_key(&target);
+    let field = b"field\0\xff";
+    let _: i64 = redis::cmd("HSET")
+        .arg(&key)
+        .arg(field.as_slice())
+        .arg("before")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let info: String = redis::cmd("INFO")
+        .arg("server")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let major: u32 = info
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("redis_version:")
+                .and_then(|v| v.split('.').next())
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap();
+    let expiry = if major >= 8 {
+        let _: Vec<i64> = redis::cmd("HPEXPIRE")
+            .arg(&key)
+            .arg(120_000)
+            .arg("FIELDS")
+            .arg(1)
+            .arg(field.as_slice())
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        let times: Vec<i64> = redis::cmd("HPEXPIRETIME")
+            .arg(&key)
+            .arg("FIELDS")
+            .arg(1)
+            .arg(field.as_slice())
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        Some(times[0])
+    } else {
+        None
+    };
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let params = json!({"target":target,"token":opened["token"],"changes":[{"operation":"hash_set","field":binary(field),"value":binary(b"after"),"preserve_field_ttl":true,"field_expires_at_ms":expiry}]});
+    let preview = f.call("change.preview", params.clone()).await.unwrap();
+    assert_eq!(preview["items"][0]["statements"][0]["text"], "EVAL");
+    let result = f.call("change.submit", params).await.unwrap();
+    assert_applied(&result);
+    let actual: Vec<u8> = redis::cmd("HGET")
+        .arg(&key)
+        .arg(field.as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(actual, b"after");
+    if let Some(expiry) = expiry {
+        let actual: Vec<i64> = redis::cmd("HPEXPIRETIME")
+            .arg(&key)
+            .arg("FIELDS")
+            .arg(1)
+            .arg(field.as_slice())
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(actual[0], expiry);
+        let opened = f
+            .call("change.open", json!({"target":target}))
+            .await
+            .unwrap();
+        let error = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"hash_set","field":binary(field),"value":binary(b"wrong"),"preserve_field_ttl":true,"field_expires_at_ms":expiry + 1}]})).await.unwrap_err();
+        assert_eq!(error.code, "conflict");
+        let actual: Vec<u8> = redis::cmd("HGET")
+            .arg(&key)
+            .arg(field.as_slice())
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(actual, b"after");
+    }
+    // 恢复的意图没有旧期限，预览应在新 WATCH 连接上冻结当前基线。
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let restored = json!({"target":target,"token":opened["token"],"changes":[{"operation":"hash_set","field":binary(field),"value":binary(b"restored"),"preserve_field_ttl":true}]});
+    f.call("change.preview", restored.clone()).await.unwrap();
+    let result = f.call("change.submit", restored).await.unwrap();
+    assert_applied(&result);
+    if let Some(expiry) = expiry {
+        let actual: Vec<i64> = redis::cmd("HPEXPIRETIME")
+            .arg(&key)
+            .arg("FIELDS")
+            .arg(1)
+            .arg(field.as_slice())
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(actual[0], expiry);
+    }
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let changed = json!({"target":target,"token":opened["token"],"changes":[{"operation":"hash_set","field":binary(field),"value":binary(b"should-not-write"),"preserve_field_ttl":true}]});
+    f.call("change.preview", changed.clone()).await.unwrap();
+    let _: i64 = redis::cmd("HSET")
+        .arg(&key)
+        .arg(field.as_slice())
+        .arg("external")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.call("change.submit", changed).await.unwrap_err().code,
+        "conflict"
+    );
+    let actual: Vec<u8> = redis::cmd("HGET")
+        .arg(&key)
+        .arg(field.as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(actual, b"external");
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated Redis instance"]
+async fn value_zset_member_replacement_preserves_score_and_rejects_collision() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"advanced-zset", "zset");
+    let key = raw_key(&target);
+    let _: i64 = redis::cmd("ZADD")
+        .arg(&key)
+        .arg("-12.5")
+        .arg(b"old\0\xff".as_slice())
+        .arg("9")
+        .arg("occupied")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let params = json!({"target":target,"token":opened["token"],"changes":[{"operation":"zset_replace_member","member":binary(b"old\0\xff"),"new_member":binary(b"new\0\xff"),"preserve_score":true}]});
+    let preview = f.call("change.preview", params.clone()).await.unwrap();
+    assert_eq!(preview["items"][0]["statements"][0]["text"], "EVAL");
+    let result = f.call("change.submit", params).await.unwrap();
+    assert_applied(&result);
+    let score: String = redis::cmd("ZSCORE")
+        .arg(&key)
+        .arg(b"new\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(score.parse::<f64>().unwrap(), -12.5);
+    let old: Option<String> = redis::cmd("ZSCORE")
+        .arg(&key)
+        .arg(b"old\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert!(old.is_none());
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let result = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"zset_replace_member","member":binary(b"new\0\xff"),"new_member":binary(b"occupied"),"preserve_score":true}]})).await.unwrap();
+    assert_eq!(result["items"][0]["status"], "conflict");
+    let score: String = redis::cmd("ZSCORE")
+        .arg(&key)
+        .arg(b"new\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(score.parse::<f64>().unwrap(), -12.5);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated Redis instance"]
+async fn value_set_member_replacement_rejects_collisions() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"advanced-set", "set");
+    let key = raw_key(&target);
+    let _: i64 = redis::cmd("SADD")
+        .arg(&key)
+        .arg(b"old\0\xff".as_slice())
+        .arg("occupied")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let unchanged = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_replace_member","member":binary(b"old\0\xff"),"new_member":binary(b"old\0\xff")}]})).await.unwrap();
+    assert_applied(&unchanged);
+    let retained: i64 = redis::cmd("SISMEMBER")
+        .arg(&key)
+        .arg(b"old\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(retained, 1);
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let params = json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_replace_member","member":binary(b"old\0\xff"),"new_member":binary(b"new\0\xff")}]});
+    let preview = f.call("change.preview", params.clone()).await.unwrap();
+    assert_eq!(preview["items"][0]["statements"][0]["text"], "EVAL");
+    assert_applied(&f.call("change.submit", params).await.unwrap());
+    let old: i64 = redis::cmd("SISMEMBER")
+        .arg(&key)
+        .arg(b"old\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let new: i64 = redis::cmd("SISMEMBER")
+        .arg(&key)
+        .arg(b"new\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!((old, new), (0, 1));
+    let opened = f
+        .call("change.open", json!({"target":target}))
+        .await
+        .unwrap();
+    let result = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_replace_member","member":binary(b"new\0\xff"),"new_member":binary(b"occupied")}]})).await.unwrap();
+    assert_eq!(result["items"][0]["status"], "conflict");
+    let retained: i64 = redis::cmd("SISMEMBER")
+        .arg(&key)
+        .arg(b"new\0\xff".as_slice())
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(retained, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 Redis 6.2+ 及 ACL 用户管理权限"]
+async fn value_verification_preserves_original_watch_without_rewatch_permission() {
+    let mut f = Fixture::new().await;
+    let target = f.target(b"original-watch", "string");
+    let key = STANDARD.decode(target.key_b64.as_ref().unwrap()).unwrap();
+    let username = format!("dp_watch_{}", Uuid::new_v4().simple());
+    let secret = Uuid::new_v4().to_string();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("original")
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("ACL")
+            .arg("SETUSER")
+            .arg(&username)
+            .arg("on")
+            .arg(format!(">{secret}"))
+            .arg(format!("~{}*", f.prefix))
+            .arg("+@all")
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        let mut profile = f.profile.clone();
+        profile.direct_mut().unwrap().username = username.clone();
+        f.session.close().await.unwrap();
+        f.session = ProviderSession::connect(profile, Some(secret))
+            .await
+            .unwrap();
+        let opened = f
+            .call("change.open", json!({"target":target}))
+            .await
+            .unwrap();
+        let mut params = json!({"target":target,"token":opened["token"],
+            "result_id":opened["result_id"],"role":"string","max_bytes":4096});
+        let ProviderSession::Redis(session) = &mut f.session else {
+            unreachable!()
+        };
+        let baseline = session.value_snapshot(&params).await.unwrap();
+        params["before"] = baseline["value"].clone();
+        params["score"] = baseline["score"].clone();
+        params["field_expires_at_ms"] = baseline["field_expires_at_ms"].clone();
+        let _: () = redis::cmd("ACL")
+            .arg("SETUSER")
+            .arg(&username)
+            .arg("-watch")
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        session.value_verify(&params).await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("other")
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("original")
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.value_verify(&params).await.unwrap_err().code,
+            "conflict"
+        );
+        let actual: Vec<u8> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut f.raw)
+            .await
+            .unwrap();
+        assert_eq!(actual, b"original");
+    })
+    .catch_unwind()
+    .await;
+    let cleanup: redis::RedisResult<i64> = redis::cmd("ACL")
+        .arg("DELUSER")
+        .arg(&username)
+        .query_async(&mut f.raw)
+        .await;
+    f.close().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    cleanup.unwrap();
 }

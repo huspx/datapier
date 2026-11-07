@@ -10,6 +10,64 @@ use sqlparser::{
 };
 use std::ops::ControlFlow;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionControl {
+    Begin,
+    Commit,
+    Rollback,
+    AutocommitOn,
+}
+
+/// 仅识别完整的单条事务控制语句，批次和注释均不能走快速通道。
+pub fn transaction_control(text: &str) -> Option<TransactionControl> {
+    let text = text.trim();
+    let text = text.strip_suffix(';').unwrap_or(text).trim();
+    if let Some((left, right)) = text.split_once('=') {
+        let mut words = left.split_ascii_whitespace();
+        let set = words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("SET"));
+        let variable = words.next();
+        let session = variable.is_some_and(|word| {
+            word.eq_ignore_ascii_case("SESSION") || word.eq_ignore_ascii_case("LOCAL")
+        });
+        let variable = if session { words.next() } else { variable };
+        if set
+            && words.next().is_none()
+            && variable.is_some_and(|word| {
+                word.eq_ignore_ascii_case("autocommit")
+                    || (!session
+                        && (word.eq_ignore_ascii_case("@@autocommit")
+                            || word.eq_ignore_ascii_case("@@session.autocommit")
+                            || word.eq_ignore_ascii_case("@@local.autocommit")))
+            })
+            && (right.trim().eq_ignore_ascii_case("ON") || right.trim() == "1")
+        {
+            return Some(TransactionControl::AutocommitOn);
+        }
+        return None;
+    }
+    let mut words = text.split_ascii_whitespace();
+    let first = words.next()?;
+    let second = words.next();
+    if words.next().is_some() {
+        return None;
+    }
+    let work = second.is_none_or(|word| word.eq_ignore_ascii_case("WORK"));
+    if (first.eq_ignore_ascii_case("BEGIN") && work)
+        || (first.eq_ignore_ascii_case("START")
+            && second.is_some_and(|word| word.eq_ignore_ascii_case("TRANSACTION")))
+    {
+        Some(TransactionControl::Begin)
+    } else if first.eq_ignore_ascii_case("COMMIT") && work {
+        Some(TransactionControl::Commit)
+    } else if first.eq_ignore_ascii_case("ROLLBACK") && work {
+        Some(TransactionControl::Rollback)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Token<'a> {
     Word(&'a str),

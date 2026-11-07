@@ -199,6 +199,8 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
         "transfer" => "导入 / 导出",
         "import" => "导入",
         "export" => "导出",
+        "replace" => "批量替换",
+        "advanced-value" => "高级值编辑",
         "cell" => "单元格",
         "cli-value" => "CLI 单元格",
         "redis" => match app.field("operation") {
@@ -256,6 +258,15 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
         .child(html::span("").class("spacer"))
         .child(button("关闭", "overlay-close"));
     match kind {
+        "replace" => panel = panel.child(crate::advanced::replace::view(&app.advanced_replace)),
+        "advanced-value" => {
+            panel = panel.child(crate::advanced::value::view(&app.advanced_value));
+            panel = panel.child(crate::advanced::files::view(
+                &app.advanced_files,
+                app.advanced_value.writable,
+                app.advanced_value.session.is_some(),
+            ));
+        }
         "history" => {
             panel = panel.child(history_panel(app));
             footer = history_footer(app);
@@ -756,6 +767,98 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .variant(ui::FieldVariant::Row)
                         .child(language),
                 );
+            }
+            if settings_ready && !mcp {
+                panel = panel.child(html::strong(crate::i18n::tr("编辑限制").into_owned()));
+                for (name, label) in [
+                    ("editing_plan_items", "计划条目上限"),
+                    ("editing_plan_bytes", "计划字节上限"),
+                    ("editing_value_bytes", "单值字节上限"),
+                    ("editing_text_bytes", "文本编辑字节上限"),
+                    ("editing_preview_rows", "预览每页条目数"),
+                ] {
+                    panel = panel.child(field(app, name, label));
+                }
+                panel = panel.child(choices(
+                    app,
+                    "external_mode",
+                    "外部编辑器模式",
+                    &[
+                        ("disabled", "不配置"),
+                        ("gui", "图形界面"),
+                        ("terminal", "终端"),
+                    ],
+                ));
+                if app.field("external_mode") != "disabled" {
+                    panel = panel.child(field(app, "external_program", "编辑器程序"));
+                    panel = panel.child(field(app, "external_args", "编辑器参数，每行一项"));
+                    panel = panel.child(
+                        html::span(
+                            crate::i18n::tr(
+                                "参数中必须恰好包含一个 {file}；程序和参数不会通过 shell 解析。",
+                            )
+                            .into_owned(),
+                        )
+                        .class("empty-note"),
+                    );
+                }
+                panel = panel.child(button("保存编辑设置", "editing-settings-save"));
+                panel = panel.child(html::strong(crate::i18n::tr("遗留编辑文件").into_owned()));
+                panel = panel.child(
+                    html::span(
+                        crate::i18n::tr("领取文件只用于管理本地文件，不恢复数据库编辑权限。")
+                            .into_owned(),
+                    )
+                    .class("empty-note"),
+                );
+                for item in &app.editing_files.items {
+                    let Some(id) = item["id"].as_str() else {
+                        continue;
+                    };
+                    let selected = app.editing_files.selected.as_deref() == Some(id);
+                    let label = format!(
+                        "{} · {} · {} · {} · {}{}",
+                        id,
+                        item["purpose"].as_str().unwrap_or(""),
+                        item["state"].as_str().unwrap_or(""),
+                        crate::i18n::tr(if item["active"] == true {
+                            "使用中"
+                        } else {
+                            "未使用"
+                        }),
+                        crate::i18n::tr(if item["referenced"] == true {
+                            "草稿引用中"
+                        } else {
+                            "无草稿引用"
+                        }),
+                        if selected { " ✓" } else { "" }
+                    );
+                    panel = panel.child(
+                        ui::button(label)
+                            .on_click(Msg::Action(format!("editing-files-select:{id}"))),
+                    );
+                }
+                panel = panel.child(button("刷新文件列表", "editing-files-refresh"));
+                if app.editing_files.offset > 0 {
+                    panel = panel.child(button("上一页", "editing-files-prev"));
+                }
+                if app.editing_files.next.is_some() {
+                    panel = panel.child(button("下一页", "editing-files-next"));
+                }
+                if app.editing_files.selected.is_some() {
+                    panel = panel.child(button("领取文件", "editing-files-claim"));
+                    panel = panel.child(field(app, "editing_file_path", "导出路径"));
+                    panel = panel.child(button("导出文件", "editing-files-export"));
+                    if app.editing_files.confirm_cleanup {
+                        panel = panel.child(html::span(
+                            crate::i18n::tr("确认清理所选编辑文件？").into_owned(),
+                        ));
+                        panel = panel.child(button("确认清理", "editing-files-cleanup-confirm"));
+                        panel = panel.child(button("取消", "editing-files-cleanup-cancel"));
+                    } else {
+                        panel = panel.child(button("清理文件", "editing-files-cleanup"));
+                    }
+                }
             }
             for &(group, key, label) in application::SETTINGS_FIELDS {
                 if !settings_ready || application::settings_is_mcp(group, key) != mcp {

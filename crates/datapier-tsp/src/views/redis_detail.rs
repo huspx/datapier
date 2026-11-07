@@ -452,6 +452,9 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
         );
     }
     tools = tools.child(html::span("").class("spacer"));
+    if matches!(kind, "string" | "hash" | "list" | "set" | "zset") && app.grid.is_some() {
+        tools = tools.child(button("高级值编辑", "redis-advanced-value-open"));
+    }
     if writable(app) {
         tools = tools.child(icon_button("edit", "编辑 value", "redis-edit"));
     }
@@ -486,6 +489,7 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
         tools = tools.child(icon_button("columns", "列配置", "overlay:columns"));
     }
     if writable(app) {
+        tools = tools.child(button("批量替换", "replace-open"));
         tools = tools.child(icon_button("arrow-up", "导入", "overlay:import"));
     }
     tools = tools.child(icon_button("download", "导出", "overlay:export"));

@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value as Json, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Arguments, Row, mysql::MySqlArguments};
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +19,23 @@ use crate::{
         ensure_not_cancelled, param,
     },
 };
+
+/// 对完整结构计算指纹，忽略 SHOW CREATE TABLE 中会随插入变化的计数。
+pub(super) fn schema_fingerprint(schema: &TableSchema) -> Result<String> {
+    let ddl = super::schema::fingerprint(&schema.ddl, "");
+    let fields = (
+        &schema.target,
+        &schema.columns,
+        &schema.keys,
+        &ddl,
+        &schema.engine,
+        &schema.details,
+    );
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&fields)?)
+    ))
+}
 
 // EXTRA 中 DEFAULT_GENERATED 仅描述默认值，不能当作生成列。
 fn column_flags(extra: &str, expression: Option<&str>) -> (bool, bool) {
@@ -36,21 +54,22 @@ async fn database(
     cancel: &CancellationToken,
 ) -> Result<String> {
     ensure_not_cancelled(cancel)?;
-    if let Some(name) = requested.or_else(|| s.profile.default_database().map(str::to_owned)) {
+    if let Some(name) = requested {
         if name.is_empty() {
             return Err(AppError::invalid("数据库名不能为空"));
         }
         return Ok(name);
     }
     // 中断共享连接上的查询后不能继续复用其协议状态；丢弃该连接而非污染后续命令。
-    let current: Option<String> = tokio::select! {
+    let current = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             s.connection.take();
             return Err(AppError::cancelled());
         }
-        result = sqlx::query_scalar("SELECT DATABASE()").fetch_one(s.connection()?) => result?,
+        result = sqlx::raw_sql("SELECT DATABASE()").fetch_one(s.connection()?) => result?,
     };
+    let current: Option<String> = current.try_get(0)?;
     current.ok_or_else(|| AppError::invalid("请选择数据库"))
 }
 
@@ -318,6 +337,72 @@ async fn list_inner(s: &mut MysqlSession, params: Json) -> Result<Json> {
     };
     let mut conn = s.new_connection().await?;
     let mut resources = Vec::new();
+    if params.get("kind").and_then(Json::as_str) == Some("trigger") {
+        let db = requested
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| AppError::invalid("列出触发器必须指定数据库"))?;
+        let table: String = param(&params, "table")?;
+        if table.is_empty() {
+            return Err(AppError::invalid("列出触发器必须指定所属表"));
+        }
+        let object = sqlx::query("SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND TABLE_TYPE = 'BASE TABLE'")
+            .bind(db).bind(&table).fetch_optional(&mut conn).await?
+            .ok_or_else(|| AppError::new("not_found", "表不存在或元数据不可见"))?;
+        let actual_db: String = object.try_get("TABLE_SCHEMA")?;
+        let actual_table: String = object.try_get("TABLE_NAME")?;
+        let lower_case: u64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
+            .fetch_one(&mut conn)
+            .await?;
+        let grants = sqlx::query("SHOW GRANTS").fetch_all(&mut conn).await?;
+        let scope = format!(
+            "{}.{}",
+            quote_ident(&actual_db)?,
+            quote_ident(&actual_table)?
+        );
+        // TRIGGERS 会按权限过滤；只有明确的 TRIGGER 授权才能证明空列表完整。
+        let mut complete = false;
+        for row in grants {
+            let grant: String = row.try_get(0)?;
+            let Some((permissions, rest)) = grant.split_once(" ON ") else {
+                continue;
+            };
+            let Some((grant_scope, _)) = rest.split_once(" TO ") else {
+                continue;
+            };
+            let matches = grant_scope == "*.*"
+                || grant_schema_matches(grant_scope, &actual_db, lower_case != 0)
+                || grant_scope == scope
+                || (lower_case != 0 && grant_scope.eq_ignore_ascii_case(&scope));
+            let permissions = permissions.to_ascii_uppercase();
+            if matches
+                && (permissions.contains("ALL PRIVILEGES")
+                    || permissions
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .any(|p| p == "TRIGGER"))
+            {
+                complete = true;
+            }
+        }
+        let rows = sqlx::query("SELECT TRIGGER_SCHEMA, TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY TRIGGER_NAME")
+            .bind(&actual_db).bind(&actual_table).fetch_all(&mut conn).await?;
+        for row in rows {
+            let definition: Option<String> = row.try_get("ACTION_STATEMENT")?;
+            complete &= definition.is_some();
+            resources.push(Resource {
+                name: row.try_get("TRIGGER_NAME")?,
+                kind: "trigger".into(),
+                database: Some(row.try_get("TRIGGER_SCHEMA")?),
+                key_b64: None,
+                data: json!({"table": row.try_get::<String, _>("EVENT_OBJECT_TABLE")?, "definition_visible": definition.is_some()}),
+            });
+        }
+        return Ok(serde_json::to_value(ResourcePage {
+            resources,
+            cursor: None,
+            complete,
+        })?);
+    }
     if let Some(db) = requested {
         let rows = sqlx::query("SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME")
             .bind(&db).fetch_all(&mut conn).await?;
@@ -370,6 +455,24 @@ pub(super) async fn describe(
 }
 
 pub(super) async fn schema(
+    s: &mut MysqlSession,
+    target: ResourceTarget,
+    cancel: &CancellationToken,
+) -> Result<TableSchema> {
+    let mut schema = schema_raw(s, target, cancel).await?;
+    if schema.target.kind == "view" {
+        match super::view::resolve(s, schema.clone(), cancel).await {
+            Ok(mapping) => schema = mapping.schema,
+            Err(error) => {
+                ensure_not_cancelled(cancel)?;
+                schema.details["view_mapping"] = json!({"insert": false, "update": false, "delete": false, "reasons": [error.to_string()]});
+            }
+        }
+    }
+    Ok(schema)
+}
+
+pub(super) async fn schema_raw(
     s: &mut MysqlSession,
     mut target: ResourceTarget,
     cancel: &CancellationToken,

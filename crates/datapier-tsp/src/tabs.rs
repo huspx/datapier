@@ -25,6 +25,8 @@ impl App {
                 redis_db,
                 ..BrowseSettings::default()
             },
+            schema_draft: None,
+            replace_draft: None,
             pending: Value::Null,
             pending_live: false,
             runtime: TabRuntime::default(),
@@ -76,9 +78,44 @@ impl App {
                 return false;
             };
             let tab = &self.tabs[index];
+            let (schema, replace, value, files) = if index == self.active {
+                (
+                    &self.advanced_schema,
+                    &self.advanced_replace,
+                    &self.advanced_value,
+                    &self.advanced_files,
+                )
+            } else {
+                (
+                    &tab.runtime.advanced_schema,
+                    &tab.runtime.advanced_replace,
+                    &tab.runtime.advanced_value,
+                    &tab.runtime.advanced_files,
+                )
+            };
+            if schema
+                .as_ref()
+                .is_some_and(|state| state.dirty || state.summary.is_some() || state.busy())
+                || replace.has_live_plan()
+                || value.session.is_some()
+                || files.file_session.is_some()
+                || (if index == self.active {
+                    self.restore_rows.is_some()
+                } else {
+                    tab.runtime.restore_rows.is_some()
+                })
+                || tab.schema_draft.is_some()
+                || tab.replace_draft.is_some()
+            {
+                self.status = i18n::UiMessage::key("请先处理该标签的高级编辑草稿或会话");
+                return false;
+            }
             let (drafts, running) = if index == self.active {
                 (
-                    self.has_live_drafts() || self.workbench.inline.is_some(),
+                    self.has_live_drafts()
+                        || self.workbench.inline.is_some()
+                        || self.workbench.draft_scope_pending.is_some()
+                        || !self.workbench.draft_scope_recovery.is_empty(),
                     self.task.is_some()
                         || self.operation_pending
                         || self.workbench.cli_running
@@ -92,7 +129,9 @@ impl App {
                         || !state.redis_changes.is_empty()
                         || state.paste_preview.is_some()
                         || self.redis_key_delete_tab_pending(tab.id)
-                        || state.workbench.inline.is_some(),
+                        || state.workbench.inline.is_some()
+                        || state.workbench.draft_scope_pending.is_some()
+                        || !state.workbench.draft_scope_recovery.is_empty(),
                     state.task.is_some()
                         || state.operation_pending
                         || state.workbench.cli_running
@@ -265,6 +304,7 @@ impl App {
             self.schema = None;
             self.edit_token = None;
             self.pending_rows.clear();
+            self.pending_edit_files.clear();
             self.redis_changes.clear();
             self.large = None;
             self.detail.clear();

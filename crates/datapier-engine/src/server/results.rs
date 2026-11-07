@@ -46,20 +46,40 @@ impl Engine {
         params: Value,
         timeout: u64,
     ) -> Result<Value> {
-        let db = {
+        let (session_id, db, owner_cancel) = {
             let state = self.state.lock().unwrap();
-            let session_id = state
+            let session_id = *state
                 .result_sessions
                 .get(&meta.execution_id)
                 .ok_or_else(|| AppError::new("expired", "结果会话已失效"))?;
             let db = state
                 .databases
-                .get(session_id)
+                .get(&session_id)
                 .ok_or_else(|| AppError::new("expired", "结果会话已关闭"))?;
             if db.closing.load(Ordering::Acquire) {
                 return Err(AppError::new("expired", "结果会话已关闭"));
             }
-            db.clone()
+            let owner_cancel = state
+                .client_cancels
+                .get(&owner)
+                .cloned()
+                .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
+            (session_id, db.clone(), owner_cancel)
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+        let gate = (db.profile.provider == model::ProviderKind::Mysql && !db.profile.is_archery())
+            .then(|| self.editing_gate(db.profile.id));
+        let _gate_guard = match gate.as_ref() {
+            Some(gate) if method == "result.count" => Some(
+                gate.try_lock()
+                    .map_err(|_| AppError::new("busy", "原数据库连接正忙"))?,
+            ),
+            Some(gate) => Some(tokio::select! {
+                _ = owner_cancel.cancelled() => return Err(AppError::cancelled()),
+                guard = tokio::time::timeout_at(deadline, gate.lock()) =>
+                    guard.map_err(|_| AppError::new("timeout", "等待数据库执行门超时"))?,
+            }),
+            None => None,
         };
         let cancel = CancellationToken::new();
         let sink = ExecutionSink::new(self.store.clone(), meta.execution_id);
@@ -68,24 +88,30 @@ impl Engine {
                 .try_lock()
                 .map_err(|_| AppError::new("busy", "原数据库会话正忙"))?
         } else {
-            tokio::time::timeout(Duration::from_secs(timeout), db.session.lock())
-                .await
-                .map_err(|_| AppError::new("timeout", "等待数据库会话超时"))?
+            tokio::select! {
+                _ = owner_cancel.cancelled() => return Err(AppError::cancelled()),
+                session = tokio::time::timeout_at(deadline, db.session.lock()) =>
+                    session.map_err(|_| AppError::new("timeout", "等待数据库会话超时"))?,
+            }
         };
-        // 每次重发都重验间接定义；旧 result ID 不代表视图仍访问原来的库。
+        self.editing_apply_invalidation(session_id, &mut session);
         self.mcp_revalidate_result(owner, &db, meta.execution_id, &mut session)
             .await?;
         let call = session.call(method, params, &sink, &cancel);
         tokio::pin!(call);
-        tokio::select! {
-            result = &mut call => result,
-            _ = tokio::time::sleep(Duration::from_secs(timeout)) => {
-                // 不能丢弃持有物理连接的 provider future；取消后等待协议尾部。
-                cancel.cancel();
-                let _ = call.await;
-                Err(AppError::new("timeout", "读取结果超时"))
-            }
-        }
+        let disconnected = tokio::select! {
+            result = &mut call => return result,
+            _ = owner_cancel.cancelled() => true,
+            _ = tokio::time::sleep_until(deadline) => false,
+        };
+        // 不能丢弃持有物理连接的 provider future；取消后等待协议尾部。
+        cancel.cancel();
+        let _ = call.await;
+        Err(if disconnected {
+            AppError::cancelled()
+        } else {
+            AppError::new("timeout", "读取结果超时")
+        })
     }
 
     pub(super) async fn read_result(&self, owner: Uuid, params: &Value) -> Result<Value> {

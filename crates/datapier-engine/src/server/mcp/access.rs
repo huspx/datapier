@@ -721,7 +721,6 @@ impl Engine {
         }
         Ok(())
     }
-
     pub(in crate::server) async fn mcp_before_send(
         &self,
         owner: Uuid,

@@ -4,12 +4,19 @@ mod catalog;
 mod changes;
 mod errors;
 mod live;
+mod replace;
 mod results;
+pub mod schema;
 mod sql;
+mod values;
+mod view;
 
 pub use changes::validate_import_value;
 pub(crate) use results::{columns as export_columns, decode_row as export_decode_row};
-pub use sql::{stateless_statement_ranges, stateless_statements, validate_readonly};
+pub use sql::{
+    TransactionControl, stateless_statement_ranges, stateless_statements, transaction_control,
+    validate_readonly,
+};
 
 use crate::{ExecutionSink, model::*};
 use results::execute_statement;
@@ -28,7 +35,8 @@ pub struct MysqlSession {
     thread_id: u64,
     options: MySqlConnectOptions,
     has_index_expression: bool,
-    edits: HashMap<Uuid, ResourceTarget>,
+    edits: HashMap<Uuid, changes::EditToken>,
+    replace_plans: HashMap<Uuid, replace::ReplacePlan>,
     recipes: HashMap<Uuid, live::Recipe>,
     transaction: Option<bool>,
 }
@@ -90,12 +98,37 @@ impl MysqlSession {
             options,
             has_index_expression: has_index_expression != 0,
             edits: HashMap::new(),
+            replace_plans: HashMap::new(),
             recipes: HashMap::new(),
             transaction: None,
         })
     }
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+    /// 清除依赖结构的编辑令牌和浏览映射，不结束查询连接或事务。
+    pub fn invalidate_editing_metadata(&mut self) {
+        self.edits.clear();
+        self.replace_plans.clear();
+        self.recipes.clear();
+    }
+    /// 返回编辑令牌绑定的绝对目标。
+    pub fn draft_target(&self, token: Uuid) -> Result<&ResourceTarget> {
+        self.edits
+            .get(&token)
+            .map(|edit| &edit.target)
+            .ok_or_else(|| AppError::new("schema_conflict", "编辑基线已失效，请重新读取并确认草稿"))
+    }
+    pub fn validate_draft_scope(&self, token: Uuid, database: &str, name: &str) -> Result<()> {
+        let target = self.draft_target(token)?;
+        if target.database.as_deref() == Some(database) && target.name == name {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "schema_conflict",
+                "编辑基线已失效，请重新读取并确认草稿",
+            ))
+        }
     }
     pub(super) async fn new_connection(&self) -> Result<MySqlConnection> {
         if self.connection.is_none() {
@@ -155,12 +188,14 @@ impl MysqlSession {
     pub(crate) fn invalidate_connection(&mut self) {
         self.connection = None;
         self.edits.clear();
+        self.replace_plans.clear();
         self.recipes.clear();
     }
 
     /// 清除编辑令牌，尝试回滚并关闭会话连接；回滚或关闭失败时返回错误。
     pub async fn close(&mut self) -> Result<()> {
         self.edits.clear();
+        self.replace_plans.clear();
         self.recipes.clear();
         if let Some(mut connection) = self.connection.take() {
             let rollback = sqlx::raw_sql("ROLLBACK").execute(&mut connection).await;
@@ -208,6 +243,18 @@ impl MysqlSession {
             "resource.list" => catalog::list(self, params, cancel).await,
             "resource.describe" => catalog::describe(self, params, cancel).await,
             "resource.browse" => catalog::browse(self, params, sink, cancel).await,
+            "schema.describe" => self.schema_describe(params, cancel).await,
+            "schema.execute" => self.schema_executor()?.execute(params, sink, cancel).await,
+            "replace.prepare" => replace::prepare(self, params, sink, cancel).await,
+            "replace.read" => replace::read(self, params).await,
+            "replace.update" => replace::update(self, params).await,
+            "replace.submit" => replace::submit(self, params, sink, cancel).await,
+            "replace.discard" => replace::discard(self, params).await,
+            "value.snapshot" => self.value_snapshot(&params, cancel).await,
+            "value.verify" => {
+                self.value_verify(&params, cancel).await?;
+                Ok(json!({"verified":true}))
+            }
             "change.open" => changes::open(self, params, cancel).await,
             "change.discard" => changes::discard(self, params).await,
             "change.preview" => changes::preview(self, params, sink, cancel).await,
@@ -302,16 +349,16 @@ impl MysqlSession {
         cancel: &CancellationToken,
     ) -> Result<Json> {
         let text: String = param(&params, "text")?;
+        let parameters = match params.get("parameters") {
+            None | Some(Json::Null) => Vec::new(),
+            Some(Json::Array(values)) => values.clone(),
+            _ => return Err(AppError::invalid("parameters 必须是数组")),
+        };
         if sql::diagnostic_statement(&text).is_none()
             && let Some(result) = self.try_live_query(&text, &params, sink, cancel).await?
         {
             return Ok(result);
         }
-        let parameters = params
-            .get("parameters")
-            .and_then(Json::as_array)
-            .cloned()
-            .unwrap_or_default();
         let mut remaining = text.as_str();
         let mut results = Vec::new();
         let mut affected = 0u64;
@@ -361,19 +408,12 @@ impl MysqlSession {
             }
             let readonly = sql::readonly(statement);
             let transaction_control = matches!(
-                statement
-                    .trim()
-                    .trim_end_matches(';')
-                    .trim()
-                    .to_ascii_uppercase()
-                    .as_str(),
-                "BEGIN"
-                    | "BEGIN WORK"
-                    | "START TRANSACTION"
-                    | "COMMIT"
-                    | "COMMIT WORK"
-                    | "ROLLBACK"
-                    | "ROLLBACK WORK"
+                sql::transaction_control(statement),
+                Some(
+                    sql::TransactionControl::Begin
+                        | sql::TransactionControl::Commit
+                        | sql::TransactionControl::Rollback
+                )
             );
             if self.profile.access_mode == AccessMode::ReadOnly && !readonly && !transaction_control
             {
@@ -397,14 +437,8 @@ impl MysqlSession {
                 Ok((ids, count)) => {
                     // SQLx 不暴露服务端事务状态；任意 SQL、隐式提交和 autocommit
                     // 都可能改变状态，只有显式开始成功可证明事务正在进行。
-                    self.transaction = match statement
-                        .trim()
-                        .trim_end_matches(';')
-                        .trim()
-                        .to_ascii_uppercase()
-                        .as_str()
-                    {
-                        "BEGIN" | "BEGIN WORK" | "START TRANSACTION" => Some(true),
+                    self.transaction = match sql::transaction_control(statement) {
+                        Some(sql::TransactionControl::Begin) => Some(true),
                         _ => None,
                     };
                     statements.push(json!({"index":statements.len(),"text":statement,"status":"executed","may_write":may_write,"affected_rows":count,"results":ids,"transaction_state":"unknown"}));

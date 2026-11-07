@@ -26,6 +26,8 @@ fn second_tab(app: &mut App) {
         browse: BrowseSettings::default(),
         pending: Value::Null,
         pending_live: false,
+        schema_draft: None,
+        replace_draft: None,
         runtime: TabRuntime::default(),
     });
 }

@@ -5,6 +5,245 @@ impl App {
         if self.tab_close.is_some() {
             return;
         }
+        if self.restore_rows.is_some() {
+            self.status = i18n::UiMessage::key("正在恢复行草稿，请等待完成");
+            return;
+        }
+        if name == "draft-scope-pending-cancel" {
+            self.cancel_pending_draft_scope(backend);
+            self.status = i18n::UiMessage::key("已放弃未确认输入");
+            return;
+        }
+        if name == "draft-scope-pending-retry" {
+            self.guard_draft_scope(backend, workbench::DraftScopeAction::Protect);
+            return;
+        }
+        if name == "draft-scope-recovery-discard" {
+            self.workbench.draft_scope_recovery.clear();
+            self.status = i18n::UiMessage::key("已清除未确认输入，请重新打开基线");
+            return;
+        }
+        if name == "draft-scope-recovery-view" {
+            let mut lines = vec![
+                "以下输入尚未取得保护。请复制需要的内容，重新打开原目标和基线后再编辑：".to_owned(),
+            ];
+            for pending in self
+                .workbench
+                .draft_scope_recovery
+                .iter()
+                .chain(self.workbench.draft_scope_pending.iter())
+            {
+                lines.push(format!("目标：{}", pending.target));
+                for action in &pending.actions {
+                    match action {
+                        workbench::DraftScopeAction::Edit(Msg::Edit(field, from, to, text, ..)) => {
+                            lines.push(format!("字段 {field}，范围 {from}..{to}，输入：{text}"))
+                        }
+                        workbench::DraftScopeAction::EditBatch { field, text, .. } => {
+                            lines.push(format!("字段 {field} 的待确认内容：{text}"))
+                        }
+                        workbench::DraftScopeAction::Key(field, key) => lines.push(format!(
+                            "字段 {field}，按键 {}，输入：{}",
+                            key.name,
+                            key.text.as_deref().unwrap_or("")
+                        )),
+                        workbench::DraftScopeAction::Action(action) => {
+                            lines.push(format!("待执行操作：{action}"))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.detail = lines.join("\n");
+            self.set_detail_context("未确认输入");
+            self.workbench.overlay = Some("diagnostics".into());
+            return;
+        }
+        if matches!(name, "discard" | "inline-cancel") {
+            self.cancel_pending_draft_scope(backend);
+        }
+        if matches!(
+            name,
+            "set-cell"
+                | "set-null"
+                | "set-json"
+                | "insert-row"
+                | "sql-row-add"
+                | "delete-rows-confirm"
+                | "paste-confirm"
+                | "restore-pending"
+                | "submit"
+                | "advanced-value-patch"
+                | "advanced-value-stage"
+                | "advanced-value-set-null"
+                | "advanced-value-replace-null"
+                | "advanced-value-format"
+                | "advanced-file-import"
+                | "advanced-external-read"
+        ) && !self.guard_draft_scope(backend, workbench::DraftScopeAction::Action(name.into()))
+        {
+            return;
+        }
+        if self.advanced_schema_action(name, backend)
+            || self.advanced_value_action(name, backend)
+            || self.replace_action(name, backend)
+        {
+            return;
+        }
+        if name == "trigger-list" {
+            if let Some(target) = self.target.clone().filter(|target| target.kind == "table") {
+                self.list_triggers(backend, target, None);
+            }
+            return;
+        }
+        if name == "trigger-list-next" {
+            if let Some((target, cursor)) = self.workbench.trigger_list.as_ref().and_then(|list| {
+                list.cursor
+                    .clone()
+                    .map(|cursor| (list.target.clone(), cursor))
+            }) {
+                self.list_triggers(backend, target, Some(cursor));
+            }
+            return;
+        }
+        if let Some(index) = name
+            .strip_prefix("trigger-open:")
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            let target = self
+                .workbench
+                .trigger_list
+                .as_ref()
+                .and_then(|list| list.resources.get(index))
+                .map(|resource| ResourceTarget {
+                    database: resource.database.clone(),
+                    name: resource.name.clone(),
+                    key_b64: None,
+                    kind: "trigger".into(),
+                });
+            if let Some(target) = target {
+                self.advanced_schema_open(backend, target, false, None);
+            }
+            return;
+        }
+        if matches!(
+            name,
+            "schema-design"
+                | "schema-create-table"
+                | "schema-create-view"
+                | "schema-create-trigger"
+        ) {
+            let creating = name != "schema-design";
+            let trigger_table = (name == "schema-create-trigger")
+                .then(|| self.target.as_ref().map(|target| target.name.clone()))
+                .flatten();
+            let target = if creating {
+                ResourceTarget {
+                    database: self
+                        .target
+                        .as_ref()
+                        .and_then(|target| target.database.clone())
+                        .or_else(|| self.database.clone()),
+                    name: String::new(),
+                    key_b64: None,
+                    kind: match name {
+                        "schema-create-view" => "view",
+                        "schema-create-trigger" => "trigger",
+                        _ => "table",
+                    }
+                    .into(),
+                }
+            } else if let Some(target) = self.target.clone() {
+                target
+            } else {
+                return;
+            };
+            self.advanced_schema_open(backend, target, creating, trigger_table);
+            return;
+        }
+        if name == "replace-restore" {
+            if let Some(draft) = self
+                .tabs
+                .get(self.active)
+                .and_then(|tab| tab.replace_draft.clone())
+            {
+                if self.replace_restore_draft(&draft) {
+                    self.tabs[self.active].replace_draft = None;
+                    self.workbench.overlay = Some("replace".into());
+                    self.dirty = true;
+                } else {
+                    self.status = i18n::UiMessage::key("请先打开原目标并重新确认基线");
+                }
+            }
+            return;
+        }
+        if name == "replace-open" {
+            self.replace_open();
+            return;
+        }
+        if name == "redis-advanced-value-open" {
+            let Some(kind) = self
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.get("type"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let column_name = match kind {
+                "string" | "hash" | "list" => "value",
+                "set" | "zset" => "member",
+                _ => {
+                    self.status = i18n::UiMessage::key("当前 Redis 类型不能编辑行");
+                    return;
+                }
+            };
+            let Some(grid) = self.grid.as_ref() else {
+                return;
+            };
+            let row = if kind == "string" {
+                grid.page.start
+            } else if let Some(cell) = grid.focus {
+                cell.row
+            } else {
+                self.status = i18n::UiMessage::key("请先选择一行");
+                return;
+            };
+            let Some(column) = grid
+                .page
+                .result
+                .columns
+                .iter()
+                .position(|column| column.name == column_name)
+            else {
+                return;
+            };
+            let cell = Cell { row, column };
+            if grid.value(cell).is_none() {
+                return;
+            }
+            self.workbench.cell_target = Some((grid.page.result.id, cell));
+            self.action("advanced-value-open", backend);
+            return;
+        }
+        if name == "advanced-value-open" {
+            if let (Some(session), Some(grid), Some(cell)) = (
+                self.session_id(),
+                self.grid.as_ref(),
+                self.detail_cell()
+                    .or_else(|| self.grid.as_ref().and_then(|grid| grid.focus)),
+            ) && let Some(column) = grid.page.result.columns.get(cell.column)
+            {
+                let writable = self.browse_result && self.edit_token.is_some();
+                let params = json!({"session_id":session,"target":self.target,"edit_token":self.edit_token,"result_id":grid.page.result.id,"row_no":cell.row,"column":column.name,"readonly":!writable});
+                self.advanced_value_open(backend, params);
+            }
+            return;
+        }
+        if name == "overlay-close" && self.workbench.overlay.as_deref() == Some("advanced-value") {
+            self.advanced_value_action("advanced-value-close", backend);
+            return;
+        }
         if self.approval_action(name, backend) {
             return;
         }
@@ -181,17 +420,21 @@ impl App {
                                 .or(self.tabs[self.active].browse.redis_db)
                                 .unwrap_or(default_db)
                         });
-                        let database = self
-                            .workbench
-                            .queued_target
-                            .as_ref()
-                            .and_then(|target| {
-                                target.database.clone().or_else(|| {
-                                    (target.kind == "database" && !target.name.is_empty())
-                                        .then(|| target.name.clone())
+                        // Redis DB 由 redis_db 传递，不能混入 MySQL 的 database 参数。
+                        let database = if redis_profile_db.is_some() {
+                            None
+                        } else {
+                            self.workbench
+                                .queued_target
+                                .as_ref()
+                                .and_then(|target| {
+                                    target.database.clone().or_else(|| {
+                                        (target.kind == "database" && !target.name.is_empty())
+                                            .then(|| target.name.clone())
+                                    })
                                 })
-                            })
-                            .or_else(|| self.database.clone());
+                                .or_else(|| self.database.clone())
+                        };
                         self.edit_token = None;
                         self.schema = None;
                         self.grid = None;
@@ -485,11 +728,12 @@ impl App {
             "undo-grid" => {
                 if let Some(g) = &mut self.grid {
                     g.undo();
+                    self.draft_revision = self.draft_revision.wrapping_add(1);
                     self.dirty = true;
                 }
             }
             "insert-row" => {
-                if self.edit_token.is_none() {
+                if !self.workbench_can_operate("insert") {
                     self.status = "请先打开编辑基线".into();
                 } else {
                     match serde_json::from_str::<BTreeMap<String, datapier_core::model::Value>>(
@@ -505,6 +749,7 @@ impl App {
                                 before: BTreeMap::new(),
                                 values,
                             });
+                            self.draft_revision = self.draft_revision.wrapping_add(1);
                             self.detail = serde_json::to_string_pretty(&self.pending_rows)
                                 .unwrap_or_default();
                             self.set_detail_context("草稿详情");
@@ -537,6 +782,16 @@ impl App {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                if redis.iter().any(|change| {
+                    change
+                        .get("requires_field_expiry_refresh")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                        || change.get("field_expires_at_ms").is_some()
+                }) {
+                    self.status = "Hash 字段过期时间需要重新读取；请保留草稿并重新确认".into();
+                    return;
+                }
                 if redis.iter().any(|change| {
                     matches!(
                         change.get("operation").and_then(Value::as_str),
@@ -666,93 +921,209 @@ impl App {
                         rows.extend(updates.into_values());
                     }
                 }
-                if rows.iter().any(|row| row.operation != "insert") {
-                    let Some(grid) = self.grid.as_ref().filter(|grid| grid.editable) else {
+                if !self.is_redis() {
+                    if !redis.is_empty() {
+                        self.status = "恢复草稿包含不匹配的 Redis 操作".into();
+                        return;
+                    }
+                    self.workspace_restore_start(backend, pending, rows);
+                    return;
+                }
+                let mut remaining = Vec::new();
+                let mut restored = Vec::new();
+                let mut restored_count = 0usize;
+                let mut seen_keys = Vec::new();
+                let mut staged_grid = self.grid.clone();
+                let files: Vec<grid::EditFileRef> = match serde_json::from_value(
+                    pending
+                        .get("edit_files")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                ) {
+                    Ok(files) => files,
+                    Err(error) => {
+                        self.status = i18n::UiMessage::raw(error.to_string());
+                        return;
+                    }
+                };
+                let schema = self.schema.clone().and_then(|value| {
+                    serde_json::from_value::<datapier_core::model::TableSchema>(value).ok()
+                });
+                for mut change in rows {
+                    if change.operation == "insert" {
+                        if change
+                            .values
+                            .values()
+                            .any(|value| matches!(value, datapier_core::model::Value::Large { .. }))
+                        {
+                            remaining.push(change);
+                        } else {
+                            restored.push(change);
+                            restored_count += 1;
+                        }
+                        continue;
+                    }
+                    let Some(grid) = staged_grid.as_mut().filter(|grid| grid.editable) else {
                         self.status = "请重新打开表编辑基线".into();
                         return;
                     };
-                    let Some(schema) = self.schema.clone().and_then(|value| {
-                        serde_json::from_value::<datapier_core::model::TableSchema>(value).ok()
-                    }) else {
-                        self.status = "请重新打开表编辑基线".into();
-                        return;
-                    };
-                    let Some(keys) = schema.keys.first().filter(|keys| !keys.is_empty()) else {
+                    let Some(keys) = schema
+                        .as_ref()
+                        .and_then(|schema| schema.keys.first())
+                        .filter(|keys| !keys.is_empty())
+                    else {
                         self.status = "表没有可靠行标识".into();
                         return;
                     };
+                    if !matches!(change.operation.as_str(), "update" | "delete")
+                        || change.key.len() != keys.len()
+                        || keys.iter().any(|key| !change.key.contains_key(key))
+                        || change.key.values().any(|value| {
+                            matches!(
+                                value,
+                                datapier_core::model::Value::Null
+                                    | datapier_core::model::Value::Missing
+                                    | datapier_core::model::Value::Large { .. }
+                            )
+                        })
+                    {
+                        self.status = "恢复数据的行标识不匹配".into();
+                        return;
+                    }
+                    if seen_keys.iter().any(|key| key == &change.key) {
+                        self.status = "恢复数据的行标识不唯一".into();
+                        return;
+                    }
+                    seen_keys.push(change.key.clone());
+                    if self.pending_rows.iter().chain(restored.iter()).any(
+                        |old: &datapier_core::model::RowChange| {
+                            old.operation != "insert" && old.key == change.key
+                        },
+                    ) {
+                        self.status = "目标行已有待提交变更".into();
+                        return;
+                    }
                     let columns = &grid.page.result.columns;
-                    for change in rows.iter_mut().filter(|row| row.operation != "insert") {
-                        if !matches!(change.operation.as_str(), "update" | "delete")
-                            || change.key.len() != keys.len()
-                            || keys.iter().any(|key| !change.key.contains_key(key))
-                            || change.key.values().any(|value| {
-                                matches!(
-                                    value,
-                                    datapier_core::model::Value::Null
-                                        | datapier_core::model::Value::Missing
-                                        | datapier_core::model::Value::Large { .. }
-                                )
-                            })
-                        {
-                            self.status = "恢复数据的行标识不匹配".into();
+                    let mut matched = None;
+                    for (index, row) in grid.page.rows.iter().enumerate() {
+                        if row.len() != columns.len() {
+                            self.status = "编辑基线列数不匹配".into();
                             return;
                         }
-                        let mut matched = None;
-                        for row in &grid.page.rows {
-                            if row.len() != columns.len() {
-                                self.status = "编辑基线列数不匹配".into();
+                        let before: BTreeMap<_, _> = columns
+                            .iter()
+                            .zip(row)
+                            .map(|(column, value)| (column.name.clone(), value.clone()))
+                            .collect();
+                        if before.len() != row.len() {
+                            self.status = "编辑基线包含重复列名".into();
+                            return;
+                        }
+                        if change
+                            .key
+                            .iter()
+                            .all(|(key, value)| before.get(key) == Some(value))
+                        {
+                            if matched.is_some() {
+                                self.status = "恢复数据的行标识不唯一".into();
                                 return;
                             }
-                            let before: BTreeMap<_, _> = columns
+                            matched = Some((grid.page.start + index as u64, before));
+                        }
+                    }
+                    let Some((row, before)) = matched else {
+                        remaining.push(change);
+                        continue;
+                    };
+                    if grid.edits().keys().any(|cell| cell.row == row) {
+                        self.status = "目标行已有待提交变更".into();
+                        return;
+                    }
+                    if (!change.before.is_empty() && change.before != before)
+                        || change.values.keys().any(|key| !before.contains_key(key))
+                    {
+                        self.status = "恢复数据与当前行基线不一致".into();
+                        return;
+                    }
+                    change.before = before;
+                    if change.operation == "update" {
+                        for (name, value) in &change.values {
+                            let Some(column) = grid
+                                .page
+                                .result
+                                .columns
                                 .iter()
-                                .zip(row)
-                                .map(|(column, value)| (column.name.clone(), value.clone()))
-                                .collect();
-                            if before.len() != row.len() {
-                                self.status = "编辑基线包含重复列名".into();
+                                .position(|column| column.name == *name)
+                            else {
+                                self.status = "恢复数据缺少列".into();
                                 return;
-                            }
-                            if change
-                                .key
-                                .iter()
-                                .all(|(key, value)| before.get(key) == Some(value))
+                            };
+                            let cell = Cell { row, column };
+                            let result = if let datapier_core::model::Value::Large { id, .. } =
+                                value
                             {
-                                if matched.is_some() {
-                                    self.status = "恢复数据的行标识不唯一".into();
+                                let Some(file) = files.iter().find(|file| file.edit_file_id == *id)
+                                else {
+                                    self.status = "大值草稿缺少受控文件登记".into();
                                     return;
-                                }
-                                matched = Some(before);
+                                };
+                                grid.edit_file(
+                                    cell,
+                                    value.clone(),
+                                    file.edit_file_id,
+                                    file.edit_file_revision,
+                                )
+                            } else {
+                                grid.edit(cell, value.clone())
+                            };
+                            if let Err(error) = result {
+                                self.status = workbench::grid_error(error);
+                                return;
                             }
                         }
-                        let Some(before) = matched else {
-                            self.status = "恢复目标不在当前页，请加载对应行".into();
-                            return;
-                        };
-                        if (!change.before.is_empty() && change.before != before)
-                            || change.values.keys().any(|key| !before.contains_key(key))
-                        {
-                            self.status = "恢复数据与当前行基线不一致".into();
-                            return;
-                        }
-                        change.before = before;
+                        restored_count += 1;
+                    } else {
+                        restored.push(change);
+                        restored_count += 1;
                     }
                 }
-                self.pending_rows = rows;
-                self.redis_changes = redis;
+                if restored_count == 0 && redis.is_empty() {
+                    self.status = "恢复目标不在当前页，请加载对应行".into();
+                    return;
+                }
+                self.grid = staged_grid;
+                self.pending_rows.extend(restored);
+                self.redis_changes.extend(redis);
                 self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+                self.draft_revision = self.draft_revision.wrapping_add(1);
                 self.clear_redis_edit_state();
-                self.tabs[self.active].pending = Value::Null;
+                if remaining.is_empty() {
+                    self.tabs[self.active].pending = Value::Null;
+                } else {
+                    let mut pending = pending;
+                    pending["rows"] = json!(remaining);
+                    pending["redis"] = json!([]);
+                    pending["edits"] = json!([]);
+                    pending["rows_include_edits"] = json!(true);
+                    self.tabs[self.active].pending = pending;
+                }
+                self.tabs[self.active].pending_live = false;
                 self.dirty = true;
                 self.detail = serde_json::to_string_pretty(
                     &json!({"rows":self.pending_rows,"redis":self.redis_changes}),
                 )
                 .unwrap_or_default();
                 self.set_detail_context("草稿详情");
-                self.status = "编辑意图已恢复；提交时将检查原值，请先确认预览".into();
+                self.status = if self.tabs[self.active].pending.is_null() {
+                    "编辑意图已恢复；提交时将检查原值，请先确认预览".into()
+                } else {
+                    "已恢复当前页草稿；其他目标请加载对应行后继续恢复".into()
+                };
             }
             "undo-row" => {
                 self.pending_rows.pop();
+                self.pending_edit_files.retain(|file| self.pending_rows.iter().any(|row| row.values.values().any(|value| matches!(value, datapier_core::model::Value::Large { id, .. } if *id == file.edit_file_id))));
+                self.draft_revision = self.draft_revision.wrapping_add(1);
                 self.detail = serde_json::to_string_pretty(&self.pending_rows).unwrap_or_default();
                 self.set_detail_context("草稿详情");
                 self.dirty = true;
@@ -768,6 +1139,7 @@ impl App {
                     if let Some(g) = &mut self.grid {
                         match g.apply_paste(preview) {
                             Ok(()) => {
+                                self.draft_revision = self.draft_revision.wrapping_add(1);
                                 self.dirty = true;
                                 self.status = "粘贴已加入待提交变更".into();
                             }
@@ -822,8 +1194,10 @@ impl App {
                     g.discard();
                 }
                 self.pending_rows.clear();
+                self.pending_edit_files.clear();
                 self.redis_changes.clear();
                 self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+                self.draft_revision = self.draft_revision.wrapping_add(1);
                 self.paste_preview = None;
                 self.tabs[self.active].pending = Value::Null;
                 self.tabs[self.active].pending_live = false;
@@ -856,6 +1230,7 @@ impl App {
             "redis-undo" => {
                 self.redis_changes.pop();
                 self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+                self.draft_revision = self.draft_revision.wrapping_add(1);
                 self.detail = serde_json::to_string_pretty(&self.redis_changes).unwrap_or_default();
                 self.set_detail_context("草稿详情");
                 self.dirty = true;
@@ -894,6 +1269,7 @@ impl App {
                         let error = workbench::grid_cell_error(e, g, cell);
                         self.field_error("cell", error);
                     } else {
+                        self.draft_revision = self.draft_revision.wrapping_add(1);
                         self.dirty = true;
                     }
                 }

@@ -2,6 +2,7 @@
 //! 凭据不写入 SQLite；原生读取使用有界独立线程，写入和删除在线程池完成。
 mod archery;
 mod authorization;
+mod edit_files;
 mod migration;
 mod profiles;
 mod results;
@@ -167,6 +168,16 @@ impl Store {
             }
         }
         Ok(preview)
+    }
+
+    /// 只读取工作区版本，供切换前检查；不加载可能很大的编辑快照。
+    pub async fn workspace_revision(&self, id: &str) -> Result<u64> {
+        let revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM workspaces WHERE id=?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        u64::try_from(revision.unwrap_or(0)).map_err(|_| AppError::invalid("工作区版本无效"))
     }
 
     /// 加载工作区快照及版本；不存在时返回版本零和空状态。

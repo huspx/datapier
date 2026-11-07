@@ -265,6 +265,7 @@ impl App {
         }
         self.redis_changes.push(change);
         self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+        self.draft_revision = self.draft_revision.wrapping_add(1);
         self.workbench
             .redis_undo_groups
             .push((start, self.redis_changes.len()));

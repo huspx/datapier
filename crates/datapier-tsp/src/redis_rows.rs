@@ -216,6 +216,7 @@ impl App {
                 let start = self.redis_changes.len();
                 self.redis_changes.extend(changes);
                 self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+                self.draft_revision = self.draft_revision.wrapping_add(1);
                 self.workbench
                     .redis_undo_groups
                     .retain(|&(_, end)| end <= start);
@@ -254,6 +255,33 @@ impl App {
                 return Err(i18n::UiMessage::key(
                     "已暂存键删除或重命名，不能继续删除条目",
                 ));
+            }
+            if matches!(
+                (kind, op),
+                ("set", "set_replace_member") | ("zset", "zset_replace_member")
+            ) {
+                // 大身份需由 Engine 解引用；本地不能用显示摘要判断是否为同一成员。
+                let decode = |field: &str| -> std::result::Result<Vec<u8>, i18n::UiMessage> {
+                    let value: DataValue =
+                        serde_json::from_value(change.get(field).cloned().ok_or_else(invalid)?)
+                            .map_err(|_| invalid())?;
+                    match value {
+                        DataValue::Bytes(encoded) => {
+                            STANDARD.decode(encoded).map_err(|_| invalid())
+                        }
+                        DataValue::Text(text) => Ok(text.into_bytes()),
+                        _ => Err(invalid()),
+                    }
+                };
+                let old = decode("member")?;
+                let new = decode("new_member")?;
+                if old == identity {
+                    present = false;
+                }
+                if new == identity {
+                    present = true;
+                }
+                continue;
             }
             if op != add && op != remove {
                 continue;

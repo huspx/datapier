@@ -35,9 +35,9 @@ fn redis_key_copy_preserves_original_bytes() {
 }
 
 #[test]
-fn cli_toggle_saves_visibility_for_both_directions() {
+fn cli_toggle_persists_visibility_for_both_directions() {
     for initial in [false, true] {
-        let (backend, mut requests, _) = Backend::scripted();
+        let (backend, _, _) = Backend::scripted();
         let mut app = app_for("redis", "string", page(&["value"], vec![]));
         app.workspace_loaded = true;
         app.workbench.cli = initial;
@@ -45,15 +45,16 @@ fn cli_toggle_saves_visibility_for_both_directions() {
 
         app.action("cli-toggle", &backend);
         assert!(app.dirty);
-        app.save_workspace(&backend);
-        let request = requests.try_recv().unwrap();
-        assert_eq!(request.method, "workspace.save");
-        assert_eq!(
-            request.params["state"]["tabs"][0]["browse"]["cli_visible"],
-            !initial
+        let state = serde_json::to_value(app.workspace_snapshot()).unwrap();
+        let mut restored = App::new("restored".into());
+        restored.response(
+            Response {
+                tag: "workspace.load".into(),
+                result: Ok(json!({"revision":1,"state":state})),
+            },
+            &backend,
         );
-        assert!(app.saving);
-        assert!(!app.dirty);
+        assert_eq!(restored.workbench.cli, !initial);
     }
 }
 
@@ -336,7 +337,7 @@ fn key(name: &str, shift: bool) -> tern_sdk::Key {
 }
 #[test]
 fn regression_refresh_finishes_inline_without_replacing_its_row() {
-    let (backend, mut requests, _) = Backend::scripted();
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = app_for(
         "mysql",
         "table",
@@ -357,6 +358,16 @@ fn regression_refresh_finishes_inline_without_replacing_its_row() {
     let cell = Cell { row: 1, column: 1 };
     app.grid.as_mut().unwrap().select(cell, false).unwrap();
     assert!(app.workbench_key(&key("enter", false), &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    assert!(app.workbench.inline.is_none());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     app.field_set("cell", "draft");
     let result = app.grid.as_ref().unwrap().page.result.id;
     app.action("browse", &backend);
@@ -403,7 +414,7 @@ fn regression_redis_history_return_keeps_key_drafts_and_cli_result() {
 
 #[test]
 fn inline_commit_cancel_and_tab_do_not_send_writes() {
-    let (backend, mut requests, _) = Backend::scripted();
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = app_for(
         "mysql",
         "table",
@@ -416,6 +427,16 @@ fn inline_commit_cancel_and_tab_do_not_send_writes() {
         ),
     );
     assert!(app.workbench_key(&key("enter", false), &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    assert!(app.workbench.inline.is_none());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     app.field_set("cell", "修改😀");
     assert!(app.workbench_key(&key("tab", false), &backend));
     assert_eq!(
@@ -445,6 +466,15 @@ fn inline_commit_cancel_and_tab_do_not_send_writes() {
         page(&["a"], vec![vec![DataValue::Integer("1".into())]]),
     );
     numeric.workbench_key(&key("enter", false), &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    numeric.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     numeric.field_set("cell", "invalid");
     numeric.workbench_key(&key("enter", false), &backend);
     assert!(numeric.workbench.inline.is_some());
