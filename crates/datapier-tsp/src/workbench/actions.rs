@@ -32,28 +32,62 @@ impl App {
             }
             return true;
         }
+        if name == "result-count" {
+            if self.page_token.is_none()
+                && let Some(id) = self.result_id.clone()
+            {
+                let size = self.result_page_size(&id);
+                let state = self
+                    .workbench
+                    .query_ui
+                    .pagination
+                    .entry(id.clone())
+                    .or_insert_with(|| crate::query_ui::ResultPaginationState {
+                        page_size: size,
+                        ..Default::default()
+                    });
+                if state.count_token.is_none() {
+                    let token = Uuid::new_v4();
+                    let tag = format!(
+                        "{}:{}:result.count/{id}/{token}",
+                        self.tabs[self.active].id, self.generation
+                    );
+                    match backend.request(tag, "result.count", json!({"result_id":id})) {
+                        Ok(()) => state.count_token = Some(token),
+                        Err(error) => self.status = UiMessage::raw(error.to_string()),
+                    }
+                }
+            }
+            return true;
+        }
         if let Some(rest) = name.strip_prefix("result-size:") {
             if let Some((kind, size)) = rest.split_once(':')
+                && matches!(kind, "grid" | "cli")
                 && let Ok(size) = size.parse::<u64>()
-                && matches!(size, 20 | 50 | 100)
+                && (1..=1000).contains(&size)
             {
-                let id = if kind == "cli" {
+                let cli = kind == "cli";
+                if (cli && self.workbench.cli_page_token.is_some())
+                    || (!cli && self.page_token.is_some())
+                {
+                    return true;
+                }
+                if !cli && self.has_live_drafts() {
+                    self.status = "请先提交或丢弃草稿".into();
+                    return true;
+                }
+                let id = if cli {
                     self.workbench.cli_result_id.clone()
                 } else {
                     self.result_id.clone()
                 };
                 if let Some(id) = id {
-                    let state = self
-                        .workbench
-                        .query_ui
-                        .pagination
-                        .entry(id.clone())
-                        .or_default();
+                    let state = self.workbench.query_ui.pagination.entry(id).or_default();
                     state.page_size = size;
-                    state.starts.clear();
-                    state.token = None;
+                    state.starts = vec![0];
+                    state.start = 0;
                     self.workbench.generic_select = None;
-                    if kind == "cli" {
+                    if cli {
                         self.workbench.cli_page_history.clear();
                         self.workbench_cli_page(backend, 0);
                     } else {
@@ -367,6 +401,8 @@ impl App {
                 let results = record.results.clone();
                 self.close_result_info(false);
                 self.workbench_cli_preserve_pending_page(backend);
+                self.workbench.cli_page_token = None;
+                self.workbench.cli_page_transition = None;
                 self.workbench_cli_store_grid();
                 self.workbench.cli_selected = Some(record_id);
                 self.workbench.cli_results = results;
@@ -392,17 +428,6 @@ impl App {
                     self.workbench_clear_cli_value();
                     self.workbench.cli_page_token = None;
                     self.workbench.cli_page_transition = None;
-                }
-                if self.profile.as_ref().is_some_and(|p| p.is_archery())
-                    && let Some(id) = self.workbench.cli_result_id.clone()
-                    && self
-                        .workbench
-                        .query_ui
-                        .pagination
-                        .get(&id)
-                        .is_none_or(|state| state.starts.is_empty() && state.token.is_none())
-                {
-                    self.request_result_pagination(backend, &id);
                 }
             }
             return true;
@@ -551,30 +576,6 @@ impl App {
                     self.workbench.cli_result_id = None;
                     self.workbench.cli_page_history.clear();
                     self.workbench.cli_page_token = None;
-                }
-            }
-            "cli-next" | "cli-previous"
-                if self.profile.as_ref().is_some_and(|p| p.is_archery()) =>
-            {
-                if self.workbench.cli_page_token.is_none() {
-                    let target = self
-                        .workbench
-                        .cli_result_id
-                        .as_ref()
-                        .and_then(|id| self.workbench.query_ui.pagination.get(id))
-                        .and_then(|state| {
-                            let current = self.workbench.cli_grid.as_ref()?.page.start;
-                            let index = state.starts.iter().position(|start| *start == current)?;
-                            let index = if name == "cli-next" {
-                                index.checked_add(1)?
-                            } else {
-                                index.checked_sub(1)?
-                            };
-                            state.starts.get(index).copied()
-                        });
-                    if let Some(start) = target {
-                        self.workbench_cli_page(backend, start);
-                    }
                 }
             }
             "cli-next" => {

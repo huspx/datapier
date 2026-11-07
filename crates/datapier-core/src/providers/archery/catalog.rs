@@ -683,7 +683,7 @@ pub(super) async fn browse(
     cancel: &CancellationToken,
 ) -> Result<Json> {
     let limit = match params.get("limit") {
-        None | Some(Json::Null) => 1_000,
+        None | Some(Json::Null) => sink.store.settings().await?.archery.request_rows as u64,
         Some(value) => value
             .as_u64()
             .filter(|n| (1..=10_000).contains(n))

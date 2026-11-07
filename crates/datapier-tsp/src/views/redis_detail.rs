@@ -183,36 +183,14 @@ pub(super) fn cli_panel(app: &App) -> Node<Msg> {
     }
     if let Some(grid) = &app.workbench.cli_grid {
         result_head = result_head.child(
-            html::span(
-                if grid.page.result.summary["origin"]["source"].as_str() == Some("archery") {
-                    crate::i18n::format_message(
-                        "本页 {page} 行 · 已返回 {total} 行",
-                        &[
-                            ("page", &grid.page.rows.len().to_string()),
-                            ("total", &grid.page.result.row_count.to_string()),
-                        ],
-                    )
-                } else {
-                    format!(
-                        "{}–{} / {}",
-                        grid.page.start + 1,
-                        grid.page.start + grid.page.rows.len() as u64,
-                        grid.page.result.row_count
-                    )
-                },
-            )
+            html::span(crate::i18n::format_message(
+                "本页 {count} 行",
+                &[("count", &grid.page.rows.len().to_string())],
+            ))
             .class("muted"),
         );
     }
     result_head = result_head.child(html::span("").class("spacer"));
-    let can_previous = app
-        .workbench
-        .cli_grid
-        .as_ref()
-        .is_some_and(|grid| grid.page.start > 0);
-    let can_next = app.workbench.cli_grid.as_ref().is_some_and(|grid| {
-        grid.page.start + (grid.page.rows.len() as u64) < grid.page.result.row_count
-    });
     let info = app
         .workbench
         .cli_grid
@@ -224,22 +202,8 @@ pub(super) fn cli_panel(app: &App) -> Node<Msg> {
         "cli-export",
         app.workbench.cli_result_id.is_some(),
     ));
-    if let Some(grid) = app
-        .workbench
-        .cli_grid
-        .as_ref()
-        .filter(|grid| grid.page.result.summary["origin"]["source"].as_str() == Some("archery"))
-    {
-        result_head = result_head.child(super::grid_view::archery_pagination(app, grid, true));
-    } else {
-        result_head = result_head
-            .child(page_button(
-                "arrow-left",
-                "上一页",
-                "cli-previous",
-                can_previous,
-            ))
-            .child(page_button("arrow-right", "下一页", "cli-next", can_next));
+    if let Some(grid) = &app.workbench.cli_grid {
+        result_head = result_head.child(super::grid_view::result_pagination(app, grid, true));
     }
     if let Some(info) = info {
         result_head = result_head.child(info);

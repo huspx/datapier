@@ -21,6 +21,112 @@ impl RedisSession {
         }
         Ok(json!({"type":kind,"expires_at_ms":expires}))
     }
+    pub(super) async fn export_read(&mut self, p: &Json) -> Result<Json> {
+        let t = target(p, &self.profile)?;
+        let k = key(&t)?;
+        let kind: String = param(p, "type")?;
+        let position = p.get("cursor").and_then(Json::as_u64).unwrap_or(0);
+        let conn = self.conn.as_mut().unwrap();
+        let actual: String = query(conn, &[b"TYPE".to_vec(), k.clone()]).await?;
+        if actual != kind {
+            return Err(AppError::conflict("导出期间 key 类型发生变化"));
+        }
+        let (rows, next): (Vec<Vec<Value>>, Option<u64>) = match kind.as_str() {
+            "string" => {
+                let end = position
+                    .checked_add(49151)
+                    .ok_or_else(|| AppError::invalid("Redis 字段偏移无效"))?;
+                let value: Vec<u8> = query(
+                    conn,
+                    &[
+                        b"GETRANGE".to_vec(),
+                        k,
+                        position.to_string().into_bytes(),
+                        end.to_string().into_bytes(),
+                    ],
+                )
+                .await?;
+                let next = if value.len() == 49152 {
+                    Some(position + 49152)
+                } else {
+                    None
+                };
+                (vec![vec![val(value)]], next)
+            }
+            "list" => {
+                let values: Vec<Vec<u8>> = query(
+                    conn,
+                    &[
+                        b"LRANGE".to_vec(),
+                        k,
+                        position.to_string().into_bytes(),
+                        (position + 99).to_string().into_bytes(),
+                    ],
+                )
+                .await?;
+                let count = values.len();
+                let rows = values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        vec![
+                            Value::Integer((position + i as u64).to_string()),
+                            val(value),
+                        ]
+                    })
+                    .collect();
+                (
+                    rows,
+                    if count == 100 {
+                        Some(position + 100)
+                    } else {
+                        None
+                    },
+                )
+            }
+            "hash" | "set" | "zset" => {
+                let cmd = match kind.as_str() {
+                    "hash" => "HSCAN",
+                    "set" => "SSCAN",
+                    _ => "ZSCAN",
+                };
+                let (cursor, values): (u64, Vec<Vec<u8>>) = query(
+                    conn,
+                    &[
+                        cmd.as_bytes().to_vec(),
+                        k,
+                        position.to_string().into_bytes(),
+                        b"COUNT".to_vec(),
+                        b"100".to_vec(),
+                    ],
+                )
+                .await?;
+                if kind != "set" && values.len() % 2 != 0 {
+                    return Err(AppError::new("database", "无效扫描响应"));
+                }
+                let mut rows = Vec::new();
+                let mut iter = values.into_iter();
+                while let Some(member) = iter.next() {
+                    let mut row = vec![val(member)];
+                    if kind != "set" {
+                        let value = iter.next().unwrap();
+                        row.push(if kind == "hash" {
+                            val(value)
+                        } else {
+                            Value::Float(
+                                String::from_utf8(value)
+                                    .map_err(|e| AppError::new("database", e.to_string()))?,
+                            )
+                        });
+                    }
+                    rows.push(row);
+                }
+                (rows, if cursor == 0 { None } else { Some(cursor) })
+            }
+            _ => return Err(AppError::invalid("不支持的 Redis 类型")),
+        };
+        Ok(json!({"rows":rows,"next":next}))
+    }
     pub(super) async fn import_begin(&mut self, p: &Json, sink: &ExecutionSink) -> Result<Json> {
         self.profile.ensure_write()?;
         let t = target(p, &self.profile)?;

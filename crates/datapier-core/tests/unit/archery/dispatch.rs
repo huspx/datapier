@@ -85,6 +85,8 @@ async fn cancelling_query_waiting_for_service_permit_remains_unsent() {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "fixture".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadOnly,
         connection: ConnectionConfig::Archery(ArcheryConnection {

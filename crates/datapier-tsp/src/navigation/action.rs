@@ -9,6 +9,62 @@ impl App {
             || self.navigation_tree_action(name, backend)
     }
 
+    pub(super) fn redis_discover(&mut self, backend: &Backend, form: bool) {
+        let (profile_id, profile, secret, session) = if form {
+            if self.navigation.form_redis_discovery.loading {
+                return;
+            }
+            let profile = match self
+                .form_profile()
+                .and_then(|p| serde_json::to_value(p).map_err(|e| e.to_string()))
+            {
+                Ok(profile) => profile,
+                Err(error) => {
+                    self.navigation.form_redis_discovery.error = Some(error);
+                    return;
+                }
+            };
+            let secret = if self.field("password").is_empty() {
+                Value::Null
+            } else {
+                json!(self.field("password"))
+            };
+            (None, Some(profile), secret, None)
+        } else {
+            let (Some(profile), Some(session)) = (self.profile.as_ref(), self.session_id()) else {
+                return;
+            };
+            let id = profile.id;
+            if self
+                .navigation
+                .redis_discovery
+                .get(&id)
+                .is_some_and(|state| state.loading)
+            {
+                return;
+            }
+            (Some(id), None, Value::Null, Some(json!(session)))
+        };
+        let state = if let Some(id) = profile_id {
+            self.navigation.redis_discovery.entry(id).or_default()
+        } else {
+            &mut self.navigation.form_redis_discovery
+        };
+        state.loading = true;
+        state.error = None;
+        let params = json!({"profile_id":profile_id,"profile":profile,"secret":secret,"session_id":session,"refresh":true});
+        self.navigation_request(
+            backend,
+            Pending::RedisDiscovery {
+                profile_id,
+                profile,
+                secret,
+                session,
+            },
+            "database.list",
+            params,
+        );
+    }
     pub(super) fn navigation_connection_action(&mut self, name: &str, backend: &Backend) -> bool {
         if name == "navigation-refresh" {
             self.navigation_load_tree(backend, true);
@@ -20,6 +76,9 @@ impl App {
             .and_then(|value| value.parse::<bool>().ok())
         {
             self.navigation.redis_db_menu = open;
+            if open {
+                self.redis_discover(backend, false);
+            }
             return true;
         }
         if let Some(open) = name
@@ -27,6 +86,9 @@ impl App {
             .and_then(|value| value.parse::<bool>().ok())
         {
             self.navigation.form_redis_db_menu = open;
+            if open {
+                self.redis_discover(backend, true);
+            }
             return true;
         }
         if let Some(db) = name

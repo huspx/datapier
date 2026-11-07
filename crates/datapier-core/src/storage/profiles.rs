@@ -3,10 +3,11 @@ use super::*;
 impl Store {
     /// 按名称和 ID 返回保存的连接配置，不包含凭据。
     pub async fn profiles(&self) -> Result<Vec<Profile>> {
-        let rows = sqlx::query("SELECT payload,archery_server_id,archery_instance_id,credential_saved,id,name FROM profiles ORDER BY name,id").fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT payload,archery_server_id,archery_instance_id,credential_saved,id,name,revision FROM profiles ORDER BY name,id").fetch_all(&self.pool).await?;
         rows.iter()
             .map(|r| {
-                let profile: Profile = serde_json::from_str(r.get::<&str, _>(0))?;
+                let mut profile: Profile = serde_json::from_str(r.get::<&str, _>(0))?;
+                profile.revision = r.get::<i64, _>(6) as u64;
                 let server: Option<String> = r.get(1);
                 let instance: Option<i64> = r.get(2);
                 let saved: i64 = r.get(3);
@@ -27,6 +28,13 @@ impl Store {
                 Ok(profile)
             })
             .collect()
+    }
+    pub async fn profile(&self, id: Uuid) -> Result<Profile> {
+        self.profiles()
+            .await?
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AppError::new("not_found", "连接不存在"))
     }
     /// 保存连接配置和可选凭据；返回是否已标记为保存到系统凭据库。
     /// 旧凭据无法删除时拒绝降级，保留原有追踪状态。
@@ -55,17 +63,31 @@ impl Store {
         persist: bool,
     ) -> Result<bool> {
         let _guard = self.profile_gate.lock().await;
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT payload FROM profiles WHERE id=?")
+        let existing: Option<(String, i64)> =
+            sqlx::query_as("SELECT payload,revision FROM profiles WHERE id=?")
                 .bind(profile.id.to_string())
                 .fetch_optional(&self.pool)
                 .await?;
-        if let Some(payload) = existing {
-            let old: Profile = serde_json::from_str(&payload)?;
+        if let Some((payload, revision)) = &existing {
+            let old: Profile = serde_json::from_str(payload)?;
             if old.is_archery() {
                 return Err(AppError::conflict("不能替换连接来源"));
             }
+            if *revision as u64 != profile.revision {
+                return Err(AppError::conflict("连接已更新，请重新载入"));
+            }
+        } else if profile.revision != 1 {
+            return Err(AppError::conflict("新连接版本无效"));
         }
+        let next = if existing.is_some() {
+            profile
+                .revision
+                .checked_add(1)
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or_else(|| AppError::invalid("连接版本溢出"))?
+        } else {
+            1
+        };
         let old: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(profile.id.to_string())
@@ -98,9 +120,11 @@ impl Store {
             }
             self.secrets.write().await.insert(profile.id, secret);
         }
-        sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,payload=excluded.payload,credential_saved=excluded.credential_saved")
-            .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(profile)?)
-            .bind(i64::from(tracked || saved)).execute(&self.pool).await?;
+        let mut saved_profile = profile.clone();
+        saved_profile.revision = next;
+        sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved,revision) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,payload=excluded.payload,credential_saved=excluded.credential_saved,revision=excluded.revision")
+            .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(&saved_profile)?)
+            .bind(i64::from(tracked || saved)).bind(next as i64).execute(&self.pool).await?;
         Ok(saved)
     }
 
@@ -128,6 +152,25 @@ impl Store {
         Ok(Some(secret))
     }
 
+    /// 显式清除系统凭据及会话副本。
+    pub async fn clear_profile_secret(&self, id: Uuid) -> Result<()> {
+        let _guard = self.profile_gate.lock().await;
+        let saved: Option<i64> =
+            sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        let saved = saved.ok_or_else(|| AppError::new("not_found", "连接不存在"))?;
+        if saved == 1 {
+            self.delete_credential(id).await?;
+        }
+        sqlx::query("UPDATE profiles SET credential_saved=0 WHERE id=?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        self.secrets.write().await.remove(&id);
+        Ok(())
+    }
     /// 删除配置和会话内凭据；标记为持久化的凭据删除失败时保留配置。
     pub async fn delete_profile(&self, id: Uuid) -> Result<()> {
         let store = self.clone();

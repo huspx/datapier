@@ -16,21 +16,17 @@ pub struct QueryUiState {
 pub struct ResultPaginationState {
     pub page_size: u64,
     pub starts: Vec<u64>,
-    pub token: Option<Uuid>,
     pub start: u64,
-    pub complete: Option<bool>,
-    pub row_count: Option<u64>,
+    pub count_token: Option<Uuid>,
 }
 
 impl Default for ResultPaginationState {
     fn default() -> Self {
         Self {
-            page_size: 20,
-            starts: Vec::new(),
-            token: None,
+            page_size: 100,
+            starts: vec![0],
             start: 0,
-            complete: None,
-            row_count: None,
+            count_token: None,
         }
     }
 }
@@ -64,144 +60,54 @@ impl App {
     }
 
     pub(super) fn remember_result_start(&mut self, page: &ResultPage) {
-        self.workbench
-            .query_ui
-            .pagination
-            .entry(page.result.id.to_string())
-            .or_default()
-            .start = page.start;
-    }
-    pub(super) fn refresh_changed_result_plan(&mut self, backend: &Backend, page: &ResultPage) {
         let id = page.result.id.to_string();
-        let changed = self
+        let cli = self.workbench.cli_result_id.as_deref() == Some(id.as_str());
+        let size = self.result_page_size_for(&id, cli);
+        let state = self
             .workbench
             .query_ui
             .pagination
-            .get(&id)
-            .is_some_and(|state| {
-                state.token.is_none()
-                    && (state
-                        .row_count
-                        .is_some_and(|count| count != page.result.row_count)
-                        || state
-                            .complete
-                            .is_some_and(|complete| complete != page.result.complete))
+            .entry(id)
+            .or_insert_with(|| ResultPaginationState {
+                page_size: size,
+                ..Default::default()
             });
-        if changed {
-            if let Some(state) = self.workbench.query_ui.pagination.get_mut(&id) {
-                state.starts.clear();
-            }
-            self.request_result_pagination(backend, &id);
+        state.start = page.start;
+        if let Some(index) = state.starts.iter().position(|start| *start == page.start) {
+            state.starts.truncate(index + 1);
+        } else {
+            state.starts.retain(|start| *start < page.start);
+            state.starts.push(page.start);
         }
+        if let Some(next) = page.next.filter(|next| *next > page.start) {
+            state.starts.push(next);
+        }
+    }
+
+    pub(super) fn result_page_size_for(&self, id: &str, cli: bool) -> u64 {
+        self.workbench.query_ui.pagination.get(id).map_or_else(
+            || {
+                let paging = &self.settings.paging;
+                if self
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.is_archery())
+                {
+                    paging.archery_grid_rows as u64
+                } else if self.is_redis() {
+                    paging.redis_value_rows as u64
+                } else if !cli && self.browse_result {
+                    paging.mysql_table_rows as u64
+                } else {
+                    paging.sql_rows as u64
+                }
+            },
+            |state| state.page_size,
+        )
     }
 
     pub(super) fn result_page_size(&self, id: &str) -> u64 {
-        self.workbench
-            .query_ui
-            .pagination
-            .get(id)
-            .map_or(20, |state| state.page_size)
-    }
-
-    // 页计划可能外置超宽行；取得稳定边界后才能读取对应页面。
-    pub(super) fn prepare_result_page(&mut self, backend: &Backend, id: &str, start: u64) -> bool {
-        let state = self
-            .workbench
-            .query_ui
-            .pagination
-            .entry(id.to_owned())
-            .or_default();
-        state.start = start;
-        if !state.starts.is_empty() && state.token.is_none() {
-            return true;
-        }
-        if state.token.is_none() {
-            self.request_result_pagination(backend, id);
-        }
-        false
-    }
-
-    pub(super) fn request_result_pagination(&mut self, backend: &Backend, id: &str) {
-        let token = Uuid::new_v4();
-        let state = self
-            .workbench
-            .query_ui
-            .pagination
-            .entry(id.to_owned())
-            .or_default();
-        state.token = Some(token);
-        let size = state.page_size;
-        let tag = format!(
-            "{}:{}:result.pagination/{token}/{id}",
-            self.tabs[self.active].id, self.generation
-        );
-        if let Err(error) = backend.request(
-            tag,
-            "result.pagination",
-            json!({"result_id":id,"page_size":size,"max_bytes":1048576}),
-        ) {
-            self.workbench
-                .query_ui
-                .pagination
-                .get_mut(id)
-                .unwrap()
-                .token = None;
-            self.status = UiMessage::raw(error.to_string());
-        }
-    }
-
-    pub(super) fn accept_result_pagination(&mut self, tag: &str, value: Value, backend: &Backend) {
-        let Some((token, id)) = tag
-            .strip_prefix("result.pagination/")
-            .and_then(|s| s.split_once('/'))
-        else {
-            return;
-        };
-        let Some(state) = self.workbench.query_ui.pagination.get_mut(id) else {
-            return;
-        };
-        if Uuid::parse_str(token).ok() != state.token || state.token.is_none() {
-            return;
-        }
-        state.token = None;
-        let Some(size) = value.get("page_size").and_then(Value::as_u64) else {
-            return;
-        };
-        let Some(complete) = value.get("complete").and_then(Value::as_bool) else {
-            return;
-        };
-        let Some(row_count) = value.get("row_count").and_then(Value::as_u64) else {
-            return;
-        };
-        if size != state.page_size {
-            return;
-        }
-        let Some(starts) = value
-            .get("starts")
-            .and_then(Value::as_array)
-            .and_then(|items| items.iter().map(Value::as_u64).collect::<Option<Vec<_>>>())
-        else {
-            return;
-        };
-        if starts.first() != Some(&0) || !starts.windows(2).all(|pair| pair[0] < pair[1]) {
-            return;
-        }
-        state.starts = starts;
-        state.complete = Some(complete);
-        state.row_count = Some(row_count);
-        let start = state
-            .starts
-            .iter()
-            .rev()
-            .find(|start| **start <= state.start)
-            .copied()
-            .unwrap_or(0);
-        state.start = start;
-        if self.result_id.as_deref() == Some(id) {
-            self.page(backend, start);
-        } else if self.workbench.cli_result_id.as_deref() == Some(id) {
-            self.workbench_cli_page(backend, start);
-        }
+        self.result_page_size_for(id, false)
     }
 }
 

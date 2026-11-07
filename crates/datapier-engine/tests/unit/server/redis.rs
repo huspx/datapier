@@ -8,6 +8,8 @@ async fn redis_test_session(engine: &Arc<Engine>, owner: Uuid, mode: AccessMode)
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "redis-test".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: model::ProviderKind::Redis,
         access_mode: mode,
         connection: model::ConnectionConfig::Direct(model::DirectConnection {
@@ -16,6 +18,7 @@ async fn redis_test_session(engine: &Arc<Engine>, owner: Uuid, mode: AccessMode)
             username: String::new(),
             database: None,
             redis_db: 0,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -107,7 +110,6 @@ async fn redis_auth_is_rejected_before_any_task_is_persisted() {
         .await
         .unwrap();
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -268,7 +270,6 @@ async fn redis_select_changes_command_task_db_but_not_browser_db() {
         .await
         .unwrap();
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -379,7 +380,6 @@ async fn redis_transaction_select_tracks_only_successful_exec() {
         .await
         .unwrap();
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -424,6 +424,8 @@ async fn redis_first_command_connect_cancels_before_proxy_releases() {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "redis-proxy".into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: model::ProviderKind::Redis,
         access_mode: AccessMode::ReadWrite,
         connection: model::ConnectionConfig::Direct(model::DirectConnection {
@@ -432,6 +434,7 @@ async fn redis_first_command_connect_cancels_before_proxy_releases() {
             username: String::new(),
             database: None,
             redis_db: 1,
+            redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
         }),
@@ -488,7 +491,6 @@ async fn redis_first_command_connect_cancels_before_proxy_releases() {
     assert!(!task.sent);
     proxy.abort();
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -583,7 +585,6 @@ async fn redis_cancelled_reads_release_both_client_sessions() {
     // 已在暂停窗口内证明读取取消和关闭完成；等待注入的全局暂停到期，避免污染后续用例。
     tokio::time::sleep_until(resume_at).await;
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }

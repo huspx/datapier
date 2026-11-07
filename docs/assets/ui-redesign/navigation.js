@@ -26,6 +26,7 @@ function openConnectionForm(
     password: '',
     database: '',
     redisDb: mode === 'new-connection' ? 0 : state.redisDb,
+    redisDatabasesOverride: mode === 'new-connection' ? '' : state.redisDatabasesOverride,
     tls: false,
     ca: '',
     cert: '',
@@ -142,10 +143,7 @@ function connectionFormBody() {
       ? `<label class="wide">${t('defaultDatabase')}<input data-connection-field="database" value="${
         h(form.database)
       }" placeholder="${t('defaultDatabaseHelp')}"></label>${databaseScope()}`
-      : `<label class="wide">${t('initialDb')}<select data-connection-field="redisDb">${
-        Array.from({ length: 16 }, (_, n) =>
-          `<option value="${n}" ${Number(form.redisDb) === n ? 'selected' : ''}>DB ${n}</option>`).join('')
-      }</select></label>`
+      : redisConnectionPreview(form)
   }<label class="wide"><span><input type="checkbox" data-connection-check="readOnly" ${
     form.readOnly ? 'checked' : ''
   }> ${h(t('readOnlyConnection'))}</span></label><details class="wide"><summary>${
@@ -281,9 +279,12 @@ function context() {
   return `<header class="context">${marker(state.provider)}<strong>${redis ? 'Cache' : 'Commerce'}</strong>${
     redis
       ? `<select id="redis-db" class="db-select" aria-label="${t('redisDatabase')}">${
-        Array.from({ length: 16 }, (_, n) =>
-          `<option value="${n}" ${n === state.redisDb ? 'selected' : ''}>DB ${n}</option>`).join('')
-      }</select>`
+        redisDbOptions(state.redisDb, redisEffectiveCount())
+      }</select>${
+        redisEffectiveCount() === null
+          ? `<span class="muted small">${h(configText('DB 数量未知', 'DB count unknown'))}</span>`
+          : ''
+      }`
       : `<span class="breadcrumb">/ ${h(state.database)}</span>`
   }<span class="tag secondary">${redis ? 'Redis 8.0' : 'MySQL 8.4'}</span><span class="tag good">${
     t(

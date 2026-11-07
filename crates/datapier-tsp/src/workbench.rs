@@ -118,6 +118,8 @@ pub(super) struct Workbench {
     pub cli_export: bool,
     pub tree: bool,
     pub redis_expansion: crate::redis_tree::Expansion,
+    pub redis_tree: crate::redis_tree::Tree,
+    pub redis_tree_owner: Option<(Uuid, u32)>,
     pub cli_grid: Option<GridState>,
     pub cli_cell: Option<Cell>,
     pub cli_large: Option<LargeLoad>,
@@ -138,8 +140,8 @@ pub(super) struct Workbench {
     pub cli_started_at: Option<Instant>,
     pub cli_elapsed: Option<Duration>,
     pub cli_error: UiMessage,
-    cli_page_token: Option<Uuid>,
-    cli_page_history: Vec<u64>,
+    pub(super) cli_page_token: Option<Uuid>,
+    pub(super) cli_page_history: Vec<u64>,
     cli_page_transition: Option<(bool, u64)>,
     pub value_format: String,
     pub ttl_policy: RedisTtlPolicy,
@@ -203,6 +205,8 @@ impl Default for Workbench {
             cli_page_transition: None,
             tree: false,
             redis_expansion: crate::redis_tree::Expansion::default(),
+            redis_tree: crate::redis_tree::Tree::default(),
+            redis_tree_owner: None,
             scan_dirty: false,
             value_format: "text".into(),
             ttl_policy: RedisTtlPolicy::Keep,
@@ -258,7 +262,11 @@ fn redis_bytes(value: &str) -> std::result::Result<Vec<u8>, String> {
 impl App {
     fn visible_key_count(&self) -> usize {
         if self.workbench.tree {
-            crate::redis_tree::Tree::from_resources(&self.resources)
+            if !self.redis_tree_matches_resources() {
+                return 0;
+            }
+            self.workbench
+                .redis_tree
                 .rows(
                     &self.workbench.redis_expansion,
                     self.profile.as_ref().map(|profile| {

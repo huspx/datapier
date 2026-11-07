@@ -11,7 +11,10 @@
     <link rel="stylesheet" href="assets/ui-redesign/redis-cli.css">
     <link rel="stylesheet" href="assets/ui-redesign/dialogs-responsive.css">
     <link rel="stylesheet" href="assets/ui-redesign/workbench-overrides.css">
+    <link rel="stylesheet" href="assets/ui-redesign/result-paging.css">
     <link rel="stylesheet" href="assets/ui-redesign/archery.css">
+    <link rel="stylesheet" href="assets/ui-redesign/mcp-pending.css">
+    <link rel="stylesheet" href="assets/ui-redesign/configuration-preview.css">
   </head>
   <body>
     <div class="preview">
@@ -29,6 +32,9 @@
         <option value="empty-connections">连接 · 空状态</option>
         <option value="query-editor">SQL · 编辑器</option>
         <option value="query-result">SQL · 结果样例</option>
+        <option value="result-single-pass">结果 · 单次读取</option>
+        <option value="result-memory-limit">结果 · 内存上限</option>
+        <option value="result-expired">结果 · 已过期</option>
         <option value="ddl">SQL · DDL 高亮</option>
         <option value="task">任务详情</option>
         <option value="error">错误详情</option>
@@ -44,6 +50,16 @@
         <option value="connection-connecting">连接 · 连接中</option>
         <option value="connection-failed">连接 · 失败</option>
         <option value="connection-disconnected">连接 · 未连接</option>
+        <option value="mcp-approval">MCP · 审批详情</option>
+        <option value="mcp-auth">MCP · 认证</option>
+        <option value="mcp-tasks">MCP · 任务结果</option>
+        <option value="mcp-empty">MCP · 空状态</option>
+        <option value="mcp-observer">MCP · 观察窗口</option>
+        <option value="mcp-unselected">MCP · 未选择</option>
+        <option value="mcp-loading">MCP · 加载中</option>
+        <option value="mcp-error">MCP · 加载失败</option>
+        <option value="mcp-ended">MCP · 审批已结束</option>
+        <option value="mcp-expired">MCP · 结果已过期</option>
         <option value="archery-login">Archery · 服务登录</option>
         <option value="archery-totp">Archery · 验证码</option>
         <option value="archery-instances">Archery · 选择实例</option>
@@ -80,6 +96,7 @@
     <script src="assets/ui-redesign/i18n.js"></script>
     <script src="assets/ui-redesign/icons.js"></script>
     <script src="assets/ui-redesign/data-state.js"></script>
+    <script src="assets/ui-redesign/configuration-preview.js"></script>
     <script src="assets/ui-redesign/sql.js"></script>
     <script src="assets/ui-redesign/navigation.js"></script>
     <script src="assets/ui-redesign/grid.js"></script>
@@ -93,9 +110,11 @@
     <script src="assets/ui-redesign/archery-management.js"></script>
     <script src="assets/ui-redesign/archery-render.js"></script>
     <script src="assets/ui-redesign/archery-events.js"></script>
+    <script src="assets/ui-redesign/mcp-pending.js"></script>
     <script src="assets/ui-redesign/render-actions.js"></script>
     <script src="assets/ui-redesign/click-events.js"></script>
     <script src="assets/ui-redesign/input-events.js"></script>
+    <script src="assets/ui-redesign/result-paging.js"></script>
     <script src="assets/ui-redesign/bootstrap.js"></script>
   </body>
 </html>

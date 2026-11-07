@@ -156,6 +156,16 @@ function cliSummary(value) {
 function cli() {
   const running = state.cliState === 'running';
   const located = state.cliEntries[state.cliSelected ?? state.cliEntries.length - 1];
+  const locatedIndex = state.cliSelected ?? state.cliEntries.length - 1;
+  const cliPageId = `cli:${locatedIndex}`;
+  const locatedValues = located?.rows || (located ? String(located.text || '').split('\n') : []);
+  const locatedPage = resultPageSlice(locatedValues, cliPageId, 20);
+  const displayEntries = state.cliEntries.map((entry, index) =>
+    index !== locatedIndex ? entry : {
+      ...entry,
+      ...(entry.rows ? { rows: locatedPage } : { text: locatedPage.join('\n') }),
+    }
+  );
   requestAnimationFrame(() => updateDirectCliHeight());
   return `<section class="cli" data-resizable-cli><div class="cli-resize-handle" data-cli-resizer role="separator" aria-orientation="horizontal" tabindex="0" title="${
     az(
@@ -181,7 +191,7 @@ function cli() {
         az('定位结果', 'Located result')
       }: ${h(cliSummary(located.command))} · ${h(cliSummary(located.instance))} / DB ${h(located.database)} · ${
         located.ms ?? 0
-      } ms</span></div>`
+      } ms</span></div>${resultPager(cliPageId, locatedValues.length, { size: 20 })}`
       : ''
   }${
     state.cliHistory
@@ -192,7 +202,7 @@ function cli() {
       }</div>`
       : ''
   }<div class="cli-output" role="log" aria-label="${az('执行记录', 'Execution log')}">${
-    cliExecutionLog(state.cliEntries)
+    cliExecutionLog(state.cliEntries, displayEntries)
   }</div><div class="cli-prompt"><span class="prompt-label">localhost:6379[${
     state.cliDb ?? '?'
   }] ›</span><input id="cli-command" aria-label="${t('redisCommand')}" placeholder="${

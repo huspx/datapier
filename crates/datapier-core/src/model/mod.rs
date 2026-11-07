@@ -121,10 +121,244 @@ pub enum LanguagePreference {
 }
 
 /// 保存在数据目录中、由各工作区共享的应用设置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct AppSettings {
-    #[serde(default)]
+    pub revision: u64,
     pub language: LanguagePreference,
+    pub mcp: McpSettings,
+    pub paging: PagingSettings,
+    pub archery: ArcherySettings,
+    pub limits: LimitSettings,
+    pub approval: ApprovalSettings,
+    pub notifications: NotificationSettings,
+    pub history: HistorySettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct McpSettings {
+    pub fine_grained_access: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PagingSettings {
+    pub mysql_table_rows: usize,
+    pub sql_rows: usize,
+    pub redis_value_rows: usize,
+    pub history_rows: usize,
+    pub archery_grid_rows: usize,
+    pub redis_key_batch: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ArcherySettings {
+    pub request_rows: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LimitSettings {
+    pub mcp_response_rows: usize,
+    pub response_bytes: usize,
+    pub value_preview_bytes: usize,
+    pub connect_timeout_seconds: u64,
+    pub query_timeout_seconds: u64,
+    pub count_timeout_seconds: u64,
+    pub result_idle_seconds: u64,
+    pub result_memory_bytes_per_client: usize,
+    pub running_tasks_per_mcp_client: usize,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    Off,
+    #[default]
+    Dangerous,
+    AllWrites,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ApprovalSettings {
+    pub ttl_seconds: u64,
+    pub default_policy: ApprovalPolicy,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NotificationSettings {
+    pub approval: bool,
+    pub authentication: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct HistorySettings {
+    pub auto_cleanup_enabled: bool,
+    pub retention_days: Option<u64>,
+    pub max_entries: Option<u64>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            revision: 1,
+            language: LanguagePreference::default(),
+            mcp: McpSettings::default(),
+            paging: PagingSettings::default(),
+            archery: ArcherySettings::default(),
+            limits: LimitSettings::default(),
+            approval: ApprovalSettings::default(),
+            notifications: NotificationSettings::default(),
+            history: HistorySettings::default(),
+        }
+    }
+}
+impl Default for PagingSettings {
+    fn default() -> Self {
+        Self {
+            mysql_table_rows: 100,
+            sql_rows: 100,
+            redis_value_rows: 100,
+            history_rows: 20,
+            archery_grid_rows: 100,
+            redis_key_batch: 1000,
+        }
+    }
+}
+impl Default for ArcherySettings {
+    fn default() -> Self {
+        Self { request_rows: 100 }
+    }
+}
+impl Default for LimitSettings {
+    fn default() -> Self {
+        Self {
+            mcp_response_rows: 1000,
+            response_bytes: 1_048_576,
+            value_preview_bytes: 4096,
+            connect_timeout_seconds: 10,
+            query_timeout_seconds: 30,
+            count_timeout_seconds: 10,
+            result_idle_seconds: 300,
+            result_memory_bytes_per_client: 67_108_864,
+            running_tasks_per_mcp_client: 4,
+        }
+    }
+}
+impl Default for ApprovalSettings {
+    fn default() -> Self {
+        Self {
+            ttl_seconds: 600,
+            default_policy: ApprovalPolicy::Dangerous,
+        }
+    }
+}
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            approval: true,
+            authentication: true,
+        }
+    }
+}
+impl AppSettings {
+    pub fn validate(&self) -> Result<()> {
+        let p = &self.paging;
+        let l = &self.limits;
+        if self.revision == 0
+            || [
+                p.mysql_table_rows,
+                p.sql_rows,
+                p.redis_value_rows,
+                p.history_rows,
+                p.archery_grid_rows,
+                p.redis_key_batch,
+                self.archery.request_rows,
+                l.mcp_response_rows,
+                l.response_bytes,
+                l.value_preview_bytes,
+                l.result_memory_bytes_per_client,
+                l.running_tasks_per_mcp_client,
+            ]
+            .contains(&0)
+            || [
+                l.connect_timeout_seconds,
+                l.query_timeout_seconds,
+                l.count_timeout_seconds,
+                l.result_idle_seconds,
+                self.approval.ttl_seconds,
+            ]
+            .contains(&0)
+            || self.history.retention_days == Some(0)
+            || self.history.max_entries == Some(0)
+            || l.response_bytes < 1024
+            || l.response_bytes > 1_048_576
+            || l.value_preview_bytes > l.response_bytes
+            || l.result_memory_bytes_per_client < l.response_bytes
+            || l.mcp_response_rows > 1000
+            || [
+                p.mysql_table_rows,
+                p.sql_rows,
+                p.redis_value_rows,
+                p.history_rows,
+                p.archery_grid_rows,
+            ]
+            .iter()
+            .any(|n| *n > 1000)
+        {
+            return Err(AppError::invalid("设置超出允许范围"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    Tui,
+    Tsp,
+    Mcp,
+    WindowBridge,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAccessLevel {
+    Disabled,
+    ReadOnly,
+    ReadWrite,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpAccessRule {
+    pub profile_id: Uuid,
+    pub scope_kind: String,
+    pub scope_key: String,
+    pub level: McpAccessLevel,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseDiscovery {
+    pub state: String,
+    pub source: String,
+    pub databases: Vec<String>,
+    pub configured_count: Option<u32>,
+    pub reason: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    pub id: Uuid,
+    pub execution_id: Uuid,
+    pub owner: Uuid,
+    pub session_id: Uuid,
+    pub profile_id: Uuid,
+    pub request: Json,
+    pub digest: String,
+    pub profile_revision: u64,
+    pub policy_revision: u64,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub state: String,
+    pub decided_at: Option<i64>,
+    pub decision_source: Option<String>,
+}
+fn initial_revision() -> u64 {
+    1
 }
 
 /// 不含密码的连接配置。
@@ -132,6 +366,10 @@ pub struct AppSettings {
 pub struct Profile {
     pub id: Uuid,
     pub name: String,
+    #[serde(default = "initial_revision")]
+    pub revision: u64,
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
     pub provider: ProviderKind,
     #[serde(default)]
     pub access_mode: AccessMode,
@@ -155,6 +393,8 @@ pub struct DirectConnection {
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
     pub redis_db: u32,
+    #[serde(default)]
+    pub redis_databases_override: Option<u32>,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -429,7 +669,7 @@ impl Profile {
     }
     /// 校验来源对应的配置及选定目标。
     pub fn validate(&self) -> Result<()> {
-        if self.name.trim().is_empty() {
+        if self.id.is_nil() || self.revision == 0 || self.name.trim().is_empty() {
             return Err(AppError::invalid("连接名称不能为空"));
         }
         let d = match &self.connection {
@@ -452,6 +692,9 @@ impl Profile {
                 return Ok(());
             }
         };
+        if d.redis_databases_override == Some(0) {
+            return Err(AppError::invalid("Redis 数据库数量必须为正数"));
+        }
         if d.host.trim().is_empty() || d.port == 0 {
             return Err(AppError::invalid("连接地址和端口不可为空"));
         }

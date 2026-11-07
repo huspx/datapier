@@ -1007,7 +1007,14 @@ document.addEventListener('click', event => {
       break;
     case 'demo-save':
       if (!validateConnection()) return;
+      if (state.connectionForm.provider === 'redis') {
+        const override = document.querySelector('[data-config-redis-override]');
+        if (override && !override.reportValidity()) return;
+      }
       if (state.overlay === 'connection-settings') {
+        if (state.connectionForm.provider === 'redis') {
+          state.redisDatabasesOverride = state.connectionForm.redisDatabasesOverride;
+        }
         state.connectionModes[state.connectionForm.provider] = state.connectionForm.readOnly;
         state.overlay = null;
         render();

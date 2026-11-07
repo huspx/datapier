@@ -37,8 +37,13 @@ async fn verify_structure(conn: &mut SqliteConnection, version: i64) -> Result<(
     sqlx::raw_sql(include_str!("../../migrations/0001_config.sql"))
         .execute(&mut reference)
         .await?;
-    if version == 2 {
+    if version >= 2 {
         sqlx::raw_sql(include_str!("../../migrations/0002_config.sql"))
+            .execute(&mut reference)
+            .await?;
+    }
+    if version >= 3 {
+        sqlx::raw_sql(include_str!("../../migrations/0003_config.sql"))
             .execute(&mut reference)
             .await?;
     }
@@ -224,7 +229,7 @@ async fn preflight_connection(conn: &mut SqliteConnection) -> Result<i64> {
                 return Err(invalid_schema());
             }
         }
-        1 | 2 => {
+        1..=3 => {
             verify_structure(conn, version).await?;
             verify_data(conn, version).await?;
         }
@@ -244,7 +249,7 @@ pub(super) async fn migrate_config(pool: &SqlitePool) -> Result<()> {
     // 即使中途取消或恢复失败，也不让关闭外键的连接回到连接池。
     conn.close_on_drop();
     let version = preflight_connection(&mut conn).await?;
-    if version == 2 {
+    if version == 3 {
         return Ok(());
     }
     sqlx::query("PRAGMA foreign_keys=OFF")
@@ -263,22 +268,27 @@ pub(super) async fn migrate_config(pool: &SqlitePool) -> Result<()> {
                 .execute(&mut *tx)
                 .await?;
         }
-        let rows = sqlx::query("SELECT id,payload,name,credential_saved FROM profiles")
-            .fetch_all(&mut *tx)
-            .await?;
-        for row in &rows {
-            sqlx::query("UPDATE profiles SET payload=? WHERE id=?")
-                .bind(convert_direct(row)?)
-                .bind(row.get::<&str, _>(0))
+        if version < 2 {
+            let rows = sqlx::query("SELECT id,payload,name,credential_saved FROM profiles")
+                .fetch_all(&mut *tx)
+                .await?;
+            for row in &rows {
+                sqlx::query("UPDATE profiles SET payload=? WHERE id=?")
+                    .bind(convert_direct(row)?)
+                    .bind(row.get::<&str, _>(0))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::raw_sql(include_str!("../../migrations/0002_config.sql"))
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::raw_sql(include_str!("../../migrations/0002_config.sql"))
+        sqlx::raw_sql(include_str!("../../migrations/0003_config.sql"))
             .execute(&mut *tx)
             .await?;
-        verify_structure(&mut tx, 2).await?;
-        verify_data(&mut tx, 2).await?;
-        sqlx::query("PRAGMA user_version=2")
+        verify_structure(&mut tx, 3).await?;
+        verify_data(&mut tx, 3).await?;
+        sqlx::query("PRAGMA user_version=3")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

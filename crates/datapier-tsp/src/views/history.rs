@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn history_panel(app: &App) -> Node<Msg> {
     let history = &app.workbench.archery_history;
     let mut list = html::div().class("history-list");
-    if history.pending.is_some() {
+    if history.items.is_empty() && history.pending.is_some() {
         list =
             list.child(html::p(crate::i18n::tr("正在加载历史").into_owned()).class("empty-note"));
     } else if let Some(error) = &history.error {
@@ -102,60 +102,29 @@ pub(super) fn history_panel(app: &App) -> Node<Msg> {
 fn history_pagination(app: &App) -> Node<Msg> {
     let history = &app.workbench.archery_history;
     let loading = history.pending.is_some();
-    let mut sizes = ui::select()
-        .key("history-page-size")
-        .value(history.limit.to_string())
-        .disabled(loading)
-        .open(app.workbench.generic_select.as_deref() == Some("history-page-size"))
-        .on_toggle(|collapsed| Msg::Action(format!("select-open:history-page-size:{}", !collapsed)))
-        .on_change(|change| {
-            Msg::Action(format!(
-                "history-size:{}",
-                change.value.as_str().unwrap_or_default()
-            ))
-        });
-    for size in [20_u64, 50, 100] {
-        sizes = sizes.option(ui::SelectOption::new(size.to_string(), size.to_string()));
-    }
     html::div()
         .class("table-footer history-pagination")
         .child(html::span(crate::i18n::format_message(
-            "本页 {count} 条 · 共 {total} 条",
-            &[
-                ("count", &history.items.len().to_string()),
-                ("total", &history.total.to_string()),
-            ],
+            "本页 {count} 条",
+            &[("count", &history.items.len().to_string())],
         )))
         .child(html::span("").class("spacer"))
-        .child(ui::field(crate::i18n::tr("每页").into_owned()).child(sizes))
-        .child(page_button(
-            "arrow-left",
-            "上一页",
-            "history-prev",
-            !loading && history.offset != 0,
-        ))
-        .child(html::span(crate::i18n::format_message(
-            "第 {page} / {total} 页",
-            &[
-                (
-                    "page",
-                    &(history.offset / history.limit.max(1) + 1).to_string(),
-                ),
-                (
-                    "total",
-                    &history
-                        .total
-                        .div_ceil(history.limit.max(1))
-                        .max(1)
-                        .to_string(),
-                ),
-            ],
-        )))
-        .child(page_button(
-            "arrow-right",
-            "下一页",
-            "history-next",
-            !loading && history.offset.saturating_add(history.limit) < history.total,
+        .child(super::pager::render(
+            app,
+            super::pager::Pager {
+                key: "history-page-size",
+                size_action: "history-size",
+                previous_action: "history-prev",
+                next_action: "history-next",
+                size: history.limit.max(1),
+                page: history.offset / history.limit.max(1) + 1,
+                total: Some(history.total),
+                can_previous: history.offset != 0,
+                can_next: history.offset.saturating_add(history.limit) < history.total,
+                loading,
+                limited: false,
+                count_action: None,
+            },
         ))
         .into()
 }

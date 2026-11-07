@@ -91,8 +91,10 @@ function historyPanel(platform = false) {
     az('总数', 'Total')
   }: ${rows.length}</span><span class="spacer"></span><label class="page-size-control">${
     az('每页', 'Per page')
-  } <select ${platform ? 'data-page-size' : 'id="local-history-size"'}>${
-    [20, 50, 100].map(n => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}</option>`).join('')
+  } <select ${platform ? 'data-page-size' : 'id="local-history-size"'} aria-label="${
+    az('历史记录每页行数', 'History page size')
+  }">${
+    resultPageSizes.map(n => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}</option>`).join('')
   }</select></label>${
     (platform ? aib : ib)(
       'back',

@@ -25,13 +25,13 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
     let handler = tokio::spawn(client(engine.clone(), owner, Box::new(stream)));
     protocol::write(
         &mut peer,
-        &json!({"id":"2","method":"session.open","params":{"protocol_version":2}}),
+        &json!({"id":"2","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
     )
     .await
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        2
+        3
     );
     assert!(engine.state.lock().unwrap().clients.contains(&owner));
     protocol::write(
@@ -49,6 +49,70 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
     assert!(state.clients.is_empty());
     assert!(state.idle > idle);
     drop(state);
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn window_bridge_requires_binding_and_does_not_keep_engine_alive() {
+    let (engine, root) = engine().await;
+    let tsp = Uuid::new_v4();
+    let bridge = Uuid::new_v4();
+    let nonce = Uuid::new_v4().to_string();
+    assert!(engine.register(tsp));
+    assert!(engine.register_with(
+        bridge,
+        ClientContext {
+            kind: model::ClientKind::WindowBridge,
+            workspace: "default".into(),
+            allow_connections: vec![],
+        }
+    ));
+    let sync = json!({"nonce":nonce,"window_id":"","pane_id":"pane"});
+    assert_eq!(
+        engine
+            .dispatch(bridge, "ui.window.sync", sync.clone())
+            .await
+            .unwrap()["bound"],
+        false
+    );
+    engine
+        .dispatch(tsp, "ui.window.bind", json!({"nonce":nonce}))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .dispatch(bridge, "ui.window.sync", sync.clone())
+            .await
+            .unwrap()["bound"],
+        true
+    );
+    engine
+        .dispatch(tsp, "ui.window.bind", json!({"nonce":nonce}))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .dispatch(
+                bridge,
+                "ui.window.sync",
+                json!({"nonce":nonce,"window_id":"","pane_id":"other"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "permission_denied"
+    );
+    engine.disconnect(tsp).await;
+    assert!(engine.state.lock().unwrap().clients.is_empty());
+    assert_eq!(
+        engine
+            .dispatch(bridge, "ui.window.sync", sync)
+            .await
+            .unwrap()["bound"],
+        false
+    );
+    engine.disconnect(bridge).await;
     drop(engine);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -298,7 +362,6 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
         }
     }
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -347,7 +410,6 @@ async fn history_pages_cover_all_matching_executions() {
     assert_eq!(filtered["limit"], 20);
     assert_eq!(filtered["items"][0]["text"], "SELECT 500 needle");
     engine.store.pool.close().await;
-    engine.store.cache.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }

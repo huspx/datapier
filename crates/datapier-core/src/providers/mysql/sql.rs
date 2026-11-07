@@ -162,6 +162,40 @@ pub(super) fn is_dynamic(input: &str) -> bool {
     matches!(first_keyword(input).as_deref(), Some("CALL" | "EXECUTE"))
 }
 
+// 诊断语句的预准备可能改写当前会话的诊断区，必须直接使用文本协议。
+pub(super) fn is_diagnostic(input: &str) -> bool {
+    let mut tokens = Tokens::new(input, false, false);
+    if !word(tokens.next(), "SHOW") {
+        return false;
+    }
+    let mut next = tokens.next();
+    if word(next, "COUNT") {
+        if !matches!(tokens.next(), Some(Token::Symbol(b'(')))
+            || !matches!(tokens.next(), Some(Token::Symbol(b'*')))
+            || !matches!(tokens.next(), Some(Token::Symbol(b')')))
+        {
+            return false;
+        }
+        next = tokens.next();
+    }
+    word(next, "WARNINGS") || word(next, "ERRORS")
+}
+
+// 诊断语句无需依赖 sql_mode 切分；含引号或反斜线时退回普通的会话模式解析。
+pub(super) fn diagnostic_statement(input: &str) -> Option<(&str, &str)> {
+    if !is_diagnostic(input) {
+        return None;
+    }
+    let (statement, rest) = next_statement(input, "").ok()?;
+    let mut tokens = Tokens::new(statement, false, false);
+    while let Some(token) = tokens.next() {
+        if matches!(token, Token::Quoted | Token::Symbol(b'\\')) {
+            return None;
+        }
+    }
+    Some((statement, rest))
+}
+
 // 按会话 sql_mode 识别引号和注释中的分号；存储程序整体交给服务端解析，
 // 因其主体可以包含分号，而 DELIMITER 是客户端指令，不属于服务端 SQL。
 pub(super) fn next_statement<'a>(input: &'a str, mode: &str) -> Result<(&'a str, &'a str)> {

@@ -13,7 +13,7 @@ pub(super) use state::{
     DatabaseForm, NavigationState, ProfileDeleteConfirmation, ResourceDropConfirmation,
     navigation_visible_databases,
 };
-use state::{DropOperation, Pending, ProfileDeleteOperation, QueuedSection};
+use state::{DropOperation, Pending, ProfileDeleteOperation, QueuedSection, RedisDiscovery};
 
 #[cfg(test)]
 #[path = "../tests/unit/navigation.rs"]

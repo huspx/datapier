@@ -99,6 +99,7 @@ fn tree_pages_preserve_all_visible_keys_without_unbounded_views() {
             data: Value::Null,
         })
         .collect();
+    app.workbench.redis_tree.reset(&app.resources);
     fn labels(node: &Node<Msg>, output: &mut Vec<String>) {
         if node.props().get("class").and_then(Value::as_str) == Some("key-name") {
             output.push(node.props()["text"].as_str().unwrap().to_owned());

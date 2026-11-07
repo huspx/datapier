@@ -44,6 +44,9 @@ impl App {
             self.action("new-tab", backend);
         }
         if self.tabs[self.active].profile_id != Some(profile.id) {
+            self.resources.clear();
+            self.workbench.redis_tree.reset(&[]);
+            self.workbench.redis_tree_owner = None;
             self.database = profile.default_database().map(str::to_owned);
             self.tabs[self.active].browse.database = self.database.clone();
             self.tabs[self.active].browse.redis_db = (profile.provider

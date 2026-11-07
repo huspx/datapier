@@ -3,6 +3,7 @@
 mod action;
 mod app;
 mod application;
+mod approval;
 mod backend;
 mod change_preview;
 mod clipboard;
@@ -35,7 +36,7 @@ mod views;
 mod workbench;
 mod workspace;
 
-pub use runtime::run;
+pub use runtime::{run, window_bridge};
 
 use backend::{Backend, Response};
 use datapier_core::{
@@ -226,6 +227,7 @@ struct IconBlobs {
 
 struct App {
     workspace_id: String,
+    window_data_dir: Option<PathBuf>,
     revision: u64,
     workspace_loaded: bool,
     restore_focus_pending: bool,
@@ -286,6 +288,7 @@ struct App {
     navigation: navigation::NavigationState,
     icon_blobs: Option<IconBlobs>,
     settings: AppSettings,
+    settings_loaded: bool,
     settings_epoch: u64,
     settings_save_token: Option<Uuid>,
     settings_unsaved: bool,
@@ -294,6 +297,7 @@ struct App {
     change_preview: change_preview::PreviewState,
     redis_keys: redis_key_selection::RedisKeySelection,
     redis_key_delete: redis_selection::RedisKeyDeleteState,
+    approvals: approval::ApprovalState,
 }
 fn tsp_error(error: tern_sdk::Error) -> AppError {
     AppError::new("tsp", error.to_string())

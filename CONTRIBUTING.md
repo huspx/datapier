@@ -11,8 +11,9 @@
 | [发布指南](RELEASING.md) | 产品版本派生、组包、发布流程及发布前后核对 | 逐条功能说明和开发排查日志 |
 | [CHANGELOG](CHANGELOG.md) | 相对已发布版本的用户可见功能、改进、修复和兼容性变化 | 新功能发布前的内部修正、代码重构、设计稿同步或每轮验证结果 |
 | [产品规划](docs/product-plan.md) | 产品目标、交付范围、路线和验收方向 | 控件尺寸、文案、字段级交互及源码实现细节 |
-| [0.1.0 技术方案](docs/technical-design-0.1.0.md)、[0.1.1 技术方案](docs/technical-design-0.1.1.md) | 对应版本的架构、数据与接口契约、决策理由、迁移、验收要求及简洁结果摘要 | 每轮修复和候选构建的流水账 |
-| [UI 设计说明](docs/ui-redesign.md) | 交互和视觉规则，包括图标、角标、布局、状态和操作语义 | 平台接口契约、发布规则或运行日志 |
+| [0.1.0 技术方案](docs/technical-design-0.1.0.md)、[0.1.1 技术方案](docs/technical-design-0.1.1.md)、[0.2.0 技术方案](docs/technical-design-0.2.0.md) | 对应版本的架构、数据与接口契约、迁移、验收要求及简洁结果摘要；0.2.0 验收中 | 每轮修复和候选构建的流水账 |
+| [UI 设计规范](docs/ui-guidelines.md) | 从原设计整理的视觉、组件、文案、响应式和状态约定；新增界面的共同基准 | Engine 接口与版本范围 |
+| [UI 设计说明](docs/ui-redesign.md) | 具体功能的操作语义与交互约束 | 重复通用设计规范、平台接口契约或运行日志 |
 | [HTML 设计稿](docs/ui-redesign.html) | 与 UI 说明一致的可交互示例 | 真实数据库执行、持久化或原生验收证据 |
 | [Archery 调研](docs/archery-integration-research.md) | 上游能力、版本差异和可追溯的源码依据 | 本地实现的实时完成状态 |
 | [AGENTS](AGENTS.md) | Agent 阅读入口、执行授权和交付约束 | 重复上述工程与文档规则 |
@@ -21,22 +22,25 @@ Changelog 按最后一个已发布版本比较：新功能在首次发布前的�
 
 用户的新要求优先于历史方案；范围或架构变化时同步相关文档。功能任务按完整可运行路径交付，不留下空壳、假结果或未接线接口。仅涉及文档的任务不顺带创建 workspace、plugin 或数据库。
 
+0.2.0 已实施查询／导出／入口迁移，正在验收；历史 0.1.x 契约保留在对应方案，不作为当前行为。继续遵守类型、提交、凭据、隔离与验证约束。
+
 ## 开发环境
 
-- 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，四个 crate 统一继承 `rust-version = 1.94`，与锁定的 SQLx 0.9 最低要求一致。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
+- 使用 stable Rust 和 Cargo；workspace 使用 edition 2024，六个 crate 统一继承 `rust-version = 1.94`，与锁定的 SQLx 0.9 最低要求一致。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
 - 应用程序的 `Cargo.lock` 固定依赖并随源码提交；官方 `tern-sdk` 使用 registry 的 `0.2.0`，版本在 workspace 中精确固定。六种目标使用一致的锁定依赖。
 - 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
 - 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
-- 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
-- 当前开发基线为 Tern 0.9.9 与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
+- 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；声明不代替实际加载和运行验证。本候选实际原生运行使用 Tern 0.9.12，尚未证明在 0.9.9 上运行。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
+- 最低设计基线为 Tern 0.9.9 与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
 
-构建本地程序并直接在 Tern 中启动：
+构建本地程序，启动普通终端 TUI 或在 Tern 中启动 TSP：
 
 ```sh
 cargo build --locked -p datapier
-tern -e "$PWD/target/debug/datapier" tui
+./target/debug/datapier tui
+tern -e "$PWD/target/debug/datapier" tsp
 ```
 
 也可链接启动 plugin，从带有本地程序路径的环境启动 Tern：
@@ -108,7 +112,7 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 
 Windows 安装器由 Windows PowerShell 5.1 读取，源码保留 UTF-8 BOM，以正确识别中文；交给启动 plugin 的 stdout JSON 则固定为无 BOM 的 UTF-8。
 
-dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。0.1.0 的配置库与结果缓存各用一份完整初始 schema，以 `PRAGMA user_version=1` 管理；SQL 格式整理必须保持 schema 语义，验证新建、重开以及拒绝不完整或较新基线。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
+dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。当前配置 schema 为 3，查询结果不再写入结果缓存；SQL 格式整理必须保持迁移语义，验证新建、升级和拒绝较新基线。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
 
 ### 本地执行与 AI 修改要求
 
@@ -142,15 +146,17 @@ Formatter 仅负责格式，不替代 Clippy、类型／编译检查或行为验
 
 | 模块 | 职责 |
 |---|---|
-| `crates/datapier` | 单一可执行文件和子命令分派；0.1.0 提供 UI 与 Engine，MCP 属于 0.2.0 |
+| `crates/datapier` | 单一可执行文件和 `tui`／`tsp`／`mcp`／`engine` 子命令分派 |
 | `crates/datapier-core` | 类型、资源、数据库会话、provider、执行、变更、持久化与凭据；不依赖 TSP、Luau 或 MCP |
 | `crates/datapier-engine` | 唯一运行状态所有者，IPC server／client、租约、实例锁、平台适配和收尾 |
 | `crates/datapier-tsp` | 编辑器、grid 和 UI 状态；通过 Engine client／IPC 访问数据，不直接连接数据库 |
+| `crates/datapier-tui` | 普通终端中的数据源、认证和设置管理，通过 Engine IPC 访问数据 |
+| `crates/datapier-mcp` | MCP stdio tools、协议适配与会话管理，通过 Engine IPC 访问数据 |
 | `plugins/datapier` | 薄 Luau 启动包及安装脚本；不复制数据库或 grid 业务 |
 
 MySQL／Redis provider 编译期注册，保留各自语义。后续数据库支持需有类型、交互和真实运行证据，不能仅注册驱动就声明支持。首版不实现动态库加载或外部 provider 进程。
 
-四个 crate 按运行边界划分，当前不再拆包。单个 crate 内优先按功能维护私有模块；入口只保留分派和状态组合，纯计算逻辑可独立为私有模块（如编辑器、grid、Redis key 树）。只有出现独立消费者、明确依赖隔离或独立版本需求时再评估新 crate，不按文件行数拆包。
+六个 crate 按运行边界划分。单个 crate 内优先按功能维护私有模块；入口只保留分派和状态组合，纯计算逻辑可独立为私有模块。只有出现独立消费者、明确依赖隔离或独立版本需求时再评估新 crate，不按文件行数拆包。
 
 TSP 的 `lib.rs` 组合共享状态与私有模块，`app` 管理初始化和字段，`workspace` 管理快照及标签运行态，`requests` 管理请求路由；`workbench`、`navigation`、`grid` 和视图按功能细分子模块。Engine 的 `server` 将 RPC、任务执行和 Archery 认证分开，仍共用唯一运行状态；Core 的 `storage` 与 `transfer` 分别按存储职责、导入导出路径组织。测试沿相应职责归类，共用 fixture 与构造器留在测试父模块。
 HTML 设计稿保留 `docs/ui-redesign.html` 为唯一入口，静态资源维护在 `docs/assets/ui-redesign/`，按既定顺序加载经典脚本和样式，支持直接打开与 HTTP 预览，不引入打包步骤。
@@ -160,7 +166,7 @@ HTML 设计稿保留 `docs/ui-redesign.html` 为唯一入口，静态资源维�
 ### 执行与数据
 
 - 大整数、精确小数、JSON 大数和二进制必须保真；NULL、空字符串及 Redis 不存在值分开表达。显示格式不得参与写回转换。
-- 结果增量落盘，分页同时限制行数和字节数，大字段按需读取。导出完整结果不等于导出当前页，也不能自动重执行原 SQL。
+- 结果不持久化，按需读取并保留有界会话内存；TSP 对安全只读源显式重查导出，其他结果只导出保留范围。不静默重放可能有副作用的语句，不把部分结果标成全量。0.1.x 历史行为见对应方案。
 - 编辑先形成草稿和变更集，显式提交后才写库；冲突不静默覆盖，过期编辑基线不能直接恢复提交。
 - 只读策略在 Engine／Core 统一执行，不仅依赖 UI、字符串前缀或未来的 MCP annotations。
 - 写入／COMMIT 发送后失联，无法确认的结果标记待确认；不自动重试或重放。取消等待、关闭连接与服务端撤销是不同状态。
@@ -223,7 +229,7 @@ STRESS_KEYS=1000000 cargo test -p datapier-core --test redis_scale -- --ignored 
 DATAPIER_TEST_KEYRING=1 cargo test -p datapier-core --test credentials -- --ignored
 ```
 
-TLS 专属回归使用 `DATAPIER_TLS_MYSQL_PORT`、`DATAPIER_TLS_MYSQL_SECRET`、`DATAPIER_TLS_REDIS_PORT`、`DATAPIER_TLS_CA`、`DATAPIER_TLS_WRONG_CA`，可选 `DATAPIER_TLS_BAD_HOST`（默认 `127.1`）。需要与测试 CA、SAN 匹配的隔离 TLS 服务：
+TLS 专属回归使用 `DATAPIER_TLS_MYSQL_PORT`、`DATAPIER_TLS_MYSQL_SECRET`、`DATAPIER_TLS_REDIS_PORT`、`DATAPIER_TLS_CA`、`DATAPIER_TLS_WRONG_CA`，可选 `DATAPIER_TLS_BAD_HOST`（默认 `127.1`）。MySQL 5.7 专项另需 `DATAPIER_TLS_MYSQL57_PORT`、`DATAPIER_TLS_MYSQL57_SECRET`，服务端启用 `require_secure_transport`。需要与测试 CA、SAN 匹配且支持 Rustls 可用 cipher 的隔离 TLS 服务；只有 DHE 的旧 OpenSSL fixture 不能证明 ECDHE 连接路径。
 
 ```sh
 cargo test -p datapier-core --test tls -- --ignored
@@ -231,9 +237,9 @@ cargo test -p datapier-core --test tls -- --ignored
 
 普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
 
-按[技术方案的验收要求](docs/technical-design-0.1.0.md#9-验收要求)覆盖中文／emoji、普通空结果、类型保真、MySQL 取消竞态、Redis List 重复值／TTL／WATCH、写入未知结果和会话收尾；相关运行场景包括十万行分页与全量导出、百万 key 扫描、大字段、草稿与布局恢复、双 UI、只读拒绝写入、磁盘不足和凭据服务不可用。0.1.1 原生运行验收仅覆盖 macOS arm64，其他五个目标保留实现，在 PR 阶段验证编译；具体门禁见[发布前检查](RELEASING.md#发布前检查)。
+按[0.2.0 技术方案验收要求](docs/technical-design-0.2.0.md#14-验收要求)覆盖真实 MCP、普通终端、Tern、数据库、权限审批、实时分页与导出、升级和生命周期，并记录实际平台与环境。本轮 0.2.0 验收按用户确认仅覆盖 macOS arm64，其他平台保留实现与 CI 配置，不作为本轮门禁；0.1.x 历史证据不替代本候选验证。具体发布检查见[发布前检查](RELEASING.md#发布前检查)。
 
-只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。[0.1.0 历史验收](docs/technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 候选运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)分别查阅，不将历史证据视为当前候选重新验证；发布门禁以[发布前检查](RELEASING.md#发布前检查)为准。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
+只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。[0.1.0 历史验收](docs/technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 候选运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)不是当前候选的验证证据；0.2.0 结果记录在[技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)，发布门禁以[发布前检查](RELEASING.md#发布前检查)为准。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
 
 ## 分支与 PR
 

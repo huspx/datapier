@@ -157,8 +157,8 @@ impl App {
             self.request(
                 backend,
                 &format!("cli.record/{selected}/{index}"),
-                "result.page",
-                json!({"result_id":result_id,"start":0,"max_rows":if self.profile.as_ref().is_some_and(|p| p.is_archery()) { self.result_page_size(&result_id) } else { 200 },"max_bytes":1048576}),
+                "result.read",
+                json!({"result_id":result_id,"start":0,"max_rows":self.result_page_size_for(&result_id, true),"max_bytes":1048576}),
             );
         }
     }
@@ -167,18 +167,10 @@ impl App {
         let Some(id) = self.workbench.cli_result_id.clone() else {
             return false;
         };
-        let archery = self
-            .profile
-            .as_ref()
-            .is_some_and(|profile| profile.is_archery());
-        let size = if archery {
-            self.result_page_size(&id)
-        } else {
-            200
-        };
-        if archery && !self.prepare_result_page(backend, &id, start) {
-            return true;
+        if self.workbench.cli_page_token.is_some() {
+            return false;
         }
+        let size = self.result_page_size_for(&id, true);
         self.workbench_clear_cli_value();
         self.workbench.cli_page_transition = None;
         let token = Uuid::new_v4();
@@ -188,7 +180,7 @@ impl App {
         );
         match backend.request(
             tag,
-            "result.page",
+            "result.read",
             json!({"result_id":id,"start":start,"max_rows":size,"max_bytes":1048576}),
         ) {
             Ok(()) => {
@@ -378,8 +370,8 @@ impl App {
                     self.request(
                         backend,
                         &format!("cli.record/{record_id}/{index}"),
-                        "result.page",
-                        json!({"result_id":id,"start":0,"max_rows":if self.profile.as_ref().is_some_and(|p| p.is_archery()) { 20 } else { 200 },"max_bytes":1048576}),
+                        "result.read",
+                        json!({"result_id":id,"start":0,"max_rows":self.result_page_size_for(id, true),"max_bytes":1048576}),
                     );
                 }
             }
@@ -445,7 +437,7 @@ impl App {
                     if self.workbench.cli_result_id.as_deref()
                         == Some(page.result.id.to_string().as_str()) =>
                 {
-                    self.refresh_changed_result_plan(backend, &page);
+                    self.remember_result_start(&page);
                     if let Some((forward, start)) = transition {
                         if forward {
                             self.workbench.cli_page_history.push(start);

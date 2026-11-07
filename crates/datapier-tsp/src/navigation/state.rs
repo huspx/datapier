@@ -36,6 +36,14 @@ pub(crate) struct DatabaseForm {
     pub all: bool,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct RedisDiscovery {
+    pub databases: Vec<String>,
+    pub loading: bool,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ProfileDeleteConfirmation {
     pub token: Uuid,
@@ -104,6 +112,12 @@ pub(super) enum Pending {
         profile: Value,
         secret: Value,
     },
+    RedisDiscovery {
+        profile_id: Option<Uuid>,
+        profile: Option<Value>,
+        secret: Value,
+        session: Option<Value>,
+    },
     Redis {
         tab: Uuid,
         generation: u64,
@@ -142,8 +156,11 @@ pub(crate) struct NavigationState {
     pub narrow_expanded: bool,
     pub databases: BTreeMap<Uuid, DatabaseTree>,
     pub form: DatabaseForm,
+    pub form_approval_policy: datapier_core::model::ApprovalPolicy,
     pub redis_db_menu: bool,
     pub form_redis_db_menu: bool,
+    pub redis_discovery: BTreeMap<Uuid, RedisDiscovery>,
+    pub form_redis_discovery: RedisDiscovery,
     pub(super) delete_confirmation: Option<ProfileDeleteConfirmation>,
     pub(super) delete_operation: Option<ProfileDeleteOperation>,
     pub(super) drop_confirmation: Option<ResourceDropConfirmation>,
@@ -158,8 +175,11 @@ impl Default for NavigationState {
             narrow_expanded: false,
             databases: BTreeMap::new(),
             form: DatabaseForm::default(),
+            form_approval_policy: datapier_core::model::ApprovalPolicy::default(),
             redis_db_menu: false,
             form_redis_db_menu: false,
+            redis_discovery: BTreeMap::new(),
+            form_redis_discovery: RedisDiscovery::default(),
             delete_confirmation: None,
             delete_operation: None,
             drop_confirmation: None,

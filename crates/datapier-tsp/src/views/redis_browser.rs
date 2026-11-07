@@ -209,16 +209,22 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
                     modes
                 }),
         );
-    let tree = app
-        .workbench
-        .tree
-        .then(|| crate::redis_tree::Tree::from_resources(&app.resources));
-    let tree_rows = tree.as_ref().map(|tree| {
+    let tree_rows = app.workbench.tree.then(|| {
+        if !app.redis_tree_matches_resources() {
+            return Vec::new();
+        }
+        let tree = &app.workbench.redis_tree;
         tree.rows(
             &app.workbench.redis_expansion,
-            app.profile
-                .as_ref()
-                .map(|profile| (profile.id, profile.redis_db())),
+            app.profile.as_ref().map(|profile| {
+                (
+                    profile.id,
+                    app.tabs[app.active]
+                        .browse
+                        .redis_db
+                        .unwrap_or_else(|| profile.redis_db()),
+                )
+            }),
         )
     });
     let count = tree_rows.as_ref().map_or(app.resources.len(), Vec::len);

@@ -308,6 +308,8 @@ fn profile(server_id: Uuid, instance_id: i64, name: &str) -> Profile {
     Profile {
         id: Uuid::new_v4(),
         name: name.into(),
+        revision: 1,
+        approval_policy: Default::default(),
         provider: ProviderKind::Mysql,
         access_mode: AccessMode::ReadOnly,
         connection: ConnectionConfig::Archery(ArcheryConnection {

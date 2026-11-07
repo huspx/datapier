@@ -13,6 +13,8 @@ pub(super) const PROFILE_DEFAULTS: &[(&str, &str)] = &[
     ("password", ""),
     ("database", ""),
     ("redis_db", "0"),
+    ("redis_databases_override", ""),
+    ("profile_revision", "1"),
     ("provider", "mysql"),
     ("access", "read_only"),
     ("tls", "false"),
@@ -59,6 +61,12 @@ impl App {
         self.archery.epoch = Uuid::new_v4();
         self.field_set("archery_otp", "");
         self.form_id = Some(profile.as_ref().map_or_else(Uuid::new_v4, |p| p.id));
+        // 连接表单不编辑 MCP 策略；已有连接保留基线，新连接取全局默认。
+        self.navigation.form_approval_policy = profile
+            .as_ref()
+            .map_or(self.settings.approval.default_policy, |profile| {
+                profile.approval_policy
+            });
         for &(name, value) in PROFILE_DEFAULTS {
             self.field_set(name, value);
         }
@@ -70,6 +78,7 @@ impl App {
                 self.workbench.focus_request = Some("input-name".into());
                 return;
             }
+            self.field_set("profile_revision", profile.revision.to_string());
             self.field_set("name", profile.name.clone());
             let Ok(direct) = profile.direct() else {
                 self.workbench.profile_error =
@@ -82,6 +91,13 @@ impl App {
             self.field_set("user", direct.username.clone());
             self.field_set("database", direct.database.clone().unwrap_or_default());
             self.field_set("redis_db", direct.redis_db.to_string());
+            self.field_set(
+                "redis_databases_override",
+                direct
+                    .redis_databases_override
+                    .map(|count| count.to_string())
+                    .unwrap_or_default(),
+            );
             self.field_set(
                 "provider",
                 match profile.provider {
@@ -119,6 +135,11 @@ impl App {
         };
         Ok(Profile {
             id: self.form_id.ok_or("请先新建或编辑连接")?,
+            revision: self
+                .field("profile_revision")
+                .parse::<u64>()
+                .map_err(|e| e.to_string())?,
+            approval_policy: self.navigation.form_approval_policy,
             name: self.field("name").to_owned(),
             connection: ConnectionConfig::Direct(DirectConnection {
                 host: self.field("host").to_owned(),
@@ -133,6 +154,9 @@ impl App {
                     .field("redis_db")
                     .parse::<u32>()
                     .map_err(|e| e.to_string())?,
+                redis_databases_override: optional("redis_databases_override")
+                    .map(|value| value.parse::<u32>().map_err(|e| e.to_string()))
+                    .transpose()?,
                 tls: TlsConfig {
                     enabled: self
                         .field("tls")
@@ -171,6 +195,15 @@ impl App {
             Some(("port", "请输入有效端口"))
         } else if self.field("redis_db").parse::<u32>().is_err() {
             Some(("redis_db", "请输入有效 Redis DB"))
+        } else if !self.field("redis_databases_override").is_empty()
+            && self
+                .field("redis_databases_override")
+                .parse::<u32>()
+                .ok()
+                .filter(|count| *count > 0)
+                .is_none()
+        {
+            Some(("redis_databases_override", "请输入有效 Redis DB 数量"))
         } else if !matches!(self.field("provider"), "mysql" | "redis") {
             Some(("provider", "未知数据库类型"))
         } else if !matches!(self.field("access"), "read_only" | "read_write") {

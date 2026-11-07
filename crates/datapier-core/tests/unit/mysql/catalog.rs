@@ -1,4 +1,4 @@
-use super::column_flags;
+use super::{column_flags, grant_schema_matches};
 
 #[test]
 fn auto_increment_and_generated_are_independent() {
@@ -15,4 +15,41 @@ fn auto_increment_and_generated_are_independent() {
         column_flags("auto_increment DEFAULT_GENERATED", None),
         (true, false)
     );
+}
+
+#[test]
+fn schema_grants_preserve_escaped_wildcards_and_identifier_quotes() {
+    assert!(grant_schema_matches(
+        r"`datapier\_fixture`.*",
+        "datapier_fixture",
+        false
+    ));
+    assert!(!grant_schema_matches(
+        r"`datapier\_fixture`.*",
+        "datapierXfixture",
+        false
+    ));
+    assert!(grant_schema_matches(r"`a\%b`.*", "a%b", false));
+    assert!(!grant_schema_matches(r"`a\%b`.*", "axxb", false));
+    assert!(grant_schema_matches("`tenant_%`.*", "tenant_audit", false));
+    assert!(!grant_schema_matches("`tenant_%`.*", "tenant", false));
+    assert!(grant_schema_matches(
+        "`quoted``name`.*",
+        "quoted`name",
+        false
+    ));
+    assert!(!grant_schema_matches(
+        "`quoted`name`.*",
+        "quoted`name",
+        false
+    ));
+    assert!(!grant_schema_matches(
+        r"`unfinished\`.*",
+        "unfinished",
+        false
+    ));
+    assert!(!grant_schema_matches("`Fixture`.*", "fixture", false));
+    assert!(grant_schema_matches("`Fixture`.*", "fixture", true));
+    assert!(!grant_schema_matches("`Fixture`.*", "fixture_extra", true));
+    assert!(!grant_schema_matches("`db`.`table`", "db", false));
 }

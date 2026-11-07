@@ -65,6 +65,5 @@ async fn redis_score_validation_matches_csv_and_json_previews() {
         assert_eq!(preview.errors.is_empty(), valid, "JSON {score}");
     }
     store.pool.close().await;
-    store.cache.close().await;
     fs::remove_dir_all(root).unwrap();
 }

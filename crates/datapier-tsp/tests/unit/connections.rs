@@ -19,6 +19,32 @@ fn connected_app() -> (App, Profile, Value) {
     app.workbench.overlay = None;
     (app, profile, session)
 }
+
+#[test]
+fn connection_edit_keeps_mcp_policy_and_creation_uses_global_default() {
+    use datapier_core::model::ApprovalPolicy;
+
+    let mut app = App::new("mcp-policy-precedence".into());
+    app.profile_form(None);
+    let mut existing = app.form_profile().unwrap();
+    existing.approval_policy = ApprovalPolicy::Off;
+    app.settings.approval.default_policy = ApprovalPolicy::AllWrites;
+
+    app.profile_form(Some(existing));
+    app.field_set("name", "renamed");
+    app.field_set("host", "changed-host");
+    assert_eq!(
+        app.form_profile().unwrap().approval_policy,
+        ApprovalPolicy::Off
+    );
+
+    app.profile_form(None);
+    app.field_set("provider", "redis");
+    assert_eq!(
+        app.form_profile().unwrap().approval_policy,
+        ApprovalPolicy::AllWrites
+    );
+}
 #[test]
 fn all_profile_submissions_reject_invalid_fields_without_requests() {
     let (backend, mut requests, _) = Backend::scripted();

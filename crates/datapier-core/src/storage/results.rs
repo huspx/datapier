@@ -1,227 +1,285 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::{Notify, watch};
+use tokio_util::sync::CancellationToken;
 
+pub(super) struct ResultStore {
+    entries: HashMap<Uuid, MemoryResult>,
+    auxiliary: HashMap<Uuid, (Uuid, usize)>,
+    values: HashMap<Uuid, (Uuid, Vec<u8>)>,
+    next_sequence: u64,
+    activity: watch::Sender<u64>,
+}
+struct MemoryResult {
+    meta: ResultMeta,
+    sequence: u64,
+    owner: Uuid,
+    base: u64,
+    rows: Vec<Vec<Value>>,
+    bytes: usize,
+    demand: u64,
+    limited: bool,
+    touched: std::time::Instant,
+    notify: Arc<Notify>,
+    wait: Arc<WaitState>,
+}
+#[derive(Default)]
+struct WaitState {
+    waiting: AtomicBool,
+    completed: AtomicU64,
+}
+struct WaitGuard {
+    state: Arc<WaitState>,
+    activity: watch::Sender<u64>,
+}
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        self.state.completed.fetch_add(1, Ordering::SeqCst);
+        self.state.waiting.store(false, Ordering::SeqCst);
+        self.activity
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+}
+impl Default for ResultStore {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            auxiliary: HashMap::new(),
+            values: HashMap::new(),
+            next_sequence: 0,
+            activity: watch::channel(0).0,
+        }
+    }
+}
+impl ResultStore {
+    fn expire(&mut self, idle: Duration) {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|(_, r)| r.touched.elapsed() >= idle)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.remove(id);
+        }
+    }
+    /// 调用方持有结果锁期间，返回尚未过期的执行 ID。
+    pub(super) fn live_execution_ids(&mut self, idle: Duration) -> std::collections::HashSet<Uuid> {
+        self.expire(idle);
+        self.entries
+            .values()
+            .map(|entry| entry.meta.execution_id)
+            .collect()
+    }
+    fn remove(&mut self, id: Uuid) {
+        if let Some(entry) = self.entries.remove(&id) {
+            entry.notify.notify_waiters();
+        }
+        self.values.retain(|_, (result, _)| *result != id);
+    }
+}
+fn missing() -> AppError {
+    AppError::new("not_found", "结果不存在或已释放")
+}
 impl Store {
-    /// 创建未完成的缓存结果，列定义与执行 ID 随结果保存。
     pub async fn start_result(
         &self,
         execution_id: Uuid,
         columns: Vec<Column>,
         kind: &str,
     ) -> Result<Uuid> {
+        let settings = self.settings().await?;
+        // 与历史清理采用同一锁顺序，避免清理在取得 owner 后删除执行记录。
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO results(id,execution_id,columns,kind,row_count,complete,summary) VALUES(?,?,?,?,0,0,'null')")
-            .bind(id.to_string()).bind(execution_id.to_string()).bind(serde_json::to_string(&columns)?)
-            .bind(kind).execute(&self.cache).await?;
+        let meta = ResultMeta {
+            id,
+            execution_id,
+            columns,
+            kind: kind.to_owned(),
+            row_count: 0,
+            complete: false,
+            summary: json!({}),
+        };
+        let bytes = serde_json::to_vec(&meta)?.len();
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(settings.limits.result_idle_seconds));
+        let owner: Option<String> = sqlx::query_scalar("SELECT owner FROM executions WHERE id=?")
+            .bind(execution_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        let owner = parse_id(&owner.ok_or_else(|| AppError::new("not_found", "任务不存在"))?)?;
+        let used: usize = state
+            .entries
+            .values()
+            .filter(|r| r.owner == owner)
+            .map(|r| r.bytes)
+            .sum::<usize>()
+            + state
+                .auxiliary
+                .values()
+                .filter(|(o, _)| *o == owner)
+                .map(|(_, n)| *n)
+                .sum::<usize>();
+        if used.saturating_add(bytes) > settings.limits.result_memory_bytes_per_client {
+            return Err(AppError::new("resource_limit", "结果内存预算已用尽"));
+        }
+        let sequence = state.next_sequence;
+        state.next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| AppError::new("resource_limit", "结果编号溢出"))?;
+        state.entries.insert(
+            id,
+            MemoryResult {
+                meta,
+                owner,
+                sequence,
+                base: 0,
+                rows: Vec::new(),
+                bytes,
+                demand: if kind == "redis" {
+                    settings.paging.redis_value_rows as u64
+                } else {
+                    settings.paging.sql_rows as u64
+                },
+                limited: false,
+                touched: std::time::Instant::now(),
+                notify: Arc::new(Notify::new()),
+                wait: Arc::new(WaitState::default()),
+            },
+        );
         Ok(id)
     }
-    // 文件和 SQLite 行的修改共用结果锁，避免追加、投影和释放彼此交错。
-    pub(super) async fn result_guard(&self, id: Uuid) -> ResultGuard {
-        let (gate, registration) = {
-            let mut gates = self.result_gates.lock().unwrap_or_else(|e| e.into_inner());
-            let gate = gates.entry(id).or_insert_with(|| ResultGate {
-                lock: Arc::new(Mutex::new(())),
-                users: 0,
-            });
-            gate.users += 1;
-            let registration = ResultGateRegistration {
-                id,
-                gates: self.result_gates.clone(),
-            };
-            (gate.lock.clone(), registration)
-        };
-        // 等待被取消时登记也会释放，不能只在成功释放结果时清理。
-        let guard = gate.lock_owned().await;
-        ResultGuard {
-            _guard: guard,
-            _registration: registration,
-        }
-    }
-    /// 追加一批行；大值可能先写入外置文件，再将行写入缓存数据库。
     pub async fn append_rows(&self, id: Uuid, rows: Vec<Vec<Value>>) -> Result<()> {
-        // 脱离调用方的等待后仍持有结果锁，直到文件写入和行提交结束。
-        let store = self.clone();
-        tokio::spawn(async move { store.append_rows_inner(id, rows).await })
-            .await
-            .map_err(|e| AppError::new("storage", e.to_string()))?
-    }
-
-    async fn append_rows_inner(&self, id: Uuid, rows: Vec<Vec<Value>>) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let _guard = self.result_guard(id).await;
-        self.result_meta(id).await?;
-        let mut payloads = Vec::with_capacity(rows.len());
+        let settings = self.settings().await?;
+        let mut state = self.results.lock().await;
+        let owner = state.entries.get(&id).ok_or_else(missing)?.owner;
+        let mut used: usize = state
+            .entries
+            .values()
+            .filter(|r| r.owner == owner)
+            .map(|r| r.bytes)
+            .sum::<usize>()
+            + state
+                .auxiliary
+                .values()
+                .filter(|(o, _)| *o == owner)
+                .map(|(_, n)| *n)
+                .sum::<usize>();
         for mut row in rows {
-            let mut payload = serde_json::to_vec(&row)?;
-            if payload.len() > 64 * 1024 {
-                drop(payload);
-                for value in &mut row {
-                    let raw = serde_json::to_vec(value)?;
-                    if raw.len() > 64 * 1024 {
-                        *value = self.externalize(id, value, raw, 4096).await?;
-                    }
+            let mut additions = Vec::new();
+            for value in &mut row {
+                let raw = serde_json::to_vec(value)?;
+                if raw.len() > settings.limits.value_preview_bytes
+                    && !matches!(value, Value::Large { .. })
+                {
+                    let value_id = Uuid::new_v4();
+                    let preview = value_preview(value, &raw, settings.limits.value_preview_bytes);
+                    let original_type = value_type(value).to_owned();
+                    let bytes = raw.len() as u64;
+                    additions.push((value_id, raw));
+                    *value = Value::Large {
+                        id: value_id,
+                        original_type,
+                        bytes,
+                        preview,
+                    };
                 }
-                payload = serde_json::to_vec(&row)?;
             }
-            payloads.push(payload);
-        }
-        let mut connection = self.cache.acquire().await?;
-        let result = async {
-            // 先取得写锁，避免不同结果的读快照在升级写事务时互相冲突。
-            let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-            let start: i64 = sqlx::query_scalar("SELECT row_count FROM results WHERE id=?")
-                .bind(id.to_string())
-                .fetch_one(&mut *tx)
-                .await?;
-            let count = payloads.len();
-            for (i, payload) in payloads.into_iter().enumerate() {
-                sqlx::query("INSERT INTO result_rows(result_id,row_no,payload) VALUES(?,?,?)")
-                    .bind(id.to_string())
-                    .bind(start + i as i64)
-                    .bind(payload)
-                    .execute(&mut *tx)
-                    .await?;
+            let size = serde_json::to_vec(&row)?
+                .len()
+                .saturating_add(additions.iter().map(|(_, v)| v.len()).sum::<usize>());
+            if used.saturating_add(size) > settings.limits.result_memory_bytes_per_client {
+                let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+                result.limited = true;
+                result.meta.summary["resource_limited"] = json!(true);
+                result.notify.notify_waiters();
+                return Err(AppError::new("resource_limit", "结果内存预算已用尽"));
             }
-            sqlx::query("UPDATE results SET row_count=row_count+? WHERE id=?")
-                .bind(count as i64)
-                .bind(id.to_string())
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(())
+            for (value_id, raw) in additions {
+                state.values.insert(value_id, (id, raw));
+            }
+            let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+            result.rows.push(row);
+            result.bytes += size;
+            result.meta.row_count = result.base + result.rows.len() as u64;
+            result.touched = std::time::Instant::now();
+            result.notify.notify_waiters();
+            used += size;
         }
-        .await;
-        if result.is_err() {
-            // SQLITE_FULL 等错误可能自动回滚；不复用驱动事务状态已不确定的连接。
-            connection.close_on_drop();
-        }
-        result
-    }
-    /// 标记结果完整并保存摘要。
-    pub async fn finish_result(&self, id: Uuid, summary: Json) -> Result<()> {
-        let _guard = self.result_guard(id).await;
-        sqlx::query("UPDATE results SET complete=1,summary=? WHERE id=?")
-            .bind(summary.to_string())
-            .bind(id.to_string())
-            .execute(&self.cache)
-            .await?;
         Ok(())
     }
-    /// 读取结果元数据；结果已释放或不存在时返回 `not_found`。
+    pub async fn finish_result(&self, id: Uuid, summary: Json) -> Result<()> {
+        let mut state = self.results.lock().await;
+        let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+        merge_summary(&mut result.meta.summary, summary);
+        result.meta.complete = true;
+        result.touched = std::time::Instant::now();
+        result.notify.notify_waiters();
+        Ok(())
+    }
+    pub async fn update_result_summary(&self, id: Uuid, summary: Json) -> Result<()> {
+        let mut state = self.results.lock().await;
+        let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+        merge_summary(&mut result.meta.summary, summary);
+        result.notify.notify_waiters();
+        Ok(())
+    }
+    pub async fn peek_result_meta(&self, id: Uuid) -> Result<ResultMeta> {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        Ok(state.entries.get(&id).ok_or_else(missing)?.meta.clone())
+    }
     pub async fn result_meta(&self, id: Uuid) -> Result<ResultMeta> {
-        let row = sqlx::query(
-            "SELECT execution_id,columns,kind,row_count,complete,summary FROM results WHERE id=?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.cache)
-        .await?
-        .ok_or_else(|| AppError::new("not_found", "结果已释放或不存在"))?;
-        Ok(ResultMeta {
-            id,
-            execution_id: parse_id(row.get::<&str, _>(0))?,
-            columns: serde_json::from_str(row.get::<&str, _>(1))?,
-            kind: row.get(2),
-            row_count: row.get::<i64, _>(3) as u64,
-            complete: row.get::<i64, _>(4) != 0,
-            summary: serde_json::from_str(row.get::<&str, _>(5))?,
-        })
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+        result.touched = std::time::Instant::now();
+        Ok(result.meta.clone())
     }
-    /// 按创建顺序读取执行关联的结果 ID。
     pub async fn result_ids(&self, task: Uuid) -> Result<Vec<Uuid>> {
-        let ids: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM results WHERE execution_id=? ORDER BY rowid")
-                .bind(task.to_string())
-                .fetch_all(&self.cache)
-                .await?;
-        ids.iter().map(|id| parse_id(id)).collect()
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let mut entries: Vec<_> = state
+            .entries
+            .values()
+            .filter(|r| r.meta.execution_id == task)
+            .collect();
+        entries.sort_by_key(|r| r.sequence);
+        Ok(entries.into_iter().map(|r| r.meta.id).collect())
     }
-    /// 按现有结果页的行数与字节预算计算当前缓存的全部页起点。
-    pub async fn result_pagination(
-        &self,
-        id: Uuid,
-        page_size: usize,
-        max_bytes: usize,
-    ) -> Result<ResultPagination> {
-        if !matches!(page_size, 20 | 50 | 100) {
-            return Err(AppError::invalid("每页行数只能为 20、50 或 100"));
-        }
-        let store = self.clone();
-        tokio::spawn(async move {
-            store
-                .result_pagination_inner(id, page_size, max_bytes)
-                .await
-        })
-        .await
-        .map_err(|e| AppError::new("storage", e.to_string()))?
+    pub(super) async fn result_summaries(&self, task: Uuid) -> Result<Vec<TaskResultSummary>> {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let mut entries: Vec<_> = state
+            .entries
+            .values()
+            .filter(|r| r.meta.execution_id == task)
+            .collect();
+        entries.sort_by_key(|r| r.sequence);
+        Ok(entries
+            .into_iter()
+            .map(|r| {
+                let meta = &r.meta;
+                TaskResultSummary {
+                    id: meta.id,
+                    row_count: meta.row_count,
+                    complete: meta.complete,
+                    kind: meta.kind.clone(),
+                    column_count: (meta.kind != "columns_unknown")
+                        .then_some(meta.columns.len() as u64),
+                    redis_type: meta
+                        .summary
+                        .get("redis_type")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned),
+                }
+            })
+            .collect())
     }
-
-    async fn result_pagination_inner(
-        &self,
-        id: Uuid,
-        page_size: usize,
-        max_bytes: usize,
-    ) -> Result<ResultPagination> {
-        let _guard = self.result_guard(id).await;
-        let result = self.result_meta(id).await?;
-        let max_bytes = max_bytes.clamp(1024, 1024 * 1024);
-        let base = Self::result_page_base(&result, max_bytes)?;
-        // 先归一化放不进空页的行；外置后缩小的行可能重新放入前一页。
-        let mut lengths: Vec<i64> = sqlx::query_scalar(
-            "SELECT length(payload) FROM result_rows WHERE result_id=? ORDER BY row_no",
-        )
-        .bind(id.to_string())
-        .fetch_all(&self.cache)
-        .await?;
-        for (index, length) in lengths.iter_mut().enumerate() {
-            if base + *length as usize + 1 > max_bytes {
-                let payload: Vec<u8> = sqlx::query_scalar(
-                    "SELECT payload FROM result_rows WHERE result_id=? AND row_no=?",
-                )
-                .bind(id.to_string())
-                .bind(index as i64)
-                .fetch_one(&self.cache)
-                .await?;
-                let (_, size) = self
-                    .project_result_row(id, index as u64, payload, base, max_bytes)
-                    .await?;
-                *length = (size - 1) as i64;
-            }
-        }
-        let mut starts = vec![0];
-        let mut bytes = base;
-        let mut count = 0usize;
-        for (index, length) in lengths.into_iter().enumerate() {
-            let size = length as usize + 1;
-            if count == page_size || (count > 0 && bytes + size > max_bytes) {
-                starts.push(index as u64);
-                bytes = base;
-                count = 0;
-            }
-            bytes += size;
-            count += 1;
-        }
-        Ok(ResultPagination {
-            starts,
-            row_count: result.row_count,
-            complete: result.complete,
-            page_size: page_size as u64,
-        })
-    }
-
-    fn result_page_base(result: &ResultMeta, max_bytes: usize) -> Result<usize> {
-        let bytes = serde_json::to_vec(result)?.len() + 128;
-        if bytes > max_bytes {
-            return Err(AppError::new(
-                "result_too_wide",
-                "列定义超过页大小，请增加页预算或减少查询列数",
-            ));
-        }
-        Ok(bytes)
-    }
-
-    /// 按起始行取页，行数限制在 1..=1000，字节预算限制在 1 KiB..=1 MiB。
-    /// 预算计入元数据；单行过宽时可将字段外置，仍无法容纳则返回错误。
     pub async fn result_page(
         &self,
         id: Uuid,
@@ -229,195 +287,361 @@ impl Store {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<ResultPage> {
-        let store = self.clone();
-        tokio::spawn(async move {
-            store
-                .result_page_inner(id, start, max_rows, max_bytes)
-                .await
-        })
-        .await
-        .map_err(|e| AppError::new("storage", e.to_string()))?
+        self.result_page_inner(id, start, max_rows, max_bytes, true)
+            .await
     }
-
-    async fn result_page_inner(
+    pub async fn peek_result_page(
         &self,
         id: Uuid,
         start: u64,
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<ResultPage> {
-        let _guard = self.result_guard(id).await;
-        let result = self.result_meta(id).await?;
-        let max_rows = max_rows.clamp(1, 1000);
-        let max_bytes = max_bytes.clamp(1024, 1024 * 1024);
-        let mut rows = Vec::new();
-        let mut bytes = Self::result_page_base(&result, max_bytes)?;
-        // SQLite 行号是有符号整数；越界偏移不能转换后回绕到结果开头。
-        if start >= result.row_count {
-            return Ok(ResultPage {
-                result,
-                rows,
-                start,
-                next: None,
-            });
+        self.result_page_inner(id, start, max_rows, max_bytes, false)
+            .await
+    }
+    async fn result_page_inner(
+        &self,
+        id: Uuid,
+        start: u64,
+        max_rows: usize,
+        max_bytes: usize,
+        touch: bool,
+    ) -> Result<ResultPage> {
+        if !(1..=1000).contains(&max_rows) || !(1024..=1_048_576).contains(&max_bytes) {
+            return Err(AppError::invalid("分页预算无效"));
         }
-        let mut first_over_budget = None;
-        let mut stream = sqlx::query("SELECT payload FROM result_rows WHERE result_id=? AND row_no>=? ORDER BY row_no LIMIT ?")
-            .bind(id.to_string()).bind(start as i64).bind(max_rows as i64).fetch(&self.cache);
-        while let Some(row) = stream.try_next().await? {
-            let payload: Vec<u8> = row.get(0);
-            if bytes + payload.len() + 1 > max_bytes {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+        if start < result.base || start > result.meta.row_count {
+            return Err(AppError::invalid("结果页已失效或超出范围"));
+        }
+        let mut size = serde_json::to_vec(&result.meta)?.len();
+        let mut rows = Vec::new();
+        for row in result
+            .rows
+            .iter()
+            .skip((start - result.base) as usize)
+            .take(max_rows)
+        {
+            let mut projected = row.clone();
+            let mut n = serde_json::to_vec(&projected)?.len() + 1;
+            if size + n > max_bytes && rows.is_empty() {
+                for value in &mut projected {
+                    if let Value::Large { preview, .. } = value {
+                        preview.clear();
+                    }
+                }
+                n = serde_json::to_vec(&projected)?.len() + 1;
+            }
+            if size + n > max_bytes {
                 if rows.is_empty() {
-                    first_over_budget = Some(payload);
+                    return Err(AppError::new("result_too_wide", "结果行超过响应预算"));
                 }
                 break;
             }
-            bytes += payload.len() + 1;
-            rows.push(serde_json::from_slice(&payload)?);
-        }
-        // 外置文件登记需要另一条连接，必须先释放读取连接，避免并发分页耗尽连接池。
-        drop(stream);
-        if let Some(payload) = first_over_budget {
-            let (values, size) = self
-                .project_result_row(id, start, payload, bytes, max_bytes)
-                .await?;
-            bytes += size;
-            rows.push(values);
-            // 投影首行后重新读取其余行，保持原有的行数和字节预算。
-            if max_rows > 1 {
-                let mut stream = sqlx::query("SELECT payload FROM result_rows WHERE result_id=? AND row_no>=? ORDER BY row_no LIMIT ?")
-                    .bind(id.to_string()).bind((start + 1) as i64).bind((max_rows - 1) as i64).fetch(&self.cache);
-                while let Some(row) = stream.try_next().await? {
-                    let payload: Vec<u8> = row.get(0);
-                    if bytes + payload.len() + 1 > max_bytes {
-                        break;
-                    }
-                    bytes += payload.len() + 1;
-                    rows.push(serde_json::from_slice(&payload)?);
-                }
-            }
+            size += n;
+            rows.push(projected);
         }
         let end = start + rows.len() as u64;
-        let next = if end < result.row_count {
-            Some(end)
-        } else {
-            None
-        };
+        let next = (end < result.meta.row_count
+            || (end > start
+                && result.meta.summary.get("has_more").and_then(Json::as_bool) == Some(true)))
+        .then_some(end);
+        if touch {
+            result.touched = std::time::Instant::now();
+        }
         Ok(ResultPage {
-            result,
+            result: result.meta.clone(),
             rows,
             start,
             next,
         })
     }
-    // 调用方持有结果锁；仅对不能放入空页的行读取和投影完整值。
-    async fn project_result_row(
+    pub async fn result_pagination(
         &self,
         id: Uuid,
-        start: u64,
-        payload: Vec<u8>,
-        bytes: usize,
+        page_size: usize,
         max_bytes: usize,
-    ) -> Result<(Vec<Value>, usize)> {
-        let mut values: Vec<Value> = serde_json::from_slice(&payload)?;
-        for value in &mut values {
-            if let Value::Large { preview, .. } = value {
-                preview.clear();
+    ) -> Result<ResultPagination> {
+        let meta = self.result_meta(id).await?;
+        let base = {
+            let s = self.results.lock().await;
+            s.entries.get(&id).ok_or_else(missing)?.base
+        };
+        let mut starts = vec![base];
+        let mut current = base;
+        while current < meta.row_count {
+            let page = self.result_page(id, current, page_size, max_bytes).await?;
+            match page.next {
+                Some(next) if next > current => {
+                    starts.push(next);
+                    current = next;
+                }
+                _ => break,
             }
         }
-        let mut size = serde_json::to_vec(&values)?.len() + 1;
-        if bytes + size > max_bytes {
-            for value in &mut values {
-                if matches!(value, Value::Large { .. }) {
-                    continue;
-                }
-                let raw = serde_json::to_vec(value)?;
-                let reference = Value::Large {
-                    id: Uuid::nil(),
-                    original_type: value_type(value).into(),
-                    bytes: raw.len() as u64,
-                    preview: String::new(),
-                };
-                let reference_size = serde_json::to_vec(&reference)?.len();
-                if reference_size >= raw.len() {
-                    continue;
-                }
-                size = size - raw.len() + reference_size;
-                *value = self.externalize(id, value, raw, 0).await?;
-                if bytes + size <= max_bytes {
-                    break;
-                }
-            }
-        }
-        sqlx::query("UPDATE result_rows SET payload=? WHERE result_id=? AND row_no=?")
-            .bind(serde_json::to_vec(&values)?)
-            .bind(id.to_string())
-            .bind(start as i64)
-            .execute(&self.cache)
-            .await?;
-        if bytes + size > max_bytes {
-            return Err(AppError::new(
-                "result_too_wide",
-                "单行引用和列定义超过页大小，请减少查询列数",
-            ));
-        }
-        Ok((values, size))
+        Ok(ResultPagination {
+            starts,
+            row_count: meta.row_count,
+            complete: meta.complete,
+            page_size: page_size as u64,
+        })
     }
-    /// 逻辑释放结果后删除外置文件；失败时保留文件清理记录，可用同一 ID 重试。
-    pub async fn release_result(&self, id: Uuid) -> Result<()> {
-        let _guard = self.result_guard(id).await;
-        let mut tx = self.cache.begin().await?;
-        // schema 1 的文件没有登记；在删除行之前将其纳入同一事务。
-        let mut after = -1_i64;
+    pub async fn set_result_demand(&self, id: Uuid, through: u64) -> Result<()> {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let r = state.entries.get_mut(&id).ok_or_else(missing)?;
+        r.demand = r.demand.max(through);
+        r.touched = std::time::Instant::now();
+        r.notify.notify_waiters();
+        Ok(())
+    }
+    /// 订阅结果读取状态变化，用于暂停执行超时计时。
+    pub async fn subscribe_result_activity(&self) -> watch::Receiver<u64> {
+        self.results.lock().await.activity.subscribe()
+    }
+    /// 返回该执行是否正在等待消费者，以及已结束的等待次数。
+    pub async fn execution_wait_state(&self, execution_id: Uuid) -> (bool, u64) {
+        let state = self.results.lock().await;
+        let mut waiting = false;
+        let mut completed = 0u64;
+        for result in state
+            .entries
+            .values()
+            .filter(|r| r.meta.execution_id == execution_id)
+        {
+            waiting |= result.wait.waiting.load(Ordering::SeqCst);
+            completed = completed.wrapping_add(result.wait.completed.load(Ordering::SeqCst));
+        }
+        (waiting, completed)
+    }
+    pub async fn wait_result_demand(
+        &self,
+        id: Uuid,
+        produced: u64,
+        cancel: &CancellationToken,
+    ) -> Result<bool> {
+        let mut wait_guard: Option<WaitGuard> = None;
         loop {
-            let rows = sqlx::query("SELECT row_no,payload FROM result_rows WHERE result_id=? AND row_no>? ORDER BY row_no LIMIT 128")
-                .bind(id.to_string()).bind(after).fetch_all(&mut *tx).await?;
-            if rows.is_empty() {
-                break;
-            }
-            for row in rows {
-                after = row.get(0);
-                let values: Vec<Value> = serde_json::from_slice(row.get::<&[u8], _>(1))?;
-                for value in values {
-                    if let Value::Large { id: value_id, .. } = value {
-                        sqlx::query("INSERT OR IGNORE INTO value_files(id,result_id) VALUES(?,?)")
-                            .bind(value_id.to_string())
-                            .bind(id.to_string())
-                            .execute(&mut *tx)
-                            .await?;
+            let notify = {
+                let state = self.results.lock().await;
+                match state.entries.get(&id) {
+                    Some(r) if !r.limited => r.notify.clone(),
+                    _ => return Ok(false),
+                }
+            };
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let idle = self.settings().await?.limits.result_idle_seconds;
+            {
+                let mut state = self.results.lock().await;
+                match state.entries.get(&id) {
+                    None => return Ok(false),
+                    Some(r) if r.limited => return Ok(false),
+                    Some(r) if produced < r.demand => return Ok(true),
+                    Some(r) if r.touched.elapsed() >= Duration::from_secs(idle) => {
+                        state.remove(id);
+                        return Ok(false);
+                    }
+                    Some(r) => {
+                        if wait_guard.is_none() {
+                            r.wait.waiting.store(true, Ordering::SeqCst);
+                            state
+                                .activity
+                                .send_modify(|version| *version = version.wrapping_add(1));
+                            wait_guard = Some(WaitGuard {
+                                state: r.wait.clone(),
+                                activity: state.activity.clone(),
+                            });
+                        }
                     }
                 }
             }
+            tokio::select! { _ = cancel.cancelled() => return Ok(false), _ = &mut notified => {}, _ = tokio::time::sleep(Duration::from_secs(idle)) => {} }
         }
-        sqlx::query("DELETE FROM result_rows WHERE result_id=?")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM results WHERE id=?")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+    }
+    pub async fn value_result_id(&self, id: Uuid) -> Result<Uuid> {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        Ok(state.values.get(&id).ok_or_else(missing)?.0)
+    }
+    pub async fn wait_result_rows(&self, id: Uuid, through: u64) -> Result<()> {
         loop {
-            let file: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM value_files WHERE result_id=? ORDER BY id LIMIT 1",
-            )
-            .bind(id.to_string())
-            .fetch_optional(&self.cache)
-            .await?;
-            let Some(file) = file else {
-                break;
+            let notify = {
+                let state = self.results.lock().await;
+                state.entries.get(&id).ok_or_else(missing)?.notify.clone()
             };
-            match tokio::fs::remove_file(self.root.join("values").join(&file)).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let state = self.results.lock().await;
+                let r = state.entries.get(&id).ok_or_else(missing)?;
+                if r.meta.row_count >= through || r.meta.complete || r.limited {
+                    return Ok(());
+                }
             }
-            sqlx::query("DELETE FROM value_files WHERE id=?")
-                .bind(file)
-                .execute(&self.cache)
-                .await?;
+            notified.await;
         }
+    }
+    pub async fn replace_result_page(
+        &self,
+        id: Uuid,
+        start: u64,
+        columns: Vec<Column>,
+        rows: Vec<Vec<Value>>,
+        summary: Json,
+    ) -> Result<()> {
+        {
+            let mut state = self.results.lock().await;
+            state.values.retain(|_, (owner, _)| *owner != id);
+            let r = state.entries.get_mut(&id).ok_or_else(missing)?;
+            r.rows.clear();
+            r.base = start;
+            r.meta.row_count = start;
+            r.meta.columns = columns;
+            r.bytes = serde_json::to_vec(&r.meta)?.len();
+            r.limited = false;
+            merge_summary(&mut r.meta.summary, summary);
+        }
+        self.append_rows(id, rows).await
+    }
+    pub async fn release_result(&self, id: Uuid) -> Result<()> {
+        self.results.lock().await.remove(id);
         Ok(())
+    }
+    pub async fn release_owner_results(&self, owner: Uuid) -> Result<()> {
+        let mut state = self.results.lock().await;
+        let ids: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|(_, r)| r.owner == owner)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            state.remove(id);
+        }
+        state.auxiliary.retain(|_, (o, _)| *o != owner);
+        Ok(())
+    }
+    pub async fn reserve_auxiliary(
+        &self,
+        execution_id: Uuid,
+        handle: Uuid,
+        bytes: usize,
+    ) -> Result<()> {
+        let owner = self.task(execution_id).await?.owner;
+        let budget = self.settings().await?.limits.result_memory_bytes_per_client;
+        let mut state = self.results.lock().await;
+        if state
+            .auxiliary
+            .get(&handle)
+            .is_some_and(|(o, _)| *o != owner)
+        {
+            return Err(AppError::new("forbidden", "句柄属于其他客户端"));
+        }
+        let used = state
+            .entries
+            .values()
+            .filter(|r| r.owner == owner)
+            .map(|r| r.bytes)
+            .sum::<usize>()
+            + state
+                .auxiliary
+                .iter()
+                .filter(|(id, (o, _))| **id != handle && *o == owner)
+                .map(|(_, (_, n))| *n)
+                .sum::<usize>();
+        if used.saturating_add(bytes) > budget {
+            return Err(AppError::new("resource_limit", "客户端内存预算已用尽"));
+        }
+        state.auxiliary.insert(handle, (owner, bytes));
+        Ok(())
+    }
+    pub async fn release_auxiliary(&self, handle: Uuid) -> Result<()> {
+        self.results.lock().await.auxiliary.remove(&handle);
+        Ok(())
+    }
+    pub async fn read_value(&self, id: Uuid) -> Result<Value> {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let (result, raw) = state.values.get(&id).ok_or_else(missing)?;
+        let result = *result;
+        let value = serde_json::from_slice(raw)?;
+        if let Some(r) = state.entries.get_mut(&result) {
+            r.touched = std::time::Instant::now();
+        }
+        Ok(value)
+    }
+    pub async fn large_value(&self, id: Uuid, offset: u64, max_bytes: usize) -> Result<Json> {
+        self.large_value_inner(id, offset, max_bytes, true).await
+    }
+    pub async fn peek_large_value(&self, id: Uuid, offset: u64, max_bytes: usize) -> Result<Json> {
+        self.large_value_inner(id, offset, max_bytes, false).await
+    }
+    async fn large_value_inner(
+        &self,
+        id: Uuid,
+        offset: u64,
+        max_bytes: usize,
+        touch: bool,
+    ) -> Result<Json> {
+        if max_bytes == 0 || max_bytes > 262144 {
+            return Err(AppError::invalid("字段块大小无效"));
+        }
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        let mut state = self.results.lock().await;
+        state.expire(Duration::from_secs(idle));
+        let (result, raw) = state.values.get(&id).ok_or_else(missing)?;
+        let result = *result;
+        let start = usize::try_from(offset).map_err(|_| AppError::invalid("字段偏移无效"))?;
+        if start > raw.len() {
+            return Err(AppError::invalid("字段偏移无效"));
+        }
+        let end = start.saturating_add(max_bytes).min(raw.len());
+        let chunk = json!({"id":id,"offset":offset,"data_b64":STANDARD.encode(&raw[start..end]),"next":(end < raw.len()).then_some(end),"total_bytes":raw.len(),"content_type":"application/vnd.datapier.value+json"});
+        if touch && let Some(r) = state.entries.get_mut(&result) {
+            r.touched = std::time::Instant::now();
+        }
+        Ok(chunk)
+    }
+}
+fn merge_summary(target: &mut Json, update: Json) {
+    if let (Some(dst), Some(src)) = (target.as_object_mut(), update.as_object()) {
+        dst.extend(src.clone());
+    } else {
+        *target = update;
+    }
+}
+fn value_preview(value: &Value, raw: &[u8], limit: usize) -> String {
+    fn prefix(s: &str, limit: usize) -> &str {
+        let mut end = limit.min(s.len());
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+    match value {
+        Value::Text(s)
+        | Value::Integer(s)
+        | Value::Unsigned(s)
+        | Value::Decimal(s)
+        | Value::Float(s)
+        | Value::Date(s)
+        | Value::Time(s)
+        | Value::DateTime(s) => prefix(s, limit).to_owned(),
+        Value::Bytes(s) => {
+            let mut result = String::from("base64:");
+            result.push_str(prefix(s, limit.saturating_sub(result.len())));
+            result
+        }
+        _ => prefix(std::str::from_utf8(raw).unwrap_or(""), limit).to_owned(),
     }
 }

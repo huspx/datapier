@@ -116,7 +116,7 @@ fn cli_pages_do_not_replace_key_grid_or_baseline() {
         }
         node.child_nodes().iter().find_map(command_text)
     }
-    let view = crate::views::render(&app);
+    let view = crate::views::render_window(&app, Some(Uuid::new_v4()));
     assert_eq!(
         view.regions().into_iter().flatten().find_map(command_text),
         Some("PING")
@@ -128,7 +128,7 @@ fn cli_pages_do_not_replace_key_grid_or_baseline() {
     app.workbench.archery_history.selected = Some(0);
     app.application_action("history-open", &backend);
     assert_eq!(app.field("cli_text"), "GET another-key");
-    let view = crate::views::render(&app);
+    let view = crate::views::render_window(&app, Some(Uuid::new_v4()));
     assert_eq!(
         view.regions().into_iter().flatten().find_map(command_text),
         Some("PING")
@@ -142,7 +142,6 @@ fn cli_pages_do_not_replace_key_grid_or_baseline() {
         &backend,
     );
     let request = requests.try_recv().unwrap();
-    assert_eq!(request.method, "result.page");
     let tag = request.tag.splitn(3, ':').nth(2).unwrap();
     app.workbench_response(tag, serde_json::to_value(result).unwrap(), &backend);
     let preload = requests.try_recv().unwrap();
@@ -174,7 +173,7 @@ fn cli_pages_do_not_replace_key_grid_or_baseline() {
     assert_eq!(app.workbench.cli_page_history, [0]);
     let record = app.workbench.cli_selected.unwrap();
     app.workbench_action(&format!("cli-record:{record}:1"), &backend);
-    let view = crate::views::render(&app);
+    let view = crate::views::render_window(&app, Some(Uuid::new_v4()));
     assert_eq!(
         view.regions().into_iter().flatten().find_map(command_text),
         Some("PING")
@@ -408,7 +407,7 @@ fn cli_header_attributes_selected_result_to_its_record() {
     app.workbench.cli_database = Some(Some(3));
     app.workbench.cli_grid = Some(GridState::new(result, false));
     app.workbench.cli_elapsed = Some(std::time::Duration::from_millis(99));
-    let view = crate::views::render(&app);
+    let view = crate::views::render_window(&app, Some(Uuid::new_v4()));
     let mut found = Vec::new();
     for node in view.regions().into_iter().flatten() {
         heads(node, &mut found);

@@ -7,6 +7,7 @@ use icons::{archery_icon, connection_provider_icon, provider_icon};
 mod schema;
 use schema::schema_panel;
 mod grid_view;
+mod pager;
 use grid_view::grid;
 mod sidebar;
 use sidebar::resource_panel;
@@ -14,6 +15,7 @@ mod redis_browser;
 use redis_browser::redis_browser;
 mod dialogs;
 pub(super) use dialogs::overlay;
+mod approval;
 mod archery;
 mod controls;
 mod profile_form;
@@ -46,25 +48,74 @@ fn redis_db_picker(app: &App, form: bool) -> Node<Msg> {
                 change.value.as_str().unwrap_or_default()
             ))
         });
-    if !form && let Some(source) = app.profile.as_ref().and_then(|profile| profile.archery()) {
-        for database in &source.databases {
+    let discovery = if form {
+        Some(&app.navigation.form_redis_discovery)
+    } else {
+        app.profile
+            .as_ref()
+            .and_then(|profile| app.navigation.redis_discovery.get(&profile.id))
+    };
+    let databases = if !form {
+        app.profile
+            .as_ref()
+            .and_then(|profile| profile.archery())
+            .map(|source| &source.databases)
+            .or_else(|| discovery.map(|state| &state.databases))
+    } else {
+        discovery.map(|state| &state.databases)
+    };
+    let mut has_current = false;
+    if let Some(databases) = databases {
+        for database in databases {
+            has_current |= database.parse::<u32>() == Ok(current);
             select = select.option(ui::SelectOption::new(
                 database.clone(),
                 format!("DB {database}"),
             ));
         }
-    } else {
-        for db in 0..16 {
-            select = select.option(ui::SelectOption::new(db.to_string(), format!("DB {db}")));
-        }
-        if current >= 16 {
-            select = select.option(ui::SelectOption::new(
-                current.to_string(),
-                format!("DB {current}"),
-            ));
+    }
+    if !has_current {
+        select = select.option(ui::SelectOption::new(
+            current.to_string(),
+            format!("DB {current}"),
+        ));
+    }
+    let mut picker = html::div();
+    if form {
+        let editor = &app.fields["redis_db"];
+        picker = picker.child(
+            ui::input()
+                .variant(ui::InputVariant::Field)
+                .aria(crate::i18n::tr("默认 DB").into_owned())
+                .readonly(app.connection_form_busy())
+                .key("input-redis_db")
+                .text(editor.text.clone())
+                .cursor(editor.cursor)
+                .anchor(editor.anchor)
+                .on_focus(Msg::Focus("redis_db".into()))
+                .on_undo(Msg::Undo("redis_db".into()))
+                .on_edit(|e| {
+                    Msg::Edit(
+                        "redis_db".into(),
+                        e.from,
+                        e.to,
+                        e.text.clone(),
+                        e.cursor,
+                        e.len,
+                    )
+                }),
+        );
+    }
+    picker = picker.child(select);
+    if let Some(state) = discovery {
+        if state.loading {
+            picker = picker
+                .child(html::span(crate::i18n::tr("正在探测数据库").into_owned()).class("muted"));
+        } else if let Some(error) = &state.error {
+            picker = picker.child(html::span(error.clone()).class("form-submit-error"));
         }
     }
-    select.into()
+    picker.into()
 }
 
 fn redis_bytes_text(encoded: &str) -> std::borrow::Cow<'_, str> {
@@ -334,7 +385,7 @@ fn ttl_short(ttl: Option<i64>) -> String {
     }
 }
 
-pub fn render(app: &App) -> View<Msg> {
+pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     let redis = app.is_redis();
     let mut content = html::div()
         .class("content")
@@ -709,6 +760,7 @@ pub fn render(app: &App) -> View<Msg> {
         status = status.child(button("停止等待", "cancel"));
     }
     status = status.child(html::span("").class("spacer"));
+    status = status.child(approval::control(app));
     if !app.detail.is_empty() {
         status =
             status.child(flat_action("info", "详情", "overlay:diagnostics").class("status-action"));
@@ -736,16 +788,30 @@ pub fn render(app: &App) -> View<Msg> {
             }
         ))
         .key("layout")
+        .attr(
+            "data-window-bridge",
+            nonce
+                .map(|id| {
+                    format!(
+                        "datapier-window-bridge:{}",
+                        json!({"nonce":id,"data_dir":app.window_data_dir})
+                    )
+                })
+                .unwrap_or_default(),
+        )
         .on_click(Msg::Action("result-info-dismiss".into()))
         .child(resource_panel(app))
         .child(content);
-    let layer = app
-        .workbench
-        .overlay
-        .as_deref()
-        .filter(|kind| redis || *kind != "cell")
-        .map(|kind| vec![overlay(app, kind)])
-        .unwrap_or_default();
+    let layer = if app.approvals.open {
+        vec![approval::panel(app)]
+    } else {
+        app.workbench
+            .overlay
+            .as_deref()
+            .filter(|kind| redis || *kind != "cell")
+            .map(|kind| vec![overlay(app, kind)])
+            .unwrap_or_default()
+    };
     View::new().main(vec![Node::from(layout)]).layer(layer)
 }
 

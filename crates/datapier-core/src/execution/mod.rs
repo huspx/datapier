@@ -1,4 +1,4 @@
-//! 执行结果落盘、发送阶段控制和数据交换。
+//! 执行结果、发送阶段控制和数据交换。
 
 pub mod transfer;
 use crate::{Result, Store, model::*};
@@ -42,9 +42,20 @@ impl ExecutionSink {
             .start_result(self.execution_id, columns, kind)
             .await
     }
-    /// 向结果追加类型化行；写盘失败会返回错误。
+    /// 向结果追加类型化行；达到内存预算时返回错误。
     pub async fn append(&self, result_id: Uuid, rows: Vec<Vec<Value>>) -> Result<()> {
         self.store.append_rows(result_id, rows).await
+    }
+    /// 等待消费者请求更多行；释放、预算耗尽或取消时返回 false。
+    pub async fn wait_demand(
+        &self,
+        result_id: Uuid,
+        produced: u64,
+        cancel: &CancellationToken,
+    ) -> Result<bool> {
+        self.store
+            .wait_result_demand(result_id, produced, cancel)
+            .await
     }
     /// 标记结果完整并保存摘要。
     pub async fn finish(&self, result_id: Uuid, summary: Json) -> Result<()> {

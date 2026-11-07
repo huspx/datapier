@@ -1,7 +1,25 @@
 'use strict';
 function render() {
+  const previousBody = document.querySelector('#app .modal-body');
+  const previousOwner = previousBody?.dataset.previewOwner;
+  const previousScroll = previousBody?.scrollTop;
+  // 在同一分区重绘加载、失败与语言状态时保留阅读位置；切换分区从顶部开始。
+  const restoreDialogScroll = () => {
+    const body = document.querySelector('#app .modal-body');
+    const owner = mcp.open
+      ? `mcp:${mcp.tab}:${mcp.authHandoff}`
+      : state.overlay === 'app-settings'
+      ? `settings:${configPreview.tab}`
+      : state.overlay;
+    if (body && owner) {
+      body.dataset.previewOwner = owner;
+      if (owner === previousOwner) body.scrollTop = previousScroll;
+    }
+  };
   if (previewSource === 'archery') {
     renderArchery();
+    renderMcpPreview();
+    restoreDialogScroll();
     return;
   }
   const focused = document.activeElement;
@@ -42,6 +60,8 @@ function render() {
       }</button>`
       : ''
   }</footer></main>${overlay()}${archeryWizard()}${archeryDialogs()}${menu()}`;
+  renderMcpPreview();
+  restoreDialogScroll();
   requestAnimationFrame(() => {
     fitGrid();
     paintCellSelection();
@@ -71,9 +91,24 @@ function render() {
     );
     syncSqlEditor();
   }
-  const replacement = focusId ? document.getElementById(focusId) : null;
-  if (replacement && !state.overlay) {
-    replacement.focus();
+  const configAttributes = [
+    'data-config-action',
+    'data-config-field',
+    'data-config-tab',
+    'data-config-key',
+    'data-config-profile',
+    'data-config-policy-owner',
+    'data-config-level',
+  ]
+    .filter(name => focused?.hasAttribute(name));
+  const configSelector = configAttributes.map(name => `[${name}="${CSS.escape(focused.getAttribute(name))}"]`).join('');
+  const replacement = focusId
+    ? document.getElementById(focusId)
+    : configSelector
+    ? document.querySelector(configSelector)
+    : null;
+  if (replacement && (!state.overlay || focused?.closest('.modal'))) {
+    replacement.focus({ preventScroll: true });
     if (
       cursor !== null && replacement instanceof HTMLInputElement
       && ['text', 'search'].includes(replacement.type)

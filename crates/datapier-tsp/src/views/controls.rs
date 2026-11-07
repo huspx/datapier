@@ -91,7 +91,10 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
     let f = name.to_string();
     let u = f.clone();
     let n = f.clone();
-    let required = matches!(name, "name" | "host" | "port" | "path" | "column")
+    let required = matches!(
+        name,
+        "name" | "host" | "port" | "path" | "column" | "mcp-rule-scope"
+    ) || (name.starts_with("settings-") && !name.starts_with("settings-history-"))
         || matches!(name, "archery_name" | "archery_url" | "archery_user")
         || name.starts_with("archery_profile_name_")
         || (name == "password"
@@ -130,6 +133,9 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
         .required(required)
         .key(name.to_string())
         .role("datapier.form-field");
+    if app.workbench.overlay.as_deref() == Some("settings") {
+        control = control.variant(ui::FieldVariant::Row);
+    }
     if let Some(error) = app
         .workbench
         .field_error
@@ -162,7 +168,11 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
                 ui::input()
                     .aria(accessible_label)
                     .variant(ui::InputVariant::Field)
-                    .readonly(app.connection_form_busy())
+                    .readonly(
+                        app.connection_form_busy()
+                            || (name == "mcp-rule-scope"
+                                && !app.field("mcp-rule-pending").is_empty()),
+                    )
                     .secret(matches!(
                         name,
                         "password" | "archery_otp" | "archery_totp_uri"

@@ -131,7 +131,7 @@ fn archery_navigation_limits_databases_and_opens_unknown_relations() {
             tag: list.tag,
             result: Ok(json!({"resources":[{"name":"unknown-relation","kind":"unknown"}],"cursor":null,"complete":true})),
         }, &backend);
-        let view = crate::views::render(&app);
+        let view = crate::views::render_window(&app, Some(Uuid::new_v4()));
         assert!(
             view.regions()
                 .into_iter()

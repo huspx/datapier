@@ -22,15 +22,31 @@ impl App {
             all: selected.is_none(),
             ..DatabaseForm::default()
         };
+        self.navigation.form_redis_discovery = RedisDiscovery::default();
         self.field_set("database_search", "");
-        self.navigation
-            .pending
-            .retain(|_, p| !matches!(p, Pending::Form { .. }));
+        self.navigation.pending.retain(|_, p| {
+            !matches!(
+                p,
+                Pending::Form { .. }
+                    | Pending::RedisDiscovery {
+                        profile_id: None,
+                        ..
+                    }
+            )
+        });
     }
     pub(crate) fn navigation_form_changed(&mut self) {
-        self.navigation
-            .pending
-            .retain(|_, p| !matches!(p, Pending::Form { .. }));
+        self.navigation.pending.retain(|_, p| {
+            !matches!(
+                p,
+                Pending::Form { .. }
+                    | Pending::RedisDiscovery {
+                        profile_id: None,
+                        ..
+                    }
+            )
+        });
+        self.navigation.form_redis_discovery = RedisDiscovery::default();
         self.navigation.form.candidates.clear();
         self.navigation.form.loaded = false;
         self.navigation.form.loading = false;
@@ -38,6 +54,8 @@ impl App {
     }
     pub(crate) fn navigation_invalidate_profile(&mut self, id: Uuid) {
         self.navigation.databases.remove(&id);
+        self.navigation.redis_discovery.remove(&id);
+        self.navigation.pending.retain(|_, p| !matches!(p, Pending::RedisDiscovery { profile_id: Some(profile), .. } if *profile == id));
         self.navigation
             .pending
             .retain(|_, p| !matches!(p, Pending::Tree { profile, .. } if *profile == id));
@@ -97,6 +115,7 @@ impl App {
             return;
         };
         if profile.provider != datapier_core::model::ProviderKind::Mysql {
+            self.redis_discover(backend, false);
             return;
         }
         let id = profile.id;

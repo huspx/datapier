@@ -52,7 +52,7 @@ fn modal_dispatch_rejects_hidden_fields_and_accepts_its_own_fields() {
     app.field_set("pattern", "base");
     app.dispatch_editor_message(Msg::Edit("pattern".into(), 4, 4, "!".into(), 5, 4));
     app.focus = "pattern".into();
-    app.workbench.overlay = Some("settings".into());
+    app.application_action("app-settings", &Backend::scripted().0);
     app.reconcile_modal_focus();
     assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
     app.focus = "pattern".into();

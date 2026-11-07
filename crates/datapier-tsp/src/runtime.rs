@@ -1,6 +1,28 @@
 use super::*;
 use crate::{input::focus_node_id, workspace::finish_after_input_closed};
 use tern_sdk::{Input, Options, Session, SurfaceOptions};
+/// 使用短生命周期客户端同步真实窗口租约；不会启动或保活 Engine。
+pub async fn window_bridge(root: PathBuf, payload: Value) -> Result<Value> {
+    let client = datapier_engine::Client::connect_with(
+        &root,
+        datapier_engine::ClientOptions {
+            kind: datapier_core::model::ClientKind::WindowBridge,
+            start_engine: false,
+            ..datapier_engine::ClientOptions::default()
+        },
+    )
+    .await?;
+    let result = client.request("ui.window.sync", payload).await;
+    let closed = client.close().await;
+    match result {
+        Ok(value) => {
+            closed?;
+            Ok(value)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// 在调用线程运行同步 TSP 界面，Session 始终由该线程独占。
 /// Engine IPC 在独立 Tokio 线程运行；终端不可用、保存未确认或 TSP 失败时返回错误。
 pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
@@ -24,8 +46,17 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
     let waker = session
         .waker()
         .ok_or_else(|| AppError::new("tsp_unavailable", "TSP 终端没有提供唤醒句柄"))?;
-    let mut backend = Backend::start(root, waker)?;
+    let window_data_dir = if root.is_absolute() {
+        root.clone()
+    } else {
+        std::env::current_dir()?.join(&root)
+    };
+    let mut backend = Backend::start(root, workspace_id.clone(), waker)?;
     let mut app = App::new(workspace_id);
+    app.window_data_dir = Some(window_data_dir);
+    let window_nonce = Uuid::new_v4();
+    let mut window_node = None;
+    let mut window_bound = false;
     app.icon_blobs = Some(IconBlobs {
         brand: session
             .blob(
@@ -69,6 +100,12 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         changed |= app.navigation_poll_drop(&backend);
         clipboard.observe_redis_context(&app);
         while let Some(mut reply) = backend.receive() {
+            if reply.tag == "window.bind" {
+                window_bound = reply
+                    .result
+                    .as_ref()
+                    .is_ok_and(|value| value["bound"] == true);
+            }
             if clipboard.redis_reply(&mut app, &mut session, &mut reply)? {
                 changed = true;
                 continue;
@@ -81,6 +118,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         if app.last_settings_poll.elapsed() >= Duration::from_secs(5) {
             app.last_settings_poll = Instant::now();
             app.refresh_settings(&backend);
+            app.approval_refresh(&backend);
             changed |= i18n::refresh_system_language();
         }
         if quitting {
@@ -149,7 +187,8 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             });
             let reveal =
                 tab_layout.is_some() && (revealed_tab != tab_layout || focus_request.is_some());
-            let view = views::render(&app);
+            let view = views::render_window(&app, Some(window_nonce));
+            window_node = focus_node_id(&view, "layout");
             let focus = focus_request.map(|key| focus_node_id(&view, &key));
             // 新资源标题可能晚于建 tab 到达；内容焦点请求也须重新保证标签可见。
             // 仅切换或布局变化时滚动，保留用户手动浏览其他标签的位置。
@@ -187,7 +226,31 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         } else {
             Duration::from_millis(250)
         })) {
+            Ok(Some(Input::Msg(_, tern_sdk::Event::Action(action))))
+            | Ok(Some(Input::Event(tern_sdk::Event::Action(action))))
+                if action.act == "datapier-window-bind"
+                    && window_node.as_deref() == Some(action.id.as_str()) =>
+            {
+                // SDK 会把有 click handler 的节点 action 包装成 Msg；两种输入都须先核验。
+                if let Err(error) = backend.request(
+                    "window.bind",
+                    "ui.window.bind",
+                    json!({"nonce":window_nonce}),
+                ) {
+                    app.status = i18n::UiMessage::raw(error.to_string());
+                }
+            }
             Ok(Some(Input::Msg(message, event))) => {
+                if window_bound
+                    && !matches!(message, Msg::Focus(_))
+                    && let Err(error) = backend.request(
+                        "window.active",
+                        "ui.window.bind",
+                        json!({"nonce":window_nonce,"active":true}),
+                    )
+                {
+                    app.status = i18n::UiMessage::raw(error.to_string());
+                }
                 if app.tab_close.is_some() {
                     continue;
                 }
@@ -388,6 +451,15 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 changed = true;
             }
             Ok(Some(Input::Key(key))) => {
+                if window_bound
+                    && let Err(error) = backend.request(
+                        "window.active",
+                        "ui.window.bind",
+                        json!({"nonce":window_nonce,"active":true}),
+                    )
+                {
+                    app.status = i18n::UiMessage::raw(error.to_string());
+                }
                 if app.tab_close.is_some() {
                     continue;
                 }

@@ -583,13 +583,13 @@ async fn oversized_resource_rpc_keeps_ipc_connection_usable() {
     let handler = tokio::spawn(client(engine.clone(), Uuid::new_v4(), Box::new(stream)));
     protocol::write(
         &mut peer,
-        &json!({"id":"open","method":"session.open","params":{"protocol_version":2}}),
+        &json!({"id":"open","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
     )
     .await
     .unwrap();
     assert_eq!(
         ipc_reply(&mut peer, "open").await["result"]["protocol_version"],
-        2
+        3
     );
     protocol::write(&mut peer, &json!({"id":"auth","method":"archery.auth.begin","params":{"server_id":fixture.server.id,"expected_revision":1,"operation_id":Uuid::new_v4()}})).await.unwrap();
     let auth_reply = ipc_reply(&mut peer, "auth").await;

@@ -183,81 +183,61 @@ pub(super) fn result_info(
     Some(container.into())
 }
 
-pub(super) fn archery_pagination(app: &App, grid: &GridState, cli: bool) -> Node<Msg> {
+pub(super) fn result_pagination(app: &App, grid: &GridState, cli: bool) -> Node<Msg> {
     let id = grid.page.result.id.to_string();
     let state = app.workbench.query_ui.pagination.get(&id);
-    let size = state.map_or(20, |state| state.page_size);
-    let key = if cli {
-        "cli-result-size"
-    } else {
-        "result-size"
-    };
-    let kind = if cli { "cli" } else { "grid" };
-    let mut select = ui::select()
-        .key(key)
-        .value(size.to_string())
-        .open(app.workbench.generic_select.as_deref() == Some(key))
-        .on_toggle(move |collapsed| Msg::Action(format!("select-open:{key}:{}", !collapsed)))
-        .on_change(move |change| {
-            Msg::Action(format!(
-                "result-size:{kind}:{}",
-                change.value.as_str().unwrap_or_default()
-            ))
-        });
-    for size in [20, 50, 100] {
-        select = select.option(ui::SelectOption::new(size.to_string(), size.to_string()));
-    }
-    let starts = state.map(|state| state.starts.as_slice()).unwrap_or(&[]);
-    let page = starts.iter().position(|start| *start == grid.page.start);
-    let indicator = page
-        .map(|page| {
-            crate::i18n::format_message(
-                "第 {page} / {total} 页",
-                &[
-                    ("page", &(page + 1).to_string()),
-                    ("total", &starts.len().to_string()),
-                ],
-            )
+    let size = app.result_page_size_for(&id, cli).max(1);
+    let summary = &grid.page.result.summary;
+    let mode = summary["retrieval_mode"].as_str();
+    let total = summary["total_rows"].as_u64().or_else(|| {
+        (mode == Some("bounded_response") && grid.page.result.complete)
+            .then_some(grid.page.result.row_count)
+    });
+    let has_more = grid.page.next.is_some();
+    let page = state
+        .and_then(|state| {
+            state
+                .starts
+                .iter()
+                .position(|start| *start == grid.page.start)
         })
-        .unwrap_or_else(|| "…".into());
-    let mut controls = html::div()
-        .class("result-pagination")
-        .child(html::span(crate::i18n::tr("每页").into_owned()))
-        .child(select)
-        .child(page_button(
-            "arrow-left",
-            "上一页",
-            if cli { "cli-previous" } else { "previous" },
-            page.is_some_and(|page| page > 0),
-        ))
-        .child(html::span(indicator).class("page-indicator"))
-        .child(page_button(
-            "arrow-right",
-            "下一页",
-            if cli { "cli-next" } else { "next" },
-            page.is_some_and(|page| page + 1 < starts.len()),
-        ));
-    if state.is_some_and(|state| state.complete == Some(false)) {
-        controls = controls.child(
-            html::span(crate::i18n::tr("平台本次返回结果缓存未完成").into_owned()).class("muted"),
-        );
-    }
-    let coverage = &grid.page.result.summary["coverage"];
-    if let (Some(rows), Some(limit)) = (
-        coverage.get("returned_rows").and_then(Value::as_u64),
-        coverage.get("requested_limit").and_then(Value::as_u64),
-    ) && rows >= limit
-    {
-        controls = controls.child(
-            html::span(crate::i18n::tr("已达上限").into_owned())
-                .class("muted")
-                .attr(
-                    "title",
-                    crate::i18n::tr("可调大请求上限后重新执行；平台不保证返回更多").into_owned(),
-                ),
-        );
-    }
-    controls.into()
+        .map(|index| index as u64 + 1)
+        .unwrap_or_else(|| {
+            if cli {
+                app.workbench.cli_page_history.len() as u64 + 1
+            } else {
+                app.page_history.len() as u64 + 1
+            }
+        });
+    super::pager::render(
+        app,
+        super::pager::Pager {
+            key: if cli {
+                "cli-result-size"
+            } else {
+                "result-size"
+            },
+            size_action: if cli {
+                "result-size:cli"
+            } else {
+                "result-size:grid"
+            },
+            previous_action: if cli { "cli-previous" } else { "previous" },
+            next_action: if cli { "cli-next" } else { "next" },
+            size,
+            page,
+            total,
+            can_previous: grid.page.start > 0,
+            can_next: has_more,
+            limited: summary["resource_limited"].as_bool().unwrap_or(false),
+            loading: if cli {
+                app.workbench.cli_page_token.is_some()
+            } else {
+                app.page_token.is_some() || state.is_some_and(|state| state.count_token.is_some())
+            },
+            count_action: (!cli && mode == Some("live_page")).then_some("result-count"),
+        },
+    )
 }
 
 fn visible_rows(app: &App) -> Vec<u64> {
@@ -568,15 +548,8 @@ pub(super) fn footer(app: &App, grid: &GridState) -> Node<Msg> {
     let redis = app.is_redis();
     let mut footer = html::div().class("table-footer").child(
         html::span(crate::i18n::format_message(
-            if grid.page.result.summary["origin"]["source"].as_str() == Some("archery") {
-                "本页 {page} 行 · 已返回 {total} 行"
-            } else {
-                "本页 {page} 行 · 共 {total} 行"
-            },
-            &[
-                ("page", &grid.page.rows.len().to_string()),
-                ("total", &grid.page.result.row_count.to_string()),
-            ],
+            "本页 {count} 行",
+            &[("count", &grid.page.rows.len().to_string())],
         ))
         .class("muted"),
     );
@@ -611,34 +584,11 @@ pub(super) fn footer(app: &App, grid: &GridState) -> Node<Msg> {
             .class("selection-hint muted"),
         );
     }
-    if grid.page.result.summary["origin"]["source"].as_str() == Some("archery") {
-        footer = footer.child(grid_view::archery_pagination(app, grid, false));
-    } else {
-        if !redis && !app.browse_result {
-            footer = footer
-                .child(html::span(crate::i18n::tr("查询结果只读").into_owned()).class("muted"));
-        }
-        footer = footer
-            .child(page_button(
-                "arrow-left",
-                "上一页",
-                "previous",
-                grid.page.start > 0,
-            ))
-            .child(
-                html::span(crate::i18n::format_message(
-                    "第 {number} 页",
-                    &[("number", &(app.page_history.len() + 1).to_string())],
-                ))
-                .class("page-indicator"),
-            )
-            .child(page_button(
-                "arrow-right",
-                "下一页",
-                "next",
-                grid.page.start + (grid.page.rows.len() as u64) < grid.page.result.row_count,
-            ));
+    if !redis && !app.browse_result {
+        footer =
+            footer.child(html::span(crate::i18n::tr("查询结果只读").into_owned()).class("muted"));
     }
+    footer = footer.child(result_pagination(app, grid, false));
     footer = footer.child(
         ui::button("")
             .variant(ui::ButtonVariant::Quiet)

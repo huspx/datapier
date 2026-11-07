@@ -33,7 +33,7 @@ fn language_saves_are_serialized_and_coalesce_to_latest_selection() {
 }
 
 #[test]
-fn failed_write_reports_error_and_still_saves_a_newer_selection() {
+fn failed_settings_write_keeps_selection_until_explicit_reload() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("test".into());
     app.application_action("language:en", &backend);
@@ -42,25 +42,35 @@ fn failed_write_reports_error_and_still_saves_a_newer_selection() {
     app.settings_response(
         Response {
             tag: first.tag,
-            result: Err(AppError::new("test", "save failed")),
-        },
-        &backend,
-    );
-    let latest = requests.try_recv().unwrap();
-    assert_eq!(latest.params["settings"]["language"], "zh-CN");
-    assert!(format!("{:?}", app.status).contains("save failed"));
-    app.settings_response(
-        Response {
-            tag: latest.tag,
-            result: Err(AppError::new("test", "latest failed")),
+            result: Err(AppError::new("revision_conflict", "save failed")),
         },
         &backend,
     );
     assert!(app.settings_unsaved);
     assert!(app.settings_save_token.is_none());
     assert_eq!(app.settings.language, LanguagePreference::ZhCn);
-    assert!(format!("{:?}", app.status).contains("latest failed"));
+    assert!(format!("{:?}", app.status).contains("save failed"));
     assert!(requests.try_recv().is_err());
+
+    let mut saved = app.settings.clone();
+    saved.revision += 1;
+    saved.language = LanguagePreference::En;
+    app.application_action("settings-reload", &backend);
+    let reload = requests.try_recv().unwrap();
+    app.settings_response(
+        Response {
+            tag: reload.tag,
+            result: Ok(serde_json::to_value(&saved).unwrap()),
+        },
+        &backend,
+    );
+    assert!(!app.settings_unsaved);
+    assert_eq!(app.settings.language, LanguagePreference::En);
+    assert!(requests.try_recv().is_err());
+    app.application_action("language:zh-CN", &backend);
+    let latest = requests.try_recv().unwrap();
+    assert_eq!(latest.params["settings"]["revision"], json!(saved.revision));
+    assert_eq!(latest.params["settings"]["language"], "zh-CN");
 }
 
 #[test]

@@ -14,6 +14,17 @@ impl Engine {
     ) -> Result<Value> {
         db.profile.capabilities().ensure_method(method, &params)?;
         let mut session = tokio::select! { _ = cancel.cancelled() => return Err(AppError::cancelled()), lock = db.session.lock() => lock };
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&db.owner)
+            .is_some_and(|context| matches!(context.kind, model::ClientKind::Mcp))
+        {
+            self.mcp_before_send(db.owner, &db, method, &params, &mut session)
+                .await?;
+        }
         {
             let _guard = transition.lock().await;
             if cancel.is_cancelled() {
@@ -256,6 +267,30 @@ impl Engine {
         params: Value,
         background: bool,
     ) -> Result<Value> {
+        self.start_inner(owner, method, params, background, None)
+            .await
+    }
+
+    pub(super) async fn start_reserved(
+        self: &Arc<Self>,
+        owner: Uuid,
+        method: &str,
+        params: Value,
+        background: bool,
+        execution_id: Uuid,
+    ) -> Result<Value> {
+        self.start_inner(owner, method, params, background, Some(execution_id))
+            .await
+    }
+
+    async fn start_inner(
+        self: &Arc<Self>,
+        owner: Uuid,
+        method: &str,
+        params: Value,
+        background: bool,
+        reserved: Option<Uuid>,
+    ) -> Result<Value> {
         let db = self.database(owner, &params)?;
         let session_id: Uuid = model::param(&params, "session_id")?;
         if db.profile.provider == model::ProviderKind::Redis
@@ -300,38 +335,114 @@ impl Engine {
             Some(gate) => Some(gate.lock().await),
             None => None,
         };
-        let record = self
-            .store
-            .create_task(owner, workspace(&params), method, persisted_params, false)
-            .await?;
-        let id = record.id;
+        let limits = self.store.settings().await?.limits;
+        let id = if let Some(id) = reserved {
+            let task = self.store.task(id).await?;
+            if task.owner != owner || task.sent || task.state != "approval_required" {
+                return Err(AppError::conflict("审批任务不再可派发"));
+            }
+            self.store
+                .update_task(id, "queued", task.summary, None)
+                .await?;
+            id
+        } else {
+            self.store
+                .create_task(owner, workspace(&params), method, persisted_params, false)
+                .await?
+                .id
+        };
         let cancel = CancellationToken::new();
         // 每任务独占控制门；排队、真正发送与完成都必须和客户端离开时的取消决策串行化。
         let transition = Arc::new(AsyncMutex::new(()));
-        {
+        let accepted = {
             let mut state = self.state.lock().unwrap();
-            if !state.clients.contains(&owner)
-                || state
-                    .databases
-                    .get(&session_id)
-                    .is_none_or(|db| db.closing.load(Ordering::Acquire))
-            {
-                cancel.cancel();
+            let at_limit = state
+                .contexts
+                .get(&owner)
+                .is_some_and(|ctx| matches!(ctx.kind, model::ClientKind::Mcp))
+                && state
+                    .tasks
+                    .values()
+                    .filter(|task| task.owner == owner)
+                    .count()
+                    >= limits.running_tasks_per_mcp_client;
+            if at_limit {
+                false
+            } else {
+                if !state.clients.contains(&owner)
+                    || state
+                        .databases
+                        .get(&session_id)
+                        .is_none_or(|db| db.closing.load(Ordering::Acquire))
+                {
+                    cancel.cancel();
+                }
+                state.result_sessions.insert(id, session_id);
+                state.tasks.insert(
+                    id,
+                    Running {
+                        owner,
+                        session_id,
+                        cancel: cancel.clone(),
+                        transition: transition.clone(),
+                        started: None,
+                        abort: None,
+                    },
+                );
+                true
             }
-            state.tasks.insert(
-                id,
-                Running {
-                    owner,
-                    session_id,
-                    cancel: cancel.clone(),
-                    transition: transition.clone(),
-                    started: None,
-                    abort: None,
-                },
-            );
+        };
+        if !accepted {
+            let error = AppError::new("resource_limit", "客户端并发任务数已达上限");
+            self.store
+                .update_task(id, "failed", json!({}), Some(error.clone()))
+                .await?;
+            return Err(error);
         }
         drop(service_guard);
         self.emit_state(owner, id, "queued");
+        let timeout_engine = Arc::downgrade(self);
+        let timeout_duration = Duration::from_secs(limits.query_timeout_seconds);
+        tokio::spawn(async move {
+            if let Some(engine) = timeout_engine.upgrade() {
+                let mut activity = engine.store.subscribe_result_activity().await;
+                let mut deadline = tokio::time::Instant::now() + timeout_duration;
+                let mut previous_waiting = false;
+                let mut completed_waits = 0;
+                loop {
+                    // 先确认通知版本，再读取状态，避免查询与睡眠之间漏掉状态变化。
+                    activity.borrow_and_update();
+                    let (waiting, completed) = engine.store.execution_wait_state(id).await;
+                    if !waiting && (previous_waiting || completed != completed_waits) {
+                        deadline = tokio::time::Instant::now() + timeout_duration;
+                    }
+                    previous_waiting = waiting;
+                    completed_waits = completed;
+                    if !engine.state.lock().unwrap().tasks.contains_key(&id) {
+                        break;
+                    }
+                    tokio::select! {
+                        changed = activity.changed() => { if changed.is_err() { break; } }
+                        _ = tokio::time::sleep_until(deadline), if !waiting => {
+                            let (now_waiting, now_completed) = engine.store.execution_wait_state(id).await;
+                            if now_waiting || now_completed != completed_waits { continue; }
+                            let running = engine.state.lock().unwrap().tasks.get(&id)
+                                .map(|task| (task.cancel.clone(), task.transition.clone()));
+                            if let Some((cancel, transition)) = running {
+                                let _guard = transition.lock().await;
+                                let (now_waiting, now_completed) = engine.store.execution_wait_state(id).await;
+                                if now_waiting || now_completed != completed_waits { continue; }
+                                if engine.state.lock().unwrap().tasks.contains_key(&id) {
+                                    // 已发送写入只发取消信号；provider 继续等待协议尾部并判定终态。
+                                    cancel.cancel();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         let engine = self.clone();
         let method = method.to_owned();
         let future = async move {

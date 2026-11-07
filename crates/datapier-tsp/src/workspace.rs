@@ -65,7 +65,15 @@ impl App {
                         .and_then(|a| a.first())
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    match g.changes(&keys) {Ok(updates)=>changes.extend(updates),Err(_)=>fallback=g.edits().iter().map(|(cell,after)|json!({"row":cell.row,"column":cell.column,"before_row":g.original_row(cell.row),"after":after})).collect()}
+                    match g.changes(&keys) {
+                        Ok(updates) => changes.extend(updates),
+                        Err(_) => fallback = g.edits().iter().map(|(cell, after)|
+                            json!({"row":cell.row,"column":cell.column,"after":after})).collect(),
+                    }
+                }
+                // 原始结果行只在内存中作为冲突基线；恢复必须读取新基线。
+                for change in &mut changes {
+                    change.before.clear();
                 }
                 tab.pending = json!({"target":target,"rows":changes,"redis":redis,"rows_include_edits":fallback.is_empty(),"edits":fallback,"requires_refresh":true});
                 tab.pending_live = true;

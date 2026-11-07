@@ -162,6 +162,8 @@ impl App {
             if self.database.as_deref() == Some(drop.database.as_str()) {
                 if drop.kind == "database" {
                     self.resources.clear();
+                    self.workbench.redis_tree.reset(&[]);
+                    self.workbench.redis_tree_owner = None;
                 } else {
                     self.resources.retain(|resource| {
                         !(resource.kind == "table" && resource.name == drop.name)

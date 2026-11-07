@@ -11,6 +11,22 @@ function mysql() {
     }</div></div>`;
   }
   if (tab.query) return `${tabs()}${queryPanel(tab)}`;
+  const pageId = `mysql:${state.database}.${state.table}`;
+  const pageState = resultPageState(pageId);
+  const countCriteria = JSON.stringify(state.filters[`${state.database}.${state.table}`] || null);
+  if (pageState.criteria !== countCriteria) {
+    pageState.criteria = countCriteria;
+    pageState.counted = false;
+    pageState.page = 0;
+  }
+  const matching = new Set(currentRows().map(rowId));
+  const savedFilter = state.rowFilter;
+  state.rowFilter = '';
+  const rows = currentRows();
+  const gridMarkup = state.section === 'data' ? grid() : '';
+  state.rowFilter = savedFilter;
+  const pageRows = resultPageSlice(rows, pageId);
+  const visibleRows = pageRows.filter(row => matching.has(rowId(row))).length;
   return `${tabs()}<div class="subnav">${
     [['data', t('data')], ['structure', t('structure')], ['ddl', 'DDL']]
       .map((
@@ -38,18 +54,15 @@ function mysql() {
           'import',
           state.connectionModes.mysql ? 'disabled' : '',
         )
-      }${ib('repeat', t('refreshData'), 'refresh-data')}</div>${grid()}<div class="table-footer"><span>${(language
-          === 'zh-CN'
-        ? `本页 ${currentRows().length} 行 · 共 ${currentRows().length} 行`
-        : `Page: ${currentRows().length} rows · Total: ${currentRows().length} rows`)}</span><span class="selection-count">${
+      }${ib('repeat', t('refreshData'), 'refresh-data')}</div>${
+        resultPageMarkup(gridMarkup, pageId, rows.length, 100, matching)
+      }<div class="table-footer"><span class="selection-count">${
         state.selected.size
           ? t('selectedRows', { count: state.selected.size })
           : ''
       }</span><span class="spacer"></span><span class="selection-help">${
         t('rowSelectionHelp', { modifier: isMac ? '⌘' : 'Ctrl' })
-      }</span>${ib('back', t('previousPage'), 'previous', 'disabled')}<span class="mono">${
-        language === 'zh-CN' ? '第 1 页' : 'Page 1'
-      }</span>${ib('chev-r', t('nextPage'), 'next', 'disabled')}${
+      }</span>${
         ib(
           'copy',
           t('copyCells'),
@@ -63,7 +76,7 @@ function mysql() {
           'inspect-cell',
           state.menuRow && state.menuCell ? '' : 'disabled',
         )
-      }</div>${draftBar()}`
+      }</div>${resultPager(pageId, rows.length, { live: true, visible: visibleRows })}${draftBar()}`
       : state.section === 'structure'
       ? `<div class="table-wrap schema-preview">${
         simpleTable(
@@ -147,14 +160,7 @@ function redisKeyList(keys) {
   return renderNode(root);
 }
 function redis() {
-  const keys = state.redisDb === 0
-    ? keySamples.filter(key =>
-      key.name.toLowerCase().includes(
-        state.keyFilter.toLowerCase().replaceAll('*', ''),
-      )
-      && (state.keyType === 'all' || key.type === state.keyType)
-    )
-    : [];
+  const keys = redisScanKeys();
   const key = state.redisDb === 0
     ? keySamples.find(k => k.name === state.key)
     : null;
@@ -180,9 +186,7 @@ function redis() {
     h(t('treeView'))
   }">${icon('tree')}</button></div></div></div><div class="keys">${redisKeyList(keys)}${
     keys.length ? '' : `<div class="empty small">${t('noKeys')}</div>`
-  }</div><div class="table-footer small">${t('scanComplete')}<span class="spacer"></span>${
-    ib('chev-r', t('scanMore'), 'scan-more', 'disabled')
-  }</div></section><section class="key-details">${
+  }</div>${redisScanFooter()}</section><section class="key-details">${
     key
       ? `<header class="key-title"><div class="key-name"><h2>${h(key.name)}</h2>${
         ib(
@@ -266,7 +270,20 @@ function redis() {
       }</p>${
         key.type === 'STR'
           ? `<pre class="value">${h(redisValue(key))}</pre>`
-          : `<div class="table-wrap">${redisRows(key)}</div>`
+          : `${
+            resultPageMarkup(
+              `<div class="table-wrap">${redisRows(key)}</div>`,
+              `redis:${state.redisDb}:${key.name}`,
+              key.rows.length,
+              20,
+            )
+          }${
+            resultPager(`redis:${state.redisDb}:${key.name}`, key.rows.length, {
+              size: 20,
+              live: true,
+              singlePass: true,
+            })
+          }`
       }${draftBar()}`
       : `<div class="empty">${t('chooseKey', { db: state.redisDb })}</div>`
   }</section></div>${state.cli ? cli() : ''}`;

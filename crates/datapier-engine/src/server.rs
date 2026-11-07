@@ -27,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod archery;
+mod discovery;
+mod mcp;
+mod results;
 mod rpc;
 mod session;
 mod tasks;
@@ -80,15 +83,35 @@ impl UnpersistedCompletion {
         task.error = Some(self.error.clone());
     }
 }
+#[derive(Clone)]
+struct ClientContext {
+    kind: model::ClientKind,
+    workspace: String,
+    allow_connections: Vec<Uuid>,
+}
+
+struct WindowBinding {
+    owner: Uuid,
+    window_id: Option<String>,
+    pane_id: Option<String>,
+    seen: Option<Instant>,
+    last_active: Instant,
+}
 struct State {
     accepting: bool,
     clients: HashSet<Uuid>,
+    mcp_owners: HashSet<Uuid>,
+    contexts: HashMap<Uuid, ClientContext>,
+    mcp: mcp::McpState,
+    windows: HashMap<String, WindowBinding>,
     client_cancels: HashMap<Uuid, CancellationToken>,
     event_senders: HashMap<Uuid, broadcast::Sender<EngineEvent>>,
     event_seq: u64,
     idle: Instant,
     databases: HashMap<Uuid, Arc<Database>>,
     tasks: HashMap<Uuid, Running>,
+    discovery: HashMap<Uuid, (u64, Value)>,
+    result_sessions: HashMap<Uuid, Uuid>,
     unpersisted: HashMap<Uuid, UnpersistedCompletion>,
     profile_locks: HashMap<Uuid, Arc<AsyncMutex<()>>>,
     archery: archery::ArcheryState,
@@ -96,6 +119,7 @@ struct State {
 impl State {
     fn stop_if_idle(&mut self) -> bool {
         if self.clients.is_empty()
+            && self.tasks.is_empty()
             && !self.archery.has_persistent_operations()
             && self.idle.elapsed() >= Duration::from_secs(30)
         {
@@ -176,12 +200,18 @@ pub async fn run(root: PathBuf) -> Result<()> {
         state: Mutex::new(State {
             accepting: true,
             clients: HashSet::new(),
+            mcp_owners: HashSet::new(),
+            contexts: HashMap::new(),
+            mcp: Default::default(),
+            windows: HashMap::new(),
             client_cancels: HashMap::new(),
             event_senders: HashMap::new(),
             event_seq: 0,
             idle: Instant::now(),
             databases: HashMap::new(),
             tasks: HashMap::new(),
+            discovery: HashMap::new(),
+            result_sessions: HashMap::new(),
             unpersisted: HashMap::new(),
             profile_locks: HashMap::new(),
             archery: archery::ArcheryState::default(),
@@ -191,10 +221,12 @@ pub async fn run(root: PathBuf) -> Result<()> {
     std::fs::write(
         &descriptor,
         serde_json::to_vec(
-            &json!({"protocol_version":2,"engine_id":engine.id,"endpoint":endpoint}),
+            &json!({"protocol_version":3,"engine_id":engine.id,"endpoint":endpoint}),
         )?,
     )?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut history_tick = tokio::time::interval(Duration::from_secs(60));
+    let mut history_cleanup: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -202,12 +234,26 @@ pub async fn run(root: PathBuf) -> Result<()> {
                 let owner = Uuid::new_v4();
                 tokio::spawn(client(engine.clone(), owner, stream));
             }
+            _ = history_tick.tick() => {
+                if history_cleanup.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
+                    let engine = engine.clone();
+                    history_cleanup = Some(tokio::spawn(async move {
+                        if let Err(error) = engine.store.cleanup_history().await {
+                            eprintln!("历史自动清理失败: {error}");
+                        }
+                    }));
+                }
+            }
             _ = tick.tick() => {
                 // 与 register 共用临界区，先停止接入再收尾，防止最后一次检查后接入新会话。
                 let stop = engine.state.lock().unwrap().stop_if_idle();
                 if stop { break; }
             }
         }
+    }
+    if let Some(cleanup) = history_cleanup {
+        cleanup.abort();
+        let _ = cleanup.await;
     }
     drop(listener);
     let aborts: Vec<_> = engine
@@ -234,12 +280,29 @@ pub async fn run(root: PathBuf) -> Result<()> {
 }
 
 impl Engine {
+    #[cfg(test)]
     fn register(&self, owner: Uuid) -> bool {
+        self.register_with(
+            owner,
+            ClientContext {
+                kind: model::ClientKind::Tsp,
+                workspace: "default".into(),
+                allow_connections: Vec::new(),
+            },
+        )
+    }
+    fn register_with(&self, owner: Uuid, context: ClientContext) -> bool {
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             return false;
         }
-        state.clients.insert(owner);
+        if !matches!(context.kind, model::ClientKind::WindowBridge) {
+            state.clients.insert(owner);
+        }
+        if matches!(context.kind, model::ClientKind::Mcp) {
+            state.mcp_owners.insert(owner);
+        }
+        state.contexts.insert(owner, context);
         state.client_cancels.insert(owner, CancellationToken::new());
         state.event_senders.insert(owner, broadcast::channel(128).0);
         true
@@ -294,7 +357,7 @@ impl Engine {
         }
     }
     fn active(&self, owner: Uuid) -> Result<()> {
-        if self.state.lock().unwrap().clients.contains(&owner) {
+        if self.state.lock().unwrap().contexts.contains_key(&owner) {
             Ok(())
         } else {
             Err(AppError::new("disconnected", "客户端会话已关闭"))
@@ -325,6 +388,9 @@ impl Engine {
             if state.clients.remove(&owner) && state.clients.is_empty() {
                 state.idle = Instant::now();
             }
+            state.contexts.remove(&owner);
+            state.mcp.disconnect(owner);
+            state.windows.retain(|_, binding| binding.owner != owner);
             if let Some(cancel) = state.client_cancels.remove(&owner) {
                 cancel.cancel();
             }
@@ -343,6 +409,13 @@ impl Engine {
                 .collect::<Vec<_>>();
             (dbs, tasks)
         };
+        if let Err(error) = self.mcp_disconnected(owner).await {
+            tracing::warn!("清理客户端审批失败: {error}");
+        }
+        // 释放展示预算会唤醒背压等待；潜在写入仍由 provider 消费协议终态。
+        if let Err(error) = self.store.release_owner_results(owner).await {
+            tracing::warn!("释放客户端结果失败: {error}");
+        }
         self.disconnect_archery(owner).await;
         for (id, cancel, transition) in tasks {
             self.cancel_if_safe(id, cancel, transition).await;

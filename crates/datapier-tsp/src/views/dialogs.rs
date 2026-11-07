@@ -460,6 +460,9 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     html::p(crate::i18n::tr("CSV 不包含来源元数据").into_owned()).class("muted"),
                 );
             }
+            if kind != "import" && !archery && !archery_result {
+                panel = panel.child(html::p(crate::i18n::tr("安全只读源会重新查询，结果可能与屏幕不同；其他结果仅导出仍保留的数据。").into_owned()).class("muted"));
+            }
             if !archery
                 && kind != "export"
                 && ((writable(app)
@@ -479,7 +482,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     if archery_result || archery {
                         "导出本次返回结果"
                     } else {
-                        "导出完整结果"
+                        "导出"
                     },
                     "export",
                 ));
@@ -696,89 +699,370 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             );
         }
         "settings" => {
-            let value = match app.settings.language {
-                datapier_core::model::LanguagePreference::System => "system",
-                datapier_core::model::LanguagePreference::ZhCn => "zh-CN",
-                datapier_core::model::LanguagePreference::En => "en",
-            };
-            let language = ui::select()
-                .value(value)
-                .option(ui::SelectOption::new(
-                    "system",
-                    crate::i18n::tr("跟随系统").into_owned(),
-                ))
-                .option(ui::SelectOption::new(
-                    "zh-CN",
-                    crate::i18n::tr("简体中文").into_owned(),
-                ))
-                .option(ui::SelectOption::new("en", "English"))
-                .open(app.workbench.generic_select.as_deref() == Some("settings-language"))
-                .on_toggle(|collapsed| {
-                    Msg::Action(format!("select-open:settings-language:{}", !collapsed))
-                })
-                .on_change(|change| {
-                    Msg::Action(format!(
-                        "language:{}",
-                        change.value.as_str().unwrap_or_default()
-                    ))
-                });
-            panel = panel.child(ui::field(crate::i18n::tr("语言").into_owned()).child(language));
-            let mut servers = html::div().class("archery-server-list").child(
-                html::div()
-                    .class("archery-section-heading")
-                    .child(html::strong(crate::i18n::tr("Archery 服务器").into_owned()))
-                    .child(icon_button("plus", "新建服务", "server-new")),
-            );
-            for server in &app.archery.servers {
-                let Some(id) = server["id"].as_str() else {
-                    continue;
-                };
-                let count = uuid::Uuid::parse_str(id)
-                    .ok()
-                    .map(|id| {
-                        app.profiles
-                            .iter()
-                            .filter(|profile| {
-                                profile
-                                    .archery()
-                                    .is_some_and(|source| source.server_id == id)
-                            })
-                            .count()
-                    })
-                    .unwrap_or(0);
-                servers = servers.child(
-                    html::div()
-                        .class("archery-server-row")
-                        .child(
-                            html::div()
-                                .class("archery-server-info")
-                                .child(html::strong(
-                                    server["name"].as_str().unwrap_or("").to_owned(),
-                                ))
-                                .child(html::span(
-                                    server["base_url"].as_str().unwrap_or("").to_owned(),
-                                ))
-                                .child(html::span(
-                                    server["username"].as_str().unwrap_or("").to_owned(),
-                                ))
-                                .child(html::span(crate::i18n::format_message(
-                                    "关联 {count} 个连接",
-                                    &[("count", &count.to_string())],
-                                ))),
-                        )
-                        .child(icon_button(
-                            "edit",
-                            "编辑服务",
-                            &format!("server-edit:{id}"),
-                        ))
-                        .child(icon_button(
-                            "trash",
-                            "删除服务",
-                            &format!("server-delete:{id}"),
-                        )),
+            let mcp = app.field("settings-tab") == "mcp";
+            let mut tabs = html::div()
+                .class("mcp-tabs")
+                .attr("role", "tablist")
+                .attr("aria-label", crate::i18n::tr("设置").into_owned());
+            for (tab, label, selected) in [("general", "常规", !mcp), ("mcp", "MCP", mcp)] {
+                tabs = tabs.child(
+                    html::button(crate::i18n::tr(label).into_owned())
+                        .class(if selected {
+                            "mcp-tab active"
+                        } else {
+                            "mcp-tab"
+                        })
+                        .attr("role", "tab")
+                        .attr("aria-selected", selected)
+                        .on_click(Msg::Action(format!("settings-tab:{tab}"))),
                 );
             }
-            panel = panel.child(servers);
+            panel = panel.child(tabs);
+            let settings_ready = app.settings_loaded && app.field("settings-reload") != "true";
+            if !settings_ready && app.field("settings-error").is_empty() {
+                panel = panel
+                    .child(html::p(crate::i18n::tr("加载中…").into_owned()).class("empty-note"));
+            }
+            if settings_ready && !mcp {
+                let value = match app.settings.language {
+                    datapier_core::model::LanguagePreference::System => "system",
+                    datapier_core::model::LanguagePreference::ZhCn => "zh-CN",
+                    datapier_core::model::LanguagePreference::En => "en",
+                };
+                let language = ui::select()
+                    .aria(crate::i18n::tr("语言").into_owned())
+                    .value(value)
+                    .option(ui::SelectOption::new(
+                        "system",
+                        crate::i18n::tr("跟随系统").into_owned(),
+                    ))
+                    .option(ui::SelectOption::new(
+                        "zh-CN",
+                        crate::i18n::tr("简体中文").into_owned(),
+                    ))
+                    .option(ui::SelectOption::new("en", "English"))
+                    .open(app.workbench.generic_select.as_deref() == Some("settings-language"))
+                    .on_toggle(|collapsed| {
+                        Msg::Action(format!("select-open:settings-language:{}", !collapsed))
+                    })
+                    .on_change(|change| {
+                        Msg::Action(format!(
+                            "language:{}",
+                            change.value.as_str().unwrap_or_default()
+                        ))
+                    });
+                panel = panel.child(
+                    ui::field(crate::i18n::tr("语言").into_owned())
+                        .variant(ui::FieldVariant::Row)
+                        .child(language),
+                );
+            }
+            for &(group, key, label) in application::SETTINGS_FIELDS {
+                if !settings_ready || application::settings_is_mcp(group, key) != mcp {
+                    continue;
+                }
+                panel = panel.child(field(app, &format!("settings-{group}-{key}"), label));
+            }
+            for &(group, key, label) in application::SETTINGS_SWITCHES {
+                if !settings_ready || application::settings_is_mcp(group, key) != mcp {
+                    continue;
+                }
+                let field_name = format!("settings-{group}-{key}");
+                let action = format!("settings-toggle:{group}:{key}");
+                panel = panel.child(
+                    ui::switch(crate::i18n::tr(label).into_owned())
+                        .on(app.field(&field_name) == "true")
+                        .on_change(move |_| Msg::Action(action.clone())),
+                );
+            }
+            if settings_ready && mcp {
+                let mut policies = html::div().class("toolbar");
+                for (value, label) in [
+                    ("dangerous", "危险操作审批"),
+                    ("all_writes", "所有写入审批"),
+                ] {
+                    policies = policies.child(
+                        html::button(format!(
+                            "{}{}",
+                            if app.field("settings-approval-default_policy") == value {
+                                "✓ "
+                            } else {
+                                ""
+                            },
+                            crate::i18n::tr(label)
+                        ))
+                        .class(if app.field("settings-approval-default_policy") == value {
+                            "policy-choice active"
+                        } else {
+                            "policy-choice"
+                        })
+                        .attr(
+                            "aria-pressed",
+                            app.field("settings-approval-default_policy") == value,
+                        )
+                        .on_click(Msg::Action(format!("settings-policy:{value}"))),
+                    );
+                }
+                panel = panel.child(
+                    ui::field(crate::i18n::tr("新连接默认审批策略").into_owned())
+                        .variant(ui::FieldVariant::Row)
+                        .child(policies),
+                );
+            }
+            if !app.field("settings-error").is_empty() {
+                panel = panel.child(
+                    html::p(app.field("settings-error").to_owned())
+                        .class("form-submit-error")
+                        .attr("role", "alert"),
+                );
+            }
+            if settings_ready && mcp {
+                let mut rules = html::div()
+                    .class("archery-server-list")
+                    .child(html::strong(crate::i18n::tr("MCP 连接权限").into_owned()));
+                let busy = !app.field("mcp-rule-pending").is_empty();
+                let selected_profile = Uuid::parse_str(app.field("mcp-rule-profile")).ok();
+                let mut selector = ui::select()
+                    .aria(crate::i18n::tr("连接").into_owned())
+                    .option(
+                        ui::SelectOption::new("", crate::i18n::tr("请选择连接").into_owned())
+                            .disabled(true),
+                    )
+                    .key("settings-mcp-profile")
+                    .value(app.field("mcp-rule-profile").to_owned())
+                    .disabled(app.profiles.is_empty())
+                    .open(app.workbench.generic_select.as_deref() == Some("settings-mcp-profile"))
+                    .on_toggle(|collapsed| {
+                        Msg::Action(format!("select-open:settings-mcp-profile:{}", !collapsed))
+                    })
+                    .on_change(|change| {
+                        Msg::Action(format!(
+                            "mcp-rules-load:{}",
+                            change.value.as_str().unwrap_or_default()
+                        ))
+                    });
+                for profile in &app.profiles {
+                    let provider = match profile.provider {
+                        datapier_core::model::ProviderKind::Mysql => "MySQL",
+                        datapier_core::model::ProviderKind::Redis => "Redis",
+                    };
+                    let source = if profile.is_archery() {
+                        "Archery".to_owned()
+                    } else {
+                        crate::i18n::tr("直连").into_owned()
+                    };
+                    selector = selector.option(ui::SelectOption::new(
+                        profile.id.to_string(),
+                        format!("{} · {} · {}", profile.name, provider, source),
+                    ));
+                }
+                rules = rules.child(
+                    ui::field(crate::i18n::tr("连接").into_owned())
+                        .variant(ui::FieldVariant::Row)
+                        .child(selector),
+                );
+                if busy {
+                    rules = rules.child(
+                        html::p(crate::i18n::tr("正在处理权限…").into_owned()).class("muted"),
+                    );
+                }
+                if !app.field("mcp-rule-error").is_empty() {
+                    rules = rules.child(
+                        html::p(app.field("mcp-rule-error").to_owned())
+                            .class("form-submit-error")
+                            .attr("role", "alert"),
+                    );
+                    if !app.field("mcp-rule-retry").is_empty() {
+                        rules = rules.child(button("重试", app.field("mcp-rule-retry")));
+                    }
+                }
+                if !app.field("mcp-rule-data").is_empty() {
+                    let mut profile_policies = html::div().class("toolbar");
+                    for (policy, label) in [
+                        ("off", "关闭审批"),
+                        ("dangerous", "危险操作审批"),
+                        ("all_writes", "所有写入审批"),
+                    ] {
+                        let selected = app.field("mcp-rule-policy") == policy;
+                        profile_policies = profile_policies.child(
+                            html::button(format!(
+                                "{}{}",
+                                if selected { "✓ " } else { "" },
+                                crate::i18n::tr(label)
+                            ))
+                            .class(if selected {
+                                "policy-choice active"
+                            } else {
+                                "policy-choice"
+                            })
+                            .attr("aria-pressed", selected)
+                            .disabled(busy)
+                            .on_click(Msg::Action(format!("mcp-policy-set:{policy}"))),
+                        );
+                    }
+                    rules = rules.child(
+                        ui::field(crate::i18n::tr("连接审批策略").into_owned())
+                            .variant(ui::FieldVariant::Row)
+                            .child(profile_policies),
+                    );
+                    if app.field("settings-mcp-fine_grained_access") == "true" {
+                        if let Ok(data) = serde_json::from_str::<Value>(app.field("mcp-rule-data"))
+                            && let Some(items) = data["rules"].as_array()
+                        {
+                            for item in items {
+                                let key = item["scope_key"].as_str().unwrap_or("");
+                                let scope = if item["scope_kind"] == "instance" {
+                                    if key == "*" {
+                                        crate::i18n::tr("Redis 整个实例").into_owned()
+                                    } else {
+                                        format!("{} ({key})", crate::i18n::tr("Redis 实例范围"))
+                                    }
+                                } else {
+                                    key.to_owned()
+                                };
+                                let level = match item["level"].as_str().unwrap_or("") {
+                                    "disabled" => crate::i18n::tr("禁用").into_owned(),
+                                    "read_only" => crate::i18n::tr("只读").into_owned(),
+                                    "read_write" => crate::i18n::tr("读写").into_owned(),
+                                    _ => crate::i18n::tr("未知").into_owned(),
+                                };
+                                rules = rules.child(
+                                    ui::field(scope)
+                                        .variant(ui::FieldVariant::Row)
+                                        .child(html::span(level)),
+                                );
+                            }
+                        }
+                        if app
+                            .profiles
+                            .iter()
+                            .find(|profile| Some(profile.id) == selected_profile)
+                            .is_some_and(|profile| {
+                                profile.provider == datapier_core::model::ProviderKind::Mysql
+                            })
+                        {
+                            rules = rules.child(field(app, "mcp-rule-scope", "MySQL 数据库名称"));
+                        }
+                        let mut levels = html::div().class("toolbar");
+                        for (level, label) in [
+                            ("disabled", "禁用"),
+                            ("read_only", "只读"),
+                            ("read_write", "读写"),
+                        ] {
+                            levels = levels.child(
+                                html::button(crate::i18n::tr(label).into_owned())
+                                    .disabled(busy)
+                                    .on_click(Msg::Action(format!("mcp-rules-level:{level}"))),
+                            );
+                        }
+                        rules = rules.child(
+                            ui::field(crate::i18n::tr("访问权限").into_owned())
+                                .variant(ui::FieldVariant::Row)
+                                .child(levels),
+                        );
+                        rules = rules.child(
+                            html::button(crate::i18n::tr("保存 MCP 权限").into_owned())
+                                .disabled(busy)
+                                .on_click(Msg::Action("mcp-rules-save".into())),
+                        );
+                    }
+                }
+                panel = panel.child(rules);
+            }
+            if settings_ready && !mcp {
+                let mut servers = html::div().class("archery-server-list").child(
+                    html::div()
+                        .class("archery-section-heading")
+                        .child(html::strong(crate::i18n::tr("Archery 服务器").into_owned()))
+                        .child(icon_button("plus", "新建服务", "server-new")),
+                );
+                for server in &app.archery.servers {
+                    let Some(id) = server["id"].as_str() else {
+                        continue;
+                    };
+                    let count = uuid::Uuid::parse_str(id)
+                        .ok()
+                        .map(|id| {
+                            app.profiles
+                                .iter()
+                                .filter(|profile| {
+                                    profile
+                                        .archery()
+                                        .is_some_and(|source| source.server_id == id)
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    servers = servers.child(
+                        html::div()
+                            .class("archery-server-row")
+                            .child(
+                                html::div()
+                                    .class("archery-server-info")
+                                    .child(
+                                        ui::field(crate::i18n::tr("服务名称").into_owned())
+                                            .variant(ui::FieldVariant::Row)
+                                            .child(html::span(
+                                                server["name"].as_str().unwrap_or("").to_owned(),
+                                            )),
+                                    )
+                                    .child(
+                                        ui::field(crate::i18n::tr("服务地址").into_owned())
+                                            .variant(ui::FieldVariant::Row)
+                                            .child(html::span(
+                                                server["base_url"]
+                                                    .as_str()
+                                                    .unwrap_or("")
+                                                    .to_owned(),
+                                            )),
+                                    )
+                                    .child(
+                                        ui::field(crate::i18n::tr("用户名").into_owned())
+                                            .variant(ui::FieldVariant::Row)
+                                            .child(html::span(
+                                                server["username"]
+                                                    .as_str()
+                                                    .unwrap_or("")
+                                                    .to_owned(),
+                                            )),
+                                    )
+                                    .child(
+                                        ui::field(crate::i18n::tr("关联连接").into_owned())
+                                            .variant(ui::FieldVariant::Row)
+                                            .child(html::span(count.to_string())),
+                                    ),
+                            )
+                            .child(icon_button(
+                                "edit",
+                                "编辑服务",
+                                &format!("server-edit:{id}"),
+                            ))
+                            .child(icon_button(
+                                "trash",
+                                "删除服务",
+                                &format!("server-delete:{id}"),
+                            )),
+                    );
+                }
+                panel = panel.child(servers);
+            }
+            footer = html::div()
+                .class("modal-footer")
+                .child(
+                    ui::button(crate::i18n::tr("重新加载设置").into_owned())
+                        .disabled(
+                            app.settings_save_token.is_some()
+                                || app.field("settings-reload") == "true",
+                        )
+                        .on_click(Msg::Action("settings-reload".into())),
+                )
+                .child(html::span("").class("spacer"))
+                .child(
+                    ui::button(crate::i18n::tr("保存设置").into_owned())
+                        .variant(ui::ButtonVariant::Primary)
+                        .disabled(!settings_ready || app.settings_save_token.is_some())
+                        .on_click(Msg::Action("settings-save".into())),
+                );
         }
         "redis" if writable(app) => {
             let op = app.field("operation");
@@ -947,10 +1231,15 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
     // class 仅属于 el；用外层限定菜单溢出，不改原生 overlay 的视觉样式。
     html::div()
         .class(format!(
-            "modal-layer {}{}",
+            "modal-layer {}{}{}",
             app.viewport_class(),
             if picker_open {
                 " modal-picker-open"
+            } else {
+                ""
+            },
+            if kind == "settings" {
+                " settings-dialog"
             } else {
                 ""
             }

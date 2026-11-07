@@ -26,6 +26,8 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "transfer-fixture".into(),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
         provider: kind,
         access_mode: AccessMode::ReadWrite,
         connection: ConnectionConfig::Direct(DirectConnection {
@@ -42,6 +44,7 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
                 None
             },
             redis_db: 15,
+            redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
         }),
@@ -119,7 +122,6 @@ fn mysql_target(name: &str) -> ResourceTarget {
 async fn clean(store: Store) {
     let root = (*store.root).clone();
     store.pool.close().await;
-    store.cache.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

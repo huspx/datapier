@@ -30,7 +30,6 @@ use crate::{
     providers::ProviderSession,
 };
 use serde_json::{Value as Json, json};
-use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
@@ -185,14 +184,6 @@ async fn full_row(sink: &ExecutionSink, mut row: Vec<Value>) -> Result<Vec<Value
     Ok(row)
 }
 
-fn validate_redis_browse_type(expected: &str, browsed: &Json) -> Result<()> {
-    if browsed.get("type").and_then(Json::as_str) != Some(expected) {
-        return Err(AppError::conflict(
-            "Redis key 类型在导出期间发生变化或 key 已不存在",
-        ));
-    }
-    Ok(())
-}
 fn redis_bytes(v: &Value) -> Result<String> {
     match v {
         Value::Bytes(s) => Ok(s.clone()),

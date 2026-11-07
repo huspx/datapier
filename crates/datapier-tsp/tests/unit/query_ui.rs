@@ -124,43 +124,70 @@ fn archery_plan_uses_stateless_context_and_selected_database() {
 }
 
 #[test]
-fn pagination_rejects_late_plans_and_preserves_result_ownership() {
+fn late_page_cannot_replace_current_page_or_another_tab() {
+    use datapier_core::model::{Column, ResultMeta, Value as DataValue};
+
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = query_app("SELECT 1");
-    let first = Uuid::new_v4().to_string();
-    let second = Uuid::new_v4().to_string();
-    app.request_result_pagination(&backend, &first);
+    let id = Uuid::new_v4();
+    app.result_id = Some(id.to_string());
+    let result = ResultMeta {
+        id,
+        execution_id: Uuid::new_v4(),
+        columns: vec![Column::new("value", "text")],
+        kind: "rows".into(),
+        row_count: 2,
+        complete: true,
+        summary: json!({"retrieval_mode":"bounded_response"}),
+    };
+    let page = |start, text: &str| ResultPage {
+        result: result.clone(),
+        rows: vec![vec![DataValue::Text(text.into())]],
+        start,
+        next: None,
+    };
+
+    app.page(&backend, 0);
     let old = requests.try_recv().unwrap();
-    app.workbench
-        .query_ui
-        .pagination
-        .get_mut(&first)
-        .unwrap()
-        .page_size = 50;
-    app.request_result_pagination(&backend, &first);
+    app.page(&backend, 1);
     let current = requests.try_recv().unwrap();
-    app.request_result_pagination(&backend, &second);
-    let other = requests.try_recv().unwrap();
-    let tag =
-        |request: &crate::backend::Request| request.tag.splitn(3, ':').nth(2).unwrap().to_owned();
-    app.accept_result_pagination(
-        &tag(&old),
-        json!({"page_size":20,"row_count":40,"complete":true,"starts":[0,20]}),
+    app.routed_response(
+        Response {
+            tag: current.tag,
+            result: Ok(serde_json::to_value(page(1, "current")).unwrap()),
+        },
         &backend,
     );
-    assert!(app.workbench.query_ui.pagination[&first].starts.is_empty());
-    app.accept_result_pagination(
-        &tag(&current),
-        json!({"page_size":50,"row_count":60,"complete":true,"starts":[0,7,57]}),
+    app.routed_response(
+        Response {
+            tag: old.tag,
+            result: Ok(serde_json::to_value(page(0, "late")).unwrap()),
+        },
         &backend,
     );
-    app.accept_result_pagination(
-        &tag(&other),
-        json!({"page_size":20,"row_count":0,"complete":true,"starts":[0]}),
+    assert_eq!(app.grid.as_ref().unwrap().page.start, 1);
+    assert_eq!(
+        app.grid.as_ref().unwrap().page.rows[0][0],
+        DataValue::Text("current".into())
+    );
+
+    app.page(&backend, 0);
+    let pending = requests.try_recv().unwrap();
+    app.create_query_tab();
+    app.routed_response(
+        Response {
+            tag: pending.tag,
+            result: Ok(serde_json::to_value(page(0, "first tab")).unwrap()),
+        },
         &backend,
     );
-    assert_eq!(app.workbench.query_ui.pagination[&first].starts, [0, 7, 57]);
-    assert_eq!(app.workbench.query_ui.pagination[&second].starts, [0]);
+    assert_eq!(app.active, 1);
+    assert!(app.grid.is_none());
+    app.switch_tab(0);
+    assert_eq!(
+        app.grid.as_ref().unwrap().page.rows[0][0],
+        DataValue::Text("first tab".into())
+    );
 }
 
 #[test]

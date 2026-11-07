@@ -2,6 +2,7 @@
 
 pub mod execution;
 pub mod model;
+pub mod policy;
 pub mod providers;
 pub mod storage;
 pub use execution::ExecutionSink;

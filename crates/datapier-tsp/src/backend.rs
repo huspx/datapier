@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use datapier_core::model::{ResultPage, Value as DataValue};
 use datapier_core::{Result, model::AppError};
-use datapier_engine::{Client, EngineEvent};
+use datapier_engine::{Client, ClientOptions, EngineEvent};
 use serde_json::Value;
 use serde_json::json;
 use std::{path::PathBuf, thread};
@@ -53,7 +53,7 @@ async fn cli_copy_log(client: &Client, request: CliCopyRequest) -> Result<String
             let mut count = None;
             loop {
                 let page: ResultPage = serde_json::from_value(client.request(
-                    "result.page",
+                    "result.read",
                     json!({"result_id":id,"start":start,"max_rows":200,"max_bytes":1048576}),
                 ).await?)?;
                 if page.result.id != result_id
@@ -183,7 +183,7 @@ async fn redis_copy_value(client: &Client, result_id: Uuid, kind: &str) -> Resul
         let page: ResultPage = serde_json::from_value(
             client
                 .request(
-                    "result.page",
+                    "result.read",
                     json!({"result_id":result_id,"start":start,"max_rows":200,"max_bytes":1048576}),
                 )
                 .await?,
@@ -435,7 +435,7 @@ async fn consume(
 impl Backend {
     /// 启动后台 runtime 和 Engine 连接；线程创建失败时返回错误。
     /// 连接和 runtime 的异步失败通过响应队列报告。
-    pub fn start(root: PathBuf, waker: Waker) -> Result<Self> {
+    pub fn start(root: PathBuf, workspace: String, waker: Waker) -> Result<Self> {
         let (commands, mut incoming) = mpsc::channel::<Request>(64);
         let (responses, receiver) = mpsc::channel::<Response>(64);
         let worker = thread::Builder::new()
@@ -456,7 +456,16 @@ impl Backend {
                     }
                 };
                 runtime.block_on(async move {
-                    let client = match Client::connect(&root).await {
+                    let client = match Client::connect_with(
+                        &root,
+                        ClientOptions {
+                            kind: datapier_core::model::ClientKind::Tsp,
+                            workspace,
+                            ..ClientOptions::default()
+                        },
+                    )
+                    .await
+                    {
                         Ok(client) => client,
                         Err(error) => {
                             let _ = responses
