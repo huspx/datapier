@@ -14,6 +14,9 @@
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
+:root[data-theme="light"] .config-tabs button {
+  background: transparent;
+}
 .config-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -47,13 +50,19 @@
   background: var(--accent);
   border-color: var(--accent);
 }
+:root[data-theme="light"] .config-switch {
+  background: var(--muted);
+}
+:root[data-theme="light"] .config-switch[aria-checked="true"] {
+  background: var(--accent);
+}
 .config-switch span {
   position: absolute;
   left: 2px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: white;
+  background: var(--panel);
   transition: transform 0.15s;
 }
 .config-switch[aria-checked="true"] span {
@@ -94,4 +103,57 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.design-tabs {
+  flex-wrap: wrap;
+  gap: 0 20px;
+}
+.design-workbench .facts {
+  margin-top: 16px;
+}
+.design-value-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.design-value-label textarea, .design-value-label input {
+  width: 100%;
+  color: var(--fg);
+}
+.design-value-label textarea {
+  resize: vertical;
+  font: 12px/1.5 var(--mono);
+}
+.design-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.design-actions button {
+  max-width: 100%;
+  white-space: normal;
+}
+.design-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.config-row > span, .config-server-info, .config-server-group {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 480px) {
+  .config-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .config-server-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .config-server-actions {
+    justify-content: flex-end;
+  }
 }

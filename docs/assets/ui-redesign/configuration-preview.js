@@ -109,7 +109,10 @@ function configRow(label, control, required = false) {
   }</span>${control}</div>`;
 }
 function configPolicySelect(selected, owner, values = ['off', 'dangerous', 'all_writes']) {
-  return `<select data-config-policy-owner="${owner}" aria-label="${h(configText('审批策略', 'Approval policy'))}" ${
+  const label = owner === 'default'
+    ? configText('新连接默认审批策略', 'Default approval policy for new connections')
+    : configText('连接审批策略', 'Connection approval policy');
+  return `<select data-config-policy-owner="${owner}" aria-label="${h(label)}" ${
     owner === 'rule' && configPreview.busy ? 'disabled' : ''
   }>${
     values.map(value =>

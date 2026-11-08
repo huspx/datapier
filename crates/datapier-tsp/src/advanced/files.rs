@@ -171,7 +171,12 @@ fn button(label: &str, action: &str, enabled: bool) -> Node<Msg> {
 /// 所有动作仅生成界面事件，调用方使用 Engine 响应更新会话与错误。
 pub(crate) fn view(state: &FileUi, writable: bool, value_ready: bool) -> Node<Msg> {
     let ready = value_ready && !state.pending;
-    let mut panel = html::div().class("value-files");
+    let mut panel = html::div()
+        .class("value-files advanced-panel")
+        .child(html::strong(tr("文件操作").into_owned()));
+    if state.pending {
+        panel = panel.child(html::p(tr("处理中").into_owned()).class("muted"));
+    }
     if let Some(error) = &state.error {
         panel = panel.child(html::p(error.clone()).class("notice"));
     }
@@ -198,43 +203,50 @@ pub(crate) fn view(state: &FileUi, writable: bool, value_ready: bool) -> Node<Ms
                 }),
         ),
     );
-    panel = panel.child(button(
-        if state.overwrite {
-            "覆盖：已启用"
-        } else {
-            "覆盖：未启用"
-        },
-        "advanced-file-overwrite",
-        ready,
-    ));
-    panel = panel.child(button(
-        "导出",
-        "advanced-file-export",
-        ready && !state.path.text.is_empty(),
-    ));
-    panel = panel.child(button(
-        "导入",
-        "advanced-file-import",
-        ready && writable && !state.path.text.is_empty(),
-    ));
-    panel = panel.child(button(
-        "准备外部编辑",
-        "advanced-external-open",
-        ready && writable && state.file_session.is_none(),
-    ));
+    panel = panel.child(
+        ui::field(tr("覆盖已有文件").into_owned()).child(
+            ui::switch(tr("覆盖已有文件").into_owned())
+                .on(state.overwrite)
+                .disabled(!ready)
+                .on_change(|_| Msg::Action("advanced-file-overwrite".into())),
+        ),
+    );
+    panel = panel.child(
+        html::div()
+            .class("advanced-actions")
+            .child(button(
+                "导出",
+                "advanced-file-export",
+                ready && !state.path.text.is_empty(),
+            ))
+            .child(button(
+                "导入",
+                "advanced-file-import",
+                ready && writable && !state.path.text.is_empty(),
+            ))
+            .child(button(
+                "准备外部编辑",
+                "advanced-external-open",
+                ready && writable && state.file_session.is_none(),
+            )),
+    );
     if let Some(path) = &state.external_path {
         panel = panel.child(html::p(path.clone()).class("mono"));
         panel = panel.child(
             html::p(tr("启动编辑器不表示编辑结束，请明确读取修改。").into_owned()).class("muted"),
         );
-        panel = panel.child(button("启动编辑器", "advanced-external-launch", ready));
-        panel = panel.child(button(
-            "读取修改",
-            "advanced-external-read",
-            ready && writable,
-        ));
-        panel = panel.child(button("保留文件", "advanced-external-keep", ready));
-        panel = panel.child(button("结束并清理", "advanced-external-clean", ready));
+        panel = panel.child(
+            html::div()
+                .class("advanced-actions")
+                .child(button("启动编辑器", "advanced-external-launch", ready))
+                .child(button(
+                    "读取修改",
+                    "advanced-external-read",
+                    ready && writable,
+                ))
+                .child(button("保留文件", "advanced-external-keep", ready))
+                .child(button("结束并清理", "advanced-external-clean", ready)),
+        );
     }
     panel.into()
 }

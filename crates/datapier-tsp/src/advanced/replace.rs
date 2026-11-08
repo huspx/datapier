@@ -751,6 +751,13 @@ fn toggle(values: &mut Vec<String>, value: String) {
 
 fn button(label: &str, action: String, disabled: bool) -> Node<Msg> {
     ui::button(i18n::tr(label).into_owned())
+        .variant(
+            if action == "replace:submit" || action == "replace:prepare" {
+                ui::ButtonVariant::Primary
+            } else {
+                ui::ButtonVariant::Default
+            },
+        )
         .key(action.clone())
         .disabled(disabled)
         .on_click(Msg::Action(action))
@@ -759,6 +766,8 @@ fn button(label: &str, action: String, disabled: bool) -> Node<Msg> {
 fn choice(label: &str, action: String, selected: bool, disabled: bool) -> Node<Msg> {
     let mark = if selected { "☑ " } else { "☐ " };
     ui::button(format!("{mark}{}", i18n::tr(label)))
+        .variant(ui::ButtonVariant::Quiet)
+        .on(selected)
         .key(action.clone())
         .disabled(disabled)
         .on_click(Msg::Action(action))
@@ -810,7 +819,7 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
     let frozen = state.summary.is_some() || state.task.is_some();
     let busy = state.pending.is_some() || state.task.is_some();
     let mut panel = html::div()
-        .class("change-preview")
+        .class("change-preview advanced-panel")
         .child(field(
             "replace-pattern",
             "查找",
@@ -823,6 +832,32 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
             &state.replacement,
             frozen || busy,
         ));
+    if let Some(ReplaceTarget::Mysql { target, .. }) = &state.target {
+        let mut context = html::div().class("advanced-facts");
+        for (key, label) in [("database", "数据库"), ("name", "对象名称")] {
+            if let Some(value) = target.get(key).and_then(Value::as_str) {
+                context = context.child(super::fact(label, value));
+            }
+        }
+        panel = panel.child(context);
+    }
+    if let Some(ReplaceTarget::Redis { targets }) = &state.target {
+        let mut context = html::div().class("advanced-facts");
+        for target in targets {
+            if let Some(database) = target.get("database").and_then(Value::as_str) {
+                context = context.child(super::fact("数据库", database));
+            }
+            if let Some(name) = target.get("name").and_then(Value::as_str) {
+                context = context.child(super::fact("目标", name));
+            }
+        }
+        panel = panel.child(context);
+    }
+    if frozen {
+        panel = panel.child(
+            html::p(i18n::tr("计划已冻结，修改条件前请先丢弃计划。").into_owned()).class("notice"),
+        );
+    }
     if state.invalid {
         panel = panel.child(
             html::p(i18n::tr("计划已失效，请重新打开替换工作台。").into_owned()).class("notice"),
@@ -837,24 +872,35 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
         ("多行", "replace:multiline", state.multi_line),
         ("点匹配换行", "replace:dot", state.dot_matches_new_line),
     ] {
-        panel = panel.child(choice(label, action.into(), enabled, frozen || busy));
+        let action = action.to_owned();
+        panel = panel.child(
+            ui::field(i18n::tr(label).into_owned()).child(
+                ui::switch(i18n::tr(label).into_owned())
+                    .on(enabled)
+                    .disabled(frozen || busy)
+                    .on_change(move |_| Msg::Action(action.clone())),
+            ),
+        );
     }
     if let Some(target) = &state.target {
         match target {
             ReplaceTarget::Mysql { columns, .. } => {
+                let mut scopes = html::div().class("advanced-actions");
                 for (label, action, scope) in [
                     ("选中行", "replace:selected", ReplaceScope::Selected),
                     ("当前页", "replace:page", ReplaceScope::CurrentPage),
                     ("筛选结果", "replace:filtered", ReplaceScope::Filtered),
                 ] {
-                    panel = panel.child(choice(
+                    scopes = scopes.child(choice(
                         label,
                         action.into(),
                         state.scope == Some(scope),
                         frozen || busy,
                     ));
                 }
+                panel = panel.child(scopes);
                 panel = panel.child(html::strong(i18n::tr("替换列").into_owned()));
+                let mut choices = html::div().class("advanced-actions");
                 for (index, column) in columns.iter().enumerate() {
                     let action = format!("replace:column:{index}");
                     let mark = if state.columns.contains(column) {
@@ -862,24 +908,29 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                     } else {
                         "☐ "
                     };
-                    panel = panel.child(
+                    choices = choices.child(
                         ui::button(format!("{mark}{column}"))
+                            .variant(ui::ButtonVariant::Quiet)
+                            .on(state.columns.contains(column))
                             .key(action.clone())
                             .disabled(frozen || busy)
                             .on_click(Msg::Action(action)),
                     );
                 }
+                panel = panel.child(choices);
             }
             ReplaceTarget::Redis { .. } => {
                 panel = panel.child(html::strong(i18n::tr("替换角色").into_owned()));
+                let mut choices = html::div().class("advanced-actions");
                 for (role, label) in REDIS_ROLES {
-                    panel = panel.child(choice(
+                    choices = choices.child(choice(
                         label,
                         format!("replace:role:{role}"),
                         state.roles.iter().any(|v| v == role),
                         frozen || busy,
                     ));
                 }
+                panel = panel.child(choices);
             }
         }
     }
@@ -906,7 +957,27 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
             ));
     }
     if let Some(summary) = &state.summary {
-        panel = panel.child(html::pre(summary.to_string()).class("preview"));
+        let mut facts = html::div().class("advanced-facts");
+        for (key, label) in [
+            ("scanned", "已扫描"),
+            ("matched", "命中数"),
+            ("total_items", "预览项"),
+            ("non_utf8", "非 UTF-8"),
+            ("unchanged", "未变更"),
+            ("inapplicable", "不适用"),
+            ("collisions", "碰撞"),
+        ] {
+            if let Some(value) = summary.get(key).filter(|value| !value.is_null()) {
+                facts = facts.child(super::fact(label, display(value)));
+            }
+        }
+        if let Some(reason) = summary.get("reason").and_then(Value::as_str) {
+            facts = facts.child(super::fact("原因", reason));
+        }
+        panel = panel
+            .child(html::strong(i18n::tr("变更预览").into_owned()))
+            .child(facts)
+            .child(super::diagnostic("replace-summary-diagnostic", summary));
     }
     if state.summary.is_some() && state.page.is_none() && !busy {
         panel = panel.child(button("刷新预览", "replace:read".into(), false));
@@ -918,16 +989,18 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
         .and_then(Value::as_array)
     {
         for (index, item) in items.iter().enumerate() {
-            let selected = item
-                .get("selected")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let mut row = html::div().class("draft-item").child(choice(
-                "包含",
-                format!("replace:item:{index}"),
-                selected,
-                busy || state.invalid,
-            ));
+            let selected = item.get("selected").and_then(Value::as_bool);
+            let mut row = html::div().class("draft-item");
+            if let Some(selected) = selected {
+                row = row.child(choice(
+                    "包含",
+                    format!("replace:item:{index}"),
+                    selected,
+                    busy || state.invalid,
+                ));
+            } else {
+                row = row.child(super::fact("状态", i18n::tr("未知").into_owned()));
+            }
             for (key, label) in [
                 ("key", "目标"),
                 ("identity", "身份"),
@@ -939,9 +1012,23 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                 ("collision", "碰撞"),
             ] {
                 if let Some(value) = item.get(key).filter(|v| !v.is_null()) {
-                    row = row
-                        .child(html::strong(i18n::tr(label).into_owned()))
-                        .child(html::pre(display(value)).class("preview"));
+                    let text = if key == "role" {
+                        value
+                            .as_str()
+                            .and_then(|role| REDIS_ROLES.iter().find(|(name, _)| *name == role))
+                            .map(|(_, label)| i18n::tr(label).into_owned())
+                            .unwrap_or_else(|| display(value))
+                    } else if key == "collision" {
+                        value
+                            .as_bool()
+                            .map(|collision| {
+                                i18n::tr(if collision { "是" } else { "否" }).into_owned()
+                            })
+                            .unwrap_or_else(|| display(value))
+                    } else {
+                        display(value)
+                    };
+                    row = row.child(super::fact(label, text));
                     if matches!(key, "before" | "after")
                         && value.get("complete").and_then(Value::as_bool) == Some(false)
                     {
@@ -988,7 +1075,42 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
         ));
     }
     if let Some(result) = &state.result {
-        panel = panel.child(html::pre(result.to_string()).class("preview"));
+        let mut section = html::div()
+            .class("advanced-section")
+            .child(html::strong(i18n::tr("执行结果").into_owned()));
+        if let Some(status) = result
+            .get("status")
+            .or_else(|| result.get("state"))
+            .and_then(Value::as_str)
+        {
+            section = section.child(super::fact("状态", super::status(status)));
+        }
+        for (key, label) in [
+            ("applied_commands", "已执行命令"),
+            ("total_commands", "命令总数"),
+            ("affected_rows", "影响行数"),
+            ("error", "错误"),
+        ] {
+            if let Some(value) = result.get(key).filter(|value| !value.is_null()) {
+                section = section.child(super::fact(label, display(value)));
+            }
+        }
+        if let Some(items) = result.get("items").and_then(Value::as_array) {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(status) = item.get("status").and_then(Value::as_str) {
+                    section = section.child(super::fact(
+                        &format!("{} {}", i18n::tr("项目"), index + 1),
+                        super::status(status),
+                    ));
+                }
+                if let Some(error) = item.get("error").filter(|value| !value.is_null()) {
+                    section = section.child(super::fact("错误", display(error)));
+                }
+            }
+        }
+        panel = panel
+            .child(section)
+            .child(super::diagnostic("replace-result-diagnostic", result));
     }
     panel = panel.child(button(
         "准备预览",

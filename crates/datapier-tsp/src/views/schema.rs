@@ -1,5 +1,21 @@
 //! MySQL 字段、索引与约束展示。
 use super::*;
+
+fn recorded(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.is_empty() {
+        crate::i18n::tr("未记录")
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
+fn metadata_part(label: &str, value: &str) -> html::El<Msg> {
+    html::div()
+        .class("schema-metadata-part")
+        .child(html::span(crate::i18n::tr(label).into_owned()).class("muted"))
+        .child(html::span(recorded(value).into_owned()).class("schema-metadata-value"))
+}
+
 pub(super) fn schema_panel(app: &App) -> Node<Msg> {
     let mut panel = html::div().class("schema-panel");
     if let Some(schema) = &app.schema {
@@ -14,12 +30,22 @@ pub(super) fn schema_panel(app: &App) -> Node<Msg> {
         );
         if let Some(columns) = schema.get("columns").and_then(Value::as_array) {
             for col in columns {
-                let name = col.get("name").and_then(Value::as_str).unwrap_or("");
-                let ty = col.get("type_name").and_then(Value::as_str).unwrap_or("");
-                let nullable = if col.get("nullable").and_then(Value::as_bool) == Some(false) {
-                    "NO"
-                } else {
-                    "YES"
+                let name = col
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(std::borrow::Cow::Borrowed)
+                    .unwrap_or_else(|| crate::i18n::tr("未记录"));
+                let ty = col
+                    .get("type_name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(std::borrow::Cow::Borrowed)
+                    .unwrap_or_else(|| crate::i18n::tr("未知"));
+                let nullable = match col.get("nullable").and_then(Value::as_bool) {
+                    Some(false) => "NO",
+                    Some(true) => "YES",
+                    None => "未知",
                 };
                 let key = if col.get("primary_key").and_then(Value::as_bool) == Some(true) {
                     "主键"
@@ -94,38 +120,60 @@ pub(super) fn schema_panel(app: &App) -> Node<Msg> {
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join(".");
-                    let desc = if key == "indexes" {
-                        format!(
-                            "{}  {}  {}",
-                            part("type"),
-                            crate::i18n::tr(
-                                if item.get("unique").and_then(Value::as_bool) == Some(true) {
-                                    "唯一"
-                                } else {
-                                    "非唯一"
-                                }
-                            ),
-                            item.get("expression")
-                                .and_then(Value::as_str)
-                                .or_else(|| item.get("column").and_then(Value::as_str))
-                                .unwrap_or("")
-                        )
+                    let mut details = html::div()
+                        .class("schema-metadata-summary")
+                        .child(metadata_part("类型", part("type")));
+                    if key == "indexes" {
+                        details = details
+                            .child(metadata_part(
+                                "唯一性",
+                                &crate::i18n::tr(
+                                    match item.get("unique").and_then(Value::as_bool) {
+                                        Some(true) => "唯一",
+                                        Some(false) => "非唯一",
+                                        None => "未知",
+                                    },
+                                ),
+                            ))
+                            .child(metadata_part(
+                                "字段 / 表达式",
+                                item.get("expression")
+                                    .and_then(Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .or_else(|| item.get("column").and_then(Value::as_str))
+                                    .unwrap_or(""),
+                            ));
                     } else {
-                        format!("{}  {}  {}", part("type"), part("column"), ref_target)
-                    };
+                        details = details.child(metadata_part("字段", part("column")));
+                        if !ref_target.is_empty() {
+                            details = details.child(metadata_part("引用目标", &ref_target));
+                        }
+                    }
                     panel = panel.child(
                         html::div()
-                            .class("schema-row")
-                            .child(html::strong(part("name")))
-                            .child(html::span(desc)),
+                            .class("schema-metadata-row")
+                            .child(
+                                html::strong(recorded(part("name"))).class("schema-metadata-name"),
+                            )
+                            .child(details),
                     );
                 }
+            } else {
+                panel = panel
+                    .child(html::span(crate::i18n::tr("未知").into_owned()).class("empty-note"));
             }
         }
     } else {
         panel = panel.child(
-            html::span(crate::i18n::tr("正在读取结构或尚未选择对象").into_owned())
-                .class("empty-note"),
+            html::span(
+                crate::i18n::tr(if app.target.is_some() {
+                    "结构尚未加载，请刷新"
+                } else {
+                    "尚未选择对象"
+                })
+                .into_owned(),
+            )
+            .class("empty-note"),
         );
     }
     panel.into()

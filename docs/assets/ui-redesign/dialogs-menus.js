@@ -123,8 +123,8 @@ function modal(title, body, foot = '') {
     || `<span class="spacer"></span><button class="button" data-action="close-modal">${h(t('close'))}</button>`
   }</footer></section></div>`;
 }
-// 固定示例只切换设计状态，不生成执行凭据或访问数据库。
-function editingDesignDemo(kind) {
+// 替换示例只切换设计状态，不生成执行凭据或访问数据库。
+function replaceDesignDemo() {
   const en = language !== 'zh-CN';
   const text = (zh, english) => en ? english : zh;
   const notice = `<p class="muted">${
@@ -133,77 +133,41 @@ function editingDesignDemo(kind) {
       'Interactive design sample; no database connection or SQL execution.',
     )
   }</p>`;
-  if (kind === 'schema-design') {
-    const planned = Boolean(state.schemaDemoPlanned);
-    const body = `<p><strong>commerce.orders</strong> · MySQL 8.0 · InnoDB</p>
-      <p>${
-      text(
-        '完整性：完整；可设计字段、索引、外键、CHECK 和表选项。',
-        'Complete metadata; columns, indexes, foreign keys, CHECK and table options are available.',
-      )
-    }</p>
-      <section class="detail-section"><h3>${t('field')}</h3><div class="fields">
-      <label>${text('名称', 'Name')}<input value="status" readonly></label>
-      <label>${t('type')}<input value="VARCHAR(32)" readonly></label>
-      <label>${text('默认值 · literal', 'Default · literal')}<input value="pending" readonly></label>
-      <label>${text('注释', 'Comment')}<input value="Order status" readonly></label></div></section>
-      <section class="detail-section"><h3>${text('索引与约束', 'Indexes and constraints')}</h3>${
-      simpleTable([text('名称', 'Name'), t('type'), t('field')], [['PRIMARY', 'PRIMARY KEY', 'id'], [
-        'idx_status',
-        'INDEX',
-        'status',
-      ]])
-    }</section>
-      <p>ALGORITHM: DEFAULT · LOCK: DEFAULT</p>
-      ${
-      planned
-        ? `<section class="detail-section"><h3>${text('变更预览', 'Change preview')}</h3><pre class="preview-code">${
-          h("ALTER TABLE `commerce`.`orders` MODIFY COLUMN `status` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT 'Order status';")
-        }</pre><p>${
-          text(
-            'DDL 可能隐式提交。执行前重新核对基线，执行后读回实际结构。',
-            'DDL may commit implicitly. Recheck the baseline before execution and read back the actual schema afterward.',
-          )
-        }</p></section>`
-        : ''
-    }${notice}`;
-    return modal(
-      text('结构设计', 'Schema design'),
-      body,
-      `<button class="button" data-action="schema-design-demo">${
-        planned ? text('丢弃计划', 'Discard plan') : text('生成计划并预览', 'Plan and preview')
-      }</button><span class="spacer"></span><button class="button" disabled>${
-        text('提交', 'Submit')
-      }</button><button class="button" data-action="close-modal">${t('close')}</button>`,
-    );
-  }
   const planned = Boolean(state.replaceDemoPlanned);
   const excluded = Boolean(state.replaceDemoExcluded);
-  const body = `<p><strong>commerce.orders</strong> · ${
-    text('选中行：2；字段：status', 'Selected rows: 2; column: status')
-  }</p>
-    <p>${
+  const body = `<dl class="facts">${fact(text('对象', 'Object'), 'commerce.orders')}${
+    fact(text('范围', 'Scope'), text('选中行：2', 'Selected rows: 2'))
+  }${fact(text('字段', 'Column'), 'status')}${fact(text('匹配方式', 'Match mode'), text('文本', 'Text'))}</dl>
+    <section class="detail-section"><h3>${text('替换条件', 'Replacement criteria')}</h3><div class="fields">
+    <label>${text('查找', 'Find')}<input value="pending" readonly></label>
+    <label>${text('替换为', 'Replace with')}<input value="paid" readonly></label></div>
+    <p class="muted">${
     text(
       '范围在准备时冻结；预览中排除的项目不会提交。',
       'The scope is frozen on preparation; excluded items are never submitted.',
     )
-  }</p>
-    <label>${text('查找 · 文本', 'Find · text')}<input value="pending" readonly></label>
-    <label>${text('替换为', 'Replace with')}<input value="paid" readonly></label>
+  }</p></section>
     ${
     planned
-      ? `<section class="detail-section"><h3>${text('冻结预览', 'Frozen preview')}</h3>${
+      ? `<section class="detail-section"><h3>${text('冻结预览', 'Frozen preview')}</h3><div class="design-table">${
         simpleTable(['id', text('原值', 'Before'), text('新值', 'After'), text('状态', 'State')], [[
           '10422',
           'pending',
           'paid',
           excluded ? text('已排除', 'Excluded') : text('已包含', 'Included'),
         ]])
-      }<button class="button" data-action="replace-design-exclude" aria-pressed="${excluded}">${
+      }</div><div class="design-actions"><button class="button" data-action="replace-design-exclude" aria-pressed="${excluded}">${
         excluded ? text('包含此项', 'Include item') : text('排除此项', 'Exclude item')
-      }</button><p>${text('将提交', 'Included')}: ${excluded ? 0 : 1}</p><pre class="preview-code">${
-        h('UPDATE `commerce`.`orders` SET `status` = ? WHERE `id` = ? AND BINARY `status` = BINARY ?;\n["paid", 10422, "pending"]')
-      }</pre><p>${
+      }</button><span>${text('将提交', 'Included')}: ${excluded ? 0 : 1}</span></div></section>
+    <section class="detail-section"><h3>SQL</h3><pre class="preview-code">${
+        h('UPDATE `commerce`.`orders` SET `status` = ? WHERE `id` = ? AND BINARY `status` = BINARY ?;')
+      }</pre><h3>${text('参数', 'Parameters')}</h3><div class="design-table">${
+        simpleTable([text('序号', 'Number'), text('类型', 'Type'), text('字节数', 'Bytes'), text('值', 'Value')], [
+          ['1', 'text', '4', 'paid'],
+          ['2', 'integer', '5', '10422'],
+          ['3', 'text', '7', 'pending'],
+        ])
+      }</div><p class="muted">${
         text(
           '提交前校验冻结的行身份和原值；此处的 SQL 与参数仅为示例。',
           'Recheck frozen row identity and original values before submission; SQL and parameters here are illustrative.',
@@ -214,13 +178,13 @@ function editingDesignDemo(kind) {
   return modal(
     text('批量查找替换', 'Batch find and replace'),
     body,
-    `<button class="button" data-action="replace-design-demo">${
+    `<button class="button${planned ? '' : ' primary'}" data-action="replace-design-demo">${
       planned
         ? text('丢弃计划并修改条件', 'Discard plan and change criteria')
         : text('准备并预览', 'Prepare and preview')
-    }</button><span class="spacer"></span><button class="button" disabled>${
-      text('提交', 'Submit')
-    }</button><button class="button" data-action="close-modal">${t('close')}</button>`,
+    }</button><span class="spacer"></span><button class="button primary" disabled title="${
+      text('设计预览不能执行', 'Execution is unavailable in the design preview')
+    }">${text('提交', 'Submit')}</button>`,
   );
 }
 function overlay() {
@@ -228,8 +192,8 @@ function overlay() {
   if (serverForm || serverDelete || connectionDelete || authStage) {
     return '';
   }
-  if (['schema-design', 'replace-design'].includes(state.overlay)) {
-    return editingDesignDemo(state.overlay);
+  if (state.overlay === 'replace-design') {
+    return replaceDesignDemo();
   }
   if (state.overlay === 'advanced-value') {
     const en = language !== 'zh-CN';
@@ -245,38 +209,77 @@ function overlay() {
       : mode === 'xml'
       ? '<example/>'
       : 'example value';
+    const label = (zh, english) => en ? english : zh;
+    const disabledReason = label(
+      '设计预览不读取文件或修改数据库',
+      'The design preview cannot read files or modify the database',
+    );
+    const values = state.advancedDemoValues || {};
     return modal(
-      en ? 'Advanced value editor' : '高级值编辑',
-      `<div class="row">${
-        modes.map(([id, label]) =>
-          `<button class="button" data-action="advanced-demo:${id}" aria-pressed="${mode === id}">${label}</button>`
+      label('高级值编辑', 'Advanced value editor'),
+      `<div class="design-workbench"><p class="notice">${
+        label(
+          '交互设计示例；不读取文件，不连接数据库。',
+          'Interactive design sample; no files or database are accessed.',
+        )
+      }</p>
+      <dl class="facts">${fact(label('目标', 'Target'), label('示例值', 'Sample value'))}${
+        fact(label('状态', 'State'), label('未加入草稿', 'Not staged'))
+      }</dl>
+      <div class="config-tabs design-tabs" role="tablist" aria-label="${label('值模式', 'Value mode')}">${
+        modes.map(([id, name]) =>
+          `<button type="button" role="tab" aria-selected="${
+            mode === id
+          }" aria-controls="advanced-panel" data-action="advanced-demo:${id}">${name}</button>`
         ).join('')
       }</div>
-      <button class="button" data-action="close-modal">${en ? 'Close' : '关闭'}</button>
+      <section id="advanced-panel" role="tabpanel" aria-label="${
+        h(modes.find(([id]) => id === mode)[1])
+      }" class="detail-section">
       ${
         mode === 'image'
           ? `<p>${
-            en ? 'Generated images are cached by the host.' : '生成的图片会被宿主缓存。'
-          }</p><button class="button" disabled>${en ? 'Generate preview' : '生成预览'}</button>`
-          : `<label>${en ? 'Value' : '值'}<textarea rows="3">${h(sample)}</textarea></label>`
-      }
-      <div class="row">${
-        ['json', 'xml'].includes(mode)
-          ? `<button class="button" disabled>${en ? 'Validate' : '校验'}</button><button class="button" disabled>${
-            en ? 'Format' : '格式化'
+            label('生成的图片会被宿主缓存。', 'Generated images are cached by the host.')
+          }</p><button class="button" disabled title="${disabledReason}">${
+            label('生成预览', 'Generate preview')
           }</button>`
+          : `<label class="design-value-label">${
+            label('值', 'Value')
+          }<textarea data-advanced-value="${mode}" aria-label="${label('值', 'Value')}" rows="6">${
+            h(values[mode] ?? sample)
+          }</textarea></label>`
+      }
+      <div class="design-actions">${
+        ['json', 'xml'].includes(mode)
+          ? `<button class="button" disabled title="${disabledReason}">${
+            label('校验', 'Validate')
+          }</button><button class="button" disabled title="${disabledReason}">${label('格式化', 'Format')}</button>`
           : ''
-      }<button class="button" disabled>${en ? 'Previous' : '上一页'}</button><button class="button" disabled>${
-        en ? 'Next' : '下一页'
-      }</button><button class="button" disabled>${
-        en ? 'Apply changes' : '应用修改'
-      }</button><button class="button" disabled>${en ? 'Stage draft' : '加入草稿'}</button></div>
-      <label>${en ? 'File path' : '文件路径'}<input type="text"></label>
-      <div class="row"><button class="button" disabled>${
-        en ? 'Overwrite: off' : '覆盖：未启用'
-      }</button><button class="button" disabled>${en ? 'Export' : '导出'}</button><button class="button" disabled>${
-        en ? 'Import' : '导入'
-      }</button><button class="button" disabled>${en ? 'Prepare external edit' : '准备外部编辑'}</button></div>`,
+      }
+      <button class="button" disabled title="${disabledReason}">${
+        label('上一页', 'Previous')
+      }</button><button class="button" disabled title="${disabledReason}">${
+        label('下一页', 'Next')
+      }</button><button class="button" disabled title="${disabledReason}">${
+        label('应用修改', 'Apply changes')
+      }</button></div></section>
+      <section class="detail-section"><h3>${
+        label('文件与外部编辑', 'Files and external editing')
+      }</h3><label class="design-value-label">${label('文件路径', 'File path')}<input data-advanced-path aria-label="${
+        label('文件路径', 'File path')
+      }" value="${h(state.advancedDemoPath || '')}"></label>
+      <div class="design-actions"><button class="button" disabled title="${disabledReason}">${
+        label('覆盖：未启用', 'Overwrite: off')
+      }</button><button class="button" disabled title="${disabledReason}">${
+        label('导出', 'Export')
+      }</button><button class="button" disabled title="${disabledReason}">${
+        label('导入', 'Import')
+      }</button><button class="button" disabled title="${disabledReason}">${
+        label('准备外部编辑', 'Prepare external edit')
+      }</button></div></section></div>`,
+      `<span class="spacer"></span><button class="button primary" disabled title="${disabledReason}">${
+        label('加入草稿', 'Stage draft')
+      }</button>`,
     );
   }
   if (state.overlay === 'columns') {
@@ -665,7 +668,7 @@ function closeTabs(ids) {
   const targets = state.tabs.filter(tab => ids.includes(tab.id));
   const blocked = targets.some(tab =>
     tab.running || ((tab.provider || 'mysql') === 'mysql'
-      ? (!tab.query && resourceHasDrafts(tab.database, tab.table))
+      ? (!tab.query && (resourceHasDrafts(tab.database, tab.table) || schemaHasDraft(tab)))
       : tab.redisKeyDraft || state.drafts.some(d => d.db === tab.redisDb && d.key === tab.key)
         || state.cliState === 'running')
   );

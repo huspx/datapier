@@ -74,6 +74,103 @@ fn failed_settings_write_keeps_selection_until_explicit_reload() {
 }
 
 #[test]
+fn settings_tabs_keep_drafts_and_footer_saves_all_fields() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("settings".into());
+    let saved = serde_json::to_value(&app.settings).unwrap();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(saved),
+        },
+        &backend,
+    );
+    app.field_set("editing_plan_items", "234");
+    app.field_set("external_mode", "gui");
+    app.field_set("external_program", "editor");
+    app.field_set("external_args", "--wait\n{file}");
+    app.application_action("settings-language:en", &backend);
+    app.application_action("settings-tab:mcp", &backend);
+    app.application_action("settings-toggle:notifications:approval", &backend);
+    app.field_set("mcp-rule-profile", "selected");
+    app.field_set("mcp-rule-error", "permission failed");
+    app.application_action("settings-tab:general", &backend);
+    assert!(requests.try_recv().is_err());
+    assert_eq!(app.field("mcp-rule-profile"), "selected");
+    assert_eq!(app.field("mcp-rule-error"), "permission failed");
+    app.application_action("settings-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "settings.set");
+    assert_eq!(request.params["settings"]["editing"]["max_plan_items"], 234);
+    assert_eq!(request.params["settings"]["language"], "en");
+    assert_eq!(
+        request.params["settings"]["external_editor"]["args"],
+        json!(["--wait", "{file}"])
+    );
+    assert_eq!(
+        request.params["settings"]["notifications"]["approval"],
+        json!(app.field("settings-notifications-approval") == "true")
+    );
+    app.application_action("settings-reload", &backend);
+    app.application_action("settings-save", &backend);
+    assert!(requests.try_recv().is_err());
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("revision_conflict", "conflict")),
+        },
+        &backend,
+    );
+    app.application_action("settings-tab:mcp", &backend);
+    assert_eq!(app.field("editing_plan_items"), "234");
+    assert!(app.field("settings-error").contains("conflict"));
+}
+
+#[test]
+fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("settings".into());
+    let saved = serde_json::to_value(&app.settings).unwrap();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(saved),
+        },
+        &backend,
+    );
+    app.field_set("external_mode", "gui");
+    app.field_set("external_program", "editor");
+    app.field_set("external_args", "--wait\n{file}\n{file}");
+    app.application_action("settings-save", &backend);
+    assert!(requests.try_recv().is_err());
+    assert!(!app.field("settings-error").is_empty());
+    app.application_action("settings-reload", &backend);
+    let request = requests.try_recv().unwrap();
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("unavailable", "reload failed")),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
+    assert!(app.field("settings-error").contains("reload failed"));
+    app.application_action("settings-reload", &backend);
+    let request = requests.try_recv().unwrap();
+    let persisted = serde_json::to_value(&app.settings).unwrap();
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Ok(persisted),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("external_mode"), "disabled");
+    assert_eq!(app.field("external_args"), "");
+    assert!(app.field("settings-error").is_empty());
+}
+
+#[test]
 fn history_search_and_pagination_use_only_applied_condition() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("history".into());

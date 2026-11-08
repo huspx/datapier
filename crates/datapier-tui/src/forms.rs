@@ -29,16 +29,44 @@ impl Field {
         self.choices = choices.iter().map(|v| (*v).into()).collect();
         self
     }
+    fn choice_label(&self, english: bool) -> &str {
+        if self.choices.is_empty() {
+            return &self.value;
+        }
+        let (zh, en) = match (self.key.as_str(), self.value.as_str()) {
+            ("language", "system") => ("跟随系统", "Follow system"),
+            ("language", "zh-CN") => ("简体中文", "Simplified Chinese"),
+            ("language", "en") => ("English", "English"),
+            ("external_editor.mode", "disabled") => ("未配置", "Not configured"),
+            (_, "mysql") => ("MySQL", "MySQL"),
+            (_, "redis") => ("Redis", "Redis"),
+            (_, "false") => ("关闭", "Off"),
+            (_, "true") => ("开启", "On"),
+            (_, "read_only") => ("只读", "Read only"),
+            (_, "read_write") => ("读写", "Read/write"),
+            (_, "disabled") => ("禁用", "Disabled"),
+            (_, "off") => ("关闭审批", "Approval off"),
+            (_, "dangerous") => ("危险操作需审批", "Approve dangerous operations"),
+            (_, "all_writes") => ("所有写入需审批", "Approve all writes"),
+            (_, "keep") => ("保留", "Keep existing"),
+            (_, "keyring") => ("系统凭据库", "System keyring"),
+            (_, "session") => ("仅本次会话", "This session only"),
+            (_, "clear") => ("清除", "Clear"),
+            (_, "manual") => ("手动输入", "Manual"),
+            (_, "automatic") => ("自动生成", "Automatic"),
+            (_, "gui") => ("图形界面", "GUI"),
+            (_, "terminal") => ("终端", "Terminal"),
+            _ => return &self.value,
+        };
+        if english { en } else { zh }
+    }
     pub fn display(&self, english: bool) -> String {
-        format!(
-            "{}: {}",
-            if english { &self.en } else { &self.zh },
-            if self.secret {
-                "•".repeat(self.value.chars().count())
-            } else {
-                self.value.clone()
-            }
-        )
+        let value = if self.secret {
+            std::borrow::Cow::Owned("•".repeat(self.value.chars().count()))
+        } else {
+            std::borrow::Cow::Borrowed(self.choice_label(english))
+        };
+        format!("{}: {value}", if english { &self.en } else { &self.zh })
     }
 }
 #[derive(Default)]

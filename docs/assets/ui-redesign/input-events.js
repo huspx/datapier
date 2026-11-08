@@ -1,4 +1,13 @@
 'use strict';
+document.addEventListener('input', event => {
+  const target = event.target;
+  if (target.dataset.advancedValue) {
+    state.advancedDemoValues ||= {};
+    state.advancedDemoValues[target.dataset.advancedValue] = target.value;
+  } else if (target.hasAttribute('data-advanced-path')) {
+    state.advancedDemoPath = target.value;
+  }
+});
 document.addEventListener('contextmenu', event => {
   const archeryCard = event.target.closest('[data-archery-connection]');
   if (archeryCard) {
@@ -92,12 +101,13 @@ document.addEventListener('contextmenu', event => {
   if (resource) {
     event.preventDefault();
     const area = $('#app').getBoundingClientRect();
+    const menuHeight = resource.dataset.openTable ? 280 : 240;
     state.menu = {
       kind: resource.dataset.openTable ? 'resource' : 'database',
       database: resource.dataset.tableDb || resource.dataset.db,
       table: resource.dataset.openTable,
       x: Math.max(4, Math.min(event.clientX - area.left, area.width - 280)),
-      y: Math.max(4, Math.min(event.clientY - area.top, area.height - 240)),
+      y: Math.max(4, Math.min(event.clientY - area.top, area.height - menuHeight)),
     };
     render();
     return;
@@ -316,9 +326,17 @@ document.addEventListener('change', event => {
       render();
       return;
     }
-    if (['advanced-value', 'schema-design', 'replace-design'].includes(kind)) {
+    if (kind === 'schema-design') {
+      previewSource = 'direct';
+      $('#preview-source').value = 'direct';
+      state.provider = 'mysql';
+      openTable('commerce', 'orders');
+      state.section = 'structure';
+      schemaDesignAction('schema-example');
+      return;
+    }
+    if (['advanced-value', 'replace-design'].includes(kind)) {
       state.overlay = kind;
-      state.schemaDemoPlanned = false;
       state.replaceDemoPlanned = false;
       state.replaceDemoExcluded = false;
       render();

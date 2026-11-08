@@ -159,9 +159,7 @@ document.addEventListener('click', event => {
     render();
     return;
   }
-  if (action === 'schema-design-demo') {
-    state.schemaDemoPlanned = !state.schemaDemoPlanned;
-    render();
+  if (schemaDesignAction(action)) {
     return;
   }
   if (action === 'replace-design-demo') {
@@ -697,6 +695,7 @@ document.addEventListener('click', event => {
       break;
     }
     case 'app-settings':
+      configPreview.tab = 'general';
       captureLanguageInputs();
       state.overlay = 'app-settings';
       state.menu = null;

@@ -226,10 +226,20 @@ impl App {
             }
             "auth" => {
                 self.auth = value;
+                let (zh, en) = match self.auth["state"].as_str().unwrap_or("") {
+                    "ready" => ("已认证", "Authenticated"),
+                    "disconnected" | "auth_required" | "password_required" => {
+                        ("待认证", "Authentication needed")
+                    }
+                    "challenge_required" => ("等待验证码", "Waiting for verification code"),
+                    "authenticating" => ("认证中", "Authenticating"),
+                    "auth_failed" => ("认证失败", "Authentication failed"),
+                    _ => ("未知", "Unknown"),
+                };
                 self.status = format!(
                     "{}: {}",
                     self.text("认证状态", "Authentication"),
-                    self.auth["state"].as_str().unwrap_or("?")
+                    self.text(zh, en)
                 );
             }
             "instances" => {
@@ -306,7 +316,7 @@ impl App {
         .split(f.area());
         let title = match self.screen {
             Screen::Home => self.text("连接", "Connections"),
-            Screen::Direct => "Direct",
+            Screen::Direct => self.text("直连", "Direct"),
             Screen::Settings => self.text("全局设置", "Global settings"),
             Screen::Servers | Screen::Server => self.text("Archery 服务", "Archery servers"),
             Screen::Instances => self.text("选择实例", "Select instances"),
@@ -329,12 +339,22 @@ impl App {
         match self.screen {
             Screen::Home => {
                 for p in &self.profiles {
+                    let provider = match p["provider"].as_str() {
+                        Some("mysql") => "MySQL",
+                        Some("redis") => "Redis",
+                        _ => self.text("未知", "Unknown"),
+                    };
+                    let source = match p["connection"]["kind"].as_str() {
+                        Some("direct") => self.text("直连", "Direct"),
+                        Some("archery") => "Archery",
+                        _ => self.text("未知", "Unknown"),
+                    };
                     rows.push(format!(
-                        "{}  [{} / {}]  {}",
-                        p["name"].as_str().unwrap_or("?"),
-                        p["provider"].as_str().unwrap_or("?"),
-                        p["connection"]["kind"].as_str().unwrap_or("?"),
-                        p["id"].as_str().unwrap_or("")
+                        "{} · {provider} · {source}",
+                        p["name"]
+                            .as_str()
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(self.text("未记录", "Not recorded"))
                     ));
                 }
                 if rows.is_empty() {

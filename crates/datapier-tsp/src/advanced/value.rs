@@ -4,6 +4,20 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tern_sdk::ui::{self, Node, html};
 
+const VALUE_KINDS: &[(&str, &str)] = &[
+    ("text", "文本"),
+    ("bytes", "二进制"),
+    ("json", "JSON"),
+    ("bool", "布尔值"),
+    ("integer", "整数"),
+    ("unsigned", "无符号整数"),
+    ("decimal", "精确小数"),
+    ("float", "浮点数"),
+    ("date", "日期"),
+    ("time", "时间"),
+    ("datetime", "日期时间"),
+];
+
 /// 所有文本模式共享同一个原始值，切换模式本身不改变内容。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -85,6 +99,11 @@ impl ValueUi {
                         && self.total <= self.max_text_bytes as u64
                         && self.original_window.len() as u64 == self.total)
             }
+    }
+
+    /// 当前窗口修改必须先应用到值会话，加入草稿仍不代表提交数据库。
+    pub(crate) fn can_stage(&self) -> bool {
+        self.writable && self.session.is_some() && !self.pending && !self.dirty()
     }
 
     /// 清除和旧 revision 关联的派生预览，避免迟到图片覆盖当前值。
@@ -594,21 +613,54 @@ impl ValueUi {
 
 fn button(label: &str, action: &str, enabled: bool) -> Node<Msg> {
     ui::button(tr(label).into_owned())
+        .variant(if action == "advanced-value-stage" {
+            ui::ButtonVariant::Primary
+        } else {
+            ui::ButtonVariant::Default
+        })
         .key(action.to_owned())
         .disabled(!enabled)
         .on_click(Msg::Action(action.to_owned()))
         .into()
 }
 
+pub(crate) fn footer(state: &ValueUi) -> html::El<Msg> {
+    html::div()
+        .class("modal-footer")
+        .child(html::span("").class("spacer"))
+        .child(button("关闭", "advanced-value-close", !state.pending))
+        .child(button(
+            "加入草稿",
+            "advanced-value-stage",
+            state.can_stage(),
+        ))
+}
+
 /// 渲染当前值的窗口与操作；调用方路由动作及编辑器输入。
 pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
-    let mut panel = html::div().class("value-editor");
-    let mut modes = html::div().class("value-modes");
+    let mut panel = html::div().class("value-editor advanced-panel");
+    let mut modes = html::div().class("advanced-tabs").attr("role", "tablist");
     for mode in [Mode::Text, Mode::Hex, Mode::Json, Mode::Xml, Mode::Image] {
-        modes = modes.child(button(mode.label(), mode.action(), !state.pending));
+        modes = modes.child(
+            html::button(tr(mode.label()).into_owned())
+                .class(if state.mode == mode {
+                    "advanced-tab active"
+                } else {
+                    "advanced-tab"
+                })
+                .attr("role", "tab")
+                .attr("aria-selected", state.mode == mode)
+                .attr("disabled", state.pending)
+                .on_click(Msg::Action(mode.action().into())),
+        );
     }
     panel = panel.child(modes);
-    panel = panel.child(button("关闭", "advanced-value-close", !state.pending));
+    if state.pending {
+        panel = panel.child(html::p(tr("处理中").into_owned()).class("muted"));
+    }
+    if !state.writable {
+        panel = panel.child(html::p(tr("只读").into_owned()).class("notice"));
+    }
     if let Some(error) = &state.error {
         panel = panel.child(html::p(error.clone()).class("notice"));
     }
@@ -622,19 +674,7 @@ pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
                 html::p(tr("选择新值类型并输入内容；空内容不等于 NULL。").into_owned())
                     .class("muted"),
             );
-            for (kind, label) in [
-                ("text", "文本"),
-                ("bytes", "二进制"),
-                ("json", "JSON"),
-                ("bool", "布尔值"),
-                ("integer", "整数"),
-                ("unsigned", "无符号整数"),
-                ("decimal", "精确小数"),
-                ("float", "浮点数"),
-                ("date", "日期"),
-                ("time", "时间"),
-                ("datetime", "日期时间"),
-            ] {
+            for &(kind, label) in VALUE_KINDS {
                 let enabled = !state.pending
                     && state
                         .native_kind
@@ -647,10 +687,14 @@ pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
                 ));
             }
             if let Some(kind) = &state.null_kind {
+                let label = VALUE_KINDS
+                    .iter()
+                    .find_map(|(value, label)| (*value == kind).then_some(*label))
+                    .unwrap_or("未知");
                 panel = panel.child(
                     html::p(crate::i18n::format_message(
                         "新值类型：{kind}",
-                        &[("kind", kind)],
+                        &[("kind", &tr(label))],
                     ))
                     .class("muted"),
                 );
@@ -682,11 +726,6 @@ pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
                     state.editable(),
                 ));
             }
-            panel = panel.child(button(
-                "加入草稿",
-                "advanced-value-stage",
-                !state.pending && !state.dirty(),
-            ));
         }
         return panel.into();
     }
@@ -751,26 +790,26 @@ pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
                     )
                 }),
         );
-        if matches!(state.mode, Mode::Json | Mode::Xml) {
-            panel = panel.child(button("校验", "advanced-value-validate", !state.pending));
-            panel = panel.child(button("格式化", "advanced-value-format", state.editable()));
+        if state.dirty() {
+            panel = panel.child(html::p(tr("请先应用当前修改").into_owned()).class("muted"));
         }
-        panel = panel.child(button(
+        let mut actions = html::div().class("advanced-actions");
+        if matches!(state.mode, Mode::Json | Mode::Xml) {
+            actions = actions.child(button("校验", "advanced-value-validate", !state.pending));
+            actions = actions.child(button("格式化", "advanced-value-format", state.editable()));
+        }
+        actions = actions.child(button(
             "上一页",
             "advanced-value-previous",
             !state.pending && state.offset > 0,
         ));
-        panel = panel.child(button(
+        actions = actions.child(button(
             "下一页",
             "advanced-value-next",
             !state.pending && state.offset + (state.original_window.len() as u64) < state.total,
         ));
-        panel = panel.child(button("应用修改", "advanced-value-patch", state.editable()));
-        panel = panel.child(button(
-            "加入草稿",
-            "advanced-value-stage",
-            state.writable && !state.pending,
-        ));
+        actions = actions.child(button("应用修改", "advanced-value-patch", state.editable()));
+        panel = panel.child(actions);
     }
     panel.into()
 }

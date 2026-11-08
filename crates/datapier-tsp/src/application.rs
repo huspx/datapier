@@ -125,6 +125,7 @@ impl App {
             "external_args",
             editor.map_or_else(String::new, |e| e.args.join("\n")),
         );
+        self.field_set("settings-language-draft", settings_text(&value["language"]));
     }
     fn mcp_rules_request(
         &mut self,
@@ -195,6 +196,9 @@ impl App {
             "settings.get",
             json!({}),
         ) {
+            if self.field("settings-reload") == "true" {
+                self.settings_unsaved = self.field("settings-reload-unsaved") == "true";
+            }
             self.field_set("settings-reload", "false");
             self.field_set("settings-error", error.to_string());
             self.status = i18n::UiMessage::raw(error.to_string());
@@ -265,6 +269,9 @@ impl App {
                 }
             }
             Err(error) => {
+                if !saving && self.field("settings-reload") == "true" {
+                    self.settings_unsaved = self.field("settings-reload-unsaved") == "true";
+                }
                 self.field_set("settings-reload", "false");
                 self.field_set("settings-error", error.to_string());
                 self.settings_unsaved |= saving;
@@ -494,7 +501,6 @@ impl App {
                 self.editing_files_list(backend, 0);
                 self.workbench.overlay = Some("settings".into());
                 self.refresh_archery_servers(backend);
-                self.settings_load_fields();
                 self.field_set("settings-tab", "general");
                 self.field_set("mcp-rule-profile", "");
                 self.field_set("mcp-rule-data", "");
@@ -516,61 +522,10 @@ impl App {
             self.workbench.query_ui.results_hidden = true;
             return true;
         }
-        if name == "editing-settings-save" {
-            use datapier_core::model::editing::{
-                EditingLimits, ExternalEditorConfig, ExternalEditorMode,
-            };
-            let parsed = (|| -> Result<(EditingLimits, Option<ExternalEditorConfig>)> {
-                let number = |name: &str| {
-                    self.field(name)
-                        .parse::<usize>()
-                        .map_err(|_| AppError::invalid("编辑限制必须为正整数"))
-                };
-                let limits = EditingLimits {
-                    max_plan_items: number("editing_plan_items")?,
-                    max_plan_bytes: number("editing_plan_bytes")?,
-                    max_value_bytes: number("editing_value_bytes")?,
-                    max_text_editor_bytes: number("editing_text_bytes")?,
-                    preview_rows: number("editing_preview_rows")?,
-                };
-                limits.validate()?;
-                let editor = match self.field("external_mode") {
-                    "disabled" => None,
-                    mode @ ("gui" | "terminal") => {
-                        let config = ExternalEditorConfig {
-                            mode: if mode == "gui" {
-                                ExternalEditorMode::Gui
-                            } else {
-                                ExternalEditorMode::Terminal
-                            },
-                            program: self.field("external_program").to_owned(),
-                            args: if self.field("external_args").is_empty() {
-                                Vec::new()
-                            } else {
-                                self.field("external_args")
-                                    .split('\n')
-                                    .map(str::to_owned)
-                                    .collect()
-                            },
-                        };
-                        config.validate()?;
-                        Some(config)
-                    }
-                    _ => return Err(AppError::invalid("请选择外部编辑器模式")),
-                };
-                Ok((limits, editor))
-            })();
-            match parsed {
-                Ok((limits, editor)) => {
-                    self.settings.editing = limits;
-                    self.settings.external_editor = editor;
-                    self.settings_epoch = self.settings_epoch.wrapping_add(1);
-                    self.settings_unsaved = true;
-                    if self.settings_save_token.is_none() {
-                        self.save_settings(backend);
-                    }
-                }
-                Err(error) => self.status = i18n::UiMessage::local(error.message),
+        if let Some(language) = name.strip_prefix("settings-language:") {
+            if matches!(language, "system" | "zh-CN" | "en") {
+                self.field_set("settings-language-draft", language);
+                self.workbench.generic_select = None;
             }
             return true;
         }
@@ -660,7 +615,8 @@ impl App {
             return true;
         }
         if name == "settings-reload" {
-            if self.settings_save_token.is_none() {
+            if self.settings_save_token.is_none() && self.field("settings-reload") != "true" {
+                self.field_set("settings-reload-unsaved", self.settings_unsaved.to_string());
                 self.settings_unsaved = false;
                 self.settings_epoch = self.settings_epoch.wrapping_add(1);
                 self.field_set("settings-reload", "true");
@@ -683,13 +639,70 @@ impl App {
             return true;
         }
         if name == "settings-save" {
-            if !self.settings_loaded || self.field("settings-reload") == "true" {
+            if !self.settings_loaded
+                || self.field("settings-reload") == "true"
+                || self.settings_save_token.is_some()
+            {
                 return true;
             }
             self.field_set("settings-error", "");
+            use datapier_core::model::editing::{
+                EditingLimits, ExternalEditorConfig, ExternalEditorMode,
+            };
+            let editing = (|| -> Result<(EditingLimits, Option<ExternalEditorConfig>)> {
+                let number = |name: &str| {
+                    self.field(name)
+                        .parse::<usize>()
+                        .map_err(|_| AppError::invalid("编辑限制必须为正整数"))
+                };
+                let limits = EditingLimits {
+                    max_plan_items: number("editing_plan_items")?,
+                    max_plan_bytes: number("editing_plan_bytes")?,
+                    max_value_bytes: number("editing_value_bytes")?,
+                    max_text_editor_bytes: number("editing_text_bytes")?,
+                    preview_rows: number("editing_preview_rows")?,
+                };
+                limits.validate()?;
+                let editor = match self.field("external_mode") {
+                    "disabled" => None,
+                    mode @ ("gui" | "terminal") => {
+                        let config = ExternalEditorConfig {
+                            mode: if mode == "gui" {
+                                ExternalEditorMode::Gui
+                            } else {
+                                ExternalEditorMode::Terminal
+                            },
+                            program: self.field("external_program").to_owned(),
+                            args: if self.field("external_args").is_empty() {
+                                Vec::new()
+                            } else {
+                                self.field("external_args")
+                                    .split('\n')
+                                    .map(str::to_owned)
+                                    .collect()
+                            },
+                        };
+                        config.validate()?;
+                        Some(config)
+                    }
+                    _ => return Err(AppError::invalid("请选择外部编辑器模式")),
+                };
+                Ok((limits, editor))
+            })();
+            let (limits, editor) = match editing {
+                Ok(value) => value,
+                Err(error) => {
+                    self.field_set("settings-error", i18n::tr(&error.message).into_owned());
+                    self.status = i18n::UiMessage::local(error.message);
+                    return true;
+                }
+            };
             let Ok(mut value) = serde_json::to_value(&self.settings) else {
                 return true;
             };
+            value["editing"] = json!(limits);
+            value["external_editor"] = json!(editor);
+            value["language"] = json!(self.field("settings-language-draft"));
             for &(group, key, label) in SETTINGS_FIELDS {
                 let text = self.field(&settings_field(group, key)).trim();
                 let parsed = if text.is_empty() && group == "history" {

@@ -78,33 +78,7 @@ function mysql() {
         )
       }</div>${resultPager(pageId, rows.length, { live: true, visible: visibleRows })}${draftBar()}`
       : state.section === 'structure'
-      ? `<div class="table-wrap schema-preview">${
-        simpleTable(
-          [
-            t('field'),
-            t('type'),
-            'NULL',
-            t('constraint'),
-            t('columnComment'),
-          ],
-          Object.keys(databases[state.database][state.table][0]).map(
-            c => [
-              c,
-              c === 'id' || c.endsWith('_id')
-                ? 'BIGINT'
-                : ['total', 'revenue', 'price'].includes(c)
-                ? 'DECIMAL(12,2)'
-                : c === 'created_at'
-                ? 'DATETIME'
-                : 'VARCHAR',
-              c === 'email' ? t('yes') : t('no'),
-              c === 'id' ? 'PRIMARY KEY · AUTO_INCREMENT' : '—',
-              sampleColumnComments[state.database]?.[state.table]?.[c]
-                ?? '',
-            ],
-          ),
-        )
-      }</div>`
+      ? schemaStructurePanel(tab)
       : ddlPanel()
   }`;
 }

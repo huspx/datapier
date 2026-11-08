@@ -299,6 +299,7 @@ pub fn stylesheet(app: &App) -> String {
         include_str!("styles/navigation-editor.css"),
         include_str!("styles/native-surfaces.css"),
         include_str!("styles/archery-forms.css"),
+        include_str!("styles/advanced-editing.css"),
     )
     .to_string();
     if let Some(g) = &app.grid {
@@ -357,7 +358,7 @@ pub(super) fn task_state_text(state: &str) -> String {
         "cancelled" => "已取消",
         "wait_stopped" => "已结束等待",
         "outcome_unknown" => "结果待确认",
-        _ => state,
+        _ => "未知",
     })
     .into_owned()
 }

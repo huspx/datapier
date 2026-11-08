@@ -207,7 +207,6 @@
   padding: 12px;
   background: var(--card);
   border: 1px solid var(--l2);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 .result-info-head, .result-pagination, .request-limit {
   display: flex;

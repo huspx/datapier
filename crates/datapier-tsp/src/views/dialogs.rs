@@ -266,6 +266,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 app.advanced_value.writable,
                 app.advanced_value.session.is_some(),
             ));
+            footer = crate::advanced::value::footer(&app.advanced_value);
         }
         "history" => {
             panel = panel.child(history_panel(app));
@@ -735,11 +736,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     .child(html::p(crate::i18n::tr("加载中…").into_owned()).class("empty-note"));
             }
             if settings_ready && !mcp {
-                let value = match app.settings.language {
-                    datapier_core::model::LanguagePreference::System => "system",
-                    datapier_core::model::LanguagePreference::ZhCn => "zh-CN",
-                    datapier_core::model::LanguagePreference::En => "en",
-                };
+                let value = app.field("settings-language-draft");
                 let language = ui::select()
                     .aria(crate::i18n::tr("语言").into_owned())
                     .value(value)
@@ -758,7 +755,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     })
                     .on_change(|change| {
                         Msg::Action(format!(
-                            "language:{}",
+                            "settings-language:{}",
                             change.value.as_str().unwrap_or_default()
                         ))
                     });
@@ -769,7 +766,10 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 );
             }
             if settings_ready && !mcp {
-                panel = panel.child(html::strong(crate::i18n::tr("编辑限制").into_owned()));
+                panel = panel.child(
+                    html::strong(crate::i18n::tr("编辑限制").into_owned())
+                        .class("settings-section-title"),
+                );
                 for (name, label) in [
                     ("editing_plan_items", "计划条目上限"),
                     ("editing_plan_bytes", "计划字节上限"),
@@ -802,8 +802,10 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .class("empty-note"),
                     );
                 }
-                panel = panel.child(button("保存编辑设置", "editing-settings-save"));
-                panel = panel.child(html::strong(crate::i18n::tr("遗留编辑文件").into_owned()));
+                panel = panel.child(
+                    html::strong(crate::i18n::tr("遗留编辑文件").into_owned())
+                        .class("settings-section-title"),
+                );
                 panel = panel.child(
                     html::span(
                         crate::i18n::tr("领取文件只用于管理本地文件，不恢复数据库编辑权限。")
@@ -811,52 +813,208 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     )
                     .class("empty-note"),
                 );
+                let busy = app.editing_files.pending.is_some();
+                if busy {
+                    panel = panel.child(
+                        html::p(crate::i18n::tr("正在处理编辑文件…").into_owned()).class("muted"),
+                    );
+                }
+                if let Some(error) = &app.editing_files.error {
+                    panel = panel.child(
+                        html::p(error.clone())
+                            .class("form-submit-error")
+                            .attr("role", "alert"),
+                    );
+                } else if app.editing_files.loaded && app.editing_files.items.is_empty() && !busy {
+                    panel = panel.child(
+                        html::p(crate::i18n::tr("暂无编辑文件").into_owned()).class("empty-note"),
+                    );
+                }
+                let mut files = html::div().class("mcp-list");
                 for item in &app.editing_files.items {
                     let Some(id) = item["id"].as_str() else {
                         continue;
                     };
                     let selected = app.editing_files.selected.as_deref() == Some(id);
-                    let label = format!(
-                        "{} · {} · {} · {} · {}{}",
-                        id,
-                        item["purpose"].as_str().unwrap_or(""),
-                        item["state"].as_str().unwrap_or(""),
-                        crate::i18n::tr(if item["active"] == true {
-                            "使用中"
-                        } else {
-                            "未使用"
-                        }),
-                        crate::i18n::tr(if item["referenced"] == true {
-                            "草稿引用中"
-                        } else {
-                            "无草稿引用"
-                        }),
-                        if selected { " ✓" } else { "" }
-                    );
-                    panel = panel.child(
-                        ui::button(label)
-                            .on_click(Msg::Action(format!("editing-files-select:{id}"))),
+                    let purpose = crate::i18n::tr(match item["purpose"].as_str() {
+                        Some("external") => "外部编辑文件",
+                        Some("draft") => "草稿文件",
+                        _ => "未知用途",
+                    });
+                    let state = crate::i18n::tr(match item["state"].as_str() {
+                        Some("preparing") => "准备中",
+                        Some("ready") => "就绪",
+                        Some("opened") => "已打开",
+                        Some("returned") => "已回填",
+                        Some("orphaned") => "已遗留",
+                        Some("cleanup_pending") => "待清理",
+                        _ => "未知状态",
+                    });
+                    let active = crate::i18n::tr(if app.editing_files.has_claim(item) {
+                        "已领取"
+                    } else {
+                        match item["active"].as_bool() {
+                            Some(true) => "使用中",
+                            Some(false) => "未使用",
+                            None => "未知状态",
+                        }
+                    });
+                    let referenced = crate::i18n::tr(match item["referenced"].as_bool() {
+                        Some(true) => "草稿引用中",
+                        Some(false) => "无草稿引用",
+                        None => "未知状态",
+                    });
+                    let format = crate::i18n::tr(match item["format"].as_str() {
+                        Some("txt") => "文本",
+                        Some("json") => "JSON",
+                        Some("xml") => "XML",
+                        Some("hex") => "Hex",
+                        Some("bin") => "二进制",
+                        Some("intent") => "编辑意图",
+                        _ => "未知",
+                    });
+                    let workspace = item["workspace_id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(std::borrow::Cow::Borrowed)
+                        .unwrap_or_else(|| crate::i18n::tr("未记录"));
+                    files = files.child(
+                        html::button("")
+                            .class(if selected {
+                                "mcp-row active"
+                            } else {
+                                "mcp-row"
+                            })
+                            .attr("aria-pressed", selected)
+                            .attr("disabled", busy)
+                            .on_click(Msg::Action(format!("editing-files-select:{id}")))
+                            .child(
+                                html::div()
+                                    .class("mcp-row-content")
+                                    .child(html::strong(format!("{purpose} · {format}")))
+                                    .child(
+                                        html::div()
+                                            .class("mcp-row-title")
+                                            .child(
+                                                html::span(state.into_owned()).class("mcp-state"),
+                                            )
+                                            .child(
+                                                html::span(active.into_owned()).class("mcp-state"),
+                                            )
+                                            .child(
+                                                html::span(referenced.into_owned())
+                                                    .class("mcp-state"),
+                                            ),
+                                    )
+                                    .child(
+                                        html::span(crate::i18n::format_message(
+                                            "工作区：{workspace}",
+                                            &[("workspace", &workspace)],
+                                        ))
+                                        .class("mcp-subtitle"),
+                                    ),
+                            ),
                     );
                 }
-                panel = panel.child(button("刷新文件列表", "editing-files-refresh"));
+                panel = panel.child(files);
+                let mut file_actions = html::div().class("settings-file-actions").child(
+                    ui::button(crate::i18n::tr("刷新文件列表").into_owned())
+                        .disabled(busy)
+                        .on_click(Msg::Action("editing-files-refresh".into())),
+                );
                 if app.editing_files.offset > 0 {
-                    panel = panel.child(button("上一页", "editing-files-prev"));
+                    file_actions = file_actions.child(
+                        ui::button(crate::i18n::tr("上一页").into_owned())
+                            .disabled(busy)
+                            .on_click(Msg::Action("editing-files-prev".into())),
+                    );
                 }
                 if app.editing_files.next.is_some() {
-                    panel = panel.child(button("下一页", "editing-files-next"));
+                    file_actions = file_actions.child(
+                        ui::button(crate::i18n::tr("下一页").into_owned())
+                            .disabled(busy)
+                            .on_click(Msg::Action("editing-files-next".into())),
+                    );
                 }
-                if app.editing_files.selected.is_some() {
-                    panel = panel.child(button("领取文件", "editing-files-claim"));
+                panel = panel.child(file_actions);
+                if let Some(item) = app
+                    .editing_files
+                    .items
+                    .iter()
+                    .find(|item| item["id"].as_str() == app.editing_files.selected.as_deref())
+                {
+                    let claimed = app.editing_files.has_claim(item);
+                    let can_claim = crate::editing_files::FileManagement::can_claim(item);
+                    let can_export = claimed
+                        && item["state"] != "preparing"
+                        && !app.field("editing_file_path").trim().is_empty();
+                    let can_cleanup = claimed && item["referenced"] == false;
+                    panel = panel.child(
+                        ui::tree().item(
+                            ui::TreeItem::new(
+                                "editing-file-diagnostic",
+                                crate::i18n::tr("完整诊断").into_owned(),
+                            )
+                            .open(false)
+                            .child(ui::TreeItem::new(
+                                "editing-file-diagnostic-value",
+                                diagnostic_text(item),
+                            )),
+                        ),
+                    );
+                    panel = panel.child(
+                        html::p(
+                            crate::i18n::tr(
+                                "领取文件并填写路径后可导出；使用中或草稿引用的文件不能领取。",
+                            )
+                            .into_owned(),
+                        )
+                        .class("muted"),
+                    );
+                    panel = panel.child(
+                        html::div()
+                            .class("settings-file-actions")
+                            .child(
+                                ui::button(crate::i18n::tr("领取文件").into_owned())
+                                    .disabled(busy || !can_claim)
+                                    .on_click(Msg::Action("editing-files-claim".into())),
+                            )
+                            .child(
+                                ui::button(crate::i18n::tr("导出文件").into_owned())
+                                    .disabled(busy || !can_export)
+                                    .on_click(Msg::Action("editing-files-export".into())),
+                            ),
+                    );
                     panel = panel.child(field(app, "editing_file_path", "导出路径"));
-                    panel = panel.child(button("导出文件", "editing-files-export"));
                     if app.editing_files.confirm_cleanup {
                         panel = panel.child(html::span(
                             crate::i18n::tr("确认清理所选编辑文件？").into_owned(),
                         ));
-                        panel = panel.child(button("确认清理", "editing-files-cleanup-confirm"));
-                        panel = panel.child(button("取消", "editing-files-cleanup-cancel"));
+                        panel = panel.child(
+                            html::div()
+                                .class("settings-file-actions")
+                                .child(
+                                    ui::button(crate::i18n::tr("取消").into_owned())
+                                        .disabled(busy)
+                                        .on_click(Msg::Action(
+                                            "editing-files-cleanup-cancel".into(),
+                                        )),
+                                )
+                                .child(
+                                    ui::button(crate::i18n::tr("确认清理").into_owned())
+                                        .variant(ui::ButtonVariant::Danger)
+                                        .disabled(busy || !can_cleanup)
+                                        .on_click(Msg::Action(
+                                            "editing-files-cleanup-confirm".into(),
+                                        )),
+                                ),
+                        );
                     } else {
-                        panel = panel.child(button("清理文件", "editing-files-cleanup"));
+                        panel = panel.child(
+                            ui::button(crate::i18n::tr("清理文件").into_owned())
+                                .disabled(busy || !can_cleanup)
+                                .on_click(Msg::Action("editing-files-cleanup".into())),
+                        );
                     }
                 }
             }
@@ -879,32 +1037,32 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 );
             }
             if settings_ready && mcp {
-                let mut policies = html::div().class("toolbar");
+                let mut policies = ui::select()
+                    .aria(crate::i18n::tr("新连接默认审批策略").into_owned())
+                    .value(app.field("settings-approval-default_policy"))
+                    .open(
+                        app.workbench.generic_select.as_deref() == Some("settings-default-policy"),
+                    )
+                    .on_toggle(|collapsed| {
+                        Msg::Action(format!(
+                            "select-open:settings-default-policy:{}",
+                            !collapsed
+                        ))
+                    })
+                    .on_change(|change| {
+                        Msg::Action(format!(
+                            "settings-policy:{}",
+                            change.value.as_str().unwrap_or_default()
+                        ))
+                    });
                 for (value, label) in [
                     ("dangerous", "危险操作审批"),
                     ("all_writes", "所有写入审批"),
                 ] {
-                    policies = policies.child(
-                        html::button(format!(
-                            "{}{}",
-                            if app.field("settings-approval-default_policy") == value {
-                                "✓ "
-                            } else {
-                                ""
-                            },
-                            crate::i18n::tr(label)
-                        ))
-                        .class(if app.field("settings-approval-default_policy") == value {
-                            "policy-choice active"
-                        } else {
-                            "policy-choice"
-                        })
-                        .attr(
-                            "aria-pressed",
-                            app.field("settings-approval-default_policy") == value,
-                        )
-                        .on_click(Msg::Action(format!("settings-policy:{value}"))),
-                    );
+                    policies = policies.option(ui::SelectOption::new(
+                        value,
+                        crate::i18n::tr(label).into_owned(),
+                    ));
                 }
                 panel = panel.child(
                     ui::field(crate::i18n::tr("新连接默认审批策略").into_owned())
@@ -980,28 +1138,29 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     }
                 }
                 if !app.field("mcp-rule-data").is_empty() {
-                    let mut profile_policies = html::div().class("toolbar");
+                    let mut profile_policies = ui::select()
+                        .aria(crate::i18n::tr("连接审批策略").into_owned())
+                        .value(app.field("mcp-rule-policy"))
+                        .disabled(busy)
+                        .open(app.workbench.generic_select.as_deref() == Some("mcp-profile-policy"))
+                        .on_toggle(|collapsed| {
+                            Msg::Action(format!("select-open:mcp-profile-policy:{}", !collapsed))
+                        })
+                        .on_change(|change| {
+                            Msg::Action(format!(
+                                "mcp-policy-set:{}",
+                                change.value.as_str().unwrap_or_default()
+                            ))
+                        });
                     for (policy, label) in [
                         ("off", "关闭审批"),
                         ("dangerous", "危险操作审批"),
                         ("all_writes", "所有写入审批"),
                     ] {
-                        let selected = app.field("mcp-rule-policy") == policy;
-                        profile_policies = profile_policies.child(
-                            html::button(format!(
-                                "{}{}",
-                                if selected { "✓ " } else { "" },
-                                crate::i18n::tr(label)
-                            ))
-                            .class(if selected {
-                                "policy-choice active"
-                            } else {
-                                "policy-choice"
-                            })
-                            .attr("aria-pressed", selected)
-                            .disabled(busy)
-                            .on_click(Msg::Action(format!("mcp-policy-set:{policy}"))),
-                        );
+                        profile_policies = profile_policies.option(ui::SelectOption::new(
+                            policy,
+                            crate::i18n::tr(label).into_owned(),
+                        ));
                     }
                     rules = rules.child(
                         ui::field(crate::i18n::tr("连接审批策略").into_owned())

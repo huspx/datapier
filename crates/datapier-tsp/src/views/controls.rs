@@ -199,12 +199,14 @@ pub(super) fn choices(
     label: &str,
     options: &[(&str, &str)],
 ) -> Node<Msg> {
+    let label = crate::i18n::tr(label).into_owned();
     let field_name = field_name.to_owned();
     let error_field = field_name.clone();
     let select_key = format!("field-{field_name}");
     let open = app.workbench.generic_select.as_deref() == Some(select_key.as_str());
     let mut select = ui::select()
         .key(format!("input-{field_name}"))
+        .aria(label.clone())
         .value(app.field(&field_name).to_owned())
         .disabled(app.connection_form_busy())
         .open(open)
@@ -217,9 +219,11 @@ pub(super) fn choices(
             crate::i18n::tr(title).into_owned(),
         ));
     }
-    let label = crate::i18n::tr(label).into_owned();
-    let control: Node<Msg> = ui::field(label)
-        .required(field_name == "format")
+    let mut field = ui::field(label).required(field_name == "format");
+    if app.workbench.overlay.as_deref() == Some("settings") {
+        field = field.variant(ui::FieldVariant::Row);
+    }
+    let control: Node<Msg> = field
         .child(select.on_change(move |change| {
             Msg::Action(format!(
                 "field:{}:{}",

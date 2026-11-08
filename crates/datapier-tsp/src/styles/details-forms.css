@@ -82,6 +82,38 @@
   color: var(--accent);
   font-size: 10px;
 }
+.schema-metadata-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--l2);
+}
+.schema-metadata-name {
+  font: 12px/1.6 var(--mono);
+  overflow-wrap: anywhere;
+}
+.schema-metadata-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  min-width: 0;
+}
+.schema-metadata-part {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  font: 11px/1.6 var(--sans);
+}
+.schema-metadata-value {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
 .draftbar {
   gap: 8px;
   padding: 9px 18px;
@@ -128,9 +160,28 @@
   flex-wrap: wrap;
   gap: 8px;
 }
-.policy-choice.active {
-  background: var(--tv-sel);
-  color: var(--t1);
+.settings-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.settings-section-title {
+  display: block;
+  margin: 16px 0 8px;
+  font: 12px/1.6 var(--sans);
+}
+.settings-dialog .sf-field-lbl,
+.settings-dialog .sf-field-t {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.settings-dialog .sf-select,
+.settings-dialog .sf-select-btn {
+  min-width: 0;
+  max-width: 100%;
 }
 .settings-dialog .archery-server-info {
   flex-basis: min(100%, 320px);
@@ -139,10 +190,6 @@
 .settings-dialog .archery-server-row {
   flex-wrap: wrap;
   align-items: flex-start;
-}
-.policy-choice:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 .mcp-body {
   font-size: 13px;

@@ -1,0 +1,126 @@
+.schema-designer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.schema-toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.schema-toolbar-spacer {
+  flex: 1;
+}
+.schema-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+.schema-designer-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+.schema-notice {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+.schema-section {
+  margin: 0 0 20px;
+}
+.schema-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.schema-section p {
+  margin: 4px 0;
+}
+.schema-table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--border);
+}
+.schema-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.schema-table th,
+.schema-table td {
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+}
+.schema-table th:nth-child(1) {
+  width: 17%;
+}
+.schema-table th:nth-child(2) {
+  width: 15%;
+}
+.schema-table th:nth-child(3) {
+  width: 9%;
+}
+.schema-table th:nth-child(4) {
+  width: 19%;
+}
+.schema-table th:nth-child(5) {
+  width: 17%;
+}
+.schema-table th:nth-child(6) {
+  width: 23%;
+}
+.schema-table input,
+.schema-table select,
+.schema-table textarea {
+  width: 100%;
+  max-width: 100%;
+}
+.schema-table textarea {
+  display: block;
+  resize: vertical;
+}
+.schema-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.schema-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.schema-error {
+  color: var(--error);
+  font-size: 12px;
+  white-space: normal;
+}
+.schema-ddl {
+  max-width: 100%;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  white-space: pre;
+}
+@media (max-width: 760px) {
+  .schema-toolbar {
+    padding: 8px;
+  }
+  .schema-toolbar-spacer {
+    display: none;
+  }
+  .schema-designer-scroll {
+    padding: 12px 8px;
+  }
+}

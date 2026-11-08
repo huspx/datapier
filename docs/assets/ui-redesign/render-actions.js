@@ -3,6 +3,14 @@ function render() {
   const previousBody = document.querySelector('#app .modal-body');
   const previousOwner = previousBody?.dataset.previewOwner;
   const previousScroll = previousBody?.scrollTop;
+  const previousSchema = document.querySelector('#schema-structure-panel');
+  const previousSchemaTab = state.tabs.find(tab => String(tab.id) === previousSchema?.dataset.schemaTab);
+  const previousSchemaScroll = previousSchema?.querySelector('.schema-designer-scroll');
+  if (previousSchemaTab && previousSchemaScroll) {
+    previousSchemaTab.schemaScrollTop = previousSchemaScroll.scrollTop;
+    previousSchemaTab.schemaScrollLeft = previousSchemaScroll.scrollLeft;
+    previousSchemaTab.schemaTableScrollLeft = previousSchema.querySelector('.schema-table-scroll')?.scrollLeft || 0;
+  }
   // 在同一分区重绘加载、失败与语言状态时保留阅读位置；切换分区从顶部开始。
   const restoreDialogScroll = () => {
     const body = document.querySelector('#app .modal-body');
@@ -24,8 +32,10 @@ function render() {
   }
   const focused = document.activeElement;
   const focusId = focused?.id;
-  const cursor = focused instanceof HTMLInputElement && focused.type !== 'checkbox'
-    ? focused.selectionStart
+  const selectable = focused instanceof HTMLTextAreaElement
+    || (focused instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'password'].includes(focused.type));
+  const selection = selectable
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection]
     : null;
   if (state.previewEmpty) state.provider = null;
   else if (!state.connections.has(state.provider)) {
@@ -62,6 +72,14 @@ function render() {
   }</footer></main>${overlay()}${archeryWizard()}${archeryDialogs()}${menu()}`;
   renderMcpPreview();
   restoreDialogScroll();
+  const schemaPanel = document.querySelector('#schema-structure-panel');
+  const schemaTab = state.tabs.find(tab => String(tab.id) === schemaPanel?.dataset.schemaTab);
+  const schemaScroll = schemaPanel?.querySelector('.schema-designer-scroll');
+  if (schemaTab && schemaScroll) {
+    schemaScroll.scrollTop = schemaTab.schemaScrollTop || 0;
+    schemaScroll.scrollLeft = schemaTab.schemaScrollLeft || 0;
+    schemaPanel.querySelector('.schema-table-scroll').scrollLeft = schemaTab.schemaTableScrollLeft || 0;
+  }
   requestAnimationFrame(() => {
     fitGrid();
     paintCellSelection();
@@ -110,9 +128,12 @@ function render() {
   if (replacement && (!state.overlay || focused?.closest('.modal'))) {
     replacement.focus({ preventScroll: true });
     if (
-      cursor !== null && replacement instanceof HTMLInputElement
-      && ['text', 'search'].includes(replacement.type)
-    ) replacement.setSelectionRange(cursor, cursor);
+      selection && (replacement instanceof HTMLTextAreaElement
+        || (replacement instanceof HTMLInputElement
+          && ['text', 'search', 'url', 'tel', 'password'].includes(replacement.type)))
+    ) {
+      replacement.setSelectionRange(...selection);
+    }
   }
 }
 function toast(text) {

@@ -778,7 +778,23 @@ impl SchemaEditor {
 
     /// 渲染公开 SDK 控件；App 将 schema: 编辑事件和 schema-op: 动作路由回本状态。
     pub fn view(&self) -> Node<Msg> {
-        let mut panel = html::div().class("schema-panel");
+        let mut panel = html::div().class("schema-panel advanced-panel");
+        let mut context = html::div().class("advanced-facts");
+        if let Some(database) = &self.draft.target.database {
+            context = context.child(super::fact("数据库", database.clone()));
+        }
+        if !self.draft.target.name.is_empty() {
+            context = context.child(super::fact("对象名称", self.draft.target.name.clone()));
+        }
+        panel = panel.child(context);
+        if self.busy() {
+            panel = panel.child(html::p(tr("处理中").into_owned()).class("notice"));
+        }
+        if self.summary.is_some() {
+            panel = panel.child(
+                html::p(tr("计划已冻结，修改条件前请先丢弃计划。").into_owned()).class("notice"),
+            );
+        }
         if self.session.is_null() && self.connect_nonce.is_none() {
             panel = panel.child(
                 ui::button(tr("重试连接").into_owned())
@@ -822,22 +838,40 @@ impl SchemaEditor {
             );
         }
         if let Some(snapshot) = &self.snapshot {
-            panel = panel.child(html::span(format!(
-                "{}: {:?}",
-                tr("完整性"),
-                snapshot.completeness.state
-            )));
+            let completeness = match &snapshot.completeness.state {
+                datapier_core::model::schema::CompletenessState::Complete => "完整",
+                datapier_core::model::schema::CompletenessState::Incomplete => "不完整",
+                datapier_core::model::schema::CompletenessState::Unknown => "未知",
+                datapier_core::model::schema::CompletenessState::Unavailable => "不可用",
+            };
+            let mut facts = html::div()
+                .class("advanced-facts")
+                .child(super::fact("完整性", tr(completeness).into_owned()));
             for reason in &snapshot.completeness.reasons {
-                panel = panel.child(html::span(reason.clone()));
+                facts = facts.child(super::fact("原因", reason.clone()));
             }
             for (name, capability) in &snapshot.capabilities {
-                panel = panel.child(html::span(format!(
-                    "{}: {} {}",
-                    name,
-                    capability.state,
-                    capability.reason.as_deref().unwrap_or("")
-                )));
+                let label = match name.as_str() {
+                    "check" => "CHECK 约束",
+                    "expression_default" => "表达式默认值",
+                    "functional_index" => "函数索引",
+                    "descending_index" => "降序索引",
+                    "index_visibility" => "索引可见性",
+                    "invisible_column" => "不可见列",
+                    _ => name,
+                };
+                let state = match capability.state.as_str() {
+                    "unsupported" => tr("不支持").into_owned(),
+                    "unknown" => tr("未知").into_owned(),
+                    other => other.to_owned(),
+                };
+                let value = match &capability.reason {
+                    Some(reason) => format!("{state} · {reason}"),
+                    None => state,
+                };
+                facts = facts.child(super::fact(label, value));
             }
+            panel = panel.child(facts);
         }
         if self.restore_confirmation_required {
             panel = panel.child(html::span(tr("请读取当前结构并确认恢复草稿").into_owned()));
@@ -903,6 +937,7 @@ impl SchemaEditor {
                     && s["submittable"] == true
                     && s["plan_digest"].as_str().is_some()
             });
+        let mut actions = html::div().class("advanced-actions");
         for (label, action, enabled) in [
             (
                 "读取结构",
@@ -925,12 +960,18 @@ impl SchemaEditor {
             ("提交", "schema-submit", can_submit),
             ("丢弃计划", "schema-discard", has_plan),
         ] {
-            panel = panel.child(
+            actions = actions.child(
                 ui::button(tr(label).into_owned())
+                    .variant(if matches!(action, "schema-plan" | "schema-submit") {
+                        ui::ButtonVariant::Primary
+                    } else {
+                        ui::ButtonVariant::Default
+                    })
                     .disabled(busy || !enabled)
                     .on_click(Msg::Action(action.into())),
             );
         }
+        panel = panel.child(actions);
         if self.dirty || self.restore_confirmation_required {
             panel = panel.child(
                 ui::button(tr("放弃结构草稿").into_owned())
@@ -981,21 +1022,66 @@ impl SchemaEditor {
             );
         }
         if let Some(preview) = &self.preview {
-            panel = panel.child(html::strong(tr("变更预览").into_owned()));
-            panel = panel.child(html::pre(
-                serde_json::to_string_pretty(preview).unwrap_or_default(),
-            ));
+            let mut section = html::div()
+                .class("advanced-section")
+                .child(html::strong(tr("变更预览").into_owned()));
+            if let Some(steps) = preview.get("steps").and_then(Value::as_array) {
+                for step in steps {
+                    if let Some(sql) = step.get("sql").and_then(Value::as_str) {
+                        section = section.child(html::pre(sql.to_owned()).class("advanced-code"));
+                    }
+                    for key in ["destructive_reasons", "warnings"] {
+                        if let Some(reasons) = step.get(key).and_then(Value::as_array) {
+                            for reason in reasons.iter().filter_map(Value::as_str) {
+                                section = section.child(html::p(reason.to_owned()).class("notice"));
+                            }
+                        }
+                    }
+                }
+            }
             if preview.get("next").is_some_and(|v| !v.is_null()) {
-                panel = panel.child(
+                section = section.child(
                     ui::button(tr("下一页").into_owned())
                         .on_click(Msg::Action("schema-preview-next".into())),
                 );
             }
+            panel = panel
+                .child(section)
+                .child(super::diagnostic("schema-preview-diagnostic", preview));
         }
         if let Some(execution) = &self.execution {
-            panel = panel.child(html::pre(
-                serde_json::to_string_pretty(execution).unwrap_or_default(),
-            ));
+            let mut section = html::div()
+                .class("advanced-section")
+                .child(html::strong(tr("执行结果").into_owned()));
+            if let Some(result) = execution.get("result") {
+                if let Some(state) = result
+                    .pointer("/summary/state")
+                    .or_else(|| result.get("state"))
+                    .and_then(Value::as_str)
+                {
+                    section = section.child(super::fact("状态", super::status(state)));
+                }
+                if let Some(steps) = result.pointer("/summary/steps").and_then(Value::as_array) {
+                    for (index, step) in steps.iter().enumerate() {
+                        if let Some(state) = step.get("state").and_then(Value::as_str) {
+                            section = section.child(super::fact(
+                                &format!("{} {}", tr("步骤"), index + 1),
+                                super::status(state),
+                            ));
+                        }
+                        for key in ["reason", "error"] {
+                            if let Some(reason) = step.get(key).and_then(Value::as_str) {
+                                section = section.child(super::fact("原因", reason));
+                            }
+                        }
+                    }
+                }
+            } else {
+                section = section.child(html::p(tr("处理中").into_owned()).class("muted"));
+            }
+            panel = panel
+                .child(section)
+                .child(super::diagnostic("schema-execution-diagnostic", execution));
         }
         panel.into()
     }
@@ -1121,7 +1207,7 @@ fn render_value(
     disabled: bool,
     table: bool,
 ) -> Node<Msg> {
-    let mut container = html::div();
+    let mut container = html::div().class("advanced-fields");
     match value {
         Value::Object(map) => {
             for (key, value) in map {
@@ -1132,7 +1218,8 @@ fn render_value(
                 let locked_identity = path.is_empty()
                     && map.get("kind").and_then(Value::as_str) == Some("trigger")
                     && matches!(key.as_str(), "name" | "database");
-                container = container
+                let mut field = html::div()
+                    .class("advanced-field")
                     .child(html::strong(tr(field_label(key)).into_owned()))
                     .child(render_value(
                         value,
@@ -1158,12 +1245,13 @@ fn render_value(
                         || (matches!(key.as_str(), "column" | "expression")
                             && path.contains("/parts/")))
                 {
-                    container = container.child(
+                    field = field.child(
                         ui::button(tr("清除").into_owned())
                             .disabled(disabled)
                             .on_click(Msg::Action(format!("schema-op:set:{child}:null"))),
                     );
                 }
+                container = container.child(field);
             }
         }
         Value::Array(items) => {
@@ -1175,6 +1263,7 @@ fn render_value(
                     .map(str::to_owned)
                     .unwrap_or_else(|| child.clone());
                 let mut row = html::div()
+                    .class("advanced-section")
                     .key(row_key)
                     .child(render_value(item, &child, editors, disabled, table));
                 for (label, action, enabled) in [
