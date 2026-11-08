@@ -6,6 +6,7 @@ use datapier_core::model::{AccessMode, ProviderKind, Value as DataValue};
 mod actions;
 mod cli;
 mod input;
+mod modal_drafts;
 mod redis_edit;
 mod sql_edit;
 
@@ -144,7 +145,12 @@ pub(super) struct Workbench {
     pub(super) archery_history: crate::application::ArcheryHistory,
     pub sql_mode: Option<editor::MysqlMode>,
     pub section: String,
+    pub schema_section: String,
     pub overlay: Option<String>,
+    pub overlay_close_confirm: bool,
+    pub(super) modal_draft: Option<modal_drafts::ModalDraft>,
+    pub(super) modal_after_close: Option<String>,
+    pub(super) modal_return_focus: Option<String>,
     pub trigger_list: Option<crate::advanced::schema_controller::TriggerList>,
     pub draft_scope: Option<(Uuid, Value, Value, u64, Option<Value>)>,
     pub(super) draft_scope_pending: Option<DraftScopePending>,
@@ -198,6 +204,8 @@ pub(super) struct Workbench {
     pub inline: Option<Cell>,
     // 详情编辑与网格选区独立，并用结果 ID 防止刷新后写入同坐标的新结果。
     pub cell_target: Option<(Uuid, Cell)>,
+    pub cell_open_intent: Option<(Uuid, Cell)>,
+    pub cell_context: Option<(Option<String>, Option<String>)>,
     pub cell_fields_open: bool,
     pub cell_editor: Editor,
     pub load_resource: bool,
@@ -217,7 +225,12 @@ impl Default for Workbench {
             archery_history: crate::application::ArcheryHistory::default(),
             sql_mode: None,
             section: "data".into(),
+            schema_section: "columns".into(),
             overlay: None,
+            overlay_close_confirm: false,
+            modal_draft: None,
+            modal_after_close: None,
+            modal_return_focus: None,
             trigger_list: None,
             draft_scope: None,
             draft_scope_pending: None,
@@ -269,8 +282,10 @@ impl Default for Workbench {
             ttl_policy: RedisTtlPolicy::Keep,
             inline: None,
             cell_target: None,
+            cell_open_intent: None,
             cell_fields_open: false,
             cell_editor: Editor::default(),
+            cell_context: None,
             load_resource: false,
             sql_forms: forms::SqlForms::default(),
             focus_request: None,

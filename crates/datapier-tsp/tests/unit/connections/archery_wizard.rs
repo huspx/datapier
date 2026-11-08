@@ -387,6 +387,9 @@ fn archery_management_restores_unchecked_saved_instance_and_can_remove_all() {
     assert!(app.archery.server_only);
     app.field_set("archery_name", "another service");
     app.archery_action("overlay-close", &backend);
+    assert!(app.archery.server_only);
+    assert_eq!(app.field("archery_name"), "another service");
+    app.archery_action("archery-discard-confirm", &backend);
     assert!(!app.archery.server_only);
     assert_eq!(
         app.field(&format!("archery_profile_name_{profile_id}")),
@@ -503,6 +506,12 @@ fn escape_returns_from_server_form_and_cancels_pending_authentication() {
     assert!(app.archery.server_only);
     app.field_set("archery_name", "unsaved child");
     app.workbench_key(&tern_sdk::Key::named("escape"), &backend);
+    assert!(app.archery.server_only);
+    assert_eq!(app.field("archery_name"), "unsaved child");
+    app.archery_action("archery-discard-cancel", &backend);
+    assert_eq!(app.field("archery_name"), "unsaved child");
+    app.workbench_key(&tern_sdk::Key::named("escape"), &backend);
+    app.archery_action("archery-discard-confirm", &backend);
     assert!(app.archery.open && !app.archery.server_only);
     assert_eq!(app.workbench.overlay.as_deref(), Some("profile"));
     assert_eq!(app.field("archery_name"), "");
@@ -588,4 +597,70 @@ fn preview_type_selection_rejects_keyboard_switching() {
     assert!(app.archery.open && app.archery.preview);
     assert_eq!(app.focus, "provider-archery");
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn archery_default_keyboard_rejects_disappeared_instances() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("archery-default-focus".into());
+    app.archery.open = true;
+    app.workbench.overlay = Some("profile".into());
+    app.archery.instances = vec![json!({"id":1,"name":"one","provider":"mysql"})];
+    app.archery_action("archery-instance:0", &backend);
+    let selection = app.archery.selected.get_mut(&1).unwrap();
+    selection.databases = Some(vec!["missing".into(), "shop".into(), "audit".into()]);
+    selection.selected = ["missing".into(), "shop".into(), "audit".into()]
+        .into_iter()
+        .collect();
+    selection.available_databases = Some(["shop".into(), "audit".into()].into_iter().collect());
+    selection.default = Some("missing".into());
+
+    app.archery_action("archery-default:1:1", &backend);
+    assert_eq!(app.focus, "archery-default-1-1");
+    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+    assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
+    assert_eq!(app.archery.selected[&1].default.as_deref(), Some("audit"));
+    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+
+    app.archery.instances.clear();
+    app.archery_action("archery-db:1:1", &backend);
+    app.archery_action("archery-default:1:1", &backend);
+    assert!(app.workbench_key(&tern_sdk::Key::named("left"), &backend));
+    assert!(app.archery.selected[&1].selected.contains("shop"));
+    assert_eq!(app.archery.selected[&1].default.as_deref(), Some("audit"));
+
+    app.archery.instances = vec![json!({"id":1,"missing":true})];
+    app.archery_action("archery-default:1:1", &backend);
+    assert!(app.workbench_key(&tern_sdk::Key::named("left"), &backend));
+    assert_eq!(app.archery.selected[&1].default.as_deref(), Some("audit"));
+}
+
+#[test]
+fn archery_http_rejects_ca_expansion() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("archery-ca".into());
+    app.archery.open = true;
+    app.field_set("archery_url", "http://example.test");
+    app.archery_action("archery-server-details", &backend);
+    assert!(!app.archery.server_details);
+    app.field_set("archery_url", "https://example.test");
+    app.archery_action("archery-server-details", &backend);
+    assert!(app.archery.server_details);
+}
+
+#[test]
+fn modal_tabs_keep_host_text_focus_cleared_and_approval_can_reopen() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("modal-tab-focus".into());
+    app.workbench.overlay = Some("settings".into());
+    app.focus = "settings-tab-general".into();
+    assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
+    assert_eq!(app.focus, "settings-tab-editing");
+    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+    app.workbench.overlay = None;
+    app.action("approval-toggle", &backend);
+    app.action("approval-close", &backend);
+    assert_eq!(app.focus, "approval-open");
+    assert!(app.workbench_key(&tern_sdk::Key::named("enter"), &backend));
+    assert!(app.approvals.open);
 }

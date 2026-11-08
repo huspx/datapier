@@ -58,6 +58,23 @@ pub(super) struct SqlForms {
     pub(super) open_select: Option<&'static str>,
 }
 
+impl SqlForms {
+    pub(super) fn draft_snapshot(&self, kind: &str) -> Value {
+        if kind == "row" {
+            json!({"advanced": self.row_advanced, "json": self.row_json.text,
+                "fields": self.row.iter().map(|field| json!({
+                    "column": field.column.name,
+                    "mode": match field.mode { RowMode::Default => "default", RowMode::Value => "value", RowMode::Null => "null" },
+                    "value": field.editor.text,
+                })).collect::<Vec<_>>()})
+        } else {
+            json!({"advanced": self.filter_advanced, "column": self.filter_column,
+                "operator": self.filter_op, "value": self.filter_value.text,
+                "sort_column": self.sort_column, "sort_desc": self.sort_desc})
+        }
+    }
+}
+
 const OPERATORS: [(&str, &str); 10] = [
     ("eq", "等于"),
     ("ne", "不等于"),
@@ -423,6 +440,29 @@ impl App {
             }
             return true;
         }
+        if let Some(rest) = name.strip_prefix("sql-row-mode-select:") {
+            if let Some((index, mode)) = rest.split_once(':')
+                && let Ok(index) = index.parse::<usize>()
+                && let Some(field) = self.workbench.sql_forms.row.get_mut(index)
+                && !field.column.generated
+            {
+                match mode {
+                    "default" => field.mode = RowMode::Default,
+                    "value" => field.mode = RowMode::Value,
+                    "null" if field.column.nullable => field.mode = RowMode::Null,
+                    _ => {}
+                }
+            }
+            self.workbench.generic_select = None;
+            return true;
+        }
+        if let Some(direction) = name.strip_prefix("sql-sort-direction-select:") {
+            if matches!(direction, "asc" | "desc") {
+                self.workbench.sql_forms.sort_desc = direction == "desc";
+            }
+            self.workbench.generic_select = None;
+            return true;
+        }
         if let Some(index) = name
             .strip_prefix("sql-row-mode:")
             .and_then(|s| s.parse::<usize>().ok())
@@ -762,7 +802,36 @@ fn advanced_input(app: &App, name: &str, label: &str) -> Node<Msg> {
     } else {
         &app.fields[name]
     };
-    input(app, name, label, editor, true)
+    let focus = name.to_owned();
+    let undo = focus.clone();
+    let edit = focus.clone();
+    let mut field = ui::field(label.to_owned())
+        .required(true)
+        .key(name.to_owned());
+    if let Some(error) = app
+        .workbench
+        .field_error
+        .as_ref()
+        .filter(|error| error.field == name)
+    {
+        field = field.error(error.message.render().into_owned());
+    }
+    field
+        .child(
+            ui::editor()
+                .aria(label.to_owned())
+                .key(format!("input-{name}"))
+                .text(editor.text.clone())
+                .cursor(editor.cursor)
+                .anchor(editor.anchor)
+                .max_lines(16u32)
+                .on_focus(Msg::Focus(focus))
+                .on_undo(Msg::Undo(undo))
+                .on_edit(move |e| {
+                    Msg::Edit(edit.clone(), e.from, e.to, e.text.clone(), e.cursor, e.len)
+                }),
+        )
+        .into()
 }
 
 /// 正文与主要动作分开返回，长表单滚动时仍能在固定页脚加入草稿。
@@ -782,9 +851,9 @@ pub(crate) fn row_form(app: &App) -> (Node<Msg>, Node<Msg>) {
         let mut fields = html::div().class("sql-row-fields");
         for (index, field) in state.row.iter().enumerate() {
             let mode = match field.mode {
-                RowMode::Default => "默认",
-                RowMode::Value => "输入值",
-                RowMode::Null => "NULL",
+                RowMode::Default => "default",
+                RowMode::Value => "value",
+                RowMode::Null => "null",
             };
             let label = format!("{} · {}", field.column.name, field.column.type_name);
             let mut item = html::div().class("form-field form-row-field");
@@ -793,6 +862,20 @@ pub(crate) fn row_form(app: &App) -> (Node<Msg>, Node<Msg>) {
                     .child(html::span(label).class("label"))
                     .child(html::span(tr("由数据库生成").into_owned()).class("muted"));
             } else {
+                let key = format!("sql-row-mode-{index}");
+                let toggle_key = key.clone();
+                let mut select = ui::select()
+                    .aria(crate::i18n::tr("字段模式").into_owned())
+                    .value(mode)
+                    .open(app.workbench.generic_select.as_deref() == Some(key.as_str()))
+                    .on_toggle(move |collapsed| {
+                        Msg::Action(format!("select-open:{toggle_key}:{}", !collapsed))
+                    })
+                    .option(ui::SelectOption::new("default", tr("默认").into_owned()))
+                    .option(ui::SelectOption::new("value", tr("输入值").into_owned()));
+                if field.column.nullable {
+                    select = select.option(ui::SelectOption::new("null", "NULL"));
+                }
                 item = item
                     .child(input(
                         app,
@@ -801,12 +884,23 @@ pub(crate) fn row_form(app: &App) -> (Node<Msg>, Node<Msg>) {
                         &field.editor,
                         required_column(&field.column),
                     ))
-                    .child(button(tr(mode).as_ref(), &format!("sql-row-mode:{index}")));
+                    .child(
+                        ui::field(tr("字段模式").into_owned()).child(select.on_change(
+                            move |change| {
+                                Msg::Action(format!(
+                                    "sql-row-mode-select:{index}:{}",
+                                    change.value.as_str().unwrap_or_default()
+                                ))
+                            },
+                        )),
+                    );
             }
             fields = fields.child(item);
         }
-        panel = panel.child(fields)
-            .child(html::span(tr("默认字段由数据库填充；输入值可为空字符串。点击字段模式可切换默认值、输入值和 NULL。").into_owned()).class("notice"));
+        panel = panel.child(fields).child(
+            html::span(tr("默认字段由数据库填充；输入值可为空字符串。").into_owned())
+                .class("notice"),
+        );
     }
     let body = panel
         .child(
@@ -887,15 +981,22 @@ pub(crate) fn filter_form(app: &App) -> (Node<Msg>, Node<Msg>) {
             .class("filter-fields")
             .child(column_select(state, true));
         if state.sort_column.is_some() {
-            sort = sort.child(button(
-                tr(if state.sort_desc {
-                    "降序 ↓"
-                } else {
-                    "升序 ↑"
+            let direction = ui::select()
+                .aria(tr("排序方向").into_owned())
+                .value(if state.sort_desc { "desc" } else { "asc" })
+                .open(app.workbench.generic_select.as_deref() == Some("sql-sort-direction"))
+                .on_toggle(|collapsed| {
+                    Msg::Action(format!("select-open:sql-sort-direction:{}", !collapsed))
                 })
-                .as_ref(),
-                "sql-sort-direction",
-            ));
+                .option(ui::SelectOption::new("asc", tr("升序 ↑").into_owned()))
+                .option(ui::SelectOption::new("desc", tr("降序 ↓").into_owned()))
+                .on_change(|change| {
+                    Msg::Action(format!(
+                        "sql-sort-direction-select:{}",
+                        change.value.as_str().unwrap_or_default()
+                    ))
+                });
+            sort = sort.child(ui::field(tr("排序方向").into_owned()).child(direction));
         }
         panel = panel.child(row).child(sort);
     }

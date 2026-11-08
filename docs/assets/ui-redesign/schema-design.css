@@ -42,6 +42,12 @@
 .schema-section p {
   margin: 4px 0;
 }
+.schema-add-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
 .schema-table-scroll {
   max-width: 100%;
   overflow: auto;
@@ -80,11 +86,78 @@
 .schema-table th:nth-child(6) {
   width: 23%;
 }
+.schema-columns-table th:nth-child(1) {
+  width: 16%;
+}
+.schema-columns-table th:nth-child(2) {
+  width: 13%;
+}
+.schema-columns-table th:nth-child(3) {
+  width: 10%;
+}
+.schema-columns-table th:nth-child(4) {
+  width: 11%;
+}
+.schema-columns-table th:nth-child(5) {
+  width: 21%;
+}
+.schema-columns-table th:nth-child(6) {
+  width: 12%;
+}
+.schema-columns-table th:nth-child(7) {
+  width: 17%;
+}
+.schema-columns-table {
+  min-width: 1250px;
+}
+.schema-columns-table th:nth-child(8) {
+  width: 140px;
+}
+.schema-key-icons {
+  white-space: nowrap;
+}
+.schema-key-icons span {
+  display: inline-flex;
+  margin-right: 5px;
+}
+.schema-key-icons svg {
+  width: 16px;
+  height: 16px;
+}
+.schema-row-actions {
+  white-space: nowrap !important;
+}
+.schema-row-actions .icon-button[aria-pressed="true"] {
+  background: var(--selected);
+}
+.schema-inline-parts {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.schema-inline-parts select {
+  flex: 1 1 100px;
+}
+.schema-inline-parts .icon-button {
+  flex: 0 0 28px;
+}
+.schema-collection-grid {
+  min-width: 1500px;
+}
+.schema-collection-grid th:last-child:last-child {
+  width: 110px;
+}
 .schema-table input,
 .schema-table select,
 .schema-table textarea {
   width: 100%;
   max-width: 100%;
+}
+.schema-table input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 7px 0;
 }
 .schema-table textarea {
   display: block;
@@ -123,4 +196,129 @@
   .schema-designer-scroll {
     padding: 12px 8px;
   }
+}
+
+.advanced-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+.advanced-switch input[role="switch"] {
+  appearance: none;
+  width: 32px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  position: relative;
+  flex: none;
+}
+.advanced-switch input[role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.advanced-switch input[role="switch"]:checked {
+  background: var(--accent);
+}
+.advanced-switch input[role="switch"]:checked::after {
+  left: 16px;
+  background: var(--panel);
+}
+.advanced-preview fieldset {
+  border: 0;
+  padding: 0;
+  margin: 12px 0;
+}
+.advanced-preview .fields, .schema-example .fields {
+  gap: 12px;
+}
+.advanced-preview label, .schema-example label {
+  min-width: 0;
+}
+.schema-example textarea {
+  width: 100%;
+  min-height: 60px;
+}
+
+.schema-tabs {
+  display: flex;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+.schema-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 2px;
+  white-space: nowrap;
+}
+.schema-tabs button[aria-selected="true"] {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.schema-column-select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 3px;
+}
+.schema-column-select[aria-pressed="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+.schema-column-properties {
+  border-top: 1px solid var(--border);
+  margin-top: 14px;
+  padding-top: 12px;
+}
+.schema-properties-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  align-items: center;
+  margin: 12px 0;
+}
+.schema-properties-flags .advanced-switch {
+  min-width: 130px;
+}
+.schema-column-properties textarea {
+  width: 100%;
+  min-height: 54px;
+}
+.schema-column-properties .fields {
+  gap: 12px;
+}
+.schema-table tr.schema-row-selected td {
+  background: var(--selected);
+}
+.schema-table input, .schema-table select {
+  min-width: 0;
+}
+.schema-collection-grid th:nth-child(n) {
+  width: auto;
+}
+.schema-collection-grid th:first-child {
+  width: 56px;
+}
+.schema-collection-grid textarea {
+  min-height: 54px;
+  resize: vertical;
+}
+.schema-options th:nth-child(n) {
+  width: 30%;
+}
+.schema-options {
+  min-width: 360px;
 }

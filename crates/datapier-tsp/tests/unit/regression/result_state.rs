@@ -967,7 +967,7 @@ fn stale_large_value_failure_does_not_cancel_newer_value() {
     assert_eq!(app.status.render().as_ref(), status);
     let full = CellValue::Text("complete".into());
     let bytes = serde_json::to_vec(&full).unwrap();
-    app.routed_response(Response { tag:current.tag, result:Ok(json!({"bytes_b64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":0,"next":null,"total":bytes.len()})) }, &backend);
+    app.routed_response(Response { tag:current.tag, result:Ok(json!({"data_b64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":0,"next":null,"total_bytes":bytes.len()})) }, &backend);
     assert_eq!(app.grid.as_ref().unwrap().value(cell), Some(&full));
     assert_eq!(app.field("cell"), "complete");
 }

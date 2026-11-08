@@ -78,10 +78,12 @@ impl App {
             node.props().get("key").and_then(Value::as_str) == Some(key)
                 || node.child_nodes().iter().any(|child| contains(child, key))
         }
-        contains(&views::overlay(self, kind), &format!("input-{name}"))
+        let overlay = views::overlay(self, kind);
+        contains(&overlay, name) || contains(&overlay, &format!("input-{name}"))
     }
 
     pub(super) fn reconcile_modal_focus(&mut self) {
+        self.track_modal_draft();
         if self
             .workbench
             .field_error
@@ -102,7 +104,7 @@ impl App {
             .workbench
             .focus_request
             .as_deref()
-            .and_then(|key| key.strip_prefix("input-"))
+            .map(|key| key.strip_prefix("input-").unwrap_or(key))
             && self.modal_allows_field(name)
         {
             self.focus = name.to_owned();
@@ -127,6 +129,7 @@ impl App {
     }
 
     pub(super) fn dispatch_editor_message(&mut self, message: Msg) {
+        self.track_modal_draft();
         if self.advanced_schema_edit(&message) || self.advanced_value_edit(&message) {
             return;
         }
@@ -159,6 +162,7 @@ impl App {
     }
 
     pub(super) fn input_key(&mut self, key: &tern_sdk::Key) {
+        self.track_modal_draft();
         if self.workbench.overlay.as_deref() == Some("profile") && self.connection_form_busy() {
             return;
         }
@@ -166,33 +170,40 @@ impl App {
             return;
         }
         let name = self.focus.clone();
+        let edit = match key.name.as_str() {
+            "backspace" => Some(EditKey::Backspace),
+            "delete" => Some(EditKey::Delete),
+            "left" => Some(EditKey::Left),
+            "right" => Some(EditKey::Right),
+            "up" => Some(EditKey::Up),
+            "down" => Some(EditKey::Down),
+            "home" => Some(EditKey::Home),
+            "end" => Some(EditKey::End),
+            "enter" => Some(EditKey::Text("\n")),
+            "paste" => key.text.as_deref().map(EditKey::Text),
+            "a" if key.ctrl || key.meta => Some(EditKey::SelectAll),
+            "z" if key.ctrl || key.meta => Some(EditKey::Undo),
+            _ => key.typed().map(EditKey::Text),
+        };
+        let Some(edit) = edit else {
+            return;
+        };
+        if let Some(schema) = self.advanced_schema.as_mut()
+            && schema.key(&name, edit, key.shift)
+        {
+            self.dirty |= schema.dirty;
+            return;
+        }
         if let Some(editor) = self.editor(&name) {
             let previous_len = editor.text.len();
-            let edit = match key.name.as_str() {
-                "backspace" => Some(EditKey::Backspace),
-                "delete" => Some(EditKey::Delete),
-                "left" => Some(EditKey::Left),
-                "right" => Some(EditKey::Right),
-                "up" => Some(EditKey::Up),
-                "down" => Some(EditKey::Down),
-                "home" => Some(EditKey::Home),
-                "end" => Some(EditKey::End),
-                "enter" => Some(EditKey::Text("\n")),
-                "paste" => key.text.as_deref().map(EditKey::Text),
-                "a" if key.ctrl || key.meta => Some(EditKey::SelectAll),
-                "z" if key.ctrl || key.meta => Some(EditKey::Undo),
-                _ => key.typed().map(EditKey::Text),
-            };
-            if let Some(edit) = edit {
-                // 处理了按键不代表文本被修改；光标、选区与空删除不能改变 NULL／默认模式。
-                let text_edit = matches!(&edit, EditKey::Text(text) if !text.is_empty() || editor.cursor != editor.anchor)
-                    || matches!(&edit, EditKey::Undo);
-                if editor.key(edit, key.shift) {
-                    if text_edit || editor.text.len() != previous_len {
-                        self.changed_field(&name);
-                    } else {
-                        self.dirty = true;
-                    }
+            // 处理了按键不代表文本被修改；光标、选区与空删除不能改变 NULL／默认模式。
+            let text_edit = matches!(&edit, EditKey::Text(text) if !text.is_empty() || editor.cursor != editor.anchor)
+                || matches!(&edit, EditKey::Undo);
+            if editor.key(edit, key.shift) {
+                if text_edit || editor.text.len() != previous_len {
+                    self.changed_field(&name);
+                } else {
+                    self.dirty = true;
                 }
             }
         }

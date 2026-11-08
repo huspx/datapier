@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field {
     pub key: String,
     pub zh: String,
@@ -69,7 +69,7 @@ impl Field {
         format!("{}: {value}", if english { &self.en } else { &self.zh })
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Form {
     pub fields: Vec<Field>,
 }
@@ -268,6 +268,56 @@ pub fn server_value(f: &Form) -> Value {
     json!({"id":f.get("id"),"revision":f.get("revision").parse::<u64>().unwrap_or(0),"name":f.get("name"),"base_url":f.get("base_url"),"username":f.get("username"),"http_tls":{"ca_path":if f.get("ca").is_empty(){Value::Null}else{json!(f.get("ca"))}},"totp_mode":f.get("totp_mode")})
 }
 
+pub fn settings_group(key: &str, english: bool) -> &'static str {
+    let (zh, en) = match key.split('.').next().unwrap_or("") {
+        "language" => ("常规", "General"),
+        "mcp" => ("MCP 权限", "MCP access"),
+        "paging" => ("分页", "Paging"),
+        "archery" => ("Archery", "Archery"),
+        "limits" => ("资源限制", "Resource limits"),
+        "approval" => ("审批", "Approval"),
+        "notifications" => ("通知", "Notifications"),
+        "history" => ("历史", "History"),
+        "editing" => ("编辑限制", "Editing limits"),
+        "external_editor" => ("外部编辑器", "External editor"),
+        _ => ("设置", "Settings"),
+    };
+    if english { en } else { zh }
+}
+pub fn settings_hint(key: &str, english: bool) -> &'static str {
+    let (zh, en) = match key {
+        "paging.mysql_table_rows"
+        | "paging.sql_rows"
+        | "paging.redis_value_rows"
+        | "paging.history_rows"
+        | "paging.archery_grid_rows"
+        | "limits.mcp_response_rows" => ("1–1000 行", "1–1000 rows"),
+        "limits.response_bytes" => (
+            "1024–1048576 字节，≤客户端结果内存",
+            "1024–1048576 bytes, ≤ client result memory",
+        ),
+        "limits.value_preview_bytes" => ("≥1 字节，≤响应字节", "≥1 byte, ≤ response bytes"),
+        "limits.result_memory_bytes_per_client" => {
+            ("≥1 字节，≥响应字节", "≥1 byte, ≥ response bytes")
+        }
+        "editing.max_text_editor_bytes" => ("≥1 字节，≤最大单值", "≥1 byte, ≤ maximum value"),
+        "editing.max_plan_bytes" | "editing.max_value_bytes" => ("≥1 字节", "≥1 byte"),
+        "limits.connect_timeout_seconds"
+        | "limits.query_timeout_seconds"
+        | "limits.count_timeout_seconds"
+        | "limits.result_idle_seconds"
+        | "approval.ttl_seconds" => ("≥1 秒", "≥1 second"),
+        "history.retention_days" => ("≥1 天，空为不限制", "≥1 day, empty is unlimited"),
+        "history.max_entries" => ("≥1 条，空为不限制", "≥1 entry, empty is unlimited"),
+        "paging.redis_key_batch"
+        | "archery.request_rows"
+        | "limits.running_tasks_per_mcp_client"
+        | "editing.max_plan_items"
+        | "editing.preview_rows" => ("≥1", "≥1"),
+        _ => ("", ""),
+    };
+    if english { en } else { zh }
+}
 pub fn settings(settings: &Value) -> Form {
     let specs = [
         ("language", "语言", "Language"),
@@ -442,7 +492,7 @@ pub fn settings(settings: &Value) -> Form {
             .collect(),
     }
 }
-pub fn settings_value(f: &Form, original: &Value) -> Result<Value, String> {
+pub fn settings_value(f: &Form, original: &Value) -> Result<Value, (String, String)> {
     let mut out = original.clone();
     for field in &f.fields {
         if field.key.starts_with("external_editor.") {
@@ -466,27 +516,87 @@ pub fn settings_value(f: &Form, original: &Value) -> Result<Value, String> {
             {
                 Value::Null
             } else {
-                json!(
-                    field
-                        .value
-                        .parse::<u64>()
-                        .map_err(|_| format!("{}: invalid number", field.key))?
-                )
+                json!(field.value.parse::<u64>().map_err(|_| (
+                    field.key.clone(),
+                    "请输入有效的非负整数 / Enter a valid non-negative integer".into()
+                ))?)
             }
         } else {
             json!(field.value)
         };
+        if value.is_number() {
+            let n = value.as_u64().unwrap_or(0);
+            let max = match field.key.as_str() {
+                "paging.mysql_table_rows"
+                | "paging.sql_rows"
+                | "paging.redis_value_rows"
+                | "paging.history_rows"
+                | "paging.archery_grid_rows"
+                | "limits.mcp_response_rows" => Some(1000),
+                "limits.response_bytes" => Some(1_048_576),
+                _ => None,
+            };
+            if n == 0
+                || (field.key == "limits.response_bytes" && n < 1024)
+                || max.is_some_and(|max| n > max)
+            {
+                return Err((
+                    field.key.clone(),
+                    "数值超出允许范围 / Value is out of range".into(),
+                ));
+            }
+        }
         parent[key] = value;
     }
     out["external_editor"] = match f.get("external_editor.mode") {
         "disabled" => Value::Null,
         mode @ ("gui" | "terminal") => {
             let args: Vec<String> = serde_json::from_str(f.get("external_editor.args"))
-                .map_err(|error| format!("外部编辑器参数必须是字符串数组: {error}"))?;
+                .map_err(|error| ("external_editor.args".into(), format!("外部编辑器参数必须是字符串数组 / Arguments must be a string array: {error}")))?;
+            if f.get("external_editor.program").trim().is_empty()
+                || f.get("external_editor.program").contains('\0')
+            {
+                return Err((
+                    "external_editor.program".into(),
+                    "程序不能为空且不能含 NUL / Program must be nonempty and contain no NUL".into(),
+                ));
+            }
+            if args.iter().any(|arg| arg.contains('\0'))
+                || args
+                    .iter()
+                    .map(|arg| arg.matches("{file}").count())
+                    .sum::<usize>()
+                    != 1
+            {
+                return Err(("external_editor.args".into(), "参数不能含 NUL，且必须恰含一个 {file} / Arguments must contain exactly one {file} and no NUL".into()));
+            }
             json!({"mode":mode,"program":f.get("external_editor.program"),"args":args})
         }
-        _ => return Err("外部编辑器模式无效".into()),
+        _ => {
+            return Err((
+                "external_editor.mode".into(),
+                "外部编辑器模式无效 / Invalid editor mode".into(),
+            ));
+        }
     };
+    for (key, other) in [
+        ("limits.value_preview_bytes", "limits.response_bytes"),
+        (
+            "limits.response_bytes",
+            "limits.result_memory_bytes_per_client",
+        ),
+        ("editing.max_text_editor_bytes", "editing.max_value_bytes"),
+    ] {
+        let get = |path: &str| {
+            path.split('.')
+                .fold(&out, |value, part| &value[part])
+                .as_u64()
+                .unwrap_or(0)
+        };
+        if get(key) > get(other) {
+            return Err((key.into(), format!("不能大于 / Must not exceed {other}")));
+        }
+    }
     Ok(out)
 }
 pub fn rules(rules: &[Value], profile: &Value) -> Form {

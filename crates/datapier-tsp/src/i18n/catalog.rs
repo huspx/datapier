@@ -1,5 +1,329 @@
 // 界面文案目录；顺序保留以维持重复词条的既有查找语义。
 pub(super) static CATALOG: &[(&str, &str)] = &[
+    ("表选项", "Table options"),
+    ("新增外键", "Add foreign key"),
+    ("新增 CHECK", "Add CHECK"),
+    ("其他表选项未记录", "Other table options were not recorded"),
+    (
+        "字段元数据不完整或未知",
+        "Column metadata is incomplete or unknown",
+    ),
+    ("元数据不完整或未知", "Metadata is incomplete or unknown"),
+    ("编辑与文件", "Editing and files"),
+    ("过期策略", "Expiration policy"),
+    (
+        "请输入非负整数毫秒数；0 会立即使 key 过期。",
+        "Enter a non-negative number of milliseconds; 0 expires the key immediately.",
+    ),
+    (
+        "请先选择包含完整文本的记录",
+        "Select a record with complete text first",
+    ),
+    ("保存全局设置", "Save global settings"),
+    (
+        "连接审批策略更改后立即单独保存；请先保存连接权限草稿。",
+        "Connection approval policy is saved separately and immediately after a change; save the connection permission draft first.",
+    ),
+    ("连接权限处理中…", "Processing connection permissions…"),
+    (
+        "连接权限有未保存修改",
+        "Connection permissions have unsaved changes",
+    ),
+    ("连接权限已保存", "Connection permissions saved"),
+    (
+        "重新加载将丢弃未保存的设置。继续编辑或丢弃并重新加载？",
+        "Reloading discards unsaved settings. Keep editing, or discard and reload?",
+    ),
+    ("丢弃并重新加载", "Discard and reload"),
+    ("平台请求", "Platform requests"),
+    ("资源限制", "Resource limits"),
+    (
+        "留空表示不限制；填写时为正整数。",
+        "Leave blank for no limit; otherwise enter a positive integer.",
+    ),
+    ("范围：1024–1048576 字节。", "Range: 1024–1048576 bytes."),
+    (
+        "单位：字节；为正数且不超过响应字节上限。",
+        "Bytes; a positive value no greater than the response byte limit.",
+    ),
+    (
+        "单位：字节；不小于响应字节上限。",
+        "Bytes; at least the response byte limit.",
+    ),
+    ("范围：1–1000 条。", "Range: 1–1000 entries."),
+    (
+        "单位：秒；必须大于零。",
+        "Seconds; must be greater than zero.",
+    ),
+    ("必须大于零。", "Must be greater than zero."),
+    (
+        "确认永久清理文件：{path}。文件大小未记录；当前无草稿引用。此操作不可恢复。",
+        "Permanently delete file {path}? Its size was not recorded, and no drafts currently reference it. This cannot be undone.",
+    ),
+    ("复制完整身份", "Copy complete identity"),
+    (
+        "部分条目身份尚未完整读取；可读取后查看和复制。",
+        "Some entry identities have not been read in full. Read them to view and copy their complete contents.",
+    ),
+    ("读取完整身份", "Read complete identities"),
+    ("请输入大于零的整数", "Enter an integer greater than zero"),
+    (
+        "文本编辑上限不能超过单值上限",
+        "The text editing limit cannot exceed the single-value limit",
+    ),
+    ("请填写有效的编辑器程序", "Enter a valid editor program"),
+    (
+        "参数必须恰好包含一个 {file}",
+        "Arguments must contain exactly one {file} placeholder",
+    ),
+    (
+        "设置超出允许范围",
+        "The setting is outside the allowed range",
+    ),
+    ("请输入有效的非负整数", "Enter a valid non-negative integer"),
+    (
+        "大值将在确认后完整读取；若读取失败则不会加入草稿。",
+        "Large values are read in full after confirmation; a read failure prevents staging.",
+    ),
+    (
+        "选项修改保存在表单草稿中，执行导入或导出时生效。",
+        "Option changes stay in this form draft and take effect when importing or exporting.",
+    ),
+    (
+        "当前连接只读或编辑基线不可用，无法导入。",
+        "Import is unavailable because the connection is read-only or the editing baseline is unavailable.",
+    ),
+    (
+        "结果尚未完整返回，暂不能导出。",
+        "Export is unavailable while results are incomplete.",
+    ),
+    ("冻结", "Freeze"),
+    ("设置宽度的列", "Column to resize"),
+    ("宽度（像素）", "Width (pixels)"),
+    (
+        "设置宽度时必填：1–65535 像素。显示和冻结立即应用。",
+        "Required when resizing: 1–65535 pixels. Visibility and freezing apply immediately.",
+    ),
+    ("全局设置保存中…", "Saving global settings…"),
+    ("全局设置保存失败", "Global settings could not be saved"),
+    (
+        "全局设置有未保存修改",
+        "Global settings have unsaved changes",
+    ),
+    ("全局设置已保存", "Global settings saved"),
+    (
+        "均为正整数；字节上限以字节计，文本编辑上限不能超过单值上限。",
+        "All limits are positive integers. Byte limits are in bytes; the text editing limit cannot exceed the single-value limit.",
+    ),
+    ("外部编辑器", "External editor"),
+    ("创建时间（毫秒）", "Created at (milliseconds)"),
+    ("登记相对路径", "Registered relative path"),
+    ("文件状态", "File state"),
+    ("领取版本", "Claimed revision"),
+    ("更新时间（毫秒）", "Updated at (milliseconds)"),
+    (
+        "文件大小未记录；登记路径为相对路径。",
+        "File size was not recorded; the registered path is relative.",
+    ),
+    ("字段模式", "Column mode"),
+    (
+        "默认字段由数据库填充；输入值可为空字符串。",
+        "Default columns are filled by the database; an entered value may be an empty string.",
+    ),
+    ("排序方向", "Sort direction"),
+    (
+        "文件状态已变化，请重新确认",
+        "The file state has changed. Confirm again.",
+    ),
+    (
+        "操作进行中，请等待完成后再关闭",
+        "An operation is in progress. Wait for it to finish before closing.",
+    ),
+    (
+        "关闭将丢弃未应用的输入。继续编辑或丢弃？",
+        "Closing discards unapplied input. Keep editing or discard?",
+    ),
+    (
+        "未保存的更改将被丢弃，是否继续？",
+        "Unsaved changes will be discarded. Continue?",
+    ),
+    ("丢弃更改", "Discard changes"),
+    ("CA 设置", "CA settings"),
+    ("清除 CA", "Clear CA"),
+    ("TOTP 设置", "TOTP settings"),
+    (
+        "待删除本地连接；勾回可恢复原值",
+        "Local connection pending deletion; select it again to restore its original values",
+    ),
+    ("数据库选择", "Database selection"),
+    (
+        "平台未发现，已保留原选择",
+        "Not reported by the platform; the saved selection is retained",
+    ),
+    ("请先选择此数据库", "Select this database first"),
+    ("当前默认目标", "Current default target"),
+    (
+        "显示已保存的数据库；刷新可核对平台可见性",
+        "Showing saved databases; refresh to check platform visibility",
+    ),
+    (
+        "Redis DB 数量覆盖（1–4294967295；留空为自动探测）",
+        "Redis DB count override (1–4294967295; leave blank to discover automatically)",
+    ),
+    (
+        "删除服务器及 {count} 个连接",
+        "Delete server and {count} connections",
+    ),
+    (
+        "只读连接不能删除 key",
+        "A read-only connection cannot delete keys",
+    ),
+    ("本页没有匹配记录", "No matching records on this page"),
+    ("没有记录", "No records"),
+    ("定位执行记录", "Show execution record"),
+    (
+        "执行中，暂不能修改输入或再次执行",
+        "Execution in progress; input and execution are temporarily unavailable",
+    ),
+    (
+        "只读连接不能修改数据",
+        "A read-only connection cannot modify data",
+    ),
+    (
+        "只读或当前对象权限不允许修改",
+        "Read-only access or object permissions prevent changes",
+    ),
+    ("正在加载触发器…", "Loading triggers…"),
+    ("新增字段", "Add column"),
+    ("选中字段属性", "Selected column properties"),
+    ("未指定", "Unspecified"),
+    ("字面量", "Literal"),
+    ("唯一索引", "Unique index"),
+    ("普通索引", "Index"),
+    ("全文索引", "Full-text index"),
+    ("空间索引", "Spatial index"),
+    ("之前", "Before"),
+    ("之后", "After"),
+    ("插入", "Insert"),
+    ("更新", "Update"),
+    ("定义者", "Definer"),
+    ("调用者", "Invoker"),
+    ("合并", "Merge"),
+    ("临时表", "Temporary table"),
+    ("本地", "Local"),
+    ("级联", "Cascade"),
+    ("限制", "Restrict"),
+    ("不操作", "No action"),
+    (
+        "以下修改仅保存在结构草稿中，提交后才会作用于数据库。",
+        "Changes remain in the schema draft until explicitly submitted to the database.",
+    ),
+    (
+        "执行结果未知。请在数据库中重新读取目标结构，核对已执行的 DDL 和实际对象状态；确认后再解除等待，不会自动重试。",
+        "The execution outcome is unknown. Read the target schema from the database and verify the executed DDL and actual object state before clearing the wait. No automatic retry occurs.",
+    ),
+    (
+        "以下冻结的 DDL 将按顺序执行；已执行的变更不能自动回滚，请先确认备份和恢复方式。",
+        "The frozen DDL below will execute in order. Applied changes cannot be rolled back automatically; confirm your backup and recovery procedure first.",
+    ),
+    (
+        "当前计划未提供完整命令及有序参数，无法预览执行命令。",
+        "This plan does not provide complete commands and ordered parameters; execution commands cannot be previewed.",
+    ),
+    (
+        "处理中，操作暂不可用。",
+        "Processing; actions are temporarily unavailable.",
+    ),
+    (
+        "计划不完整或不可提交，请检查预览原因。",
+        "The plan is incomplete or cannot be submitted. Review the preview reasons.",
+    ),
+    (
+        "尚有未应用修改，丢弃后无法恢复。",
+        "Unapplied changes remain. Discarding them cannot be undone.",
+    ),
+    ("未应用修改", "Unapplied changes"),
+    (
+        "已应用到值会话，尚未加入草稿",
+        "Applied to the value session; not yet added to the draft",
+    ),
+    (
+        "值会话已打开，尚未加入草稿",
+        "Value session open; not yet added to the draft",
+    ),
+    ("新值类型", "New value type"),
+    (
+        "加入草稿不可用：请求处理中。",
+        "Cannot add to draft: a request is in progress.",
+    ),
+    (
+        "加入草稿不可用：当前值只读。",
+        "Cannot add to draft: this value is read-only.",
+    ),
+    (
+        "加入草稿不可用：值会话尚未就绪。",
+        "Cannot add to draft: the value session is not ready.",
+    ),
+    (
+        "加入草稿不可用：请先应用当前修改。",
+        "Cannot add to draft: apply the current changes first.",
+    ),
+    (
+        "确认清理外部编辑文件？清理后文件无法恢复。",
+        "Delete the external editing file? The file cannot be recovered after deletion.",
+    ),
+    (
+        "文件会话已变化，请重新确认清理。",
+        "The file session has changed. Confirm cleanup again.",
+    ),
+    (
+        "导入、导出和外部编辑不可用：值会话尚未就绪。",
+        "Import, export, and external editing are unavailable: the value session is not ready.",
+    ),
+    (
+        "文件操作不可用：请先应用当前修改。",
+        "File actions are unavailable: apply the current changes first.",
+    ),
+    (
+        "导入、导出和外部编辑不可用：文件操作处理中。",
+        "Import, export, and external editing are unavailable: a file operation is in progress.",
+    ),
+    (
+        "导入和导出不可用：请填写文件路径。",
+        "Import and export are unavailable: enter a file path.",
+    ),
+    (
+        "导入和外部编辑不可用：当前值只读。",
+        "Import and external editing are unavailable: this value is read-only.",
+    ),
+    (
+        "准备外部编辑不可用：请先结束当前文件会话。",
+        "External editing cannot be prepared: end the current file session first.",
+    ),
+    ("重试列表", "Retry list"),
+    ("重新读取详情", "Reload details"),
+    ("正在刷新列表", "Refreshing list"),
+    ("行数未记录", "Row count not recorded"),
+    ("详见完整诊断", "See full diagnostics"),
+    ("Redis 变更", "Redis changes"),
+    (
+        "连接不可用，无法编辑单元格",
+        "The connection is unavailable; this cell cannot be edited",
+    ),
+    (
+        "当前连接为只读，无法编辑单元格",
+        "The current connection is read-only; this cell cannot be edited",
+    ),
+    ("生成列不可编辑", "Generated columns cannot be edited"),
+    (
+        "该行已有待提交的删除，无法编辑",
+        "This row has a pending deletion and cannot be edited",
+    ),
+    ("丢弃未应用的输入？", "Discard unapplied input?"),
+    (
+        "未应用的输入将被丢弃。",
+        "Unapplied input will be discarded.",
+    ),
     ("待审批", "Pending approval"),
     ("待认证", "Authentication needed"),
     ("已批准", "Approved"),
@@ -911,6 +1235,122 @@ pub(super) static CATALOG: &[(&str, &str)] = &[
     ("结果集数量", "Result sets"),
     ("摘要结果集数量", "Summary result sets"),
     ("长度", "Length"),
+    ("预览 DDL", "Preview DDL"),
+    ("计划完整", "Plan complete"),
+    ("可提交", "Submittable"),
+    (
+        "计划已生成，请使用上方预览按钮读取 DDL。",
+        "The plan is ready. Use Preview above to read its DDL.",
+    ),
+    (
+        "尚未读取全部预览页，请继续读取后再提交。",
+        "Read the remaining preview pages before submitting.",
+    ),
+    (
+        "尚未生成计划，请使用上方生成计划按钮查看 DDL。",
+        "No plan has been generated. Use Generate plan above to view its DDL.",
+    ),
+    (
+        "计划已提交，请查看执行结果。",
+        "The plan has been submitted. Review its execution result.",
+    ),
+    (
+        "请先修正无效的数值",
+        "Correct the invalid numeric values first",
+    ),
+    ("小数秒精度（0–6）", "Fractional seconds precision (0–6)"),
+    (
+        "小数秒精度必须为 0 到 6 的整数",
+        "Fractional seconds precision must be an integer from 0 to 6",
+    ),
+    ("本地列", "Local columns"),
+    ("引用列", "Referenced columns"),
+    ("添加列", "Add column"),
+    ("请选择", "Select"),
+    (
+        "当前值未加载或不可见",
+        "Current value is not loaded or is unavailable",
+    ),
+    ("正在加载引用表", "Loading referenced tables"),
+    ("正在加载引用列", "Loading referenced columns"),
+    ("加载引用表", "Load referenced tables"),
+    ("加载引用列", "Load referenced columns"),
+    ("设为主键", "Add to primary key"),
+    ("取消主键", "Remove from primary key"),
+    (
+        "请先修正无效的字段输入",
+        "Correct the invalid column input first",
+    ),
+    (
+        "主键不能重复包含同一列",
+        "A primary key cannot contain the same column twice",
+    ),
+    (
+        "请通过字段行设置主键",
+        "Set the primary key from the column row",
+    ),
+    (
+        "主键列不能允许 NULL",
+        "Primary-key columns cannot allow NULL",
+    ),
+    (
+        "字段被索引或外键引用，不能删除",
+        "The column is referenced by an index or foreign key and cannot be deleted",
+    ),
+    (
+        "字段被索引或外键引用，不能清空名称",
+        "The name of a column referenced by an index or foreign key cannot be empty",
+    ),
+    (
+        "字段名称为空或不唯一",
+        "The column name is empty or not unique",
+    ),
+    (
+        "存在多个主键索引，请先修正",
+        "Correct the multiple primary-key indexes first",
+    ),
+    (
+        "主键索引中重复包含该字段",
+        "The primary-key index contains this column more than once",
+    ),
+    (
+        "字段名称重复，无法安全更新索引或外键引用",
+        "Duplicate column names prevent updating index or foreign-key references safely",
+    ),
+    (
+        "资源列表游标重复，无法继续读取",
+        "The resource-list cursor repeated; reading cannot continue",
+    ),
+    (
+        "资源列表不完整，无法继续读取",
+        "The resource list is incomplete; reading cannot continue",
+    ),
+    (
+        "返回的表结构与请求目标不一致",
+        "The returned table structure does not match the requested target",
+    ),
+    (
+        "精度必须为 1 到 65 的整数",
+        "Precision must be an integer from 1 to 65",
+    ),
+    (
+        "长度超出该类型允许的范围",
+        "Length is outside the range allowed for this type",
+    ),
+    (
+        "小数位必须为 0 到 30 且不大于精度",
+        "Scale must be from 0 to 30 and no greater than precision",
+    ),
+    ("类型长度格式无效", "Invalid type length format"),
+    (
+        "尚有未加入草稿的修改，丢弃后无法恢复。",
+        "Changes have not been staged. Discarding them cannot be undone.",
+    ),
+    ("已加入待提交草稿", "Staged for submission"),
+    (
+        "修改已加入草稿。请重新打开以继续编辑。",
+        "Changes have been staged. Reopen the value to continue editing.",
+    ),
     ("过期时间（毫秒）", "Expiry (ms)"),
     ("原生类型", "Native type"),
     ("自增", "Auto increment"),

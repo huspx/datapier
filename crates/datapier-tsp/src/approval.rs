@@ -18,6 +18,11 @@ pub(super) struct ApprovalState {
     pub authentication: Vec<Value>,
     pub selected: Option<String>,
     pub detail: Option<Value>,
+    pub list_loaded: bool,
+    pub list_error: Option<String>,
+    pub detail_error: Option<String>,
+    pub observe_list_loaded: bool,
+    pub observe_list_error: Option<String>,
     pub list_pending: Option<Uuid>,
     pub detail_pending: Option<Uuid>,
     pub decide_pending: Option<Uuid>,
@@ -44,8 +49,11 @@ impl App {
                 "execution.observe.list",
                 json!({}),
             ) {
-                Ok(()) => self.approvals.observe_list_pending = Some(token),
-                Err(error) => self.approvals.observe_error = Some(error.to_string()),
+                Ok(()) => {
+                    self.approvals.observe_list_error = None;
+                    self.approvals.observe_list_pending = Some(token);
+                }
+                Err(error) => self.approvals.observe_list_error = Some(error.to_string()),
             }
         }
         if self.approvals.list_pending.is_some() {
@@ -53,8 +61,11 @@ impl App {
         }
         let token = Uuid::new_v4();
         match backend.request(format!("approval.list/{token}"), "approval.list", json!({})) {
-            Ok(()) => self.approvals.list_pending = Some(token),
-            Err(error) => self.approvals.error = Some(error.to_string()),
+            Ok(()) => {
+                self.approvals.list_error = None;
+                self.approvals.list_pending = Some(token);
+            }
+            Err(error) => self.approvals.list_error = Some(error.to_string()),
         }
     }
 
@@ -65,8 +76,11 @@ impl App {
             "approval.get",
             json!({"approval_id":id}),
         ) {
-            Ok(()) => self.approvals.detail_pending = Some(token),
-            Err(error) => self.approvals.error = Some(error.to_string()),
+            Ok(()) => {
+                self.approvals.detail_error = None;
+                self.approvals.detail_pending = Some(token);
+            }
+            Err(error) => self.approvals.detail_error = Some(error.to_string()),
         }
     }
     fn approval_observe_task(&mut self, backend: &Backend, id: String) {
@@ -124,11 +138,20 @@ impl App {
                         ApprovalTab::Approvals
                     };
                     self.approval_refresh(backend);
+                    self.focus = match self.approvals.tab {
+                        ApprovalTab::Approvals => "approval-tab-approvals",
+                        ApprovalTab::Authentication => "approval-tab-authentication",
+                        ApprovalTab::Tasks => "approval-tab-tasks",
+                    }
+                    .into();
+                    self.workbench.focus_request = Some(String::new());
                 }
                 return true;
             }
             "approval-close" => {
                 self.approvals.open = false;
+                self.focus = "approval-open".into();
+                self.workbench.focus_request = Some(String::new());
                 return true;
             }
             "approval-tab-approvals" | "approval-tab-authentication" | "approval-tab-tasks" => {
@@ -138,6 +161,8 @@ impl App {
                     "approval-tab-tasks" => ApprovalTab::Tasks,
                     _ => ApprovalTab::Approvals,
                 };
+                self.focus = name.into();
+                self.workbench.focus_request = Some(String::new());
                 return true;
             }
             "approval-diagnostics-toggle" => {
@@ -146,6 +171,12 @@ impl App {
             }
             "approval-refresh" => {
                 self.approval_refresh(backend);
+                return true;
+            }
+            "approval-detail-retry" => {
+                if let Some(id) = self.approvals.selected.clone() {
+                    self.approval_load_detail(backend, &id);
+                }
                 return true;
             }
             _ => {}
@@ -258,6 +289,7 @@ impl App {
             if Uuid::parse_str(id).is_ok() {
                 self.approvals.selected = Some(id.to_owned());
                 self.approvals.diagnostics_open = false;
+                self.approvals.detail_error = None;
                 self.approvals.detail = None;
                 self.approvals.observed_task = None;
                 self.approvals.observed_task_id = None;
@@ -278,6 +310,7 @@ impl App {
                 && self.approvals.selected.as_deref() == Some(id)
                 && self.approvals.decide_pending.is_none()
                 && self.approvals.detail_pending.is_none()
+                && self.approvals.detail_error.is_none()
                 && self.approvals.detail.as_ref().is_some_and(|record| {
                     record["approval_id"].as_str() == Some(id)
                         && record["state"].as_str() == Some("pending")
@@ -317,10 +350,14 @@ impl App {
             self.approvals.observe_list_pending = None;
             match result {
                 Ok(value) => match value.get("executions").and_then(Value::as_array) {
-                    Some(items) => self.approvals.observed_tasks = items.clone(),
-                    None => self.approvals.observe_error = Some("任务列表响应无效".into()),
+                    Some(items) => {
+                        self.approvals.observed_tasks = items.clone();
+                        self.approvals.observe_list_loaded = true;
+                        self.approvals.observe_list_error = None;
+                    }
+                    None => self.approvals.observe_list_error = Some("任务列表响应无效".into()),
                 },
-                Err(error) => self.approvals.observe_error = Some(error.to_string()),
+                Err(error) => self.approvals.observe_list_error = Some(error.to_string()),
             }
             return true;
         }
@@ -397,13 +434,14 @@ impl App {
             self.approvals.list_pending = None;
             match result {
                 Ok(value) => {
-                    if let Some(items) = value.get("approvals").and_then(Value::as_array) {
+                    if let (Some(items), Some(authentication)) = (
+                        value.get("approvals").and_then(Value::as_array),
+                        value.get("authentication").and_then(Value::as_array),
+                    ) {
                         self.approvals.items = items.clone();
-                        self.approvals.authentication = value
-                            .get("authentication")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default();
+                        self.approvals.authentication = authentication.clone();
+                        self.approvals.list_loaded = true;
+                        self.approvals.list_error = None;
                         if self.approvals.open && self.approvals.choose_initial_tab {
                             self.approvals.tab = if self
                                 .approvals
@@ -417,6 +455,14 @@ impl App {
                             } else {
                                 ApprovalTab::Approvals
                             };
+                            if self.focus.starts_with("approval-tab-") {
+                                self.focus = match self.approvals.tab {
+                                    ApprovalTab::Approvals => "approval-tab-approvals",
+                                    ApprovalTab::Authentication => "approval-tab-authentication",
+                                    ApprovalTab::Tasks => "approval-tab-tasks",
+                                }
+                                .into();
+                            }
                             self.approvals.choose_initial_tab = false;
                         }
                         if let Some(id) = self.approvals.selected.clone()
@@ -426,10 +472,10 @@ impl App {
                             self.approval_load_detail(backend, &id);
                         }
                     } else {
-                        self.approvals.error = Some("审批列表响应无效".into());
+                        self.approvals.list_error = Some("审批列表响应无效".into());
                     }
                 }
-                Err(error) => self.approvals.error = Some(error.to_string()),
+                Err(error) => self.approvals.list_error = Some(error.to_string()),
             }
             return true;
         }
@@ -443,9 +489,10 @@ impl App {
                     match result {
                         Ok(value) if value["approval_id"].as_str() == Some(id) => {
                             self.approvals.detail = Some(value.clone());
+                            self.approvals.detail_error = None;
                         }
-                        Ok(_) => self.approvals.error = Some("审批详情响应无效".into()),
-                        Err(error) => self.approvals.error = Some(error.to_string()),
+                        Ok(_) => self.approvals.detail_error = Some("审批详情响应无效".into()),
+                        Err(error) => self.approvals.detail_error = Some(error.to_string()),
                     }
                 }
             }

@@ -47,7 +47,7 @@ fn restored_value_accounts_for_json_nodes_and_keeps_pending_on_rejection() {
         for (index, bytes) in raw.chunks(chunk_bytes).enumerate() {
             let offset = index * chunk_bytes;
             let end = offset + bytes.len();
-            let response = json!({"offset":offset,"total":raw.len(),"bytes_b64":STANDARD.encode(bytes),"next":(end < raw.len()).then_some(end)});
+            let response = json!({"offset":offset,"total_bytes":raw.len(),"data_b64":STANDARD.encode(bytes),"next":(end < raw.len()).then_some(end)});
             if let Err(error) = app.workspace_restore_accept(RestoreOp::Value, &response) {
                 rejected = Some(error);
                 break;

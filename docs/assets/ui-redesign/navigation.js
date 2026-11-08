@@ -111,17 +111,15 @@ function connectionFormBody() {
   return `<div class="fields"><fieldset class="provider-field wide"><legend>${
     t('databaseType')
   }</legend><div class="provider-options" role="radiogroup" aria-label="${t('databaseType')}">${
-    ['mysql', 'redis'].map(provider =>
-      `<button class="provider-option" role="radio" aria-checked="${
+    ['mysql', 'redis', 'archery'].map(provider =>
+      `<button type="button" class="provider-option" role="radio" aria-checked="${
         form.provider === provider
-      }" data-connection-type="${provider}">${marker(provider)}<span>${
-        provider === 'mysql' ? 'MySQL' : 'Redis'
-      }</span></button>`
+      }" tabindex="${form.provider === provider ? '0' : '-1'}" ${
+        state.overlay === 'connection-settings' ? 'disabled' : ''
+      } ${provider === 'archery' ? 'data-archery="type-archery"' : `data-connection-type="${provider}"`}>${
+        provider === 'archery' ? '<img class="archery-mark" src="assets/archery.svg" alt="">' : marker(provider)
+      }<span>${provider === 'mysql' ? 'MySQL' : provider === 'redis' ? 'Redis' : 'Archery'}</span></button>`
     ).join('')
-  }${
-    state.overlay === 'new-connection'
-      ? `<button class="provider-option" role="radio" aria-checked="false" data-archery="type-archery"><img class="archery-mark" src="assets/archery.svg" alt=""><span>Archery</span></button>`
-      : ''
   }</div></fieldset><label class="wide">${
     t('name')
   } <span style="color:var(--danger,red)">*</span><input data-connection-field="name" required aria-required="true" value="${
@@ -144,19 +142,51 @@ function connectionFormBody() {
         h(form.database)
       }" placeholder="${t('defaultDatabaseHelp')}"></label>${databaseScope()}`
       : redisConnectionPreview(form)
-  }<label class="wide"><span><input type="checkbox" data-connection-check="readOnly" ${
+  }<label class="wide connection-switch"><span>${
+    h(t('readOnlyConnection'))
+  }</span><input type="checkbox" role="switch" data-connection-check="readOnly" ${
     form.readOnly ? 'checked' : ''
-  }> ${h(t('readOnlyConnection'))}</span></label><details class="wide"><summary>${
-    h(t('tlsDetails'))
-  }</summary><label><span><input type="checkbox" data-connection-check="tls" ${form.tls ? 'checked' : ''}> ${
+  }></label><details class="wide"><summary>${h(t('tlsDetails'))}</summary><label class="connection-switch"><span>${
     h(t('tlsEnable'))
-  }</span></label><div class="fields tls-fields" ${form.tls ? '' : 'hidden'}><label class="wide">${
+  }</span><input type="checkbox" role="switch" data-connection-check="tls" ${
+    form.tls ? 'checked' : ''
+  }></label><div class="fields tls-fields" ${form.tls ? '' : 'hidden'}><label class="wide">${
     h(t('caPath'))
   }<input data-connection-field="ca" value="${h(form.ca)}"></label><label>${
     h(t('certPath'))
   }<input data-connection-field="cert" value="${h(form.cert)}"></label><label>${
     h(t('keyPath'))
   }<input data-connection-field="key" value="${h(form.key)}"></label></div></details></div>`;
+}
+const treeGroups = new Set();
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-tree-group]');
+  if (!button) return;
+  event.stopImmediatePropagation();
+  const key = button.dataset.treeGroup;
+  if (treeGroups.has(key)) treeGroups.delete(key);
+  else treeGroups.add(key);
+  render();
+  [...document.querySelectorAll('[data-tree-group]')].find(item => item.dataset.treeGroup === key)?.focus();
+}, true);
+function viewResourcePreview() {
+  const target = state.viewPreviewTarget;
+  if (!target) return '';
+  return modal(
+    `${az('视图', 'View')} · ${target.database}.${target.name}`,
+    `<p class="archery-note">${
+      az('只读示例数据；未连接数据库或发送请求。', 'Read-only example data; no database connection or request is made.')
+    }</p><h3>${az('结构', 'Structure')}</h3><div class="table-wrap">${
+      simpleTable([t('field'), t('type'), 'NULL', az('注释', 'Comment')], [[
+        'status',
+        'VARCHAR(32)',
+        az('是', 'Yes'),
+        az('未提供', 'Not provided'),
+      ], ['order_count', 'BIGINT', az('否', 'No'), az('未提供', 'Not provided')]])
+    }</div><h3>${az('数据', 'Data')}</h3><div class="table-wrap">${
+      simpleTable(['status', 'order_count'], [['active', '3'], ['complete', '8']])
+    }</div>`,
+  );
 }
 function tree() {
   return `<div class="section-heading">${
@@ -175,23 +205,28 @@ function tree() {
         icon(state.expanded.has(db) ? 'chev' : 'chev-r')
       }${icon('database')}<span>${db}</span></button>${
         state.expanded.has(db)
-          ? `<div class="tree-line depth-1">${icon('chev')}${icon('table')} ${t('tables')}<span class="count">${
-            Object.keys(tables).length
-          }</span></div>${
-            Object.keys(tables).filter(table => table.includes(state.objectFilter.toLowerCase())).map(table =>
-              `<button class="tree-line depth-2 ${
-                db === state.database && table === state.table
-                  ? 'active'
-                  : ''
-              }" data-open-table="${table}" data-table-db="${db}">${icon('table')}${table}</button>`
-            ).join('')
-          }${
-            !Object.keys(tables).some(table => table.includes(state.objectFilter.toLowerCase()))
-              ? `<div class="tree-line depth-2 small">${t('noObjects')}</div>`
-              : ''
-          }<div class="tree-line depth-1">${icon('chev-r')}${icon('eye')} ${
-            t('views')
-          }<span class="count">0</span></div>`
+          ? ['tables', 'views'].map(group => {
+            const key = `${db}:${group}`, expanded = treeGroups.has(key);
+            const items = group === 'tables' ? Object.keys(tables) : ['orders_summary'];
+            const matches = items.filter(name => name.toLowerCase().includes(state.objectFilter.toLowerCase()));
+            return `<button class="tree-line depth-1" data-tree-group="${h(key)}" aria-expanded="${expanded}">${
+              icon(expanded ? 'chev' : 'chev-r')
+            }${icon(group === 'tables' ? 'table' : 'eye')} ${
+              t(group)
+            }<span class="count">${items.length}</span></button>${
+              expanded
+                ? matches.map(name =>
+                  group === 'tables'
+                    ? `<button class="tree-line depth-2 ${
+                      db === state.database && name === state.table ? 'active' : ''
+                    }" data-open-table="${h(name)}" data-table-db="${h(db)}">${icon('table')}${h(name)}</button>`
+                    : `<button class="tree-line depth-2" data-view-preview="${h(name)}" data-view-db="${h(db)}">${
+                      icon('eye')
+                    }${h(name)} <span class="muted small">${az('示例视图', 'Example view')}</span></button>`
+                ).join('') || `<div class="tree-line depth-2 small">${t('noObjects')}</div>`
+                : ''
+            }`;
+          }).join('')
           : ''
       }`
     ).join('')

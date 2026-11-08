@@ -1,5 +1,10 @@
 use super::*;
-fn redis_key_row(app: &App, i: usize, label: String) -> Node<Msg> {
+fn redis_key_row(
+    app: &App,
+    i: usize,
+    label: String,
+    tree_index: Option<(usize, usize)>,
+) -> Node<Msg> {
     let r = &app.resources[i];
     let full = crate::workbench::redis_key_text(&r.name, r.key_b64.as_deref());
     let active = app.redis_key_selected(i);
@@ -28,14 +33,13 @@ fn redis_key_row(app: &App, i: usize, label: String) -> Node<Msg> {
             )
             .icon("copy"),
         );
-    if writable(app) {
-        actions = actions.menu(
-            ui::MenuItem::new("delete", crate::i18n::tr("删除选中 key").into_owned())
-                .icon("trash")
-                .danger(true),
-        );
-    }
-    html::button("")
+    actions = actions.menu(
+        ui::MenuItem::new("delete", crate::i18n::tr("删除选中 key").into_owned())
+            .icon("trash")
+            .danger(true)
+            .disabled(!writable(app)),
+    );
+    let mut button = html::button("")
         .class(if active {
             "resource key-row active"
         } else {
@@ -66,24 +70,42 @@ fn redis_key_row(app: &App, i: usize, label: String) -> Node<Msg> {
         .on_action(
             "delete",
             Msg::Action(format!("redis-key-menu:{identity}:delete")),
-        )
-        .into()
+        );
+    if let Some((index, focused)) = tree_index {
+        button = button
+            .key(format!("input-workspace-tree-{index}"))
+            .attr("role", "treeitem")
+            .attr("tabindex", if index == focused { 0 } else { -1 })
+            .on_focus(Msg::Focus(format!("workspace-tree-{index}")));
+    }
+    button.into()
 }
 fn redis_tree_nodes(app: &App, rows: &[crate::redis_tree::Row<'_>]) -> Node<Msg> {
-    let mut container = html::div().class("key-tree-nodes");
-    for row in rows {
+    let mut container = html::div().class("key-tree-nodes").attr("role", "tree");
+    let focused = app
+        .focus
+        .strip_prefix("workspace-tree-")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|index| *index < rows.len())
+        .unwrap_or(0);
+    for (position, row) in rows.iter().enumerate() {
         let label = if row.label.is_empty() {
             "∅".to_owned()
         } else {
             crate::redis_tree::display(row.label)
         };
         let node = match &row.kind {
-            crate::redis_tree::Kind::Key { index } => redis_key_row(app, *index, label),
+            crate::redis_tree::Kind::Key { index } => {
+                redis_key_row(app, *index, label, Some((position, focused)))
+            }
             crate::redis_tree::Kind::Directory { prefix, expanded } => {
                 let action = format!("redis-tree:{}", crate::redis_tree::encoded(prefix));
                 html::button("")
                     .class("resource key-directory")
-                    .key(action.clone())
+                    .key(format!("input-workspace-tree-{position}"))
+                    .attr("role", "treeitem")
+                    .attr("tabindex", if position == focused { 0 } else { -1 })
+                    .on_focus(Msg::Focus(format!("workspace-tree-{position}")))
                     .prop("title", crate::redis_tree::display(prefix))
                     .attr("aria-expanded", *expanded)
                     .child(ui::icon(if *expanded { "chev" } else { "chev-r" }))
@@ -249,6 +271,23 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
         );
     }
     let mut keys = html::div().class("key-list");
+    if app.resources.is_empty() {
+        let message = if app.workbench.scan_dirty {
+            "条件已更改，请刷新"
+        } else if app.scan_token.is_some() {
+            "扫描中"
+        } else if app.cursor.is_some() {
+            "可加载更多"
+        } else {
+            "没有匹配的 key"
+        };
+        keys = keys.child(html::span(crate::i18n::tr(message).into_owned()).class("empty-note"));
+    }
+    if !writable(app) {
+        keys = keys.child(
+            html::span(crate::i18n::tr("只读连接不能删除 key").into_owned()).class("empty-note"),
+        );
+    }
     if let Some(rows) = tree_rows.as_ref() {
         let start = page * workbench::KEY_PAGE_SIZE;
         let end = (start + workbench::KEY_PAGE_SIZE).min(rows.len());
@@ -262,6 +301,7 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
                 app,
                 i,
                 crate::workbench::redis_key_text(&r.name, r.key_b64.as_deref()),
+                None,
             ));
         }
     }

@@ -10,6 +10,10 @@ const mcpPreviewLabels = {
   'mcp-error': ['MCP · 加载失败', 'MCP · Loading failed'],
   'mcp-ended': ['MCP · 审批已结束', 'MCP · Approval ended'],
   'mcp-expired': ['MCP · 结果已过期', 'MCP · Result expired'],
+  'mcp-auth-only': ['MCP · 仅待认证', 'MCP · Authentication only'],
+  'mcp-initial-loading': ['MCP · 首次加载', 'MCP · Initial loading'],
+  'mcp-list-error': ['MCP · 列表加载失败', 'MCP · List loading failed'],
+  'mcp-refresh-error': ['MCP · 刷新失败保留列表', 'MCP · Refresh failed with retained list'],
 };
 const mcp = {
   scenario: 'mcp-approval',
@@ -21,6 +25,7 @@ const mcp = {
   diagnostic: false,
   message: '',
   authHandoff: false,
+  returnFocus: '[data-mcp-action="open"]',
 };
 const mz = (zh, en) => language === 'zh-CN' ? zh : en;
 const mcpApprovals = [
@@ -62,14 +67,38 @@ const mcpRows = Array.from({ length: 65 }, (_, index) => [
   ['Ada', 'Lin', 'Sam', 'Alex'][index % 4],
   ['128.00', '74.50', '219.00', '36.00'][index % 4],
 ]);
+function mcpCounts() {
+  if (['mcp-initial-loading', 'mcp-list-error'].includes(mcp.scenario)) return [null, null];
+  if (mcp.scenario === 'mcp-empty') return [0, 0];
+  if (mcp.scenario === 'mcp-auth-only') return [0, 2];
+  return [mcp.scenario === 'mcp-ended' ? 1 : mcpApprovals.length, 2];
+}
+function mcpInitialTab() {
+  const [approvals, auth] = mcpCounts();
+  return approvals === 0 && auth > 0 ? 'auth' : 'approval';
+}
+function mcpClose() {
+  if (mcp.authHandoff) {
+    mcp.authHandoff = false;
+    render();
+    document.querySelector('[data-mcp-action="authenticate"]:not([disabled])')?.focus({ preventScroll: true });
+    return;
+  }
+  mcp.open = false;
+  render();
+  (document.querySelector(mcp.returnFocus) || document.querySelector('[data-mcp-action="open"]'))?.focus({
+    preventScroll: true,
+  });
+}
 function mcpSelectScenario(value) {
   mcp.scenario = value;
-  mcp.tab = value === 'mcp-auth' ? 'auth' : ['mcp-tasks', 'mcp-expired'].includes(value) ? 'tasks' : 'approval';
+  mcp.tab = value === 'mcp-auth' ? 'auth' : ['mcp-tasks', 'mcp-expired'].includes(value) ? 'tasks' : mcpInitialTab();
   mcp.selected = value === 'mcp-unselected' ? -1 : 0;
   mcp.page = 0;
   mcp.diagnostic = false;
   mcp.message = '';
   mcp.authHandoff = false;
+  mcp.returnFocus = '#preview-state';
   mcp.open = true;
   state.overlay = null;
   serverForm = null;
@@ -114,9 +143,12 @@ function mcpApproval() {
     return list + `<p class="mcp-empty">${mz('正在加载审批详情', 'Loading approval details')}</p>`;
   }
   if (mcp.scenario === 'mcp-error') {
-    return `<p class="mcp-error" role="alert">${
-      mz('审批详情加载失败，请重新选择重试。', 'Approval details failed to load. Select a request to retry.')
-    }</p>` + list;
+    return list
+      + `<div class="mcp-recovery" role="alert"><span>${
+        mz('审批详情加载失败，保留当前选择。', 'Approval details failed to load. The selection is retained.')
+      }</span><button class="button" data-mcp-action="retry-detail">${
+        mz('重新读取详情', 'Retry details')
+      }</button></div>`;
   }
   const item = mcpApprovals[mcp.selected];
   if (!item) return list + `<p class="mcp-empty">${mz('选择一项查看详情', 'Select an item to view details')}</p>`;
@@ -176,18 +208,12 @@ function mcpTask() {
   const item = mcpTasks[mcp.selected];
   const failed = mcp.selected === 1;
   const rows = mcpRows.slice(mcp.page * mcp.size, (mcp.page + 1) * mcp.size);
-  return `<div class="mcp-tools"><button class="button" data-mcp-action="refresh">${
-    mz('刷新任务', 'Refresh tasks')
-  }</button></div><div class="mcp-list">${
-    mcpTasks.map((row, i) => mcpListRow(row, i, mz(...row.status))).join('')
-  }</div>
+  return `<div class="mcp-list">${mcpTasks.map((row, i) => mcpListRow(row, i, mz(...row.status))).join('')}</div>
     <section class="detail-section mcp-details"><div class="detail-summary"><strong>${
     h(mz(...item.title))
   }</strong><span class="spacer"></span><span>${h(mz(...item.status))}</span></div><dl class="facts">${
     fact(mz('连接 / 数据库', 'Connection / database'), item.connection)
-  }${fact(mz('创建时间', 'Created'), item.created)}</dl><button class="button" data-mcp-action="refresh">${
-    mz('刷新任务', 'Refresh tasks')
-  }</button>
+  }${fact(mz('创建时间', 'Created'), item.created)}</dl>
     ${
     failed
       ? `<section class="detail-section"><h3>${
@@ -229,32 +255,51 @@ function mcpTask() {
 function renderMcpPreview() {
   const status = document.querySelector('#app .statusbar');
   if (!status) return;
-  const approvalCount = mcp.scenario === 'mcp-empty' ? 0 : mcp.scenario === 'mcp-ended' ? 1 : 2;
-  const authCount = mcp.scenario === 'mcp-empty' ? 0 : 2;
-  const count = approvalCount + authCount;
+  const [approvalCount, authCount] = mcpCounts();
+  const count = approvalCount === null || authCount === null ? null : approvalCount + authCount;
+  const countLabel = value => value === null ? mz('未知', 'Unknown') : value;
   status.insertAdjacentHTML(
     'beforeend',
-    `<button data-mcp-action="open">${mz('MCP 待办', 'MCP pending')} (${count})</button>`,
+    `<button data-mcp-action="open">${mz('MCP 待办', 'MCP pending')} (${countLabel(count)})</button>`,
   );
   if (!mcp.open) return;
-  const empty = mcp.scenario === 'mcp-empty';
-  const tabs = [['approval', `${mz('待审批', 'Approvals')} (${approvalCount})`], [
+  const empty = mcp.scenario === 'mcp-empty' || (mcp.scenario === 'mcp-auth-only' && mcp.tab === 'approval');
+  const tabs = [['approval', `${mz('待审批', 'Approvals')} (${countLabel(approvalCount)})`], [
     'auth',
-    `${mz('待认证', 'Authentication')} (${authCount})`,
+    `${mz('待认证', 'Authentication')} (${countLabel(authCount)})`,
   ], ['tasks', mz('Agent 任务', 'Agent tasks')]];
-  const content = empty
-    ? `<div class="mcp-empty">${
-      mcp.tab === 'approval'
-        ? mz('没有待审批项', 'No pending approvals')
-        : mcp.tab === 'auth'
-        ? mz('没有待认证连接', 'No connections awaiting authentication')
-        : mz('没有 Agent 任务', 'No agent tasks')
-    }</div>`
-    : mcp.tab === 'approval'
-    ? mcpApproval()
+  const listName = mcp.tab === 'approval'
+    ? mz('审批列表', 'Approval list')
     : mcp.tab === 'auth'
-    ? mcpAuth()
-    : mcpTask();
+    ? mz('认证列表', 'Authentication list')
+    : mz('任务列表', 'Task list');
+  const loading = mcp.scenario === 'mcp-initial-loading';
+  const listFailed = mcp.scenario === 'mcp-list-error';
+  const refreshFailed = mcp.scenario === 'mcp-refresh-error';
+  const recovery = `<div class="mcp-recovery" role="alert"><span>${h(listName)}${
+    listFailed
+      ? mz('未能加载，数据未知。', ' could not be loaded; data is unknown.')
+      : mz('刷新失败，仍显示上次加载的数据。', ' refresh failed; previously loaded data is retained.')
+  }</span><button class="button" data-mcp-action="retry-list">${mz('重试列表', 'Retry list')}</button></div>`;
+  const content = loading
+    ? `<p class="mcp-empty" role="status">${h(listName)}${mz('加载中…', ' loading…')}</p>`
+    : listFailed
+    ? recovery
+    : `${refreshFailed ? recovery : ''}${
+      empty
+        ? `<div class="mcp-empty">${
+          mcp.tab === 'approval'
+            ? mz('没有待审批项', 'No pending approvals')
+            : mcp.tab === 'auth'
+            ? mz('没有待认证连接', 'No connections awaiting authentication')
+            : mz('没有 Agent 任务', 'No agent tasks')
+        }</div>`
+        : mcp.tab === 'approval'
+        ? mcpApproval()
+        : mcp.tab === 'auth'
+        ? mcpAuth()
+        : mcpTask()
+    }`;
   const body = mcp.authHandoff
     ? `<p>${
       mz(
@@ -266,11 +311,17 @@ function renderMcpPreview() {
       mz('示例数据 · 仅供预览 · 未发送', 'Sample data · preview only · not sent')
     }</p><nav class="mcp-tabs" role="tablist" aria-label="${mz('MCP 待办分区', 'MCP pending sections')}">${
       tabs.map(([id, label]) =>
-        `<button role="tab" aria-selected="${mcp.tab === id}" class="${
+        `<button id="mcp-tab-${id}" role="tab" aria-selected="${
+          mcp.tab === id
+        }" aria-controls="mcp-tab-panel" tabindex="${mcp.tab === id ? '0' : '-1'}" class="${
           mcp.tab === id ? 'active' : ''
         }" data-mcp-action="tab" data-tab="${id}">${h(label)}</button>`
       ).join('')
-    }</nav>${content}${mcp.message ? `<p class="mcp-message" role="status">${h(mz(...mcp.message))}</p>` : ''}`;
+    }</nav><div class="mcp-tools"><button class="button" data-mcp-action="refresh">${
+      mz('刷新当前分区', 'Refresh current section')
+    }</button></div><div id="mcp-tab-panel" role="tabpanel" aria-labelledby="mcp-tab-${mcp.tab}">${content}</div>${
+      mcp.message ? `<p class="mcp-message" role="status">${h(mz(...mcp.message))}</p>` : ''
+    }`;
   const footer = `<span class="spacer"></span><button class="button" data-mcp-action="close">${
     mz('关闭', 'Close')
   }</button>`;
@@ -290,6 +341,7 @@ document.addEventListener('change', event => {
       event.stopImmediatePropagation();
       mcpSelectScenario(event.target.value);
       render();
+      document.querySelector('.mcp-overlay [role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
     } else mcp.open = false;
   } else if (event.target.id === 'preview-source') mcp.open = false;
   else if (event.target.matches('[data-mcp-size]')) {
@@ -309,7 +361,8 @@ document.addEventListener('click', event => {
   if (action === 'open') {
     mcp.open = true;
     mcp.authHandoff = false;
-    mcp.tab = 'approval';
+    mcp.tab = mcpInitialTab();
+    mcp.returnFocus = '[data-mcp-action="open"]';
     mcp.selected = 0;
     state.overlay = null;
     ap.modal = false;
@@ -318,8 +371,8 @@ document.addEventListener('click', event => {
     serverDelete = null;
     connectionDelete = null;
   } else if (action === 'close') {
-    mcp.open = false;
-    mcp.authHandoff = false;
+    mcpClose();
+    return;
   } else if (action === 'tab') {
     mcp.tab = button.dataset.tab;
     mcp.selected = 0;
@@ -331,11 +384,11 @@ document.addEventListener('click', event => {
     mcp.page = 0;
     mcp.diagnostic = false;
     mcp.message = '';
-    if (mcp.scenario === 'mcp-error') {
-      mcp.scenario = 'mcp-approval';
-      document.querySelector('#preview-state').value = 'mcp-approval';
-      mcp.message = ['示例详情已重新加载 · 未发送请求。', 'Sample details reloaded · no request was sent.'];
-    }
+  } else if (action === 'retry-list' || action === 'retry-detail') {
+    mcp.message = [
+      '重试仅供预览，未发送请求；当前状态和选择保持不变。',
+      'Retry is a preview only; no request was sent and the state and selection are unchanged.',
+    ];
   } else if (action === 'authenticate') mcp.authHandoff = true;
   else if (action === 'diagnostic') mcp.diagnostic = !mcp.diagnostic;
   else if (action === 'observe') {
@@ -350,17 +403,48 @@ document.addEventListener('click', event => {
   } else if (action === 'previous') mcp.page--;
   else if (action === 'next') mcp.page++;
   render();
-  (document.querySelector(focusSelector) || document.querySelector('[data-mcp-action="close"]'))?.focus({
-    preventScroll: true,
-  });
+  const focusTarget = action === 'open'
+    ? document.querySelector('.mcp-overlay [role="tab"][aria-selected="true"]')
+    : action === 'authenticate'
+    ? document.querySelector('.mcp-overlay [data-mcp-action="close"]')
+    : document.querySelector(focusSelector) || document.querySelector('.mcp-overlay [data-mcp-action="close"]');
+  focusTarget?.focus({ preventScroll: true });
 }, true);
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && mcp.open) {
+  if (!mcp.open) return;
+  const overlay = document.querySelector('.mcp-overlay');
+  if (!overlay || Array.from(document.querySelectorAll('#app .overlay')).at(-1) !== overlay) return;
+  const tab = event.target.closest('.mcp-tabs [role="tab"]');
+  if (tab && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+    const tabs = Array.from(overlay.querySelectorAll('.mcp-tabs [role="tab"]'));
+    const index = tabs.indexOf(tab);
+    const next = event.key === 'Home' ? 0 : event.key === 'End'
+      ? tabs.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    tabs.forEach((item, i) => {
+      item.tabIndex = i === next ? 0 : -1;
+    });
+    tabs[next].focus();
+    return;
+  }
+  if (event.key === 'Tab') {
+    const focusable = Array.from(
+      overlay.querySelectorAll(
+        'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      ),
+    )
+      .filter(item => item.tabIndex >= 0 && item.getClientRects().length);
+    if (!focusable.length) return;
+    const index = focusable.indexOf(document.activeElement);
+    if ((event.shiftKey && index <= 0) || (!event.shiftKey && (index === -1 || index === focusable.length - 1))) {
+      event.preventDefault();
+      focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
+    }
+  } else if (event.key === 'Escape' && !document.querySelector(':popover-open')) {
     event.stopImmediatePropagation();
     event.preventDefault();
-    mcp.open = false;
-    mcp.authHandoff = false;
-    render();
-    document.querySelector('[data-mcp-action="open"]')?.focus({ preventScroll: true });
+    mcpClose();
   }
 }, true);

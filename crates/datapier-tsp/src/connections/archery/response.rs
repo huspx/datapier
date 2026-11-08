@@ -318,6 +318,10 @@ impl App {
                         .filter_map(Value::as_str)
                         .map(str::to_owned)
                         .collect();
+                    self.archery
+                        .available_by_instance
+                        .insert(id, databases.iter().cloned().collect());
+                    sel.available_databases = Some(databases.iter().cloned().collect());
                     for selected in &sel.selected {
                         if !databases.contains(selected) {
                             databases.push(selected.clone());

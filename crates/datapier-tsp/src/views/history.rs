@@ -130,15 +130,33 @@ fn history_pagination(app: &App) -> Node<Msg> {
 }
 
 pub(super) fn history_footer(app: &App) -> html::El<Msg> {
-    let can_open = app.history_selected_text().is_some();
-    html::div()
-        .class("modal-footer")
+    let reason = if app.workbench.archery_history.text_pending.is_some() {
+        Some("正在加载完整文本")
+    } else if app.history_selected_text().is_none() {
+        Some("请先选择包含完整文本的记录")
+    } else if app.tabs.get(app.active).is_none() {
+        Some("请先连接数据库")
+    } else if app.workbench.inline.is_some()
+        || app.has_live_drafts()
+        || !app.tabs[app.active].pending.is_null()
+    {
+        Some("请先提交或丢弃当前草稿")
+    } else if app.task.is_some() || app.operation_pending || app.workbench.cli_running {
+        Some("请等待或取消当前任务")
+    } else {
+        None
+    };
+    let mut footer = html::div().class("modal-footer");
+    if let Some(reason) = reason {
+        footer = footer.child(html::span(crate::i18n::tr(reason).into_owned()).class("muted"));
+    }
+    footer
         .child(html::span("").class("spacer"))
         .child(button("关闭", "overlay-close"))
         .child(
             ui::button(crate::i18n::tr("打开为草稿").into_owned())
                 .variant(ui::ButtonVariant::Primary)
-                .disabled(!can_open)
+                .disabled(reason.is_some())
                 .on_click(Msg::Action("history-open".into())),
         )
 }

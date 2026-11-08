@@ -1,16 +1,18 @@
 'use strict';
 function simpleTable(columns, rows, resultGrid = false) {
-  return `<table ${resultGrid ? 'id="result-grid"' : ''}>${
+  return `<table ${resultGrid ? 'id="result-grid" role="grid"' : ''}>${
     resultGrid
       ? `<colgroup>${columns.map(c => `<col data-grid-column="${h(c)}">`).join('')}</colgroup>`
       : ''
-  }<thead><tr>${columns.map(c => `<th>${h(c)}</th>`).join('')}</tr></thead><tbody>${
-    rows.map(row =>
+  }<thead><tr>${
+    columns.map(c => `<th ${resultGrid ? `data-grid-column="${h(c)}"` : ''}>${h(c)}</th>`).join('')
+  }</tr></thead><tbody>${
+    rows.map((row, rowIndex) =>
       `<tr>${
         row.map((v, i) =>
-          `<td ${resultGrid ? `data-cell="${h(columns[i])}" tabindex="0"` : ''}>${
-            v === null ? '<span class="null">NULL</span>' : h(v)
-          }</td>`
+          `<td ${
+            resultGrid ? `data-cell="${h(columns[i])}" tabindex="${rowIndex === 0 && i === 0 ? '0' : '-1'}"` : ''
+          }>${v === null ? '<span class="null">NULL</span>' : h(v)}</td>`
         ).join('')
       }</tr>`
     ).join('')
@@ -86,9 +88,38 @@ function startCellEdit(id, column) {
   $('#grid-cell-editor').select();
 }
 let gridMeasureCache = null;
+const frozenGridStyle = document.createElement('style');
+frozenGridStyle.textContent = `
+  table[role="grid"] .grid-frozen { position: sticky; background: var(--panel); }
+  table[role="grid"] td.grid-frozen { z-index: 2; }
+  table[role="grid"] th.grid-frozen { z-index: 3; }
+  table[role="grid"] tr:hover td.grid-frozen { background: var(--card); }
+  table[role="grid"] tr.selected td.grid-frozen,
+  table[role="grid"] td.grid-frozen.cell-selected { background: var(--selected); }
+`;
+document.head.appendChild(frozenGridStyle);
+function positionFrozenColumns(table, key) {
+  if (!table) return;
+  const frozen = new Set(state.frozenColumns?.[key] || []);
+  let left = 0;
+  [...table.tHead.rows[0].cells].forEach((header, index) => {
+    const active = header.dataset.gridColumn !== undefined && frozen.has(header.dataset.gridColumn);
+    const width = header.getBoundingClientRect().width;
+    [header, ...[...table.tBodies[0].rows].map(row => row.cells[index])].forEach(cell => {
+      if (!cell) return;
+      cell.classList.toggle('grid-frozen', active);
+      cell.style.left = active ? `${left}px` : '';
+    });
+    if (active) left += width;
+  });
+}
 function fitGrid() {
   const table = $('#mysql-grid') || $('#result-grid');
-  if (!table || state.cellEdit) return;
+  if (!table || state.cellEdit) {
+    positionFrozenColumns($('#redis-grid'), `redis:${state.redisDb}:${state.key}`);
+    if (table) positionFrozenColumns(table, table.id === 'result-grid' ? 'result' : `${state.database}.${state.table}`);
+    return;
+  }
   const result = table.id === 'result-grid';
   const columns = [...table.querySelectorAll('col[data-grid-column]')];
   const rows = result
@@ -168,6 +199,8 @@ function fitGrid() {
   columns.forEach((col, i) => col.style.width = widths[i] + 'px');
   table.style.width = (numberWidth + widths.reduce((a, b) => a + b, 0))
     + 'px';
+  positionFrozenColumns(table, key);
+  positionFrozenColumns($('#redis-grid'), `redis:${state.redisDb}:${state.key}`);
 }
 function paintCellSelection() {
   const selection = state.cellSelection;
@@ -220,6 +253,8 @@ function copyCellSelection(
   ];
   const source = redis
     ? keySamples.find(item => item.name === state.key)?.rows
+    : queryResult && previewSource === 'archery'
+    ? ap.cachedRows.slice(ap.resultPage * ap.resultPageSize, (ap.resultPage + 1) * ap.resultPageSize)
     : queryResult
     ? orders.filter(row =>
       row.status === 'paid'
@@ -241,7 +276,7 @@ function copyCellSelection(
       c++
     ) {
       if (!cells[c] || !source[r]) return;
-      const value = source[r][cells[c].dataset.cell];
+      const value = queryResult && previewSource === 'archery' ? source[r][c] : source[r][cells[c].dataset.cell];
       if (value === undefined) return;
       const redisType = redis
         && keySamples.find(item => item.name === state.key)?.type;
@@ -275,16 +310,41 @@ function gridPosition(cell) {
     [...row.querySelectorAll('td[data-cell]')].indexOf(cell),
   ];
 }
-function grid() {
+// 一个数据单元格进入 Tab 序列；编辑器自行处理文本编辑和 Tab。
+document.addEventListener('focusin', event => {
+  const cell = event.target.closest?.('table[role="grid"] td[data-cell]');
+  if (!cell) return;
+  cell.closest('table').querySelectorAll('td[data-cell][tabindex="0"]').forEach(item => {
+    if (item !== cell) item.tabIndex = -1;
+  });
+  cell.tabIndex = 0;
+});
+document.addEventListener('keydown', event => {
+  const cell = event.target.matches?.('table[role="grid"] td[data-cell]') ? event.target : null;
+  if (!cell || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+  const directions = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] };
+  const direction = directions[event.key];
+  if (!direction && event.key !== 'Home' && event.key !== 'End') return;
+  const rows = [...cell.closest('tbody').rows];
+  const [row, column] = gridPosition(cell);
+  const nextRow = Math.max(0, Math.min(rows.length - 1, row + (direction?.[0] || 0)));
+  const cells = [...rows[nextRow].querySelectorAll('td[data-cell]')];
+  const nextColumn = event.key === 'Home' ? 0 : event.key === 'End'
+    ? cells.length - 1
+    : Math.max(0, Math.min(cells.length - 1, column + direction[1]));
+  event.preventDefault();
+  cells[nextColumn]?.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: event.shiftKey }));
+});
+function grid(firstVisibleRow) {
   const rows = currentRows();
   const columns = Object.keys(
     databases[state.database]?.[state.table]?.[0] || {},
   ).filter(c => !state.hiddenColumns[`${state.database}.${state.table}`]?.includes(c));
-  return `<div class="table-wrap"><table id="mysql-grid"><colgroup><col style="width:38px">${
+  return `<div class="table-wrap"><table id="mysql-grid" role="grid"><colgroup><col style="width:38px">${
     columns.map(c => `<col data-grid-column="${h(c)}">`).join('')
   }</colgroup><thead><tr><th class="row-number">#</th>${
     columns.map(c =>
-      `<th>${h(c)}<small>${
+      `<th data-grid-column="${h(c)}">${h(c)}<small>${
         c === 'id' || c.endsWith('_id')
           ? 'BIGINT'
           : ['total', 'revenue', 'price'].includes(c)
@@ -299,13 +359,15 @@ function grid() {
       const identity = rowId(row);
       return `<tr data-row="${h(identity)}" class="${
         state.selected.has(identity) ? 'selected' : ''
-      }"><td class="row-number" data-select-row="${h(identity)}" tabindex="0" role="button" aria-label="${
+      }"><td class="row-number" data-select-row="${h(identity)}" tabindex="-1" role="button" aria-label="${
         t('selectRow', { number: index + 1 })
       }" aria-pressed="${state.selected.has(identity)}" title="${deletedRows.has(row) ? h(t('deletedDraft')) : ''}">${
         index + 1
       }${deletedRows.has(row) ? ' · ×' : ''}</td>${
-        columns.map(c =>
-          `<td data-cell="${h(c)}" tabindex="0" class="${
+        columns.map((c, columnIndex) =>
+          `<td data-cell="${h(c)}" tabindex="${
+            identity === firstVisibleRow && columnIndex === 0 ? '0' : '-1'
+          }" class="${
             ['id', 'total', 'customer_id', 'revenue', 'orders'].includes(c)
               ? 'number'
               : ''

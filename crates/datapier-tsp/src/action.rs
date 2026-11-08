@@ -2,6 +2,41 @@ use super::*;
 
 impl App {
     pub(super) fn action(&mut self, name: &str, backend: &Backend) {
+        self.track_modal_draft();
+        let previous = self.workbench.overlay.clone();
+        let previous_cell_intent = self.workbench.cell_open_intent;
+        let previous_focus = previous.is_none().then(|| self.focus.clone());
+        self.action_inner(name, backend);
+        // 切换字段会先关闭旧 drawer 再读取；只清除离开前已有的意图，保留本次新请求。
+        if previous != self.workbench.overlay
+            && self.workbench.overlay.as_deref() != Some("cell")
+            && self.workbench.cell_open_intent == previous_cell_intent
+        {
+            self.workbench.cell_open_intent = None;
+        }
+        self.track_modal_draft();
+        if previous.is_none() && self.workbench.overlay.is_some() {
+            self.workbench.modal_return_focus = previous_focus;
+        }
+    }
+
+    fn action_inner(&mut self, name: &str, backend: &Backend) {
+        if self.modal_close_action(name, backend) {
+            return;
+        }
+        for (prefix, action) in [
+            ("column-select-hide:", "column-hide"),
+            ("column-select-freeze:", "column-freeze"),
+        ] {
+            if let Some(index) = name
+                .strip_prefix(prefix)
+                .and_then(|index| index.parse::<usize>().ok())
+            {
+                self.field_set("column", index.to_string());
+                self.action(action, backend);
+                return;
+            }
+        }
         if self.tab_close.is_some() {
             return;
         }
@@ -128,37 +163,27 @@ impl App {
         }
         if matches!(
             name,
-            "schema-design"
-                | "schema-create-table"
-                | "schema-create-view"
-                | "schema-create-trigger"
+            "schema-create-table" | "schema-create-view" | "schema-create-trigger"
         ) {
-            let creating = name != "schema-design";
             let trigger_table = (name == "schema-create-trigger")
                 .then(|| self.target.as_ref().map(|target| target.name.clone()))
                 .flatten();
-            let target = if creating {
-                ResourceTarget {
-                    database: self
-                        .target
-                        .as_ref()
-                        .and_then(|target| target.database.clone())
-                        .or_else(|| self.database.clone()),
-                    name: String::new(),
-                    key_b64: None,
-                    kind: match name {
-                        "schema-create-view" => "view",
-                        "schema-create-trigger" => "trigger",
-                        _ => "table",
-                    }
-                    .into(),
+            let target = ResourceTarget {
+                database: self
+                    .target
+                    .as_ref()
+                    .and_then(|target| target.database.clone())
+                    .or_else(|| self.database.clone()),
+                name: String::new(),
+                key_b64: None,
+                kind: match name {
+                    "schema-create-view" => "view",
+                    "schema-create-trigger" => "trigger",
+                    _ => "table",
                 }
-            } else if let Some(target) = self.target.clone() {
-                target
-            } else {
-                return;
+                .into(),
             };
-            self.advanced_schema_open(backend, target, creating, trigger_table);
+            self.advanced_schema_open(backend, target, true, trigger_table);
             return;
         }
         if name == "replace-restore" {
@@ -249,9 +274,6 @@ impl App {
         }
         if self.empty_context_action(name, backend) {
             return;
-        }
-        if name == "overlay-close" && self.workbench.overlay.as_deref() == Some("history") {
-            self.invalidate_history(backend);
         }
         if self.archery_action(name, backend) {
             return;

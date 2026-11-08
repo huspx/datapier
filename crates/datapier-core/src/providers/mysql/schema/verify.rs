@@ -1,5 +1,8 @@
-//! 视图读回比较；仅规范化可证明不改变含义的服务端格式变换。
-use crate::model::schema::{TriggerDefinition, ViewDefinition};
+//! 结构读回比较；仅规范化可证明不改变含义的服务端变换。
+use crate::model::schema::{
+    ConstraintDefinition, IndexDefinition, IndexKind, TableDefinition, TriggerDefinition,
+    ViewDefinition,
+};
 use sqlparser::{
     ast::{
         Expr, Ident, ObjectName, ObjectNamePart, Select, SelectItem, SetExpr, Statement,
@@ -9,6 +12,55 @@ use sqlparser::{
     parser::Parser,
 };
 use std::ops::ControlFlow;
+
+fn supports_foreign_key(index: &IndexDefinition, columns: &[String]) -> bool {
+    !columns.is_empty()
+        && index.visible
+        && matches!(
+            index.kind,
+            IndexKind::Primary | IndexKind::Unique | IndexKind::Normal
+        )
+        && index
+            .method
+            .as_deref()
+            .is_none_or(|method| method.eq_ignore_ascii_case("BTREE"))
+        && index.parts.len() >= columns.len()
+        && index.parts.iter().zip(columns).all(|(part, column)| {
+            part.column.as_ref() == Some(column)
+                && part.expression.is_none()
+                && part.prefix_length.is_none()
+                && !part.descending
+        })
+}
+
+/// 没有可复用索引时，InnoDB 为具名外键生成同名普通索引；不忽略其他额外索引。
+pub(super) fn include_implicit_foreign_indexes(
+    expected: &mut TableDefinition,
+    actual: &TableDefinition,
+) {
+    for constraint in &expected.constraints {
+        let ConstraintDefinition::ForeignKey { name, columns, .. } = constraint else {
+            continue;
+        };
+        if name.is_empty()
+            || expected
+                .indexes
+                .iter()
+                .any(|index| index.name == *name || supports_foreign_key(index, columns))
+        {
+            continue;
+        }
+        if let Some(index) = actual.indexes.iter().find(|index| {
+            index.name == *name
+                && index.kind == IndexKind::Normal
+                && index.parts.len() == columns.len()
+                && index.options.is_empty()
+                && supports_foreign_key(index, columns)
+        }) {
+            expected.indexes.push(index.clone());
+        }
+    }
+}
 
 // MySQL 5.7 补全整数显示宽度，8.x 删除该宽度；ZEROFILL 会使宽度影响显示，必须保留。
 pub(super) fn normalized_type(value: &str) -> String {
@@ -239,3 +291,7 @@ pub(super) fn triggers_equal(expected: &TriggerDefinition, actual: &TriggerDefin
             .as_ref()
             .is_none_or(|v| actual.collation_connection.as_ref() == Some(v))
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/mysql/schema_verify.rs"]
+mod tests;

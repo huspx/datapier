@@ -281,6 +281,22 @@ impl App {
                     response.tag = tag;
                     self.response(response, backend);
                 }
+            } else if tag.starts_with("schema/") {
+                // SchemaEditor 对每个请求再校验 token 与本地代次；连续失效事件不应丢失提交响应。
+                self.advanced_schema_response(&tag, &response.result, backend);
+            } else if let Some(task) = tag.strip_prefix("execution.get/")
+                && self.task.as_deref() == Some(task)
+                && self.advanced_schema.as_ref().is_some_and(|schema| {
+                    schema.execution_pending
+                        && schema
+                            .execution
+                            .as_ref()
+                            .and_then(|execution| execution.get("task_id"))
+                            .and_then(Value::as_str)
+                            == Some(task)
+                })
+            {
+                self.advanced_schema_task_response(task, &response.result, backend);
             } else if tag.starts_with("advanced-value/") {
                 if self.workbench.value_schema_generations == Some((generation, self.generation)) {
                     self.advanced_value_response(&tag, &response.result, backend);
@@ -306,6 +322,7 @@ impl App {
                     self.response(response, backend);
                 } else if let Some(task) = tag.strip_prefix("execution.get/")
                     && self.task.as_deref() == Some(task)
+                    && !self.advanced_schema_task_response(task, &response.result, backend)
                 {
                     response.tag = "execution.get".into();
                     self.response(response, backend);

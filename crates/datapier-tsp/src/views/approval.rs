@@ -119,22 +119,40 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
     for (tab, label, action) in [
         (
             ApprovalTab::Approvals,
-            format!("{} ({approval_count})", text("待审批")),
+            format!(
+                "{} ({})",
+                text("待审批"),
+                if state.list_loaded {
+                    approval_count.to_string()
+                } else {
+                    text("未知")
+                }
+            ),
             "approval-tab-approvals",
         ),
         (
             ApprovalTab::Authentication,
-            format!("{} ({})", text("待认证"), state.authentication.len()),
+            format!(
+                "{} ({})",
+                text("待认证"),
+                if state.list_loaded {
+                    state.authentication.len().to_string()
+                } else {
+                    text("未知")
+                }
+            ),
             "approval-tab-authentication",
         ),
         (ApprovalTab::Tasks, text("Agent 任务"), "approval-tab-tasks"),
     ] {
         tabs = tabs.child(
             html::button(label)
-                .class(if state.tab == tab {
-                    "mcp-tab active"
-                } else {
-                    "mcp-tab"
+                .key(action)
+                .class(match (state.tab == tab, app.focus == action) {
+                    (true, true) => "mcp-tab active focused",
+                    (true, false) => "mcp-tab active",
+                    (false, true) => "mcp-tab focused",
+                    (false, false) => "mcp-tab",
                 })
                 .attr("role", "tab")
                 .attr("aria-selected", state.tab == tab)
@@ -142,6 +160,13 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         );
     }
     let mut body = html::div().class("modal-body mcp-body").child(tabs);
+    if (state.tab == ApprovalTab::Tasks
+        && state.observe_list_loaded
+        && state.observe_list_pending.is_some())
+        || (state.tab != ApprovalTab::Tasks && state.list_loaded && state.list_pending.is_some())
+    {
+        body = body.child(html::p(text("正在刷新列表")).class("muted"));
+    }
     let footer = html::div()
         .class("modal-footer")
         .child(html::span("").class("spacer"))
@@ -151,15 +176,17 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             if let Some(error) = &state.error {
                 body = body.child(html::p(text(error)).class("form-submit-error"));
             }
-            if state.items.is_empty() {
-                body = body.child(
-                    html::p(text(if state.list_pending.is_some() {
-                        "正在加载审批"
-                    } else {
-                        "没有待处理的审批"
-                    }))
-                    .class("empty-note"),
-                );
+            if let Some(error) = &state.list_error {
+                body = body
+                    .child(html::p(text(error)).class("form-submit-error"))
+                    .child(button("重试列表", "approval-refresh"));
+            }
+            if state.items.is_empty() && state.list_error.is_none() {
+                if state.list_pending.is_some() || !state.list_loaded {
+                    body = body.child(html::p(text("正在加载审批")).class("empty-note"));
+                } else {
+                    body = body.child(html::p(text("没有待处理的审批")).class("empty-note"));
+                }
             }
             let mut list = html::div().class("mcp-list");
             for item in &state.items {
@@ -199,6 +226,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 let selected = state.selected.as_deref() == Some(id);
                 let can_decide = selected
                     && state.detail_pending.is_none()
+                    && state.detail_error.is_none()
                     && state.decide_pending.is_none()
                     && detail.is_some_and(|record| {
                         record["state"].as_str() == Some("pending")
@@ -252,6 +280,11 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 );
             }
             body = body.child(list);
+            if let Some(error) = &state.detail_error {
+                body = body
+                    .child(html::p(text(error)).class("form-submit-error"))
+                    .child(button("重新读取详情", "approval-detail-retry"));
+            }
             if state.detail_pending.is_some() {
                 body = body.child(html::p(text("正在加载审批详情")).class("empty-note"));
             } else if let Some(record) = &state.detail {
@@ -341,15 +374,17 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             if let Some(error) = &state.error {
                 body = body.child(html::p(text(error)).class("form-submit-error"));
             }
-            if state.authentication.is_empty() {
-                body = body.child(
-                    html::p(text(if state.list_pending.is_some() {
-                        "加载中…"
-                    } else {
-                        "没有待认证的连接"
-                    }))
-                    .class("empty-note"),
-                );
+            if let Some(error) = &state.list_error {
+                body = body
+                    .child(html::p(text(error)).class("form-submit-error"))
+                    .child(button("重试列表", "approval-refresh"));
+            }
+            if state.authentication.is_empty() && state.list_error.is_none() {
+                if state.list_pending.is_some() || !state.list_loaded {
+                    body = body.child(html::p(text("加载中…")).class("empty-note"));
+                } else {
+                    body = body.child(html::p(text("没有待认证的连接")).class("empty-note"));
+                }
             }
             let mut list = html::div().class("mcp-list");
             for item in &state.authentication {
@@ -399,16 +434,19 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             );
             if let Some(error) = &state.observe_error {
                 body = body.child(html::p(text(error)).class("form-submit-error"));
+                if state.observed_task_id.is_some() {
+                    body = body.child(button("重新读取详情", "approval-observe-refresh"));
+                }
             }
-            if state.observed_tasks.is_empty() {
-                body = body.child(
-                    html::p(text(if state.observe_list_pending.is_some() {
-                        "加载中…"
-                    } else {
-                        "没有可观察的任务"
-                    }))
-                    .class("empty-note"),
-                );
+            if let Some(error) = &state.observe_list_error {
+                body = body.child(html::p(text(error)).class("form-submit-error"));
+            }
+            if state.observed_tasks.is_empty() && state.observe_list_error.is_none() {
+                if state.observe_list_pending.is_some() || !state.observe_list_loaded {
+                    body = body.child(html::p(text("加载中…")).class("empty-note"));
+                } else {
+                    body = body.child(html::p(text("没有可观察的任务")).class("empty-note"));
+                }
             }
             let mut list = html::div().class("mcp-list");
             for task in &state.observed_tasks {
@@ -611,8 +649,20 @@ pub(super) fn control(app: &App) -> Node<Msg> {
         .count()
         + app.approvals.authentication.len();
     flat_action("list", "MCP 待办", "approval-toggle")
-        .class("status-action")
+        .key("approval-open")
+        .class(if app.focus == "approval-open" {
+            "status-action focused"
+        } else {
+            "status-action"
+        })
         .attr("aria-expanded", app.approvals.open)
-        .child(html::span(format!(" ({count})")))
+        .child(html::span(format!(
+            " ({})",
+            if app.approvals.list_loaded {
+                count.to_string()
+            } else {
+                text("未知")
+            }
+        )))
         .into()
 }

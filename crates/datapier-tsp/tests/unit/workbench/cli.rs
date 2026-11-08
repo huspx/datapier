@@ -272,15 +272,15 @@ fn cli_failure_keeps_partial_results_and_chunked_value_separate() {
     let tag = request.tag.splitn(3, ':').nth(2).unwrap();
     app.workbench_response(
         &stale_tag,
-        json!({"bytes_b64":STANDARD.encode(&bytes),"offset":0,"next":null,"total":bytes.len()}),
+        json!({"data_b64":STANDARD.encode(&bytes),"offset":0,"next":null,"total_bytes":bytes.len()}),
         &backend,
     );
     assert_eq!(app.workbench.cli_large.as_ref().unwrap().offset, 0);
     let split = bytes.len() / 2;
-    app.workbench_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total":bytes.len()}), &backend);
+    app.workbench_response(tag, json!({"data_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total_bytes":bytes.len()}), &backend);
     let request = requests.try_recv().unwrap();
     let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total":bytes.len()}), &backend);
+    app.workbench_response(tag, json!({"data_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total_bytes":bytes.len()}), &backend);
     assert_eq!(
         app.workbench
             .cli_grid

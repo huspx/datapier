@@ -570,8 +570,6 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             "right" => Some(Navigation::Right),
                             "home" => Some(Navigation::Home),
                             "end" => Some(Navigation::End),
-                            "tab" if key.shift => Some(Navigation::BackTab),
-                            "tab" => Some(Navigation::Tab),
                             _ => None,
                         };
                         if let Some(nav) = nav {

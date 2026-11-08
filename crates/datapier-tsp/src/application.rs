@@ -87,6 +87,47 @@ pub(super) struct ArcheryHistory {
 }
 
 impl App {
+    fn settings_form_snapshot(&self) -> String {
+        let mut values = serde_json::Map::new();
+        for &(group, key, _) in SETTINGS_FIELDS.iter().chain(SETTINGS_SWITCHES) {
+            let name = settings_field(group, key);
+            values.insert(name.clone(), json!(self.field(&name)));
+        }
+        for name in [
+            "settings-approval-default_policy",
+            "settings-language-draft",
+            "editing_plan_items",
+            "editing_plan_bytes",
+            "editing_value_bytes",
+            "editing_text_bytes",
+            "editing_preview_rows",
+            "external_mode",
+            "external_program",
+            "external_args",
+        ] {
+            values.insert(name.to_owned(), json!(self.field(name)));
+        }
+        Value::Object(values).to_string()
+    }
+
+    pub(super) fn settings_form_dirty(&self) -> bool {
+        self.settings_loaded
+            && self.settings_form_snapshot() != self.field("settings-form-snapshot")
+    }
+
+    pub(super) fn settings_discard_form(&mut self) {
+        if let Ok(Value::Object(snapshot)) =
+            serde_json::from_str::<Value>(self.field("settings-form-snapshot"))
+        {
+            for (name, value) in snapshot {
+                if let Some(value) = value.as_str() {
+                    self.field_set(&name, value);
+                }
+            }
+        }
+        self.field_set("settings-reload-confirm", "false");
+    }
+
     fn settings_load_fields(&mut self) {
         let value = serde_json::to_value(&self.settings).unwrap_or_default();
         for &(group, key, _) in SETTINGS_FIELDS.iter().chain(SETTINGS_SWITCHES) {
@@ -126,6 +167,7 @@ impl App {
             editor.map_or_else(String::new, |e| e.args.join("\n")),
         );
         self.field_set("settings-language-draft", settings_text(&value["language"]));
+        self.field_set("settings-form-snapshot", self.settings_form_snapshot());
     }
     fn mcp_rules_request(
         &mut self,
@@ -168,6 +210,7 @@ impl App {
         match result {
             Ok(value) if operation == "mcp-rules-get" => {
                 self.field_set("mcp-rule-data", value.to_string());
+                self.field_set("mcp-rule-baseline", value.to_string());
             }
             Ok(value) if operation == "mcp-rules-set" || operation == "mcp-policy-set" => {
                 if let Some(policy) = value["profile"]["approval_policy"].as_str() {
@@ -206,6 +249,7 @@ impl App {
     }
 
     fn save_settings(&mut self, backend: &Backend) {
+        self.field_set("settings-form-saving", self.settings_form_snapshot());
         self.field_set("settings-error", "");
         let token = Uuid::new_v4();
         self.settings_save_token = Some(token);
@@ -242,6 +286,10 @@ impl App {
             {
                 return;
             }
+            // 后台刷新不得给未保存草稿换用更新后的 revision；否则整份旧表单会覆盖另一窗口的修改。
+            if self.field("settings-reload") != "true" && self.settings_form_dirty() {
+                return;
+            }
             false
         } else {
             return;
@@ -252,8 +300,13 @@ impl App {
             .and_then(|v| serde_json::from_value::<AppSettings>(v).map_err(Into::into))
         {
             Ok(settings) => {
-                let first_load = !self.settings_loaded;
                 self.settings_loaded = true;
+                if saving {
+                    self.field_set(
+                        "settings-form-snapshot",
+                        self.field("settings-form-saving").to_owned(),
+                    );
+                }
                 self.field_set("settings-error", "");
                 if saving && self.settings_unsaved {
                     self.settings.revision = settings.revision;
@@ -261,7 +314,7 @@ impl App {
                 if !saving || !self.settings_unsaved {
                     self.settings = settings;
                     self.settings_unsaved = false;
-                    if !saving && (first_load || self.field("settings-reload") == "true") {
+                    if !saving {
                         self.settings_load_fields();
                         self.field_set("settings-reload", "false");
                     }
@@ -289,6 +342,10 @@ impl App {
     }
 
     pub(super) fn application_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if name == "redis-row-delete-load-identities" {
+            self.load_redis_row_delete_targets(backend);
+            return true;
+        }
         if self.editing_files_action(name, backend) {
             return true;
         }
@@ -502,18 +559,17 @@ impl App {
                 self.workbench.overlay = Some("settings".into());
                 self.refresh_archery_servers(backend);
                 self.field_set("settings-tab", "general");
-                self.field_set("mcp-rule-profile", "");
-                self.field_set("mcp-rule-data", "");
-                self.field_set("mcp-rule-scope", "");
-                self.field_set("mcp-rule-pending", "");
-                self.field_set("mcp-rule-error", "");
+                self.focus = "settings-tab-general".into();
+                self.workbench.focus_request = Some(String::new());
             }
             return true;
         }
         if let Some(tab) = name.strip_prefix("settings-tab:") {
-            if matches!(tab, "general" | "mcp") {
+            if matches!(tab, "general" | "editing" | "archery" | "mcp") {
                 self.field_set("settings-tab", tab);
                 self.workbench.generic_select = None;
+                self.focus = format!("settings-tab-{tab}");
+                self.workbench.focus_request = Some(String::new());
             }
             return true;
         }
@@ -538,12 +594,34 @@ impl App {
                 .and_then(|profile| serde_json::to_value(profile.approval_policy).ok())
                 .and_then(|value| value.as_str().map(str::to_owned))
             {
-                if self.field("mcp-rule-profile") != id {
+                if !self.field("mcp-rule-pending").is_empty() {
+                    return true;
+                }
+                let previous = self.field("mcp-rule-profile").to_owned();
+                if !previous.is_empty() && previous != id {
+                    for name in ["data", "scope", "baseline"] {
+                        let value = self.field(&format!("mcp-rule-{name}")).to_owned();
+                        self.field_set(&format!("mcp-rule-cache-{previous}-{name}"), value);
+                    }
+                }
+                if previous != id {
+                    self.field_set("mcp-rule-profile", id);
+                    self.field_set("mcp-rule-policy", policy);
+                    let cached = self.field(&format!("mcp-rule-cache-{id}-data")).to_owned();
+                    if !cached.is_empty() {
+                        for name in ["data", "scope", "baseline"] {
+                            let value = self
+                                .field(&format!("mcp-rule-cache-{id}-{name}"))
+                                .to_owned();
+                            self.field_set(&format!("mcp-rule-{name}"), value);
+                        }
+                        return true;
+                    }
                     self.field_set("mcp-rule-data", "");
                     self.field_set("mcp-rule-scope", "");
-                    self.field_set("mcp-rule-policy", policy);
+                } else if !self.field("mcp-rule-data").is_empty() {
+                    return true;
                 }
-                self.field_set("mcp-rule-profile", id);
                 self.mcp_rules_request(
                     backend,
                     "mcp-rules-get",
@@ -555,6 +633,7 @@ impl App {
             return true;
         }
         if let Some(level) = name.strip_prefix("mcp-rules-level:") {
+            self.workbench.generic_select = None;
             if !self.field("mcp-rule-pending").is_empty() {
                 return true;
             }
@@ -595,6 +674,10 @@ impl App {
             return true;
         }
         if let Some(policy) = name.strip_prefix("mcp-policy-set:") {
+            self.workbench.generic_select = None;
+            if self.field("mcp-rule-data") != self.field("mcp-rule-baseline") {
+                return true;
+            }
             if self.field("mcp-rule-pending").is_empty()
                 && matches!(policy, "off" | "dangerous" | "all_writes")
             {
@@ -614,7 +697,16 @@ impl App {
             }
             return true;
         }
-        if name == "settings-reload" {
+        if name == "settings-reload-cancel" {
+            self.field_set("settings-reload-confirm", "false");
+            return true;
+        }
+        if name == "settings-reload" && self.settings_form_dirty() {
+            self.field_set("settings-reload-confirm", "true");
+            return true;
+        }
+        if name == "settings-reload" || name == "settings-reload-confirm" {
+            self.field_set("settings-reload-confirm", "false");
             if self.settings_save_token.is_none() && self.field("settings-reload") != "true" {
                 self.field_set("settings-reload-unsaved", self.settings_unsaved.to_string());
                 self.settings_unsaved = false;
@@ -646,6 +738,105 @@ impl App {
                 return true;
             }
             self.field_set("settings-error", "");
+            for field in [
+                "editing_plan_items",
+                "editing_plan_bytes",
+                "editing_value_bytes",
+                "editing_text_bytes",
+                "editing_preview_rows",
+            ] {
+                if !self
+                    .field(field)
+                    .parse::<usize>()
+                    .is_ok_and(|value| value > 0)
+                {
+                    self.field_set("settings-tab", "editing");
+                    self.field_error(field, UiMessage::key("请输入大于零的整数"));
+                    return true;
+                }
+            }
+            if self.field("editing_text_bytes").parse::<usize>().ok()
+                > self.field("editing_value_bytes").parse::<usize>().ok()
+            {
+                self.field_set("settings-tab", "editing");
+                self.field_error(
+                    "editing_text_bytes",
+                    UiMessage::key("文本编辑上限不能超过单值上限"),
+                );
+                return true;
+            }
+            if self.field("external_mode") != "disabled" {
+                if self.field("external_program").trim().is_empty()
+                    || self.field("external_program").contains('\0')
+                {
+                    self.field_set("settings-tab", "editing");
+                    self.field_error("external_program", UiMessage::key("请填写有效的编辑器程序"));
+                    return true;
+                }
+                let args = self.field("external_args");
+                if args.contains('\0') || args.matches("{file}").count() != 1 {
+                    self.field_set("settings-tab", "editing");
+                    self.field_error(
+                        "external_args",
+                        UiMessage::key("参数必须恰好包含一个 {file}"),
+                    );
+                    return true;
+                }
+            }
+            for &(group, key, _) in SETTINGS_FIELDS {
+                let name = settings_field(group, key);
+                let text = self.field(&name).trim();
+                if group == "history" && text.is_empty() {
+                    continue;
+                }
+                let parsed = text.parse::<u64>();
+                let upper = if (group == "paging" && key != "redis_key_batch")
+                    || key == "mcp_response_rows"
+                {
+                    1000
+                } else if key == "response_bytes" {
+                    1_048_576
+                } else {
+                    u64::MAX
+                };
+                let lower = if key == "response_bytes" { 1024 } else { 1 };
+                if !parsed.is_ok_and(|number| (lower..=upper).contains(&number)) {
+                    self.field_set(
+                        "settings-tab",
+                        if settings_is_mcp(group, key) {
+                            "mcp"
+                        } else {
+                            "general"
+                        },
+                    );
+                    self.field_error(&name, UiMessage::key("设置超出允许范围"));
+                    return true;
+                }
+            }
+            let response = self
+                .field("settings-limits-response_bytes")
+                .parse::<u64>()
+                .unwrap_or(0);
+            for (field, valid) in [
+                (
+                    "settings-limits-value_preview_bytes",
+                    self.field("settings-limits-value_preview_bytes")
+                        .parse::<u64>()
+                        .is_ok_and(|v| v <= response),
+                ),
+                (
+                    "settings-limits-result_memory_bytes_per_client",
+                    self.field("settings-limits-result_memory_bytes_per_client")
+                        .parse::<u64>()
+                        .is_ok_and(|v| v >= response),
+                ),
+            ] {
+                if !valid {
+                    self.field_set("settings-tab", "general");
+                    self.field_error(field, UiMessage::key("设置超出允许范围"));
+                    return true;
+                }
+            }
             use datapier_core::model::editing::{
                 EditingLimits, ExternalEditorConfig, ExternalEditorMode,
             };
@@ -710,6 +901,10 @@ impl App {
                 } else if let Ok(number) = text.parse::<u64>() {
                     json!(number)
                 } else {
+                    self.field_error(
+                        &settings_field(group, key),
+                        UiMessage::key("请输入有效的非负整数"),
+                    );
                     self.field_set(
                         "settings-error",
                         i18n::format_message(
@@ -845,17 +1040,27 @@ impl App {
         self.request(backend, "execution.start", "execution.start", params);
     }
     pub(super) fn open_history(&mut self, backend: &Backend) {
-        self.invalidate_history(backend);
-        self.field_set("history_filter", "");
         let visible = self.profile.as_ref().is_some_and(|p| p.is_archery());
-        self.workbench.archery_history = ArcheryHistory {
-            limit: 20,
-            visible,
-            ..Default::default()
-        };
+        let history = &self.workbench.archery_history;
+        let same_target = history.limit != 0
+            && history.visible == visible
+            && history.tab == self.tabs.get(self.active).map(|tab| tab.id)
+            && history.profile == self.profile.as_ref().map(|profile| profile.id)
+            && history.database == self.database;
+        if !same_target {
+            self.invalidate_history(backend);
+            self.field_set("history_filter", "");
+            self.workbench.archery_history = ArcheryHistory {
+                limit: 20,
+                visible,
+                ..Default::default()
+            };
+        }
         self.workbench.overlay = Some("history".into());
         self.workbench.focus_request = Some("input-history_filter".into());
-        self.request_history(backend);
+        if !same_target {
+            self.request_history(backend);
+        }
     }
 
     pub(super) fn invalidate_history(&mut self, backend: &Backend) {

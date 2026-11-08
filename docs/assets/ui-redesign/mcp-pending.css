@@ -143,6 +143,14 @@
 .mcp-error {
   color: var(--error);
 }
+.mcp-recovery {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+  color: var(--error);
+}
 .mcp-row-text .muted, .mcp-status {
   font-size: 11px;
 }

@@ -174,7 +174,7 @@ pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         form = form.child(field(
             app,
             "redis_databases_override",
-            "Redis DB 数量覆盖（留空为自动探测）",
+            "Redis DB 数量覆盖（1–4294967295；留空为自动探测）",
         ));
     }
     let read_only = app.field("access") == "read_only";

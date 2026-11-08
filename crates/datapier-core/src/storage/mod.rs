@@ -6,6 +6,7 @@ mod edit_files;
 mod migration;
 mod profiles;
 mod results;
+mod retired_cache;
 mod tasks;
 
 use crate::model::*;
@@ -30,6 +31,8 @@ use uuid::Uuid;
 pub struct Store {
     pub pool: SqlitePool,
     pub root: Arc<PathBuf>,
+    // 与 Store 同寿命固定根目录身份，清理时不重新解析可能被替换的绝对路径。
+    retired_cache_root: Arc<cap_std::fs::Dir>,
     secrets: Arc<RwLock<HashMap<Uuid, String>>>,
     archery_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
     archery_totp_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
@@ -44,6 +47,8 @@ impl Store {
     pub async fn open(root: &Path) -> Result<Self> {
         tokio::fs::create_dir_all(root).await?;
         let root = tokio::fs::canonicalize(root).await?;
+        let retired_cache_root =
+            cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())?;
         let pool = open_database(&root.join("datapier.sqlite3")).await?;
         let initialized: Result<()> = async {
             migration::preflight_config(&pool).await?;
@@ -59,6 +64,7 @@ impl Store {
         let store = Self {
             pool,
             root: Arc::new(root),
+            retired_cache_root: Arc::new(retired_cache_root),
             archery_secrets: Arc::new(RwLock::new(HashMap::new())),
             archery_totp_secrets: Arc::new(RwLock::new(HashMap::new())),
             secrets: Arc::new(RwLock::new(HashMap::new())),
@@ -116,58 +122,6 @@ impl Store {
         }
         self.cleanup_history().await?;
         Ok(())
-    }
-
-    /// 预览旧版本结果缓存；不会打开旧数据库或跟随符号链接。
-    pub async fn retired_cache_preview(&self) -> Result<Json> {
-        let mut paths = Vec::new();
-        let mut bytes = 0u64;
-        for name in [
-            "cache.sqlite3",
-            "cache.sqlite3-wal",
-            "cache.sqlite3-shm",
-            "values",
-        ] {
-            let path = self.root.join(name);
-            match tokio::fs::symlink_metadata(&path).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
-            paths.push(name.to_owned());
-            let mut stack = vec![path];
-            while let Some(path) = stack.pop() {
-                let meta = tokio::fs::symlink_metadata(&path).await?;
-                if meta.is_file() {
-                    bytes = bytes.saturating_add(meta.len());
-                } else if meta.is_dir() {
-                    let mut entries = tokio::fs::read_dir(path).await?;
-                    while let Some(entry) = entries.next_entry().await? {
-                        stack.push(entry.path());
-                    }
-                }
-            }
-        }
-        Ok(json!({"paths": paths, "bytes": bytes}))
-    }
-    /// 显式删除预览中的退休缓存，不触及其他数据。
-    pub async fn clear_retired_cache(&self) -> Result<Json> {
-        let preview = self.retired_cache_preview().await?;
-        for name in preview["paths"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Json::as_str)
-        {
-            let path = self.root.join(name);
-            let meta = tokio::fs::symlink_metadata(&path).await?;
-            if meta.is_dir() {
-                tokio::fs::remove_dir_all(path).await?;
-            } else {
-                tokio::fs::remove_file(path).await?;
-            }
-        }
-        Ok(preview)
     }
 
     /// 只读取工作区版本，供切换前检查；不加载可能很大的编辑快照。

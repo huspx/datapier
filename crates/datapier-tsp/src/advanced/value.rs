@@ -82,6 +82,10 @@ pub(crate) struct ValueUi {
     pub request: Option<(uuid::Uuid, String)>,
     pub source: Option<Value>,
     pub image_blob: Option<String>,
+    pub confirm_close: bool,
+    pub kind_select_open: bool,
+    pub applied: bool,
+    pub staged: bool,
 }
 
 impl ValueUi {
@@ -625,6 +629,16 @@ fn button(label: &str, action: &str, enabled: bool) -> Node<Msg> {
 }
 
 pub(crate) fn footer(state: &ValueUi) -> html::El<Msg> {
+    if state.confirm_close {
+        return html::div()
+            .class("modal-footer")
+            .child(button("继续编辑", "advanced-value-continue", true))
+            .child(
+                ui::button(tr("丢弃").into_owned())
+                    .variant(ui::ButtonVariant::Danger)
+                    .on_click(Msg::Action("advanced-value-discard".into())),
+            );
+    }
     html::div()
         .class("modal-footer")
         .child(html::span("").class("spacer"))
@@ -639,10 +653,74 @@ pub(crate) fn footer(state: &ValueUi) -> html::El<Msg> {
 /// 渲染当前值的窗口与操作；调用方路由动作及编辑器输入。
 pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
     let mut panel = html::div().class("value-editor advanced-panel");
+    if state.confirm_close {
+        return panel
+            .child(
+                html::p(tr("尚有未加入草稿的修改，丢弃后无法恢复。").into_owned()).class("notice"),
+            )
+            .into();
+    }
+    if let Some(source) = &state.source {
+        let mut facts = html::div().class("advanced-facts");
+        if let Some(connection) = source.get("connection").and_then(Value::as_str) {
+            facts = facts.child(super::fact("连接", connection));
+        }
+        if let Some(target) = source.get("target") {
+            for (key, label) in [("database", "数据库"), ("name", "目标")] {
+                if let Some(value) = target.get(key).and_then(Value::as_str) {
+                    facts = facts.child(super::fact(label, value));
+                }
+            }
+        }
+        if let Some(row) = source.get("row").and_then(Value::as_u64) {
+            facts = facts.child(super::fact("行", row.to_string()));
+        }
+        if let Some(column) = source.get("column_name").and_then(Value::as_str) {
+            facts = facts.child(super::fact("字段", column));
+        }
+        panel = panel.child(facts);
+    }
+    panel = panel.child(
+        html::p(
+            tr(if state.staged {
+                "已加入待提交草稿"
+            } else if state.dirty() {
+                "未应用修改"
+            } else if state.applied {
+                "已应用到值会话，尚未加入草稿"
+            } else {
+                "值会话已打开，尚未加入草稿"
+            })
+            .into_owned(),
+        )
+        .class("muted"),
+    );
+    if state.pending {
+        panel =
+            panel.child(html::p(tr("加入草稿不可用：请求处理中。").into_owned()).class("notice"));
+    } else if state.staged {
+        panel = panel.child(
+            html::p(tr("修改已加入草稿。请重新打开以继续编辑。").into_owned()).class("notice"),
+        );
+    } else if !state.writable {
+        panel =
+            panel.child(html::p(tr("加入草稿不可用：当前值只读。").into_owned()).class("notice"));
+    } else if state.session.is_none() {
+        panel = panel
+            .child(html::p(tr("加入草稿不可用：值会话尚未就绪。").into_owned()).class("notice"));
+    } else if state.dirty() {
+        panel = panel
+            .child(html::p(tr("加入草稿不可用：请先应用当前修改。").into_owned()).class("notice"));
+    }
     let mut modes = html::div().class("advanced-tabs").attr("role", "tablist");
     for mode in [Mode::Text, Mode::Hex, Mode::Json, Mode::Xml, Mode::Image] {
+        let focus = format!(
+            "advanced-value-tab-{}",
+            mode.action().rsplit(':').next().unwrap_or("text")
+        );
         modes = modes.child(
             html::button(tr(mode.label()).into_owned())
+                .key(focus.clone())
                 .class(if state.mode == mode {
                     "advanced-tab active"
                 } else {
@@ -674,18 +752,30 @@ pub(crate) fn view(state: &ValueUi) -> Node<Msg> {
                 html::p(tr("选择新值类型并输入内容；空内容不等于 NULL。").into_owned())
                     .class("muted"),
             );
+            let mut kinds = ui::select()
+                .aria(tr("新值类型").into_owned())
+                .value(state.null_kind.as_deref().unwrap_or(""))
+                .disabled(state.pending || state.dirty())
+                .open(state.kind_select_open)
+                .on_toggle(|collapsed| {
+                    Msg::Action(format!("advanced-value-kind-open:{}", !collapsed))
+                })
+                .on_change(|change| {
+                    Msg::Action(format!(
+                        "advanced-value-null-kind:{}",
+                        change.value.as_str().unwrap_or_default()
+                    ))
+                });
             for &(kind, label) in VALUE_KINDS {
-                let enabled = !state.pending
-                    && state
-                        .native_kind
-                        .as_deref()
-                        .is_none_or(|original| original == kind);
-                panel = panel.child(button(
-                    label,
-                    &format!("advanced-value-null-kind:{kind}"),
-                    enabled,
-                ));
+                if state
+                    .native_kind
+                    .as_deref()
+                    .is_none_or(|original| original == kind)
+                {
+                    kinds = kinds.option(ui::SelectOption::new(kind, tr(label).into_owned()));
+                }
             }
+            panel = panel.child(ui::field(tr("新值类型").into_owned()).child(kinds));
             if let Some(kind) = &state.null_kind {
                 let label = VALUE_KINDS
                     .iter()

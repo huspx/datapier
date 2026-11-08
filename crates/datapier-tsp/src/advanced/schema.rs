@@ -11,6 +11,146 @@ use std::collections::{BTreeMap, BTreeSet};
 use tern_sdk::ui::{self, Node, html};
 use uuid::Uuid;
 
+#[path = "schema_primary.rs"]
+mod schema_primary;
+#[path = "schema_reference.rs"]
+pub(crate) mod schema_reference;
+
+const COLUMN_TYPE_CHOICES: &[(&str, &str)] = &[
+    ("BIGINT", "BIGINT"),
+    ("INT", "INT"),
+    ("DECIMAL", "DECIMAL(12,2)"),
+    ("NUMERIC", "NUMERIC(12,2)"),
+    ("VARCHAR", "VARCHAR(255)"),
+    ("CHAR", "CHAR(1)"),
+    ("VARBINARY", "VARBINARY(255)"),
+    ("BINARY", "BINARY(1)"),
+    ("BIT", "BIT(1)"),
+    ("TEXT", "TEXT"),
+    ("DATETIME", "DATETIME"),
+    ("TIMESTAMP", "TIMESTAMP"),
+    ("TIME", "TIME"),
+    ("DATE", "DATE"),
+    ("BOOLEAN", "BOOLEAN"),
+];
+
+/// 保留原始类型名、参数及未修改的后缀。
+struct TypeParameters<'a> {
+    name: &'a str,
+    suffix: &'a str,
+    first: &'a str,
+    second: &'a str,
+    decimal: bool,
+    fractional_seconds: bool,
+    min: u32,
+    max: u32,
+}
+
+fn type_parameters(text: &str) -> Option<TypeParameters<'_>> {
+    let start = text.len() - text.trim_start().len();
+    let end = text[start..]
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .map_or(text.len(), |n| n + start);
+    let kind = text[start..end].to_ascii_uppercase();
+    let fractional_seconds = matches!(kind.as_str(), "DATETIME" | "TIMESTAMP" | "TIME");
+    let (decimal, min, max, default) = match kind.as_str() {
+        "DECIMAL" | "NUMERIC" => (true, 1, 65, "10"),
+        "VARCHAR" | "VARBINARY" => (false, 0, 65535, ""),
+        "CHAR" | "BINARY" => (false, 0, 255, "1"),
+        "BIT" => (false, 1, 64, "1"),
+        "DATETIME" | "TIMESTAMP" | "TIME" => (false, 0, 6, "0"),
+        _ => return None,
+    };
+    let rest = &text[end..];
+    let trimmed = rest.trim_start();
+    let (first, second, suffix) = if let Some(params) = trimmed.strip_prefix('(') {
+        let close = params.find(')')?;
+        let values = &params[..close];
+        let (first, second) = values.split_once(',').unwrap_or((values, "0"));
+        if first.trim().is_empty()
+            || !first.trim().bytes().all(|c| c.is_ascii_digit())
+            || (decimal
+                && (second.trim().is_empty() || !second.trim().bytes().all(|c| c.is_ascii_digit())))
+            || (!decimal && values.contains(','))
+        {
+            return None;
+        }
+        (first.trim(), second.trim(), &params[close + 1..])
+    } else {
+        (default, "0", rest)
+    };
+    Some(TypeParameters {
+        name: &text[..end],
+        suffix,
+        first,
+        second,
+        decimal,
+        fractional_seconds,
+        min,
+        max,
+    })
+}
+
+fn type_parameter_error(
+    params: &TypeParameters<'_>,
+    first: &str,
+    second: &str,
+) -> Option<&'static str> {
+    let first = first
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n >= params.min && *n <= params.max);
+    if first.is_none() {
+        return Some(if params.decimal {
+            "精度必须为 1 到 65 的整数"
+        } else if params.fractional_seconds {
+            "小数秒精度必须为 0 到 6 的整数"
+        } else {
+            "长度超出该类型允许的范围"
+        });
+    }
+    if params.decimal
+        && !second
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|n| n <= 30 && n <= first.unwrap_or(0))
+    {
+        return Some("小数位必须为 0 到 30 且不大于精度");
+    }
+    None
+}
+
+fn type_parameter_text(params: &TypeParameters<'_>) -> String {
+    if params.decimal {
+        format!("{},{}", params.first, params.second)
+    } else {
+        params.first.to_owned()
+    }
+}
+
+fn parse_parameter_text<'a>(
+    params: &TypeParameters<'_>,
+    text: &'a str,
+) -> Result<(&'a str, &'a str), &'static str> {
+    let (first, second) = if params.decimal {
+        text.split_once(',').unwrap_or((text, "0"))
+    } else {
+        (text, "0")
+    };
+    let (first, second) = (first.trim(), second.trim());
+    if first.is_empty()
+        || !first.bytes().all(|c| c.is_ascii_digit())
+        || second.is_empty()
+        || !second.bytes().all(|c| c.is_ascii_digit())
+    {
+        return Err("类型长度格式无效");
+    }
+    if let Some(error) = type_parameter_error(params, first, second) {
+        return Err(error);
+    }
+    Ok((first, second))
+}
+
 /// 可恢复的操作序列；数组操作按当时的顺序重放，ID 保留在新增对象中。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SchemaOperation {
@@ -38,6 +178,8 @@ pub enum SchemaOperation {
 pub struct SchemaDraft {
     pub target: ResourceTarget,
     pub creating: bool,
+    #[serde(default)]
+    pub embedded: bool,
     #[serde(default)]
     pub baseline_fingerprint: Option<String>,
     pub operations: Vec<SchemaOperation>,
@@ -91,6 +233,13 @@ pub struct SchemaEditor {
     pub outcome_unknown: bool,
     pub confirm_submit: bool,
     pub confirm_discard: bool,
+    pub embedded: bool,
+    pub section: String,
+    pub(crate) references: schema_reference::ReferenceState,
+    selected_column: Option<String>,
+    selected_items: BTreeMap<String, String>,
+    open_select: Option<String>,
+    destructive_reasons: Vec<String>,
     pub connect_nonce: Option<Uuid>,
     target_name: Editor,
     invalid_numbers: BTreeSet<String>,
@@ -113,6 +262,7 @@ impl SchemaEditor {
             draft: SchemaDraft {
                 target,
                 creating,
+                embedded: false,
                 baseline_fingerprint: None,
                 operations: Vec::new(),
                 algorithm: None,
@@ -138,10 +288,17 @@ impl SchemaEditor {
             outcome_unknown: false,
             confirm_submit: false,
             confirm_discard: false,
+            embedded: false,
+            section: "columns".into(),
+            selected_column: None,
+            selected_items: BTreeMap::new(),
+            open_select: None,
+            destructive_reasons: Vec::new(),
             connect_nonce: None,
             invalid_numbers: BTreeSet::new(),
             generation: 0,
             pending: None,
+            references: schema_reference::ReferenceState::default(),
             editors: RefCell::new(BTreeMap::new()),
         }
     }
@@ -154,6 +311,7 @@ impl SchemaEditor {
         initial: Option<SchemaDefinition>,
     ) -> Self {
         let mut state = Self::new(session, draft.target.clone(), profile_revision, initial);
+        state.embedded = draft.embedded;
         state.dirty = draft.creating
             || !draft.operations.is_empty()
             || draft.algorithm.is_some()
@@ -161,6 +319,16 @@ impl SchemaEditor {
         state.restore_confirmation_required = state.dirty;
         state.draft = draft;
         state
+    }
+
+    /// 已有表未产生编辑意图时不保存独立结构草稿。
+    pub(crate) fn workspace_draft(&self) -> Option<SchemaDraft> {
+        if self.embedded && !self.dirty && !self.restore_confirmation_required {
+            return None;
+        }
+        let mut draft = self.draft.clone();
+        draft.embedded = self.embedded;
+        Some(draft)
     }
 
     /// 仅在基线指纹未变化时重放草稿；数组索引不能安全地重放到另一份结构。
@@ -352,6 +520,7 @@ impl SchemaEditor {
                         self.preview_complete = false;
                         self.preview_expected = 0;
                         self.preview_sql.clear();
+                        self.destructive_reasons.clear();
                         self.preview = None;
                     }
                     if summary.get("id").and_then(Value::as_str).is_none()
@@ -383,6 +552,7 @@ impl SchemaEditor {
                         if offset == 0 {
                             self.preview_expected = 0;
                             self.preview_complete = false;
+                            self.destructive_reasons.clear();
                             self.preview_sql.clear();
                         }
                         if offset != self.preview_expected
@@ -403,13 +573,37 @@ impl SchemaEditor {
                                 .and_then(Value::as_str)
                                 .ok_or("missing preview SQL")?;
                             self.preview_sql.push(sql.to_owned());
+                            if let Some(reasons) =
+                                step.get("destructive_reasons").and_then(Value::as_array)
+                            {
+                                self.destructive_reasons.extend(
+                                    reasons.iter().filter_map(Value::as_str).map(str::to_owned),
+                                );
+                            }
                         }
                         self.preview_complete = next.is_none();
-                        self.preview = Some(value.clone());
+                        let mut accumulated = value.clone();
+                        if offset > 0 {
+                            let mut steps = self
+                                .preview
+                                .as_ref()
+                                .and_then(|preview| preview.get("steps"))
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
+                            steps.extend(value["steps"].as_array().into_iter().flatten().cloned());
+                            accumulated["steps"] = Value::Array(steps);
+                        }
+                        self.preview = Some(accumulated);
                     }
                     self.summary = Some(
                         json!({"id":summary["id"],"revision":summary["revision"],"state":summary["state"],"complete":summary["complete"],"total_items":summary["total_items"],"plan_digest":summary["plan_digest"],"submittable":summary["submittable"]}),
                     );
+                    if kind == RequestKind::Plan
+                        && matches!(self.definition.as_ref(), Some(SchemaDefinition::Table(_)))
+                    {
+                        self.section = "ddl_preview".to_owned();
+                    }
                 }
                 RequestKind::Submit => {
                     self.execution = Some(value.clone());
@@ -432,6 +626,14 @@ impl SchemaEditor {
             self.error = Some(error);
         }
         true
+    }
+
+    pub(crate) fn is_plan_response(&self, tag: &str) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.kind == RequestKind::Plan
+                && pending.generation == self.generation
+                && tag == format!("schema/{}", pending.token)
+        })
     }
 
     /// 只有顺序读取完全部预览页才能将冻结计划转到自由 SQL。
@@ -526,6 +728,7 @@ impl SchemaEditor {
             self.draft.lock = None;
             self.initial_definition = None;
             self.dirty = false;
+            self.restore_confirmation_required = false;
             self.definition = None;
         } else {
             self.restore_confirmation_required = true;
@@ -593,6 +796,46 @@ impl SchemaEditor {
         Ok(())
     }
 
+    /// 宿主未执行 native editing 时，仍通过同一份 UTF-16 编辑器维护结构草稿。
+    pub(crate) fn key(&mut self, name: &str, key: crate::editor::Key<'_>, shift: bool) -> bool {
+        let target = name == "schema-target";
+        let path = if target {
+            ""
+        } else if let Some(path) = name.strip_prefix("schema:") {
+            path
+        } else {
+            return false;
+        };
+        if self.pending.is_some()
+            || self.execution_pending
+            || self.summary.is_some()
+            || self.query_transferred
+            || self.restore_confirmation_required
+            || (target && !self.draft.creating)
+        {
+            return true;
+        }
+        let editor = if target {
+            &mut self.target_name
+        } else if let Some(editor) = self.editors.get_mut().get_mut(path) {
+            editor
+        } else {
+            return true;
+        };
+        let old_len = editor.text.len();
+        let text_edit = matches!(key, crate::editor::Key::Text(text) if !text.is_empty() || editor.cursor != editor.anchor)
+            || matches!(key, crate::editor::Key::Undo);
+        if editor.key(key, shift) && (text_edit || editor.text.len() != old_len) {
+            if target {
+                self.changed_target_name();
+            } else {
+                let value = editor.text.clone();
+                self.changed_text(path, value);
+            }
+        }
+        true
+    }
+
     /// App 将 `Msg::Edit` 中以 schema: 开头的字段交给此方法。
     pub fn edit(
         &mut self,
@@ -658,6 +901,52 @@ impl SchemaEditor {
     }
 
     fn changed_text(&mut self, path: &str, value: String) {
+        if let Some(type_path) = path.strip_suffix("/@length") {
+            self.changed_type_parameter(type_path, &value);
+            return;
+        }
+        if let Some(index) = path
+            .strip_prefix("/columns/")
+            .and_then(|s| s.strip_suffix("/name"))
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if let Some(root) = self
+                .definition
+                .as_ref()
+                .and_then(|d| serde_json::to_value(d).ok())
+            {
+                match schema_primary::rename_column(
+                    &root,
+                    index,
+                    &value,
+                    self.draft.target.database.as_deref(),
+                    &self.draft.target.name,
+                ) {
+                    Ok(operations) => {
+                        self.invalid_numbers.remove(path);
+                        self.error = None;
+                        for operation in operations {
+                            if let SchemaOperation::Set { path: changed, .. } = &operation
+                                && changed != path
+                            {
+                                self.editors.get_mut().remove(changed);
+                            }
+                            if let Err(error) = self.apply_operation(operation) {
+                                self.error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.invalid_numbers.insert(path.to_owned());
+                        self.error = Some(tr(&error).into_owned());
+                        self.dirty = true;
+                        self.generation = self.generation.wrapping_add(1);
+                    }
+                }
+            }
+            return;
+        }
         if path == "/@algorithm" || path == "/@lock" {
             let setting = if value.is_empty() { None } else { Some(value) };
             if path == "/@algorithm" {
@@ -689,6 +978,106 @@ impl SchemaEditor {
             }) {
                 self.error = Some(error);
             }
+        }
+    }
+
+    fn column_type(&self, path: &str) -> Option<String> {
+        self.definition
+            .as_ref()
+            .and_then(|definition| serde_json::to_value(definition).ok())
+            .and_then(|value| {
+                value
+                    .pointer(path)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
+
+    fn changed_type_name(&mut self, path: &str, value: &str) {
+        let Some(old) = self.column_type(path) else {
+            return;
+        };
+        let old_params = type_parameters(&old);
+        let new_params = type_parameters(value);
+        let compatible = old_params
+            .as_ref()
+            .zip(new_params.as_ref())
+            .is_some_and(|(old, new)| {
+                (old.decimal && new.decimal)
+                    || old.name.trim().eq_ignore_ascii_case(new.name.trim())
+            });
+        let updated = if compatible && !value.contains('(') {
+            let old_params = old_params.as_ref().unwrap();
+            let segment = &old[old_params.name.len()..old.len() - old_params.suffix.len()];
+            let new_params = new_params.as_ref().unwrap();
+            format!("{}{}{}", new_params.name, segment, new_params.suffix)
+        } else {
+            value.to_owned()
+        };
+        let length_path = format!("{path}/@length");
+        let invalid_path = format!("{path}/@parameters");
+        if !compatible {
+            self.editors.get_mut().remove(&length_path);
+            self.editors.get_mut().remove(&invalid_path);
+            self.invalid_numbers.remove(&invalid_path);
+        }
+        if let Err(error) = self.apply_operation(SchemaOperation::Set {
+            path: path.into(),
+            value: json!(updated),
+        }) {
+            self.error = Some(error);
+            return;
+        }
+        if compatible {
+            let candidate = self
+                .editors
+                .get_mut()
+                .get(&length_path)
+                .map(|editor| editor.text.clone());
+            if let (Some(params), Some(candidate)) = (type_parameters(&updated), candidate) {
+                if parse_parameter_text(&params, &candidate).is_err() {
+                    self.invalid_numbers.insert(invalid_path.clone());
+                    self.editors.get_mut().insert(invalid_path, Editor::new(""));
+                } else if self.invalid_numbers.contains(&invalid_path) {
+                    self.changed_type_parameter(path, &candidate);
+                }
+            }
+        }
+    }
+
+    fn changed_type_parameter(&mut self, path: &str, value: &str) {
+        let Some(text) = self.column_type(path) else {
+            return;
+        };
+        let Some(params) = type_parameters(&text) else {
+            return;
+        };
+        let invalid_path = format!("{path}/@parameters");
+        let Ok((first, second)) = parse_parameter_text(&params, value) else {
+            self.invalid_numbers.insert(invalid_path.clone());
+            self.editors.get_mut().insert(invalid_path, Editor::new(""));
+            self.dirty = true;
+            self.generation = self.generation.wrapping_add(1);
+            self.preview = None;
+            return;
+        };
+        let updated = if params.decimal {
+            format!("{}({first},{second}){}", params.name, params.suffix)
+        } else if params.fractional_seconds && first.bytes().all(|byte| byte == b'0') {
+            // MySQL 将零精度时间类型读回为不带括号的类型名。
+            format!("{}{}", params.name, params.suffix)
+        } else {
+            format!("{}({first}){}", params.name, params.suffix)
+        };
+        if self.invalid_numbers.remove(&invalid_path) {
+            self.error = None;
+        }
+        self.editors.get_mut().remove(&invalid_path);
+        if let Err(error) = self.apply_operation(SchemaOperation::Set {
+            path: path.into(),
+            value: json!(updated),
+        }) {
+            self.error = Some(error);
         }
     }
 
@@ -726,6 +1115,309 @@ impl SchemaEditor {
         let command = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("");
         let arg = parts.next().unwrap_or("");
+        if command == "section" {
+            if matches!(
+                path,
+                "columns" | "indexes" | "foreign_keys" | "checks" | "options" | "ddl_preview"
+            ) {
+                self.section = path.to_owned();
+            }
+            return true;
+        }
+        if command == "column" {
+            self.selected_column = Some(path.to_owned());
+            return true;
+        }
+        if command == "item" {
+            self.selected_items.insert(path.to_owned(), arg.to_owned());
+            return true;
+        }
+        if command == "open" {
+            self.open_select = if arg == "true" {
+                Some(path.to_owned())
+            } else {
+                None
+            };
+            return true;
+        }
+        if !self.invalid_numbers.is_empty() {
+            self.error = Some(tr("请先修正无效的字段输入").into_owned());
+            return true;
+        }
+        if command == "primary" {
+            if let Some(root) = self
+                .definition
+                .as_ref()
+                .and_then(|d| serde_json::to_value(d).ok())
+            {
+                match schema_primary::toggle_primary(&root, path) {
+                    Ok(operations) => {
+                        for operation in operations {
+                            if let Err(error) = self.apply_operation(operation) {
+                                self.error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => self.error = Some(tr(&error).into_owned()),
+                }
+                self.editors
+                    .get_mut()
+                    .retain(|key, _| !key.starts_with("/indexes/"));
+            }
+            return true;
+        }
+        if command == "index-column" {
+            self.open_select = None;
+            if let Some(part_path) = path.strip_suffix("/column")
+                && let Some(root) = self
+                    .definition
+                    .as_ref()
+                    .and_then(|d| serde_json::to_value(d).ok())
+                && let Some(mut part) = root.pointer(part_path).cloned()
+            {
+                let index_path = part_path
+                    .split_once("/parts/")
+                    .map(|(index, _)| index)
+                    .unwrap_or("");
+                let primary = root
+                    .pointer(index_path)
+                    .and_then(|index| index.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("primary");
+                if primary && !arg.is_empty() {
+                    let duplicate = root
+                        .pointer(&format!("{index_path}/parts"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|parts| {
+                            parts.iter().enumerate().any(|(i, item)| {
+                                format!("{index_path}/parts/{i}") != part_path
+                                    && item.get("column").and_then(Value::as_str) == Some(arg)
+                            })
+                        });
+                    if duplicate {
+                        self.error = Some(tr("主键不能重复包含同一列").into_owned());
+                        return true;
+                    }
+                }
+                part["column"] = json!(arg);
+                part["expression"] = Value::Null;
+                if let Err(error) = self.apply_operation(SchemaOperation::Set {
+                    path: part_path.into(),
+                    value: part,
+                }) {
+                    self.error = Some(error);
+                    return true;
+                }
+                self.editors
+                    .get_mut()
+                    .retain(|key, _| !key.starts_with(&(part_path.to_owned() + "/")));
+                if primary
+                    && !arg.is_empty()
+                    && let Some(index) = root["columns"].as_array().and_then(|columns| {
+                        columns
+                            .iter()
+                            .position(|column| column["name"].as_str() == Some(arg))
+                    })
+                {
+                    match schema_primary::primary_column_changes(&root, index) {
+                        Ok(changes) => {
+                            for operation in changes.into_iter().flatten() {
+                                if let Err(error) = self.apply_operation(operation) {
+                                    self.error = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            }
+            return true;
+        }
+        if command == "remove" && path == "/columns" {
+            if let (Ok(index), Some(root)) = (
+                arg.parse::<usize>(),
+                self.definition
+                    .as_ref()
+                    .and_then(|d| serde_json::to_value(d).ok()),
+            ) {
+                match schema_primary::remove_column(
+                    &root,
+                    index,
+                    self.draft.target.database.as_deref(),
+                    &self.draft.target.name,
+                ) {
+                    Ok(operations) => {
+                        for operation in operations {
+                            if let Err(error) = self.apply_operation(operation) {
+                                self.error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => self.error = Some(tr(&error).into_owned()),
+                }
+                self.editors.get_mut().clear();
+            }
+            return true;
+        }
+        if command == "column-type" {
+            self.open_select = None;
+            if let Some((_, preset)) = COLUMN_TYPE_CHOICES.iter().find(|(kind, _)| *kind == arg)
+                && let Some(old) = self.column_type(path)
+            {
+                let family = old
+                    .trim_start()
+                    .split(|c: char| !c.is_ascii_alphabetic())
+                    .next()
+                    .unwrap_or("");
+                let numeric = |name: &str| {
+                    [
+                        "TINYINT",
+                        "SMALLINT",
+                        "MEDIUMINT",
+                        "INT",
+                        "INTEGER",
+                        "BIGINT",
+                        "DECIMAL",
+                        "NUMERIC",
+                        "FLOAT",
+                        "DOUBLE",
+                        "REAL",
+                    ]
+                    .iter()
+                    .any(|kind| name.eq_ignore_ascii_case(kind))
+                };
+                let params = type_parameters(&old);
+                let suffix =
+                    if family.eq_ignore_ascii_case(arg) || (numeric(family) && numeric(arg)) {
+                        params.as_ref().map_or_else(
+                            || &old[old.len() - old.trim_start().len() + family.len()..],
+                            |params| params.suffix,
+                        )
+                    } else {
+                        ""
+                    };
+                let value = if family.eq_ignore_ascii_case(arg)
+                    || (params.as_ref().is_some_and(|p| p.decimal)
+                        && matches!(arg, "DECIMAL" | "NUMERIC"))
+                {
+                    arg
+                } else {
+                    preset
+                };
+                self.changed_type_name(path, &format!("{value}{suffix}"));
+            }
+            return true;
+        }
+        if command == "choice" {
+            self.open_select = None;
+            if path.starts_with("/indexes/") && path.ends_with("/kind") && arg == "primary" {
+                self.error = Some(tr("请通过字段行设置主键").into_owned());
+                return true;
+            }
+            if arg == "true"
+                && path.starts_with("/columns/")
+                && path.ends_with("/nullable")
+                && let Some(root) = self
+                    .definition
+                    .as_ref()
+                    .and_then(|d| serde_json::to_value(d).ok())
+            {
+                let name_path = path.trim_end_matches("/nullable").to_owned() + "/name";
+                let name = root
+                    .pointer(&name_path)
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !name.is_empty()
+                    && root["indexes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|index| {
+                            index["kind"] == "primary"
+                                && index["parts"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .any(|part| part["column"].as_str() == Some(name))
+                        })
+                {
+                    self.error = Some(tr("主键列不能允许 NULL").into_owned());
+                    return true;
+                }
+            }
+            if path.starts_with("/columns/") && path.ends_with("/nullable") {
+                if let Err(error) = self.apply_operation(SchemaOperation::Set {
+                    path: path.into(),
+                    value: json!(arg == "true"),
+                }) {
+                    self.error = Some(error);
+                    return true;
+                }
+                let default_path = path.trim_end_matches("/nullable").to_owned() + "/default";
+                if arg == "false"
+                    && self
+                        .definition
+                        .as_ref()
+                        .and_then(|definition| serde_json::to_value(definition).ok())
+                        .and_then(|value| value.pointer(&format!("{default_path}/kind")).cloned())
+                        == Some(json!("null"))
+                    && let Err(error) = self.apply_operation(SchemaOperation::Set {
+                        path: default_path,
+                        value: json!({"kind":"unspecified"}),
+                    })
+                {
+                    self.error = Some(error);
+                }
+                return true;
+            }
+            if path.ends_with("/default/kind")
+                && self
+                    .definition
+                    .as_ref()
+                    .and_then(|definition| serde_json::to_value(definition).ok())
+                    .and_then(|value| {
+                        value
+                            .pointer(path)
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    == Some(arg)
+            {
+                return true;
+            }
+            let (target, value) = if path.ends_with("/default/kind") {
+                (
+                    path.trim_end_matches("/kind"),
+                    if matches!(arg, "literal" | "expression") {
+                        json!({"kind": arg, "value": ""})
+                    } else {
+                        json!({"kind": arg})
+                    },
+                )
+            } else if self
+                .definition
+                .as_ref()
+                .and_then(|definition| serde_json::to_value(definition).ok())
+                .and_then(|value| value.pointer(path).and_then(Value::as_bool))
+                .is_some()
+            {
+                (path, json!(arg == "true"))
+            } else {
+                (path, json!(arg))
+            };
+            if let Err(error) = self.apply_operation(SchemaOperation::Set {
+                path: target.into(),
+                value,
+            }) {
+                self.error = Some(error);
+            }
+            self.editors.get_mut().clear();
+            return true;
+        }
         let operation = match command {
             "toggle" => self
                 .definition
@@ -742,13 +1434,26 @@ impl SchemaEditor {
                     path: path.into(),
                     value,
                 }),
-            "add" => template(path, arg).map(|value| SchemaOperation::Insert {
-                path: path.into(),
-                value,
+            "add" => template(path, arg).map(|mut value| {
+                if path == "/constraints" && arg == "foreign_key" {
+                    value["referenced_database"] =
+                        json!(self.draft.target.database.as_deref().unwrap_or(""));
+                }
+                SchemaOperation::Insert {
+                    path: path.into(),
+                    value,
+                }
             }),
             "remove" => arg.parse().ok().map(|index| SchemaOperation::Remove {
                 path: path.into(),
                 index,
+            }),
+            "move" => arg.split_once(',').and_then(|(from, to)| {
+                Some(SchemaOperation::Move {
+                    path: path.into(),
+                    from: from.parse().ok()?,
+                    to: to.parse().ok()?,
+                })
             }),
             "up" | "down" => arg.parse::<usize>().ok().and_then(|from| {
                 if command == "up" {
@@ -802,6 +1507,7 @@ impl SchemaEditor {
             );
         }
         if self.outcome_unknown {
+            panel = panel.child(html::p(tr("执行结果未知。请在数据库中重新读取目标结构，核对已执行的 DDL 和实际对象状态；确认后再解除等待，不会自动重试。").into_owned()).class("notice"));
             panel = panel.child(
                 ui::button(tr("已核对结果，解除等待").into_owned())
                     .on_click(Msg::Action("schema-unknown-acknowledge".into())),
@@ -883,43 +1589,10 @@ impl SchemaEditor {
         if let Some(error) = &self.error {
             panel = panel.child(html::span(error.clone()).class("field-error"));
         }
-        if let Some(definition) = &self.definition
-            && let Ok(value) = serde_json::to_value(definition)
-        {
-            let table = value.get("kind").and_then(Value::as_str) == Some("table");
-            let disabled = self.pending.is_some()
-                || self.execution_pending
-                || self.summary.is_some()
-                || self.query_transferred
-                || self.restore_confirmation_required;
-            panel = panel.child(render_value(
-                &value,
-                "",
-                &mut self.editors.borrow_mut(),
-                disabled,
-                table,
-            ));
-            for (label, path, text) in [
-                (
-                    "ALGORITHM",
-                    "/@algorithm",
-                    self.draft.algorithm.as_deref().unwrap_or(""),
-                ),
-                ("LOCK", "/@lock", self.draft.lock.as_deref().unwrap_or("")),
-            ] {
-                panel = panel
-                    .child(html::strong(tr(label).into_owned()))
-                    .child(render_value(
-                        &Value::String(text.to_owned()),
-                        path,
-                        &mut self.editors.borrow_mut(),
-                        disabled,
-                        table,
-                    ));
-            }
-        }
         let busy = self.busy();
         let has_plan = self.summary.is_some();
+        let table = matches!(self.definition.as_ref(), Some(SchemaDefinition::Table(_)));
+        let show_plan_details = !table || self.section == "ddl_preview";
         if self.query_transferred {
             panel = panel
                 .child(html::span(
@@ -937,7 +1610,7 @@ impl SchemaEditor {
                     && s["submittable"] == true
                     && s["plan_digest"].as_str().is_some()
             });
-        let mut actions = html::div().class("advanced-actions");
+        let mut actions = html::div().class("advanced-actions schema-sticky-actions");
         for (label, action, enabled) in [
             (
                 "读取结构",
@@ -962,11 +1635,15 @@ impl SchemaEditor {
         ] {
             actions = actions.child(
                 ui::button(tr(label).into_owned())
-                    .variant(if matches!(action, "schema-plan" | "schema-submit") {
-                        ui::ButtonVariant::Primary
-                    } else {
-                        ui::ButtonVariant::Default
-                    })
+                    .variant(
+                        if (action == "schema-plan" && !has_plan)
+                            || (action == "schema-submit" && has_plan)
+                        {
+                            ui::ButtonVariant::Primary
+                        } else {
+                            ui::ButtonVariant::Default
+                        },
+                    )
                     .disabled(busy || !enabled)
                     .on_click(Msg::Action(action.into())),
             );
@@ -992,25 +1669,6 @@ impl SchemaEditor {
                         .on_click(Msg::Action("schema-draft-discard-cancel".into())),
                 );
         }
-        if self.confirm_submit {
-            panel = panel
-                .child(html::p(tr("确认执行预览中的结构变更？").into_owned()))
-                .child(
-                    ui::button(tr("确认执行").into_owned())
-                        .disabled(busy || !can_submit)
-                        .on_click(Msg::Action("schema-submit-confirm".into())),
-                )
-                .child(
-                    ui::button(tr("取消").into_owned())
-                        .on_click(Msg::Action("schema-submit-cancel".into())),
-                );
-        }
-        if self.query_sql().is_some() {
-            panel = panel.child(
-                ui::button(tr("转到查询编辑器").into_owned())
-                    .on_click(Msg::Action("schema-query".into())),
-            );
-        }
         if self
             .snapshot
             .as_ref()
@@ -1021,7 +1679,197 @@ impl SchemaEditor {
                     .on_click(Msg::Action("schema-query-original".into())),
             );
         }
-        if let Some(preview) = &self.preview {
+        if let Some(definition) = &self.definition
+            && let Ok(value) = serde_json::to_value(definition)
+        {
+            let table = value.get("kind").and_then(Value::as_str) == Some("table");
+            let disabled = self.pending.is_some()
+                || self.execution_pending
+                || self.summary.is_some()
+                || self.query_transferred
+                || self.restore_confirmation_required;
+            panel = panel.child(
+                html::p(tr("以下修改仅保存在结构草稿中，提交后才会作用于数据库。").into_owned())
+                    .class("muted"),
+            );
+            if table {
+                panel = panel.child(schema_tabs(&self.section, false));
+                if self.section == "columns" {
+                    if let Some(content) = value.get("columns") {
+                        panel = panel.child(render_value(
+                            content,
+                            "/columns",
+                            &mut self.editors.borrow_mut(),
+                            disabled,
+                            true,
+                            self.selected_column.as_deref(),
+                            SchemaChoices {
+                                open_select: self.open_select.as_deref(),
+                                root: Some(&value),
+                            },
+                        ));
+                    }
+                } else if matches!(self.section.as_str(), "indexes" | "foreign_keys" | "checks") {
+                    panel = panel.child(render_object_grid(
+                        &value,
+                        &self.section,
+                        &mut self.editors.borrow_mut(),
+                        disabled,
+                        self.selected_items.get(&self.section).map(String::as_str),
+                        self.open_select.as_deref(),
+                        SchemaGridContext {
+                            references: &self.references,
+                            database: self.draft.target.database.as_deref().unwrap_or(""),
+                            table_name: &self.draft.target.name,
+                        },
+                    ));
+                } else if self.section == "options" {
+                    let mut options = serde_json::Map::new();
+                    for key in ["engine", "charset", "collation", "comment", "options"] {
+                        if let Some(item) = value.get(key) {
+                            options.insert(key.to_owned(), item.clone());
+                        }
+                    }
+                    panel = panel.child(html::div().class("schema-design-table-options").child(
+                        render_value(
+                            &Value::Object(options),
+                            "",
+                            &mut self.editors.borrow_mut(),
+                            disabled,
+                            true,
+                            self.selected_column.as_deref(),
+                            SchemaChoices {
+                                open_select: self.open_select.as_deref(),
+                                root: Some(&value),
+                            },
+                        ),
+                    ));
+                }
+            } else {
+                panel = panel.child(render_value(
+                    &value,
+                    "",
+                    &mut self.editors.borrow_mut(),
+                    disabled,
+                    false,
+                    self.selected_column.as_deref(),
+                    SchemaChoices {
+                        open_select: self.open_select.as_deref(),
+                        root: Some(&value),
+                    },
+                ));
+            }
+            if !table || self.section == "options" {
+                for (label, path, text) in [
+                    (
+                        "ALGORITHM",
+                        "/@algorithm",
+                        self.draft.algorithm.as_deref().unwrap_or(""),
+                    ),
+                    ("LOCK", "/@lock", self.draft.lock.as_deref().unwrap_or("")),
+                ] {
+                    panel = panel
+                        .child(html::strong(tr(label).into_owned()))
+                        .child(render_value(
+                            &Value::String(text.to_owned()),
+                            path,
+                            &mut self.editors.borrow_mut(),
+                            disabled,
+                            table,
+                            self.selected_column.as_deref(),
+                            SchemaChoices {
+                                open_select: self.open_select.as_deref(),
+                                root: Some(&value),
+                            },
+                        ));
+                }
+            }
+        }
+        if self.confirm_submit && show_plan_details {
+            let mut confirmation = html::div().class("advanced-section")
+                .child(html::strong(tr("确认执行预览中的结构变更？").into_owned()))
+                .child(super::fact("数据库", self.draft.target.database.clone().unwrap_or_default()))
+                .child(super::fact("对象名称", self.draft.target.name.clone()))
+                .child(html::p(tr("以下冻结的 DDL 将按顺序执行；已执行的变更不能自动回滚，请先确认备份和恢复方式。").into_owned()).class("notice"));
+            for sql in &self.preview_sql {
+                confirmation = confirmation.child(html::pre(sql.clone()).class("advanced-code"));
+            }
+            for reason in &self.destructive_reasons {
+                confirmation = confirmation.child(html::p(reason.clone()).class("notice"));
+            }
+            confirmation = confirmation
+                .child(
+                    ui::button(tr("取消").into_owned())
+                        .on_click(Msg::Action("schema-submit-cancel".into())),
+                )
+                .child(
+                    ui::button(tr("确认执行").into_owned())
+                        .variant(if self.destructive_reasons.is_empty() {
+                            ui::ButtonVariant::Primary
+                        } else {
+                            ui::ButtonVariant::Danger
+                        })
+                        .disabled(busy || !can_submit)
+                        .on_click(Msg::Action("schema-submit-confirm".into())),
+                );
+            panel = panel.child(confirmation);
+        }
+        if show_plan_details && self.query_sql().is_some() {
+            panel = panel.child(
+                ui::button(tr("转到查询编辑器").into_owned())
+                    .on_click(Msg::Action("schema-query".into())),
+            );
+        }
+        if show_plan_details {
+            if let Some(summary) = &self.summary {
+                let mut facts = html::div().class("advanced-facts schema-plan-summary");
+                if let Some(state) = summary.get("state").and_then(Value::as_str) {
+                    facts = facts.child(super::fact("状态", super::status(state)));
+                }
+                if let Some(total) = summary.get("total_items").and_then(Value::as_u64) {
+                    facts = facts.child(super::fact("步骤", total.to_string()));
+                }
+                facts = facts
+                    .child(super::fact(
+                        "计划完整",
+                        tr(if summary["complete"] == true {
+                            "是"
+                        } else {
+                            "否"
+                        })
+                        .into_owned(),
+                    ))
+                    .child(super::fact(
+                        "可提交",
+                        tr(if summary["submittable"] == true {
+                            "是"
+                        } else {
+                            "否"
+                        })
+                        .into_owned(),
+                    ));
+                panel = panel.child(facts);
+                if self.preview.is_none() {
+                    panel = panel.child(
+                        html::p(tr("计划已生成，请使用上方预览按钮读取 DDL。").into_owned())
+                            .class("notice"),
+                    );
+                } else if !self.preview_complete {
+                    panel = panel.child(
+                        html::p(tr("尚未读取全部预览页，请继续读取后再提交。").into_owned())
+                            .class("notice"),
+                    );
+                }
+            } else if table {
+                let message = if self.execution.is_some() {
+                    "计划已提交，请查看执行结果。"
+                } else {
+                    "尚未生成计划，请使用上方生成计划按钮查看 DDL。"
+                };
+                panel = panel.child(html::p(tr(message).into_owned()).class("notice"));
+            }
+        }
+        if show_plan_details && let Some(preview) = &self.preview {
             let mut section = html::div()
                 .class("advanced-section")
                 .child(html::strong(tr("变更预览").into_owned()));
@@ -1154,6 +2002,7 @@ fn field_label(key: &str) -> &str {
         "constraints" => "约束",
         "name" => "名称",
         "native_type" => "类型",
+        "@length" => "长度",
         "nullable" => "允许 NULL",
         "default" => "默认值",
         "value" => "值",
@@ -1200,13 +2049,544 @@ fn field_label(key: &str) -> &str {
     }
 }
 
+pub(crate) fn schema_tabs(selected: &str, readonly: bool) -> Node<Msg> {
+    let mut tabs = html::div()
+        .class("advanced-tabs schema-design-tabs")
+        .attr("role", "tablist");
+    for (id, label) in [
+        ("columns", "字段"),
+        ("indexes", "索引"),
+        ("foreign_keys", "外键"),
+        ("checks", "CHECK"),
+        ("options", "表选项"),
+    ]
+    .into_iter()
+    .chain((!readonly).then_some(("ddl_preview", "预览 DDL")))
+    {
+        let focus = format!("schema-section-{id}");
+        let action = format!(
+            "{}:{id}",
+            if readonly {
+                "schema-read-section"
+            } else {
+                "schema-section"
+            }
+        );
+        tabs = tabs.child(
+            html::button(tr(label).into_owned())
+                .key(focus.clone())
+                .class(if selected == id {
+                    "advanced-tab active"
+                } else {
+                    "advanced-tab"
+                })
+                .attr("role", "tab")
+                .attr("aria-selected", selected == id)
+                .on_click(Msg::Action(action)),
+        );
+    }
+    tabs.into()
+}
+
+fn row_action(label: &str, icon: &str, action: String, disabled: bool) -> Node<Msg> {
+    let label = tr(label).into_owned();
+    ui::button("")
+        .icon(icon.to_owned())
+        .aria(label.clone())
+        .title(label)
+        .disabled(disabled)
+        .on_click(Msg::Action(action))
+        .into()
+}
+
+fn candidate_select(
+    path: &str,
+    label: &str,
+    current: &str,
+    candidates: &[String],
+    disabled: bool,
+    open: Option<&str>,
+    command: &str,
+) -> Node<Msg> {
+    let toggle_path = path.to_owned();
+    let change_path = path.to_owned();
+    let command = command.to_owned();
+    let mut select = ui::select()
+        .aria(tr(label).into_owned())
+        .value(current.to_owned())
+        .disabled(disabled)
+        .open(open == Some(path))
+        .on_toggle(move |collapsed| {
+            Msg::Action(format!("schema-op:open:{toggle_path}:{}", !collapsed))
+        })
+        .option(ui::SelectOption::new("", tr("请选择").into_owned()));
+    if !current.is_empty() && !candidates.iter().any(|value| value == current) {
+        select = select.option(ui::SelectOption::new(
+            current.to_owned(),
+            format!("{} · {}", current, tr("当前值未加载或不可见")),
+        ));
+    }
+    for candidate in candidates {
+        select = select.option(ui::SelectOption::new(candidate.clone(), candidate.clone()));
+    }
+    select
+        .on_change(move |change| {
+            Msg::Action(format!(
+                "schema-op:{command}:{change_path}:{}",
+                change.value.as_str().unwrap_or_default()
+            ))
+        })
+        .into()
+}
+
+fn ordered_columns(
+    items: &Value,
+    path: &str,
+    label: &str,
+    candidates: &[String],
+    index_parts: bool,
+    disabled: bool,
+    open: Option<&str>,
+) -> Node<Msg> {
+    let mut cell = html::div().class("schema-design-ordered-columns");
+    let values = items.as_array();
+    let count = values.map_or(0, Vec::len);
+    for (index, item) in values.into_iter().flatten().enumerate() {
+        let value = if index_parts {
+            item.get("column").and_then(Value::as_str).unwrap_or("")
+        } else {
+            item.as_str().unwrap_or("")
+        };
+        let item_path = format!("{path}/{index}");
+        let select_path = if index_parts {
+            format!("{item_path}/column")
+        } else {
+            item_path
+        };
+        let mut line = html::div()
+            .class("schema-design-ordered-column")
+            .child(candidate_select(
+                &select_path,
+                label,
+                value,
+                candidates,
+                disabled,
+                open,
+                if index_parts {
+                    "index-column"
+                } else {
+                    "choice"
+                },
+            ));
+        if let Some(expression) = item
+            .get("expression")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            line = line.child(html::span(expression.to_owned()));
+        }
+        for (title, icon, action, unavailable) in [
+            ("前移", "chev-up", "up", index == 0),
+            ("后移", "chev", "down", index + 1 == count),
+            ("删除", "trash", "remove", false),
+        ] {
+            line = line.child(row_action(
+                title,
+                icon,
+                format!("schema-op:{action}:{path}:{index}"),
+                disabled || unavailable,
+            ));
+        }
+        cell = cell.child(line);
+    }
+    cell = cell.child(row_action(
+        "添加列",
+        "plus",
+        format!("schema-op:add:{path}:item"),
+        disabled,
+    ));
+    cell.into()
+}
+
+struct SchemaGridContext<'a> {
+    references: &'a schema_reference::ReferenceState,
+    database: &'a str,
+    table_name: &'a str,
+}
+
+fn render_object_grid(
+    root: &Value,
+    section: &str,
+    editors: &mut BTreeMap<String, Editor>,
+    disabled: bool,
+    selected_id: Option<&str>,
+    open_select: Option<&str>,
+    context: SchemaGridContext<'_>,
+) -> Node<Msg> {
+    let SchemaGridContext {
+        references,
+        database,
+        table_name,
+    } = context;
+    let (path, kind, fields): (&str, &str, &[(&str, &str)]) = match section {
+        "indexes" => (
+            "/indexes",
+            "",
+            &[
+                ("name", "名称"),
+                ("kind", "种类"),
+                ("@table", "表"),
+                ("parts", "列"),
+                ("visible", "可见"),
+            ],
+        ),
+        "foreign_keys" => (
+            "/constraints",
+            "foreign_key",
+            &[
+                ("name", "名称"),
+                ("columns", "本地列"),
+                ("referenced_database", "引用数据库"),
+                ("referenced_table", "引用表"),
+                ("referenced_columns", "引用列"),
+                ("on_update", "更新时"),
+                ("on_delete", "删除时"),
+            ],
+        ),
+        _ => (
+            "/constraints",
+            "check",
+            &[
+                ("name", "名称"),
+                ("expression", "表达式"),
+                ("enforced", "启用约束"),
+            ],
+        ),
+    };
+    let items = root.pointer(path).and_then(Value::as_array);
+    let matching: Vec<_> = items
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, item)| {
+            kind.is_empty() || item.get("kind").and_then(Value::as_str) == Some(kind)
+        })
+        .collect();
+    let selected = selected_id
+        .and_then(|id| {
+            matching
+                .iter()
+                .position(|(_, item)| item.get("id").and_then(Value::as_str) == Some(id))
+        })
+        .or_else(|| (!matching.is_empty()).then_some(0));
+    let mut grid = html::div().class("schema-design-object-grid");
+    let mut header = html::div().class(format!(
+        "schema-design-object-row schema-design-object-{section} schema-design-column-header"
+    ));
+    for (_, label) in fields {
+        header = header.child(html::strong(tr(label).into_owned()));
+    }
+    header = header.child(html::strong(tr("操作").into_owned()));
+    grid = grid.child(header);
+    let local_columns: Vec<String> = root["columns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|column| {
+            column["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+        .collect();
+    for (position, (index, item)) in matching.iter().enumerate() {
+        let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+        let referenced_database = item
+            .get("referenced_database")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(database);
+        let referenced_table = item
+            .get("referenced_table")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let entry = references.entries.get(id).filter(|entry| {
+            entry.database == referenced_database && entry.table == referenced_table
+        });
+        let self_reference = referenced_database == database
+            && referenced_table == table_name
+            && !table_name.is_empty();
+        let mut row = html::div()
+            .class(format!(
+                "schema-design-object-row schema-design-object-{section}{}",
+                if selected == Some(position) {
+                    " selected"
+                } else {
+                    ""
+                }
+            ))
+            .key(id.to_owned())
+            .on_click(Msg::Action(format!("schema-op:item:{section}:{id}")));
+        for (key, label) in fields {
+            let field_path = format!("{path}/{index}/{key}");
+            let mut cell = html::div().class("schema-design-object-cell");
+            if *key == "@table" {
+                cell = cell.child(html::span(table_name.to_owned()));
+                row = row.child(cell);
+                continue;
+            }
+            if matches!(*key, "parts" | "columns" | "referenced_columns") {
+                let candidates = if *key == "referenced_columns" {
+                    if self_reference {
+                        local_columns.as_slice()
+                    } else {
+                        entry.map_or(&[][..], |entry| entry.columns.as_slice())
+                    }
+                } else {
+                    local_columns.as_slice()
+                };
+                let empty = json!([]);
+                cell = cell.child(ordered_columns(
+                    item.get(*key).unwrap_or(&empty),
+                    &field_path,
+                    label,
+                    candidates,
+                    *key == "parts",
+                    disabled,
+                    open_select,
+                ));
+                if *key == "referenced_columns" && !self_reference {
+                    let loading = entry.is_some_and(|entry| entry.columns_loading);
+                    let complete = entry.is_some_and(|entry| entry.columns_complete);
+                    if let Some(error) = entry.and_then(|entry| entry.columns_error.as_deref()) {
+                        cell = cell.child(html::p(tr(error).into_owned()).class("field-error"));
+                    }
+                    if loading {
+                        cell = cell.child(html::span(tr("正在加载引用列").into_owned()));
+                    }
+                    if !complete && !loading {
+                        cell = cell.child(
+                            ui::button(tr("加载引用列").into_owned())
+                                .disabled(disabled || referenced_table.is_empty())
+                                .on_click(Msg::Action(format!("schema-ref:load:{id}:columns"))),
+                        );
+                    }
+                }
+                row = row.child(cell);
+                continue;
+            }
+            if *key == "referenced_table" {
+                let mut candidates = entry.map_or_else(Vec::new, |entry| entry.tables.clone());
+                if referenced_database == database
+                    && !table_name.is_empty()
+                    && !candidates.iter().any(|value| value == table_name)
+                {
+                    candidates.push(table_name.to_owned());
+                }
+                cell = cell.child(candidate_select(
+                    &field_path,
+                    label,
+                    referenced_table,
+                    &candidates,
+                    disabled,
+                    open_select,
+                    "choice",
+                ));
+                let loading = entry.is_some_and(|entry| entry.tables_loading);
+                let complete = entry.is_some_and(|entry| entry.tables_complete);
+                if let Some(error) = entry.and_then(|entry| entry.tables_error.as_deref()) {
+                    cell = cell.child(html::p(tr(error).into_owned()).class("field-error"));
+                }
+                if loading {
+                    cell = cell.child(html::span(tr("正在加载引用表").into_owned()));
+                }
+                if !complete && !loading {
+                    cell = cell.child(
+                        ui::button(tr("加载引用表").into_owned())
+                            .disabled(disabled || referenced_database.is_empty())
+                            .on_click(Msg::Action(format!("schema-ref:load:{id}:tables"))),
+                    );
+                }
+                row = row.child(cell);
+                continue;
+            }
+            if let Some(value) = item.get(*key) {
+                if let Some(on) = value.as_bool() {
+                    let toggle_path = field_path.clone();
+                    let change_path = field_path.clone();
+                    cell = cell.child(
+                        ui::select()
+                            .aria(tr(label).into_owned())
+                            .value(if on { "true" } else { "false" })
+                            .open(open_select == Some(field_path.as_str()))
+                            .disabled(disabled)
+                            .option(ui::SelectOption::new("true", tr("是").into_owned()))
+                            .option(ui::SelectOption::new("false", tr("否").into_owned()))
+                            .on_toggle(move |collapsed| {
+                                Msg::Action(format!("schema-op:open:{toggle_path}:{}", !collapsed))
+                            })
+                            .on_change(move |change| {
+                                Msg::Action(format!(
+                                    "schema-op:choice:{change_path}:{}",
+                                    change.value.as_str().unwrap_or_default()
+                                ))
+                            }),
+                    );
+                } else {
+                    cell = cell.child(render_value(
+                        value,
+                        &field_path,
+                        editors,
+                        disabled,
+                        true,
+                        None,
+                        SchemaChoices {
+                            open_select,
+                            root: Some(root),
+                        },
+                    ));
+                }
+            }
+            if *key == "name" {
+                cell = cell.child(
+                    ui::button(tr("扩展属性").into_owned())
+                        .on_click(Msg::Action(format!("schema-op:item:{section}:{id}"))),
+                );
+            }
+            row = row.child(cell);
+        }
+        let mut actions = html::div().class("schema-design-row-actions");
+        for (label, icon, target) in [
+            ("前移", "chev-up", position.checked_sub(1)),
+            (
+                "后移",
+                "chev",
+                (position + 1 < matching.len()).then_some(position + 1),
+            ),
+        ] {
+            let destination = target.map(|n| matching[n].0).unwrap_or(*index);
+            actions = actions.child(row_action(
+                label,
+                icon,
+                format!("schema-op:move:{path}:{index},{destination}"),
+                disabled || target.is_none(),
+            ));
+        }
+        actions = actions.child(row_action(
+            "删除",
+            "trash",
+            format!("schema-op:remove:{path}:{index}"),
+            disabled,
+        ));
+        row = row.child(actions);
+        grid = grid.child(row);
+    }
+    let add_kind = if kind.is_empty() { "item" } else { kind };
+    let mut content = html::div().class("advanced-fields").child(grid).child(
+        html::div().class("advanced-actions").child(row_action(
+            "新增",
+            "plus",
+            format!("schema-op:add:{path}:{add_kind}"),
+            disabled,
+        )),
+    );
+    if let Some(position) = selected {
+        let (index, item) = matching[position];
+        let mut properties = item.as_object().cloned().unwrap_or_default();
+        for (key, _) in fields {
+            if *key != "parts" {
+                properties.remove(*key);
+            }
+        }
+        properties.remove("kind");
+        let mut detail = html::div()
+            .class("schema-design-column-details")
+            .child(html::strong(tr("选中项扩展属性").into_owned()))
+            .child(html::span(
+                item.get("name")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("—")
+                    .to_owned(),
+            ));
+        if properties.keys().any(|key| key != "id") {
+            detail = detail.child(render_value(
+                &Value::Object(properties),
+                &format!("{path}/{index}"),
+                editors,
+                disabled,
+                true,
+                None,
+                SchemaChoices {
+                    open_select,
+                    root: Some(root),
+                },
+            ));
+        }
+        content = content.child(detail);
+    }
+    content.into()
+}
+
+fn schema_choices(path: &str) -> &'static [(&'static str, &'static str)] {
+    if path.ends_with("/default/kind") {
+        &[
+            ("unspecified", "未指定"),
+            ("null", "NULL"),
+            ("literal", "字面量"),
+            ("expression", "表达式"),
+        ]
+    } else if path.contains("/indexes/") && path.ends_with("/kind") {
+        &[
+            ("unique", "唯一索引"),
+            ("normal", "普通索引"),
+            ("fulltext", "全文索引"),
+            ("spatial", "空间索引"),
+        ]
+    } else if path == "/timing" {
+        &[("BEFORE", "之前"), ("AFTER", "之后")]
+    } else if path == "/event" {
+        &[("INSERT", "插入"), ("UPDATE", "更新"), ("DELETE", "删除")]
+    } else if path == "/security" {
+        &[("DEFINER", "定义者"), ("INVOKER", "调用者")]
+    } else if path == "/algorithm" {
+        &[
+            ("UNDEFINED", "未指定"),
+            ("MERGE", "合并"),
+            ("TEMPTABLE", "临时表"),
+        ]
+    } else if path == "/check_option" {
+        &[("LOCAL", "本地"), ("CASCADED", "级联")]
+    } else if path.contains("/constraints/")
+        && (path.ends_with("/on_update") || path.ends_with("/on_delete"))
+    {
+        &[
+            ("RESTRICT", "限制"),
+            ("CASCADE", "级联"),
+            ("SET NULL", "设为 NULL"),
+            ("NO ACTION", "不操作"),
+        ]
+    } else {
+        &[]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SchemaChoices<'a> {
+    open_select: Option<&'a str>,
+    root: Option<&'a Value>,
+}
+
 fn render_value(
     value: &Value,
     path: &str,
     editors: &mut BTreeMap<String, Editor>,
     disabled: bool,
     table: bool,
+    selected_column: Option<&str>,
+    choices: SchemaChoices<'_>,
 ) -> Node<Msg> {
+    let SchemaChoices { open_select, root } = choices;
     let mut container = html::div().class("advanced-fields");
     match value {
         Value::Object(map) => {
@@ -1218,8 +2598,24 @@ fn render_value(
                 let locked_identity = path.is_empty()
                     && map.get("kind").and_then(Value::as_str) == Some("trigger")
                     && matches!(key.as_str(), "name" | "database");
+                if let Value::Bool(on) = value {
+                    let action = format!("schema-op:toggle:{child}");
+                    container = container.child(
+                        html::div().class("schema-design-boolean").child(
+                            ui::switch(tr(field_label(key)).into_owned())
+                                .on(*on)
+                                .disabled(disabled || locked_identity)
+                                .on_change(move |_| Msg::Action(action.clone())),
+                        ),
+                    );
+                    continue;
+                }
                 let mut field = html::div()
-                    .class("advanced-field")
+                    .class(if path.is_empty() && table {
+                        "advanced-field schema-design-section"
+                    } else {
+                        "advanced-field"
+                    })
                     .child(html::strong(tr(field_label(key)).into_owned()))
                     .child(render_value(
                         value,
@@ -1227,6 +2623,8 @@ fn render_value(
                         editors,
                         disabled || locked_identity,
                         table,
+                        selected_column,
+                        SchemaChoices { open_select, root },
                     ));
                 if !value.is_null()
                     && (matches!(
@@ -1255,6 +2653,313 @@ fn render_value(
             }
         }
         Value::Array(items) => {
+            if path == "/columns" && table {
+                let selected = selected_column
+                    .and_then(|id| {
+                        items
+                            .iter()
+                            .position(|item| item.get("id").and_then(Value::as_str) == Some(id))
+                    })
+                    .or_else(|| (!items.is_empty()).then_some(0));
+                let mut list = html::div().class("schema-design-columns");
+                let mut header =
+                    html::div().class("schema-design-column-row schema-design-column-header");
+                for label in [
+                    "名称",
+                    "类型",
+                    "长度",
+                    "允许 NULL",
+                    "默认值",
+                    "约束",
+                    "注释",
+                    "操作",
+                ] {
+                    header = header.child(html::strong(tr(label).into_owned()));
+                }
+                list = list.child(header);
+                for (index, item) in items.iter().enumerate() {
+                    let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    let mut primary = false;
+                    let mut foreign = false;
+                    for index in root
+                        .and_then(|v| v.get("indexes"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if !name.is_empty()
+                            && index
+                                .get("parts")
+                                .and_then(Value::as_array)
+                                .is_some_and(|parts| {
+                                    parts.iter().any(|part| {
+                                        part.get("column").and_then(Value::as_str) == Some(name)
+                                    })
+                                })
+                            && index.get("kind").and_then(Value::as_str) == Some("primary")
+                        {
+                            primary = true;
+                        }
+                    }
+                    for constraint in root
+                        .and_then(|v| v.get("constraints"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if !name.is_empty()
+                            && constraint.get("kind").and_then(Value::as_str) == Some("foreign_key")
+                            && constraint
+                                .get("columns")
+                                .and_then(Value::as_array)
+                                .is_some_and(|columns| {
+                                    columns.iter().any(|column| column.as_str() == Some(name))
+                                })
+                        {
+                            foreign = true;
+                        }
+                    }
+                    let mut row = html::div()
+                        .class(if selected == Some(index) {
+                            "schema-design-column-row selected"
+                        } else {
+                            "schema-design-column-row"
+                        })
+                        .key(id.to_owned())
+                        .on_click(Msg::Action(format!("schema-op:column:{id}:")));
+                    if let Some(value) = item.get("name") {
+                        row = row.child(render_value(
+                            value,
+                            &format!("/columns/{index}/name"),
+                            editors,
+                            disabled,
+                            table,
+                            selected_column,
+                            SchemaChoices { open_select, root },
+                        ));
+                    }
+                    let type_path = format!("/columns/{index}/native_type");
+                    let native_type = item
+                        .get("native_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let params = type_parameters(native_type);
+                    let family = native_type
+                        .trim_start()
+                        .split(|c: char| !c.is_ascii_alphabetic())
+                        .next()
+                        .unwrap_or("");
+                    let current = COLUMN_TYPE_CHOICES
+                        .iter()
+                        .find(|(choice, _)| family.eq_ignore_ascii_case(choice))
+                        .map_or(native_type, |(choice, _)| *choice);
+                    let toggle_path = type_path.clone();
+                    let change_path = type_path.clone();
+                    let mut type_select = ui::select()
+                        .aria(tr("类型").into_owned())
+                        .value(current)
+                        .open(open_select == Some(type_path.as_str()))
+                        .disabled(disabled);
+                    if !COLUMN_TYPE_CHOICES
+                        .iter()
+                        .any(|(choice, _)| *choice == current)
+                    {
+                        type_select = type_select.option(ui::SelectOption::new(current, current));
+                    }
+                    for (choice, _) in COLUMN_TYPE_CHOICES {
+                        let label = if *choice == current {
+                            params.as_ref().map_or_else(
+                                || native_type.to_owned(),
+                                |params| format!("{}{}", params.name, params.suffix),
+                            )
+                        } else {
+                            (*choice).to_owned()
+                        };
+                        type_select = type_select.option(ui::SelectOption::new(*choice, label));
+                    }
+                    row = row.child(
+                        type_select
+                            .on_toggle(move |collapsed| {
+                                Msg::Action(format!("schema-op:open:{toggle_path}:{}", !collapsed))
+                            })
+                            .on_change(move |change| {
+                                Msg::Action(format!(
+                                    "schema-op:column-type:{change_path}:{}",
+                                    change.value.as_str().unwrap_or_default()
+                                ))
+                            }),
+                    );
+                    let mut length_cell = html::div();
+                    if let Some(params) = params {
+                        if params.fractional_seconds {
+                            length_cell =
+                                length_cell.attr("title", tr("小数秒精度（0–6）").into_owned());
+                        }
+                        let length_path = format!("{type_path}/@length");
+                        length_cell = length_cell.child(render_value(
+                            &Value::String(type_parameter_text(&params)),
+                            &length_path,
+                            editors,
+                            disabled,
+                            table,
+                            selected_column,
+                            SchemaChoices { open_select, root },
+                        ));
+                        if editors.contains_key(&format!("{type_path}/@parameters"))
+                            && let Some(editor) = editors.get(&length_path)
+                            && let Err(error) = parse_parameter_text(&params, &editor.text)
+                        {
+                            length_cell =
+                                length_cell.child(html::p(tr(error).into_owned()).class("notice"));
+                        }
+                    }
+                    row = row.child(length_cell);
+                    let nullable_path = format!("/columns/{index}/nullable");
+                    let change_path = nullable_path.clone();
+                    let nullable = html::checkbox(format!("schema-nullable-{id}"), "true")
+                        .class("schema-design-nullable")
+                        .aria(tr("允许 NULL").into_owned())
+                        .checked(item.get("nullable") == Some(&Value::Bool(true)))
+                        .disabled(disabled || primary)
+                        .on_change(move |change| {
+                            Msg::Action(format!(
+                                "schema-op:choice:{change_path}:{}",
+                                change.checked == Some(true)
+                            ))
+                        });
+                    row = row.child(nullable);
+                    let mut default_cell = html::div().class("schema-design-default");
+                    if let Some(default) = item.get("default") {
+                        if let Some(kind) = default.get("kind") {
+                            default_cell = default_cell.child(render_value(
+                                kind,
+                                &format!("/columns/{index}/default/kind"),
+                                editors,
+                                disabled,
+                                table,
+                                selected_column,
+                                SchemaChoices { open_select, root },
+                            ));
+                        }
+                        if let Some(value) = default.get("value") {
+                            default_cell = default_cell.child(render_value(
+                                value,
+                                &format!("/columns/{index}/default/value"),
+                                editors,
+                                disabled,
+                                table,
+                                selected_column,
+                                SchemaChoices { open_select, root },
+                            ));
+                        }
+                    }
+                    let pk_label = tr(if primary {
+                        "取消主键"
+                    } else {
+                        "设为主键"
+                    })
+                    .into_owned();
+                    let mut badges = html::div().class("schema-design-column-constraints");
+                    if primary {
+                        badges = badges.child(
+                            html::span("")
+                                .attr("role", "img")
+                                .aria(tr("主键").into_owned())
+                                .title(tr("主键").into_owned())
+                                .child(ui::icon("key")),
+                        );
+                    }
+                    if foreign {
+                        badges = badges.child(
+                            html::span("")
+                                .attr("role", "img")
+                                .aria(tr("外键").into_owned())
+                                .title(tr("外键").into_owned())
+                                .child(ui::icon("link")),
+                        );
+                    }
+                    if !primary && !foreign {
+                        badges = badges.child(html::span("—"));
+                    }
+                    row = row.child(default_cell).child(badges);
+                    if let Some(value) = item.get("comment") {
+                        row = row.child(render_value(
+                            value,
+                            &format!("/columns/{index}/comment"),
+                            editors,
+                            disabled,
+                            table,
+                            selected_column,
+                            SchemaChoices { open_select, root },
+                        ));
+                    }
+                    let mut actions = html::div().class("schema-design-row-actions").child(
+                        ui::button("")
+                            .icon("key")
+                            .aria(pk_label.clone())
+                            .title(pk_label)
+                            .variant(if primary {
+                                ui::ButtonVariant::Primary
+                            } else {
+                                ui::ButtonVariant::Default
+                            })
+                            .disabled(disabled || name.trim().is_empty())
+                            .on_click(Msg::Action(format!("schema-op:primary:{id}:"))),
+                    );
+                    for (label, icon, command, unavailable) in [
+                        ("上移字段", "chev-up", "up", index == 0),
+                        ("下移字段", "chev", "down", index + 1 == items.len()),
+                        ("删除字段", "trash", "remove", false),
+                    ] {
+                        actions = actions.child(row_action(
+                            label,
+                            icon,
+                            format!("schema-op:{command}:/columns:{index}"),
+                            disabled || unavailable,
+                        ));
+                    }
+                    row = row.child(actions);
+                    list = list.child(row);
+                }
+                container =
+                    container
+                        .child(list)
+                        .child(html::div().class("advanced-actions").child(row_action(
+                            "新增字段",
+                            "plus",
+                            "schema-op:add:/columns:column".into(),
+                            disabled,
+                        )));
+                if let Some(index) = selected {
+                    let mut properties = items[index].as_object().cloned().unwrap_or_default();
+                    for key in ["name", "native_type", "nullable", "default", "comment"] {
+                        properties.remove(key);
+                    }
+                    let details = html::div()
+                        .class("schema-design-column-details")
+                        .child(html::strong(tr("选中字段扩展属性").into_owned()))
+                        .child(html::span(
+                            items[index]
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or("—")
+                                .to_owned(),
+                        ))
+                        .child(render_value(
+                            &Value::Object(properties),
+                            &format!("/columns/{index}"),
+                            editors,
+                            disabled,
+                            table,
+                            selected_column,
+                            SchemaChoices { open_select, root },
+                        ));
+                    container = container.child(details);
+                }
+                return container.into();
+            }
             for (index, item) in items.iter().enumerate() {
                 let child = format!("{path}/{index}");
                 let row_key = item
@@ -1262,10 +2967,19 @@ fn render_value(
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                     .unwrap_or_else(|| child.clone());
-                let mut row = html::div()
-                    .class("advanced-section")
-                    .key(row_key)
-                    .child(render_value(item, &child, editors, disabled, table));
+                let mut row =
+                    html::div()
+                        .class("advanced-section")
+                        .key(row_key)
+                        .child(render_value(
+                            item,
+                            &child,
+                            editors,
+                            disabled,
+                            table,
+                            selected_column,
+                            SchemaChoices { open_select, root },
+                        ));
                 for (label, action, enabled) in [
                     ("删除", "remove", true),
                     ("前移", "up", index > 0),
@@ -1293,17 +3007,18 @@ fn render_value(
             };
             for (label, kind) in kinds {
                 if template(path, kind).is_some() {
-                    container = container.child(
-                        ui::button(tr(label).into_owned())
-                            .disabled(disabled)
-                            .on_click(Msg::Action(format!("schema-op:add:{path}:{kind}"))),
-                    );
+                    container = container.child(row_action(
+                        label,
+                        "plus",
+                        format!("schema-op:add:{path}:{kind}"),
+                        disabled,
+                    ));
                 }
             }
         }
         Value::Bool(on) => {
             container = container.child(
-                ui::switch(tr("启用").into_owned())
+                ui::switch(tr(field_label(path.rsplit('/').next().unwrap_or(""))).into_owned())
                     .on(*on)
                     .disabled(disabled)
                     .on_change({
@@ -1312,63 +3027,104 @@ fn render_value(
                     }),
             );
         }
+        Value::String(text) if !schema_choices(path).is_empty() => {
+            let label = tr(if path.ends_with("/default/kind") {
+                "默认值种类"
+            } else {
+                field_label(path.rsplit('/').next().unwrap_or(""))
+            })
+            .into_owned();
+            let toggle_path = path.to_owned();
+            let change_path = path.to_owned();
+            let mut select = ui::select()
+                .aria(label)
+                .value(text.clone())
+                .disabled(disabled)
+                .open(open_select == Some(path))
+                .on_toggle(move |collapsed| {
+                    Msg::Action(format!("schema-op:open:{toggle_path}:{}", !collapsed))
+                });
+            let choices = schema_choices(path);
+            if !choices.iter().any(|(value, _)| *value == text.as_str()) {
+                select = select.option(ui::SelectOption::new(text.clone(), text.clone()));
+            }
+            for (value, label) in choices {
+                select = select.option(ui::SelectOption::new(*value, tr(label).into_owned()));
+            }
+            container = container.child(select.on_change(move |change| {
+                Msg::Action(format!(
+                    "schema-op:choice:{change_path}:{}",
+                    change.value.as_str().unwrap_or_default()
+                ))
+            }));
+        }
         Value::String(text) if path.ends_with("/kind") => {
             container = container.child(html::span(text.clone()));
-            let choices: &[&str] = if path.ends_with("/default/kind") {
-                &["unspecified", "null", "literal", "expression"]
-            } else if path.contains("/indexes/") {
-                &["primary", "unique", "normal", "fulltext", "spatial"]
-            } else {
-                &[]
-            };
-            for choice in choices {
-                let (target, replacement) = if path.ends_with("/default/kind") {
-                    (
-                        path.trim_end_matches("/kind"),
-                        if *choice == "literal" || *choice == "expression" {
-                            json!({"kind":choice,"value":""})
-                        } else {
-                            json!({"kind":choice})
-                        },
-                    )
-                } else {
-                    (path, json!(choice))
-                };
-                container = container.child(
-                    ui::button(tr(choice).into_owned())
-                        .disabled(disabled)
-                        .on_click(Msg::Action(format!("schema-op:set:{target}:{replacement}"))),
-                );
-            }
         }
         Value::String(text) => {
             let editor = editors
                 .entry(path.to_owned())
                 .or_insert_with(|| Editor::new(text));
             let name = format!("schema:{path}");
-            let edit_name = name.clone();
-            let undo_name = name.clone();
-            let input = ui::editor()
-                .key(name.clone())
-                .aria(tr("编辑").into_owned())
-                .readonly(disabled)
-                .text(editor.text.clone())
-                .cursor(editor.cursor)
-                .anchor(editor.anchor)
-                .max_lines(16u32)
-                .on_focus(Msg::Focus(name))
-                .on_undo(Msg::Undo(undo_name))
-                .on_edit(move |e| {
-                    Msg::Edit(
-                        edit_name.clone(),
-                        e.from,
-                        e.to,
-                        e.text.clone(),
-                        e.cursor,
-                        e.len,
-                    )
-                });
-            container = container.child(input);
+            let key = path.rsplit('/').next().unwrap_or("");
+            let label = tr(if key == "value" && path.contains("/default/") {
+                "默认值"
+            } else {
+                field_label(key)
+            })
+            .into_owned();
+            let long = matches!(key, "select" | "body" | "expression");
+            if long {
+                let edit_name = name.clone();
+                let undo_name = name.clone();
+                container = container.child(
+                    ui::editor()
+                        .key(name.clone())
+                        .aria(label)
+                        .readonly(disabled)
+                        .text(editor.text.clone())
+                        .cursor(editor.cursor)
+                        .anchor(editor.anchor)
+                        .max_lines(16u32)
+                        .on_focus(Msg::Focus(name))
+                        .on_undo(Msg::Undo(undo_name))
+                        .on_edit(move |e| {
+                            Msg::Edit(
+                                edit_name.clone(),
+                                e.from,
+                                e.to,
+                                e.text.clone(),
+                                e.cursor,
+                                e.len,
+                            )
+                        }),
+                );
+            } else {
+                let edit_name = name.clone();
+                let undo_name = name.clone();
+                container = container.child(
+                    ui::input()
+                        .key(name.clone())
+                        .aria(label)
+                        .variant(ui::InputVariant::Field)
+                        .readonly(disabled)
+                        .text(editor.text.clone())
+                        .cursor(editor.cursor)
+                        .anchor(editor.anchor)
+                        .on_focus(Msg::Focus(name))
+                        .on_undo(Msg::Undo(undo_name))
+                        .on_edit(move |e| {
+                            Msg::Edit(
+                                edit_name.clone(),
+                                e.from,
+                                e.to,
+                                e.text.clone(),
+                                e.cursor,
+                                e.len,
+                            )
+                        }),
+                );
+            }
         }
         Value::Null => {
             let replacement = if path.ends_with("/generated") {
@@ -1393,6 +3149,8 @@ fn render_value(
                 editors,
                 disabled,
                 table,
+                selected_column,
+                SchemaChoices { open_select, root },
             );
         }
     }
@@ -1402,3 +3160,7 @@ fn render_value(
 #[cfg(test)]
 #[path = "../../tests/unit/advanced_schema.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/schema_embedded_regression.rs"]
+mod embedded_regression;

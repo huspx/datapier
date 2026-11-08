@@ -37,10 +37,16 @@ pub(super) fn string_value(app: &App) -> Node<Msg> {
             Some(bytes) if app.workbench.value_format == "json" => {
                 match serde_json::from_slice::<Value>(bytes) {
                     Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_default(),
-                    Err(error) => crate::i18n::format_message(
-                        "JSON 解析失败：{error}",
-                        &[("error", &error.to_string())],
-                    ),
+                    Err(error) => {
+                        panel = panel.child(
+                            html::span(crate::i18n::format_message(
+                                "JSON 解析失败：{error}",
+                                &[("error", &error.to_string())],
+                            ))
+                            .class("empty-note"),
+                        );
+                        value_text(value, true).into_owned()
+                    }
                 }
             }
             _ => value_text(value, true).into_owned(),
@@ -255,14 +261,16 @@ pub(super) fn cli_panel(app: &App) -> Node<Msg> {
             let mut result = html::div()
                 .class("cli-results")
                 .key(format!("cli-result-{}-{result_index}", record.id))
-                .attr("role", "group")
-                .aria(format!(
-                    "{} · {}",
-                    crate::i18n::tr("执行记录"),
-                    record.command
-                ))
-                .title(crate::i18n::tr("点击定位执行记录").into_owned())
-                .on_click(Msg::Action(action));
+                .child(
+                    ui::button(crate::i18n::tr("定位执行记录").into_owned())
+                        .variant(ui::ButtonVariant::Quiet)
+                        .aria(format!(
+                            "{} · {}",
+                            crate::i18n::tr("定位执行记录"),
+                            record.command
+                        ))
+                        .on_click(Msg::Action(action)),
+                );
             if let Some(db) = app
                 .workbench
                 .cli_result_databases
@@ -330,13 +338,25 @@ pub(super) fn cli_panel(app: &App) -> Node<Msg> {
                 .class("cli-prompt")
                 .child(html::span(">"))
                 .child(field(app, "cli_text", ""))
-                .child(icon_button("play", "执行", "cli-run")),
+                .child(page_button(
+                    "play",
+                    "执行",
+                    "cli-run",
+                    !app.workbench.cli_running && !app.operation_pending,
+                ))
+                .child(if app.workbench.cli_running || app.operation_pending {
+                    html::span(crate::i18n::tr("执行中，暂不能修改输入或再次执行").into_owned())
+                        .class("muted")
+                } else {
+                    html::span("")
+                }),
         )
         .into()
 }
 
 pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
     let target = app.target.as_ref().unwrap();
+    let can_edit = writable(app) && app.browse_result && app.edit_token.is_some();
     let ttl = app
         .schema
         .as_ref()
@@ -379,16 +399,22 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
         )));
     }
     metadata = metadata.child(html::span(format!("TTL {}", ttl_label(ttl))));
-    if writable(app) {
-        metadata = metadata.child(icon_button("edit", "编辑 TTL", "redis-op:set_ttl"));
-    }
+    metadata = metadata.child(page_button(
+        "edit",
+        "编辑 TTL",
+        "redis-op:set_ttl",
+        writable(app),
+    ));
     let mut heading = html::div()
         .class("key-heading")
         .child(html::span(type_label).class("tag"))
         .child(html::strong(target.name.clone()));
-    if writable(app) {
-        heading = heading.child(icon_button("edit", "编辑 key 名称", "redis-op:rename"));
-    }
+    heading = heading.child(page_button(
+        "edit",
+        "编辑 key 名称",
+        "redis-op:rename",
+        writable(app),
+    ));
     let copy_label = crate::i18n::tr("复制完整 key").into_owned();
     heading = heading.child(
         ui::button("")
@@ -403,19 +429,12 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
                 target.key_b64.as_deref(),
             ))),
     );
-    if writable(app) {
-        let label = crate::i18n::tr("删除 key").into_owned();
-        heading = heading.child(
-            ui::button("")
-                .variant(ui::ButtonVariant::Quiet)
-                .size(ui::ButtonSize::Md)
-                .icon("trash")
-                .role("redis-delete")
-                .title(label.clone())
-                .aria(label)
-                .on_click(Msg::Action("redis-op:delete_key".into())),
-        );
-    }
+    heading = heading.child(page_button(
+        "trash",
+        "删除 key",
+        "redis-op:delete_key",
+        writable(app),
+    ));
     let title = html::div()
         .class("key-title")
         .child(heading)
@@ -423,7 +442,7 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
     let mut tools = html::div().class("key-actions");
     if app.target.as_ref().is_some_and(|t| t.kind == "string") {
         let mut formats = ui::tabs()
-            .variant(ui::TabsVariant::Segmented)
+            .variant(ui::TabsVariant::Underline)
             .active(app.workbench.value_format.clone());
         for (value, label) in [("text", "Text"), ("json", "JSON"), ("hex", "HEX")] {
             formats = formats.tab(value, label);
@@ -455,10 +474,8 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
     if matches!(kind, "string" | "hash" | "list" | "set" | "zset") && app.grid.is_some() {
         tools = tools.child(button("高级值编辑", "redis-advanced-value-open"));
     }
-    if writable(app) {
-        tools = tools.child(icon_button("edit", "编辑 value", "redis-edit"));
-    }
-    if writable(app) {
+    tools = tools.child(page_button("edit", "编辑 value", "redis-edit", can_edit));
+    {
         let operations: &[(&str, &str, &str)] = match kind {
             "hash" => &[("plus", "设置 Hash 字段", "hash_set")],
             "list" => &[("plus", "插入 List 元素", "list_insert")],
@@ -467,7 +484,12 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
             _ => &[],
         };
         for (icon, label, operation) in operations {
-            tools = tools.child(icon_button(icon, label, &format!("redis-op:{operation}")));
+            tools = tools.child(page_button(
+                icon,
+                label,
+                &format!("redis-op:{operation}"),
+                writable(app),
+            ));
         }
         if matches!(kind, "hash" | "list" | "set" | "zset") {
             let label = crate::i18n::tr("删除选中条目").into_owned();
@@ -480,7 +502,7 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
                     .key("redis-row-delete")
                     .title(label.clone())
                     .aria(label)
-                    .disabled(!app.redis_row_delete_enabled())
+                    .disabled(!writable(app) || !app.redis_row_delete_enabled())
                     .on_click(Msg::Action("redis-row-delete".into())),
             );
         }
@@ -488,9 +510,26 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
     if app.grid.is_some() {
         tools = tools.child(icon_button("columns", "列配置", "overlay:columns"));
     }
-    if writable(app) {
-        tools = tools.child(button("批量替换", "replace-open"));
-        tools = tools.child(icon_button("arrow-up", "导入", "overlay:import"));
+    tools = tools.child(
+        ui::button(crate::i18n::tr("批量替换").into_owned())
+            .disabled(!writable(app))
+            .on_click(Msg::Action("replace-open".into())),
+    );
+    tools = tools.child(page_button(
+        "arrow-up",
+        "导入",
+        "overlay:import",
+        writable(app),
+    ));
+    if !writable(app) {
+        tools = tools
+            .child(html::span(crate::i18n::tr("只读连接不能修改数据").into_owned()).class("muted"));
+    }
+    if writable(app) && !can_edit {
+        tools = tools.child(
+            html::span(crate::i18n::tr("当前 Redis 资源没有可用的编辑基线").into_owned())
+                .class("muted"),
+        );
     }
     tools = tools.child(icon_button("download", "导出", "overlay:export"));
     let value_copy_label = crate::i18n::tr("复制原始 value（不含草稿）").into_owned();

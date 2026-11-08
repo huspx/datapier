@@ -18,6 +18,8 @@ rust-version = "1.94"
 [workspace.dependencies]
 base64 = "0.22"
 bigdecimal = { version = "0.4", features = ["serde"] }
+cap-fs-ext = "=4.0.3"
+cap-std = "=4.0.3"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = { version = "=0.29.0", features = ["event-stream"] }

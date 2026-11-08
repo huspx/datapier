@@ -343,7 +343,12 @@ pub(super) fn grid(app: &App) -> Option<Node<Msg>> {
     let cols = grid.visible_columns();
     let redis = app.is_redis();
     let redis_rows = app.redis_composite_grid();
-    let mut wrapper = html::div().class("gridscroll").key("grid");
+    let mut wrapper = html::div()
+        .class("gridscroll")
+        .key("grid")
+        .attr("role", "grid")
+        .attr("tabindex", 0)
+        .on_focus(Msg::Focus("grid".into()));
     let mut header = html::div().class("gridrow header").key("header");
     header = header.child(html::span("#").class("rownum"));
     for &col in &cols {
@@ -380,7 +385,19 @@ pub(super) fn grid(app: &App) -> Option<Node<Msg>> {
         header = header.child(cell);
     }
     wrapper = wrapper.child(header);
-    for row_id in visible_rows(app) {
+    let rows = visible_rows(app);
+    if rows.is_empty() {
+        let message = if app.operation_pending {
+            "加载中…"
+        } else if !grid.page.rows.is_empty() && !app.field("row_search").is_empty() {
+            "本页没有匹配记录"
+        } else {
+            "没有记录"
+        };
+        wrapper =
+            wrapper.child(html::span(crate::i18n::tr(message).into_owned()).class("empty-note"));
+    }
+    for row_id in rows {
         let row = &grid.page.rows[(row_id - grid.page.start) as usize];
         let mut line = html::div().class("gridrow").key(format!("r{row_id}"));
         let first = cols.first().copied().unwrap_or(0);
@@ -389,6 +406,7 @@ pub(super) fn grid(app: &App) -> Option<Node<Msg>> {
             column: first,
         };
         let row_button = html::button((row_id + 1).to_string())
+            .attr("tabindex", -1)
             .class(if grid.is_row_selected(row_id) {
                 "rownum selected"
             } else {
@@ -495,6 +513,7 @@ pub(super) fn grid(app: &App) -> Option<Node<Msg>> {
             } else {
                 let node = html::button(text)
                     .class(class)
+                    .attr("tabindex", -1)
                     .key(format!("c{col}"))
                     .actions(row_menu(app, cell, redis_rows, grid.editable, true).click("click"))
                     .on_action_with("click", move |event| {

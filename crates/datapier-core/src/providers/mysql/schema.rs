@@ -387,6 +387,7 @@ fn equivalent(
                     c.default = ColumnDefault::Null;
                 }
             }
+            verify::include_implicit_foreign_indexes(&mut a, &b);
             for i in &mut a.indexes {
                 i.id = i.name.clone();
             }

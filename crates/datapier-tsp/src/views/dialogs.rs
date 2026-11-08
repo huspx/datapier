@@ -1,6 +1,6 @@
 use super::*;
 mod diagnostics;
-use diagnostics::{diagnostic_content, diagnostic_task, diagnostic_text};
+use diagnostics::{diagnostic_detail, diagnostic_task, diagnostic_text};
 fn paste_preview_panel(app: &App) -> Node<Msg> {
     let mut panel = html::div().class("draft-list");
     if let Some(paste) = &app.paste_preview {
@@ -258,15 +258,27 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
         .child(html::span("").class("spacer"))
         .child(button("关闭", "overlay-close"));
     match kind {
-        "replace" => panel = panel.child(crate::advanced::replace::view(&app.advanced_replace)),
+        "replace" => {
+            panel = panel.child(crate::advanced::replace::view(&app.advanced_replace));
+            footer = crate::advanced::replace::footer(&app.advanced_replace);
+        }
         "advanced-value" => {
-            panel = panel.child(crate::advanced::value::view(&app.advanced_value));
-            panel = panel.child(crate::advanced::files::view(
-                &app.advanced_files,
-                app.advanced_value.writable,
-                app.advanced_value.session.is_some(),
-            ));
-            footer = crate::advanced::value::footer(&app.advanced_value);
+            if !app.advanced_files.confirm_clean.is_some() {
+                panel = panel.child(crate::advanced::value::view(&app.advanced_value));
+            }
+            if !app.advanced_value.confirm_close {
+                panel = panel.child(crate::advanced::files::view(
+                    &app.advanced_files,
+                    app.advanced_value.writable,
+                    app.advanced_value.session.is_some(),
+                    app.advanced_value.dirty(),
+                ));
+            }
+            footer = if app.advanced_files.confirm_clean.is_some() {
+                html::div().class("modal-footer")
+            } else {
+                crate::advanced::value::footer(&app.advanced_value)
+            };
         }
         "history" => {
             panel = panel.child(history_panel(app));
@@ -278,7 +290,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 "将 {count} 个选中条目加入删除草稿，提交后才会写入数据库。",
                 &[("count", &app.redis_row_delete_count().to_string())],
             )));
-            if let Some(target) = &app.target {
+            if let Some((target, rows)) = app.redis_row_delete_targets() {
                 panel = panel.child(
                     html::pre(workbench::redis_key_text(
                         &target.name,
@@ -286,12 +298,62 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     ))
                     .class("preview"),
                 );
+                let resolved = app.redis_row_delete_resolved();
+                let mut needs_load = false;
+                for (position, (index, row)) in rows.iter().enumerate() {
+                    if let Some(identity) = resolved
+                        .and_then(|rows| rows.get(position))
+                        .and_then(|row| row.first())
+                        .or_else(|| row.first())
+                    {
+                        let large = matches!(identity, datapier_core::model::Value::Large { .. });
+                        needs_load |= large;
+                        let text = value_text(identity, true).into_owned();
+                        let mut entry = html::div()
+                            .class("key-delete-target")
+                            .child(
+                                html::span(format!("{} {}", crate::i18n::tr("条目"), index + 1))
+                                    .class("muted"),
+                            )
+                            .child(html::pre(text.clone()).class("preview"));
+                        if !large {
+                            entry = entry.child(
+                                ui::button(crate::i18n::tr("复制完整身份").into_owned())
+                                    .on_click(Msg::CopyText(text)),
+                            );
+                        }
+                        panel = panel.child(entry);
+                    }
+                }
+                if needs_load {
+                    panel = panel
+                        .child(
+                            html::p(
+                                crate::i18n::tr("部分条目身份尚未完整读取；可读取后查看和复制。")
+                                    .into_owned(),
+                            )
+                            .class("muted"),
+                        )
+                        .child(
+                            ui::button(crate::i18n::tr("读取完整身份").into_owned())
+                                .disabled(app.redis_row_delete_resolution_pending())
+                                .on_click(Msg::Action("redis-row-delete-load-identities".into())),
+                        );
+                }
+                if let Some(error) = app.redis_row_delete_error() {
+                    panel = panel.child(html::p(error.to_owned()).class("form-submit-error"));
+                }
             }
             footer = html::div()
                 .class("modal-footer")
                 .child(html::span("").class("spacer"))
                 .child(button("取消", "redis-row-delete-cancel"))
-                .child(button("加入草稿", "redis-row-delete-confirm"));
+                .child(
+                    ui::button(crate::i18n::tr("加入草稿").into_owned())
+                        .variant(ui::ButtonVariant::Danger)
+                        .disabled(app.redis_row_delete_resolution_pending())
+                        .on_click(Msg::Action("redis-row-delete-confirm".into())),
+                );
         }
         "redis-key-delete" => {
             let targets = app.redis_key_delete_targets();
@@ -456,14 +518,24 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 );
             if app.workbench.transfer_advanced {
                 let mut advanced = html::div().class("transfer-advanced");
-                for (name, label) in [
-                    ("mapping", "列映射 JSON"),
-                    ("null_marker", "NULL 标记"),
-                    ("backslash_escape", "反斜线转义"),
-                    ("binary_columns", "二进制列 JSON"),
-                ] {
-                    advanced = advanced.child(field(app, name, label));
-                }
+                advanced = advanced.child(field(app, "mapping", "列映射 JSON"));
+                advanced = advanced.child(field(app, "null_marker", "NULL 标记"));
+                advanced = advanced.child(
+                    ui::switch(crate::i18n::tr("反斜线转义").into_owned())
+                        .on(app.field("backslash_escape") == "true")
+                        .on_change({
+                            let next = app.field("backslash_escape") != "true";
+                            move |_| Msg::Action(format!("field:backslash_escape:{next}"))
+                        }),
+                );
+                advanced = advanced.child(field(app, "binary_columns", "二进制列 JSON"));
+                advanced = advanced.child(
+                    html::p(
+                        crate::i18n::tr("选项修改保存在表单草稿中，执行导入或导出时生效。")
+                            .into_owned(),
+                    )
+                    .class("muted"),
+                );
                 form = form.child(advanced);
             }
             panel = panel.child(form);
@@ -488,16 +560,50 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 footer = footer
                     .child(button("预览导入", "preview-import"))
                     .child(button("确认导入", "import"));
+            } else if !archery
+                && kind != "export"
+                && (app.is_redis()
+                    || app
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.kind == "table"))
+            {
+                panel = panel.child(
+                    html::p(
+                        crate::i18n::tr("当前连接只读或编辑基线不可用，无法导入。").into_owned(),
+                    )
+                    .class("muted"),
+                );
+                footer = footer
+                    .child(ui::button(crate::i18n::tr("预览导入").into_owned()).disabled(true))
+                    .child(ui::button(crate::i18n::tr("确认导入").into_owned()).disabled(true));
             }
             if kind != "import" && (!archery || result.is_some_and(|result| result.complete)) {
-                footer = footer.child(button(
-                    if archery_result || archery {
-                        "导出本次返回结果"
+                footer = footer.child(
+                    ui::button(
+                        crate::i18n::tr(if archery_result || archery {
+                            "导出本次返回结果"
+                        } else {
+                            "导出"
+                        })
+                        .into_owned(),
+                    )
+                    .key("export")
+                    .variant(if kind == "export" {
+                        ui::ButtonVariant::Primary
                     } else {
-                        "导出"
-                    },
-                    "export",
-                ));
+                        ui::ButtonVariant::Default
+                    })
+                    .on_click(Msg::Action("export".into())),
+                );
+            } else if kind != "import" && archery {
+                panel = panel.child(
+                    html::p(crate::i18n::tr("结果尚未完整返回，暂不能导出。").into_owned())
+                        .class("muted"),
+                );
+                footer = footer.child(
+                    ui::button(crate::i18n::tr("导出本次返回结果").into_owned()).disabled(true),
+                );
             }
         }
         "file" => {
@@ -507,13 +613,70 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 .child(button("保存", "file-save"));
         }
         "columns" => {
-            panel = panel
-                .child(field(app, "column", "列序号"))
-                .child(field(app, "width", "宽度"));
-            footer = footer
-                .child(button("设置宽度", "column-width"))
-                .child(button("隐藏 / 显示", "column-hide"))
-                .child(button("冻结 / 解冻", "column-freeze"));
+            if let Some(grid) = &app.grid {
+                let mut selector = ui::select()
+                    .aria(crate::i18n::tr("列").into_owned())
+                    .value(app.field("column").to_owned())
+                    .open(app.workbench.generic_select.as_deref() == Some("column-picker"))
+                    .on_toggle(|collapsed| {
+                        Msg::Action(format!("select-open:column-picker:{}", !collapsed))
+                    })
+                    .on_change(|change| {
+                        Msg::Action(format!(
+                            "field:column:{}",
+                            change.value.as_str().unwrap_or_default()
+                        ))
+                    });
+                for (index, column) in grid.page.result.columns.iter().enumerate() {
+                    selector = selector.option(ui::SelectOption::new(
+                        index.to_string(),
+                        column.name.clone(),
+                    ));
+                    if let Some(setting) = grid.settings.get(index) {
+                        panel = panel.child(
+                            html::div()
+                                .class("choice-row")
+                                .child(
+                                    html::label()
+                                        .child(
+                                            html::checkbox("visible-column", index.to_string())
+                                                .checked(!setting.hidden)
+                                                .on_change(move |_| {
+                                                    Msg::Action(format!(
+                                                        "column-select-hide:{index}"
+                                                    ))
+                                                }),
+                                        )
+                                        .child(html::span(column.name.clone())),
+                                )
+                                .child(
+                                    html::label()
+                                        .child(
+                                            html::checkbox("frozen-column", index.to_string())
+                                                .checked(setting.frozen)
+                                                .on_change(move |_| {
+                                                    Msg::Action(format!(
+                                                        "column-select-freeze:{index}"
+                                                    ))
+                                                }),
+                                        )
+                                        .child(html::span(crate::i18n::tr("冻结").into_owned())),
+                                ),
+                        );
+                    }
+                }
+                panel = panel
+                    .child(ui::field(crate::i18n::tr("设置宽度的列").into_owned()).child(selector))
+                    .child(field(app, "width", "宽度（像素）"))
+                    .child(
+                        html::p(
+                            crate::i18n::tr("设置宽度时必填：1–65535 像素。显示和冻结立即应用。")
+                                .into_owned(),
+                        )
+                        .class("muted"),
+                    );
+                footer = footer.child(button("设置宽度", "column-width"));
+            }
         }
         "filters" => {
             let (form, action) = crate::forms::filter_form(app);
@@ -675,7 +838,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 {
                     panel = panel.child(diagnostic_task(app, &value));
                 } else {
-                    panel = panel.child(diagnostic_content("内容", &value, 0, &mut 120));
+                    panel = panel.child(diagnostic_detail(app.detail_context.kind, &value));
                 }
             } else {
                 panel = panel.child(
@@ -711,18 +874,29 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             );
         }
         "settings" => {
-            let mcp = app.field("settings-tab") == "mcp";
+            let current_tab = app.field("settings-tab");
+            let mcp = current_tab == "mcp";
             let mut tabs = html::div()
                 .class("mcp-tabs")
                 .attr("role", "tablist")
                 .attr("aria-label", crate::i18n::tr("设置").into_owned());
-            for (tab, label, selected) in [("general", "常规", !mcp), ("mcp", "MCP", mcp)] {
+            for (tab, label) in [
+                ("general", "常规"),
+                ("editing", "编辑与文件"),
+                ("archery", "Archery 服务器"),
+                ("mcp", "MCP"),
+            ] {
+                let selected = current_tab == tab;
+                let key = format!("settings-tab-{tab}");
+                let focused = app.focus == key;
                 tabs = tabs.child(
                     html::button(crate::i18n::tr(label).into_owned())
-                        .class(if selected {
-                            "mcp-tab active"
-                        } else {
-                            "mcp-tab"
+                        .key(key)
+                        .class(match (selected, focused) {
+                            (true, true) => "mcp-tab active focused",
+                            (true, false) => "mcp-tab active",
+                            (false, true) => "mcp-tab focused",
+                            (false, false) => "mcp-tab",
                         })
                         .attr("role", "tab")
                         .attr("aria-selected", selected)
@@ -731,11 +905,24 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             }
             panel = panel.child(tabs);
             let settings_ready = app.settings_loaded && app.field("settings-reload") != "true";
-            if !settings_ready && app.field("settings-error").is_empty() {
+            if settings_ready && current_tab != "archery" {
+                let status = if app.settings_save_token.is_some() {
+                    "全局设置保存中…"
+                } else if !app.field("settings-error").is_empty() {
+                    "全局设置保存失败"
+                } else if app.settings_form_dirty() {
+                    "全局设置有未保存修改"
+                } else {
+                    "全局设置已保存"
+                };
+                panel = panel.child(html::p(crate::i18n::tr(status).into_owned()).class("muted"));
+            }
+            if current_tab != "archery" && !settings_ready && app.field("settings-error").is_empty()
+            {
                 panel = panel
                     .child(html::p(crate::i18n::tr("加载中…").into_owned()).class("empty-note"));
             }
-            if settings_ready && !mcp {
+            if settings_ready && current_tab == "general" {
                 let value = app.field("settings-language-draft");
                 let language = ui::select()
                     .aria(crate::i18n::tr("语言").into_owned())
@@ -765,7 +952,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .child(language),
                 );
             }
-            if settings_ready && !mcp {
+            if settings_ready && current_tab == "editing" {
                 panel = panel.child(
                     html::strong(crate::i18n::tr("编辑限制").into_owned())
                         .class("settings-section-title"),
@@ -779,6 +966,19 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 ] {
                     panel = panel.child(field(app, name, label));
                 }
+                panel = panel.child(
+                    html::p(
+                        crate::i18n::tr(
+                            "均为正整数；字节上限以字节计，文本编辑上限不能超过单值上限。",
+                        )
+                        .into_owned(),
+                    )
+                    .class("muted"),
+                );
+                panel = panel.child(
+                    html::strong(crate::i18n::tr("外部编辑器").into_owned())
+                        .class("settings-section-title"),
+                );
                 panel = panel.child(choices(
                     app,
                     "external_mode",
@@ -912,6 +1112,19 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                                             &[("workspace", &workspace)],
                                         ))
                                         .class("mcp-subtitle"),
+                                    )
+                                    .child(
+                                        html::span(format!(
+                                            "{}: {}",
+                                            crate::i18n::tr("创建时间（毫秒）"),
+                                            item["created_at_ms"]
+                                                .as_i64()
+                                                .map(|v| v.to_string())
+                                                .unwrap_or_else(
+                                                    || crate::i18n::tr("未记录").into_owned()
+                                                )
+                                        ))
+                                        .class("mcp-subtitle"),
                                     ),
                             ),
                     );
@@ -949,6 +1162,52 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         && item["state"] != "preparing"
                         && !app.field("editing_file_path").trim().is_empty();
                     let can_cleanup = claimed && item["referenced"] == false;
+                    for (label, key) in [
+                        ("登记相对路径", "relative_dir"),
+                        ("工作区", "workspace_id"),
+                        ("文件状态", "state"),
+                        ("领取版本", "revision"),
+                        ("创建时间（毫秒）", "created_at_ms"),
+                        ("更新时间（毫秒）", "updated_at_ms"),
+                    ] {
+                        let value = item
+                            .get(key)
+                            .filter(|value| !value.is_null())
+                            .map(|value| {
+                                value
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| value.to_string())
+                            })
+                            .unwrap_or_else(|| crate::i18n::tr("未记录").into_owned());
+                        panel = panel.child(
+                            ui::field(crate::i18n::tr(label).into_owned())
+                                .variant(ui::FieldVariant::Row)
+                                .child(html::span(value)),
+                        );
+                    }
+                    panel = panel.child(
+                        html::p(
+                            crate::i18n::tr("文件大小未记录；登记路径为相对路径。").into_owned(),
+                        )
+                        .class("muted"),
+                    );
+                    if let Some(target) = item["target"].as_object() {
+                        for (key, label) in [
+                            ("database", "数据库"),
+                            ("table", "表"),
+                            ("column", "列"),
+                            ("key", "Key"),
+                        ] {
+                            if let Some(value) = target.get(key).and_then(Value::as_str) {
+                                panel = panel.child(
+                                    ui::field(crate::i18n::tr(label).into_owned())
+                                        .variant(ui::FieldVariant::Row)
+                                        .child(html::span(value.to_owned())),
+                                );
+                            }
+                        }
+                    }
                     panel = panel.child(
                         ui::tree().item(
                             ui::TreeItem::new(
@@ -987,9 +1246,10 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     );
                     panel = panel.child(field(app, "editing_file_path", "导出路径"));
                     if app.editing_files.confirm_cleanup {
-                        panel = panel.child(html::span(
-                            crate::i18n::tr("确认清理所选编辑文件？").into_owned(),
-                        ));
+                        if let Some(frozen) = &app.editing_files.cleanup_target {
+                            let path = frozen["relative_dir"].as_str().unwrap_or("");
+                            panel = panel.child(html::p(crate::i18n::format_message("确认永久清理文件：{path}。文件大小未记录；当前无草稿引用。此操作不可恢复。", &[("path", path)])));
+                        }
                         panel = panel.child(
                             html::div()
                                 .class("settings-file-actions")
@@ -1018,23 +1278,67 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     }
                 }
             }
-            for &(group, key, label) in application::SETTINGS_FIELDS {
-                if !settings_ready || application::settings_is_mcp(group, key) != mcp {
-                    continue;
+            if settings_ready && (current_tab == "general" || mcp) {
+                for (section, title) in [
+                    ("paging", "分页"),
+                    ("archery", "平台请求"),
+                    ("limits", "资源限制"),
+                    ("history", "历史"),
+                    ("mcp", "MCP"),
+                    ("notifications", "通知"),
+                    ("approval", "审批"),
+                ] {
+                    let has_fields = application::SETTINGS_FIELDS
+                        .iter()
+                        .chain(application::SETTINGS_SWITCHES)
+                        .any(|(group, key, _)| {
+                            *group == section && application::settings_is_mcp(group, key) == mcp
+                        });
+                    if !has_fields {
+                        continue;
+                    }
+                    panel = panel.child(
+                        html::strong(crate::i18n::tr(title).into_owned())
+                            .class("settings-section-title"),
+                    );
+                    for &(group, key, label) in application::SETTINGS_SWITCHES {
+                        if group != section || application::settings_is_mcp(group, key) != mcp {
+                            continue;
+                        }
+                        let field_name = format!("settings-{group}-{key}");
+                        let action = format!("settings-toggle:{group}:{key}");
+                        panel = panel.child(
+                            ui::switch(crate::i18n::tr(label).into_owned())
+                                .on(app.field(&field_name) == "true")
+                                .on_change(move |_| Msg::Action(action.clone())),
+                        );
+                    }
+                    for &(group, key, label) in application::SETTINGS_FIELDS {
+                        if group != section || application::settings_is_mcp(group, key) != mcp {
+                            continue;
+                        }
+                        panel = panel.child(field(app, &format!("settings-{group}-{key}"), label));
+                        let note = if group == "history" {
+                            "留空表示不限制；填写时为正整数。"
+                        } else if key == "response_bytes" {
+                            "范围：1024–1048576 字节。"
+                        } else if key == "value_preview_bytes" {
+                            "单位：字节；为正数且不超过响应字节上限。"
+                        } else if key == "result_memory_bytes_per_client" {
+                            "单位：字节；不小于响应字节上限。"
+                        } else if (group == "paging" && key != "redis_key_batch")
+                            || key == "mcp_response_rows"
+                        {
+                            "范围：1–1000 条。"
+                        } else if key.ends_with("seconds") {
+                            "单位：秒；必须大于零。"
+                        } else {
+                            "必须大于零。"
+                        };
+                        panel =
+                            panel.child(html::p(crate::i18n::tr(note).into_owned()).class("muted"));
+                    }
                 }
-                panel = panel.child(field(app, &format!("settings-{group}-{key}"), label));
-            }
-            for &(group, key, label) in application::SETTINGS_SWITCHES {
-                if !settings_ready || application::settings_is_mcp(group, key) != mcp {
-                    continue;
-                }
-                let field_name = format!("settings-{group}-{key}");
-                let action = format!("settings-toggle:{group}:{key}");
-                panel = panel.child(
-                    ui::switch(crate::i18n::tr(label).into_owned())
-                        .on(app.field(&field_name) == "true")
-                        .on_change(move |_| Msg::Action(action.clone())),
-                );
             }
             if settings_ready && mcp {
                 let mut policies = ui::select()
@@ -1070,7 +1374,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .child(policies),
                 );
             }
-            if !app.field("settings-error").is_empty() {
+            if current_tab != "archery" && !app.field("settings-error").is_empty() {
                 panel = panel.child(
                     html::p(app.field("settings-error").to_owned())
                         .class("form-submit-error")
@@ -1141,7 +1445,9 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     let mut profile_policies = ui::select()
                         .aria(crate::i18n::tr("连接审批策略").into_owned())
                         .value(app.field("mcp-rule-policy"))
-                        .disabled(busy)
+                        .disabled(
+                            busy || app.field("mcp-rule-data") != app.field("mcp-rule-baseline"),
+                        )
                         .open(app.workbench.generic_select.as_deref() == Some("mcp-profile-policy"))
                         .on_toggle(|collapsed| {
                             Msg::Action(format!("select-open:mcp-profile-policy:{}", !collapsed))
@@ -1166,6 +1472,28 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         ui::field(crate::i18n::tr("连接审批策略").into_owned())
                             .variant(ui::FieldVariant::Row)
                             .child(profile_policies),
+                    );
+                    rules = rules.child(
+                        html::p(
+                            crate::i18n::tr(
+                                "连接审批策略更改后立即单独保存；请先保存连接权限草稿。",
+                            )
+                            .into_owned(),
+                        )
+                        .class("muted"),
+                    );
+                    rules = rules.child(
+                        html::p(
+                            crate::i18n::tr(if busy {
+                                "连接权限处理中…"
+                            } else if app.field("mcp-rule-data") != app.field("mcp-rule-baseline") {
+                                "连接权限有未保存修改"
+                            } else {
+                                "连接权限已保存"
+                            })
+                            .into_owned(),
+                        )
+                        .class("muted"),
                     );
                     if app.field("settings-mcp-fine_grained_access") == "true" {
                         if let Ok(data) = serde_json::from_str::<Value>(app.field("mcp-rule-data"))
@@ -1205,17 +1533,54 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         {
                             rules = rules.child(field(app, "mcp-rule-scope", "MySQL 数据库名称"));
                         }
-                        let mut levels = html::div().class("toolbar");
+                        let scope = app.field("mcp-rule-scope").trim();
+                        let selected_level =
+                            serde_json::from_str::<Value>(app.field("mcp-rule-data"))
+                                .ok()
+                                .and_then(|data| {
+                                    data["rules"].as_array().and_then(|items| {
+                                        items
+                                            .iter()
+                                            .find(|item| {
+                                                item["scope_key"].as_str()
+                                                    == Some(if scope.is_empty() {
+                                                        "*"
+                                                    } else {
+                                                        scope
+                                                    })
+                                            })
+                                            .and_then(|item| item["level"].as_str())
+                                            .map(str::to_owned)
+                                    })
+                                })
+                                .unwrap_or_default();
+                        let mut levels = ui::select()
+                            .aria(crate::i18n::tr("访问权限").into_owned())
+                            .value(selected_level)
+                            .disabled(busy)
+                            .open(app.workbench.generic_select.as_deref() == Some("mcp-rule-level"))
+                            .on_toggle(|collapsed| {
+                                Msg::Action(format!("select-open:mcp-rule-level:{}", !collapsed))
+                            })
+                            .on_change(|change| {
+                                Msg::Action(format!(
+                                    "mcp-rules-level:{}",
+                                    change.value.as_str().unwrap_or_default()
+                                ))
+                            })
+                            .option(
+                                ui::SelectOption::new("", crate::i18n::tr("请选择").into_owned())
+                                    .disabled(true),
+                            );
                         for (level, label) in [
                             ("disabled", "禁用"),
                             ("read_only", "只读"),
                             ("read_write", "读写"),
                         ] {
-                            levels = levels.child(
-                                html::button(crate::i18n::tr(label).into_owned())
-                                    .disabled(busy)
-                                    .on_click(Msg::Action(format!("mcp-rules-level:{level}"))),
-                            );
+                            levels = levels.option(ui::SelectOption::new(
+                                level,
+                                crate::i18n::tr(label).into_owned(),
+                            ));
                         }
                         rules = rules.child(
                             ui::field(crate::i18n::tr("访问权限").into_owned())
@@ -1223,15 +1588,19 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                                 .child(levels),
                         );
                         rules = rules.child(
-                            html::button(crate::i18n::tr("保存 MCP 权限").into_owned())
-                                .disabled(busy)
+                            ui::button(crate::i18n::tr("保存 MCP 权限").into_owned())
+                                .variant(ui::ButtonVariant::Primary)
+                                .disabled(
+                                    busy || app.field("mcp-rule-data")
+                                        == app.field("mcp-rule-baseline"),
+                                )
                                 .on_click(Msg::Action("mcp-rules-save".into())),
                         );
                     }
                 }
                 panel = panel.child(rules);
             }
-            if settings_ready && !mcp {
+            if current_tab == "archery" {
                 let mut servers = html::div().class("archery-server-list").child(
                     html::div()
                         .class("archery-section-heading")
@@ -1308,23 +1677,28 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 }
                 panel = panel.child(servers);
             }
-            footer = html::div()
-                .class("modal-footer")
-                .child(
+            footer = html::div().class("modal-footer");
+            if current_tab != "archery" {
+                footer = footer.child(
                     ui::button(crate::i18n::tr("重新加载设置").into_owned())
                         .disabled(
                             app.settings_save_token.is_some()
                                 || app.field("settings-reload") == "true",
                         )
                         .on_click(Msg::Action("settings-reload".into())),
-                )
+                );
+            }
+            footer = footer
                 .child(html::span("").class("spacer"))
-                .child(
-                    ui::button(crate::i18n::tr("保存设置").into_owned())
+                .child(button("关闭", "overlay-close"));
+            if current_tab != "archery" {
+                footer = footer.child(
+                    ui::button(crate::i18n::tr("保存全局设置").into_owned())
                         .variant(ui::ButtonVariant::Primary)
                         .disabled(!settings_ready || app.settings_save_token.is_some())
                         .on_click(Msg::Action("settings-save".into())),
                 );
+            }
         }
         "redis" if writable(app) => {
             let op = app.field("operation");
@@ -1388,34 +1762,45 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                             )
                             .child(html::span(ttl_label(ttl))),
                     );
-                    let mut choices = html::div().class("choice-row wide");
-                    for (policy, label, action) in [
-                        (
-                            workbench::RedisTtlPolicy::Keep,
-                            "保留现有 TTL",
-                            "redis-ttl:keep",
-                        ),
-                        (
-                            workbench::RedisTtlPolicy::Set,
-                            "设置新 TTL",
-                            "redis-ttl:set",
-                        ),
-                        (
-                            workbench::RedisTtlPolicy::Persist,
-                            "移除期限",
-                            "redis-ttl:persist",
-                        ),
+                    let selected = match app.workbench.ttl_policy {
+                        workbench::RedisTtlPolicy::Keep => "keep",
+                        workbench::RedisTtlPolicy::Set => "set",
+                        workbench::RedisTtlPolicy::Persist => "persist",
+                    };
+                    let mut select = ui::select()
+                        .aria(crate::i18n::tr("过期策略").into_owned())
+                        .value(selected)
+                        .open(app.workbench.generic_select.as_deref() == Some("redis-ttl"))
+                        .on_toggle(|collapsed| {
+                            Msg::Action(format!("select-open:redis-ttl:{}", !collapsed))
+                        })
+                        .on_change(|change| {
+                            Msg::Action(format!(
+                                "redis-ttl:{}",
+                                change.value.as_str().unwrap_or_default()
+                            ))
+                        });
+                    for (value, label) in [
+                        ("keep", "保留现有 TTL"),
+                        ("set", "设置新 TTL"),
+                        ("persist", "移除期限"),
                     ] {
-                        choices = choices.child(
-                            ui::button(crate::i18n::tr(label).into_owned())
-                                .on(app.workbench.ttl_policy == policy)
-                                .key(action)
-                                .on_click(Msg::Action(action.into())),
-                        );
+                        select = select.option(ui::SelectOption::new(
+                            value,
+                            crate::i18n::tr(label).into_owned(),
+                        ));
                     }
-                    form = form.child(choices);
+                    form = form
+                        .child(ui::field(crate::i18n::tr("过期策略").into_owned()).child(select));
                     if app.workbench.ttl_policy == workbench::RedisTtlPolicy::Set {
                         form = form.child(field(app, "redis_ttl", "期限（毫秒）"));
+                        form = form.child(
+                            html::p(
+                                crate::i18n::tr("请输入非负整数毫秒数；0 会立即使 key 过期。")
+                                    .into_owned(),
+                            )
+                            .class("muted"),
+                        );
                     }
                 }
                 _ => {}
@@ -1476,6 +1861,38 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             );
         }
         _ => {}
+    }
+    if kind == "settings" && app.field("settings-reload-confirm") == "true" {
+        panel = html::div().class("modal-body").child(html::p(
+            crate::i18n::tr("重新加载将丢弃未保存的设置。继续编辑或丢弃并重新加载？").into_owned(),
+        ));
+        footer = html::div()
+            .class("modal-footer")
+            .child(html::span("").class("spacer"))
+            .child(button("继续编辑", "settings-reload-cancel"))
+            .child(
+                ui::button(crate::i18n::tr("丢弃并重新加载").into_owned())
+                    .variant(ui::ButtonVariant::Danger)
+                    .on_click(Msg::Action("settings-reload-confirm".into())),
+            );
+    }
+    if app.workbench.overlay_close_confirm {
+        panel = html::div().class("modal-body").child(html::p(
+            crate::i18n::tr("关闭将丢弃未应用的输入。继续编辑或丢弃？").into_owned(),
+        ));
+        footer = html::div()
+            .class("modal-footer")
+            .child(html::span("").class("spacer"))
+            .child(
+                ui::button(crate::i18n::tr("继续编辑").into_owned())
+                    .key("overlay-close-safe")
+                    .on_click(Msg::Action("overlay-close-continue".into())),
+            )
+            .child(
+                ui::button(crate::i18n::tr("丢弃").into_owned())
+                    .variant(ui::ButtonVariant::Danger)
+                    .on_click(Msg::Action("overlay-close-discard".into())),
+            );
     }
     let picker_open = app.navigation.form_redis_db_menu
         || app.workbench.cell_fields_open

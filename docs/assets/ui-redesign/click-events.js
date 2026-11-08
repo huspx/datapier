@@ -2,11 +2,11 @@
 document.addEventListener('click', event => {
   const folder = event.target.closest('[data-key-folder]');
   if (folder) {
-    const identity = state.redisDb + '\0'
-      + decodeURIComponent(folder.dataset.keyFolder);
+    const prefix = decodeURIComponent(folder.dataset.keyFolder);
+    const identity = state.redisDb + '\0' + prefix;
     if (state.expandedKeyFolders.has(identity)) {
-      state.selectedKeys.clear();
-      state.keyAnchor = null;
+      for (const key of state.selectedKeys) if (key.name.startsWith(prefix)) state.selectedKeys.delete(key);
+      if (state.keyAnchor?.name?.startsWith(prefix)) state.keyAnchor = null;
     }
     state.expandedKeyFolders.has(identity)
       ? state.expandedKeyFolders.delete(identity)
@@ -18,6 +18,20 @@ document.addEventListener('click', event => {
     '#mysql-grid td[data-cell], #result-grid td[data-cell], #redis-grid td[data-cell]',
   );
   if (clickedCell && event.target.id !== 'grid-cell-editor') {
+    if (
+      state.cellDrawer && state.cellInspectorDirty && clickedCell.closest('#mysql-grid')
+      && (clickedCell.closest('tr').dataset.row !== state.menuRow || clickedCell.dataset.cell !== state.menuCell)
+    ) {
+      const row = clickedCell.closest('tr').dataset.row, column = clickedCell.dataset.cell;
+      requestDialogClose(() => {
+        state.cellDrawer = false;
+        state.cellInspectorValue = null;
+        render();
+        document.querySelector(`#mysql-grid tr[data-row="${CSS.escape(row)}"] td[data-cell="${CSS.escape(column)}"]`)
+          ?.click();
+      });
+      return;
+    }
     const redis = clickedCell.closest('#redis-grid'),
       result = clickedCell.closest('#result-grid');
     const key = redis
@@ -75,6 +89,12 @@ document.addEventListener('click', event => {
     }
     return;
   }
+  if (button.dataset.viewPreview) {
+    state.viewPreviewTarget = { database: button.dataset.viewDb, name: button.dataset.viewPreview };
+    state.overlay = 'view-resource-preview';
+    render();
+    return;
+  }
   if (button.dataset.provider) {
     activateProvider(button.dataset.provider);
     state.menu = null;
@@ -93,6 +113,11 @@ document.addEventListener('click', event => {
     return;
   }
   if (button.dataset.tab) {
+    if (state.cellDrawer && Number(button.dataset.tab) !== state.active) {
+      const tabId = button.dataset.tab;
+      leaveCellDrawer(() => document.querySelector(`[data-tab="${CSS.escape(tabId)}"]`)?.click());
+      return;
+    }
     state.active = Number(button.dataset.tab);
     const tab = state.tabs.find(t => t.id === state.active);
     state.provider = tab.provider || 'mysql';
@@ -140,20 +165,52 @@ document.addEventListener('click', event => {
   }
   if (button.dataset.connectionType) {
     const form = state.connectionForm;
-    const oldPort = form.provider === 'mysql' ? '3306' : '6379';
-    form.provider = button.dataset.connectionType;
-    if (form.port === oldPort) {
-      form.port = form.provider === 'mysql'
-        ? '3306'
-        : '6379';
+    if (form.provider !== button.dataset.connectionType) {
+      requestDialogClose(() => {
+        const oldPort = form.provider === 'mysql' ? '3306' : '6379';
+        form.provider = button.dataset.connectionType;
+        if (form.port === oldPort) form.port = form.provider === 'mysql' ? '3306' : '6379';
+        render();
+        document.querySelector(`[data-connection-type="${form.provider}"]`)?.focus();
+      });
     }
-    render();
-    document.querySelector(`[data-connection-type="${form.provider}"]`)
-      .focus();
     return;
   }
   const action = button.dataset.action;
   if (!action) return;
+  if (action === 'schema-trigger-list') {
+    const target = state.menu;
+    state.menu = null;
+    if (!target?.table) return;
+    const existing = state.tabs.find(tab =>
+      !tab.query && !tab.schemaCreateKind && tab.database === target.database && tab.table === target.table
+    );
+    if (existing && schemaHasDraft(existing)) {
+      render();
+      toast(t('closeBlocked'));
+      return;
+    }
+    openTable(target.database, target.table);
+    if (!schemaOpenExample('trigger-list')) {
+      render();
+      toast(language === 'zh-CN' ? '无法打开触发器列表。' : 'Unable to open the trigger list.');
+    }
+    return;
+  }
+  if (action.startsWith('schema-create:')) {
+    const database = state.menu?.database;
+    state.menu = null;
+    if (database) state.database = database;
+    if (!schemaCreateWorkspace(action.slice('schema-create:'.length))) {
+      render();
+      toast(
+        language === 'zh-CN'
+          ? '只读连接或数据库不可用，不能新建对象。'
+          : 'Cannot create an object on a read-only connection or without a database.',
+      );
+    }
+    return;
+  }
   if (action.startsWith('advanced-demo:')) {
     state.advancedDemoMode = action.slice('advanced-demo:'.length);
     render();
@@ -192,9 +249,6 @@ document.addEventListener('click', event => {
     return;
   }
   if (action === 'history') {
-    state.historyFilter = '';
-    state.historyApplied = '';
-    state.historyPage = 0;
     state.overlay = 'history';
     render();
     return;
@@ -256,6 +310,10 @@ document.addEventListener('click', event => {
     state.hiddenColumns[state.columnsTarget] = [
       ...document.querySelectorAll('[data-column-choice]'),
     ].filter(input => !input.checked).map(input => input.dataset.columnChoice);
+    state.frozenColumns ||= {};
+    state.frozenColumns[state.columnsTarget] = [...document.querySelectorAll('[data-column-freeze]:checked')].map(
+      input => input.dataset.columnFreeze,
+    );
     state.overlay = null;
     render();
     return;
@@ -333,6 +391,55 @@ document.addEventListener('click', event => {
     render();
     return;
   }
+  if (action === 'stage-new-row') {
+    let values = {};
+    const advanced = document.getElementById('new-row-json');
+    if (advanced.value.trim()) {
+      try {
+        values = JSON.parse(advanced.value);
+        if (!values || Array.isArray(values) || typeof values !== 'object') throw new Error();
+      } catch {
+        fieldError(advanced, language === 'zh-CN' ? '请输入 JSON 对象。' : 'Enter a JSON object.');
+        return;
+      }
+    } else {
+      for (const field of document.querySelectorAll('[data-new-column]')) {
+        const mode = field.querySelector('[data-new-mode]').value;
+        if (mode === 'value') values[field.dataset.newColumn] = field.querySelector('[data-new-value]').value;
+        if (mode === 'null') {
+          if (field.dataset.newNullable !== 'true') {
+            fieldError(
+              field.querySelector('[data-new-mode]'),
+              language === 'zh-CN' ? '非空字段不能为 NULL。' : 'A NOT NULL column cannot be NULL.',
+            );
+            return;
+          }
+          values[field.dataset.newColumn] = null;
+        }
+      }
+    }
+    for (const column of schemaInitialColumns({ database: state.database, table: state.table })) {
+      if (!column.nullable && Object.hasOwn(values, column.name) && values[column.name] === null) {
+        const field = advanced.value.trim()
+          ? advanced
+          : [...document.querySelectorAll('[data-new-column]')].find(item => item.dataset.newColumn === column.name)
+            ?.querySelector('[data-new-mode]');
+        fieldError(field, language === 'zh-CN' ? `${column.name} 不能为 NULL。` : `${column.name} cannot be NULL.`);
+        return;
+      }
+    }
+    state.newRowDrafts ||= [];
+    state.newRowDrafts.push({
+      database: state.database,
+      table: state.table,
+      insertion: true,
+      after: values,
+      label: `${state.database}.${state.table} · ${language === 'zh-CN' ? '新增行' : 'New row'}`,
+    });
+    state.overlay = null;
+    render();
+    return;
+  }
   if (action === 'clear-filter') {
     delete state.filters[`${state.database}.${state.table}`];
     delete state.sortColumns[`${state.database}.${state.table}`];
@@ -341,15 +448,44 @@ document.addEventListener('click', event => {
     return;
   }
   if (action === 'apply-filter') {
-    state.filters[`${state.database}.${state.table}`] = {
-      column: $('#filter-column').value,
-      operator: $('#filter-operator').value,
-      value: $('#filter-value').value,
-    };
-    state.sortColumns[`${state.database}.${state.table}`] = {
-      column: $('#sort-column').value,
-      desc: $('#sort-direction').value === 'desc',
-    };
+    const columns = Object.keys(databases[state.database][state.table][0] || {});
+    const parsed = {};
+    for (const [id, kind] of [['filter-advanced-json', 'filters'], ['sort-advanced-json', 'sorts']]) {
+      const input = document.getElementById(id);
+      if (!input.value.trim()) continue;
+      try {
+        const entries = JSON.parse(input.value);
+        if (!Array.isArray(entries) || entries.some(item => !item || !columns.includes(item.column))) throw new Error();
+        if (
+          kind === 'filters'
+          && entries.some(item =>
+            !['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'like', 'not_like', 'is_null', 'is_not_null'].includes(
+              item.op || 'eq',
+            ) || (!['is_null', 'is_not_null'].includes(item.op) && !('value' in item))
+          )
+        ) throw new Error();
+        if (
+          kind === 'sorts'
+          && (entries.some(item => !['asc', 'desc'].includes(item.direction || 'asc'))
+            || new Set(entries.map(item => item.column)).size !== entries.length)
+        ) throw new Error();
+        parsed[kind] = entries;
+      } catch {
+        fieldError(
+          input,
+          language === 'zh-CN'
+            ? '请输入有效的条件数组、列和操作。'
+            : 'Enter a valid array of conditions, columns and operations.',
+        );
+        return;
+      }
+    }
+    state.filters[`${state.database}.${state.table}`] = parsed.filters
+      ?? ($('#filter-column').value
+        ? [{ column: $('#filter-column').value, op: $('#filter-operator').value, value: $('#filter-value').value }]
+        : []);
+    state.sortColumns[`${state.database}.${state.table}`] = parsed.sorts
+      ?? ($('#sort-column').value ? [{ column: $('#sort-column').value, direction: $('#sort-direction').value }] : []);
     state.overlay = null;
     state.selected.clear();
     render();
@@ -359,7 +495,8 @@ document.addEventListener('click', event => {
     const drafts = currentDrafts();
     if (state.provider === 'mysql') {
       drafts.forEach(d => {
-        if (d.deletion) deletedRows.delete(d.row);
+        if (d.insertion) state.newRowDrafts = state.newRowDrafts.filter(item => item !== d);
+        else if (d.deletion) deletedRows.delete(d.row);
         else {
           d.row[d.column] = d.before;
           cellOriginals.get(d.row).delete(d.column);
@@ -498,13 +635,13 @@ document.addEventListener('click', event => {
       ) {
         fieldError(
           $('#redis-ttl-value'),
-          t('enterAValidDurationInSeconds'),
+          language === 'zh-CN' ? '请输入非负整数毫秒。' : 'Enter a nonnegative integer number of milliseconds.',
         );
         return;
       }
       before = key.ttl;
       after = $('#redis-ttl-policy').value === 'set'
-        ? $('#redis-ttl-value').value + ' s'
+        ? $('#redis-ttl-value').value + ' ms'
         : $('#redis-ttl-policy').value === 'persist'
         ? '∞'
         : key.ttl;
@@ -609,7 +746,9 @@ document.addEventListener('click', event => {
       toast(t('resourceRefreshPreview'));
       return;
     } else if (target.kind === 'database') {
-      state.expanded.add(target.database);
+      state.expanded.has(target.database)
+        ? state.expanded.delete(target.database)
+        : state.expanded.add(target.database);
     } else {
       openTable(target.database, target.table);
       state.section = action === 'resource-structure'
@@ -675,7 +814,9 @@ document.addEventListener('click', event => {
             'transfer-null',
             'transfer-escape',
             'transfer-binary',
-          ].map(id => document.getElementById(id)?.value),
+          ].map(id =>
+            id === 'transfer-escape' ? String(document.getElementById(id)?.checked) : document.getElementById(id)?.value
+          ),
         ]);
         if (
           action === 'request-import' && state.importPreview !== signature
@@ -688,6 +829,10 @@ document.addEventListener('click', event => {
         }
         if (action === 'request-preview-import') {
           state.importPreview = signature;
+          if (state.overlay === 'import') {
+            button.classList.replace('primary', 'button');
+            document.querySelector('[data-action="request-import"]')?.classList.replace('button', 'primary');
+          }
         }
       }
       preview.hidden = false;
@@ -797,8 +942,7 @@ document.addEventListener('click', event => {
       render();
       break;
     case 'close-modal':
-      state.overlay = null;
-      render();
+      requestDialogClose(closePreviewDialog);
       break;
     case 'delete-rows': {
       const rows = currentRows().filter(row => state.selected.has(rowId(row)));
@@ -922,26 +1066,91 @@ document.addEventListener('click', event => {
       break;
     case 'inspect-cell':
       state.menu = null;
+      state.cellDrawer = true;
+      state.cellInspectorValue = null;
+      state.cellInspectorDirty = false;
+      state.cellOverlayBaseline = null;
+      state.cellInspectorIsNull = databases[state.database][state.table].find(row =>
+        rowId(row) === state.menuRow
+      )?.[state.menuCell] === null;
+      render();
+      document.querySelector('.cell-drawer #cell-value')?.focus();
+      break;
+    case 'inspect-cell-overlay':
+      state.menu = null;
+      state.cellDrawer = false;
+      state.cellInspectorValue = null;
+      state.cellInspectorDirty = false;
+      state.cellOverlayBaseline = null;
+      state.cellInspectorIsNull =
+        databases[state.database][state.table].find(row => rowId(row) === state.menuRow)?.[state.menuCell] === null;
+      state.overlay = 'cell-details';
+      render();
+      break;
+    case 'close-cell-drawer':
+      requestDialogClose(() => {
+        state.cellDrawer = false;
+        state.cellInspectorValue = null;
+        render();
+      });
+      break;
+    case 'cell-open-overlay':
+      state.cellOverlayBaseline = {
+        column: state.menuCell,
+        value: state.cellInspectorValue,
+        isNull: state.cellInspectorIsNull,
+        dirty: state.cellInspectorDirty,
+      };
       state.overlay = 'cell-details';
       render();
       break;
     case 'edit-cell':
       startCellEdit(state.menuRow, state.menuCell);
       break;
+    case 'cell-advanced': {
+      const row = databases[state.database][state.table].find(item => rowId(item) === state.menuRow);
+      state.cellValueTarget = {
+        database: state.database,
+        table: state.table,
+        row: state.menuRow,
+        column: state.menuCell,
+        value: state.cellInspectorIsNull ? null : $('#cell-value').value,
+        readonly: Boolean(deletedRows.has(row) || state.connectionModes.mysql),
+      };
+      state.valuePreviewTarget = null;
+      state.cellAdvancedReturn = state.overlay === 'cell-details' ? 'cell-details' : null;
+      state.overlay = 'advanced-value';
+      render();
+      break;
+    }
+    case 'cell-json':
+      try {
+        JSON.parse($('#cell-value').value);
+      } catch {
+        fieldError($('#cell-value'), language === 'zh-CN' ? '请输入有效 JSON。' : 'Enter valid JSON.');
+        break;
+      }
+      button.closest('.modal, .cell-drawer').querySelector('[data-action="cell-stage"]')?.click();
+      break;
     case 'cell-stage':
     case 'cell-null': {
       const row = databases[state.database][state.table].find(row => rowId(row) === state.menuRow);
       if (
-        row && !deletedRows.has(row)
+        row && !deletedRows.has(row) && !state.connectionModes.mysql
         && (action !== 'cell-null' || state.menuCell === 'email')
       ) {
         stageCellValue(
           row,
           state.menuCell,
-          action === 'cell-null' ? null : $('#cell-value').value,
+          action === 'cell-null' || state.cellInspectorIsNull ? null : $('#cell-value').value,
         );
       }
       state.overlay = null;
+      state.cellInspectorValue = null;
+      state.cellInspectorIsNull = false;
+      state.cellOverlayBaseline = null;
+      state.cellInspectorDirty = false;
+      dialogDraftDirty = false;
       render();
       break;
     }

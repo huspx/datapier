@@ -60,6 +60,22 @@ function syncConditionalRequirements() {
   if (sort) {
     setRequired(document.getElementById('sort-direction'), !!sort.value);
   }
+  const ttlPolicy = document.getElementById('redis-ttl-policy');
+  if (ttlPolicy) {
+    const setting = ttlPolicy.value === 'set';
+    document.getElementById('ttl-value-label').hidden = !setting;
+    setRequired(document.getElementById('redis-ttl-value'), setting);
+  }
+  const filterColumn = document.getElementById('filter-column');
+  if (filterColumn) {
+    const operator = document.getElementById('filter-operator');
+    const value = document.getElementById('filter-value');
+    operator.disabled = !filterColumn.value;
+    value.disabled = !filterColumn.value || ['is_null', 'is_not_null'].includes(operator.value);
+  }
+  document.querySelectorAll('[data-new-column]').forEach(row => {
+    row.querySelector('[data-new-value]').disabled = row.querySelector('[data-new-mode]').value !== 'value';
+  });
   document.querySelectorAll('label').forEach(label => {
     const field = [...label.children].find(child =>
       child.matches(
@@ -115,13 +131,31 @@ function validateRequiredFields(root) {
   }
   return true;
 }
+function validateAdvancedJson(root) {
+  for (const field of root.querySelectorAll('#filter-advanced-json, #sort-advanced-json, #new-row-json')) {
+    if (!field.value.trim()) continue;
+    const array = field.id !== 'new-row-json';
+    try {
+      const value = JSON.parse(field.value);
+      if (array ? Array.isArray(value) : value && typeof value === 'object' && !Array.isArray(value)) continue;
+    } catch {}
+    fieldError(
+      field,
+      array
+        ? (language === 'zh-CN' ? '请输入有效的 JSON 数组。' : 'Enter a valid JSON array.')
+        : (language === 'zh-CN' ? '请输入有效的 JSON 对象。' : 'Enter a valid JSON object.'),
+    );
+    return false;
+  }
+  return true;
+}
 document.addEventListener('click', event => {
   const button = event.target.closest(
     '.modal button.primary, .modal button[data-action^="request-"]',
   );
   if (
     button && !button.disabled
-    && !validateRequiredFields(button.closest('.modal'))
+    && (!validateRequiredFields(button.closest('.modal')) || !validateAdvancedJson(button.closest('.modal')))
   ) {
     event.preventDefault();
     event.stopImmediatePropagation();

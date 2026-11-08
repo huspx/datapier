@@ -232,7 +232,10 @@ impl Engine {
                 Ok(json!({"revision":revision}))
             }
             "cache.retired.preview" => self.store.retired_cache_preview().await,
-            "cache.retired.clear" => self.store.clear_retired_cache().await,
+            "cache.retired.clear" => {
+                let expected: Value = model::param(&params, "expected_preview")?;
+                self.store.clear_retired_cache(&expected).await
+            }
             method if method.starts_with("archery.") => {
                 self.archery_rpc(owner, method, params).await
             }

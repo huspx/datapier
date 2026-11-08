@@ -630,14 +630,14 @@ impl App {
                     .ok_or_else(|| AppError::invalid("恢复分块状态已失效"))?;
                 let offset = chunk.data.len() as u64;
                 if value.get("offset").and_then(Value::as_u64) != Some(offset)
-                    || value.get("total").and_then(Value::as_u64) != Some(chunk.total)
+                    || value.get("total_bytes").and_then(Value::as_u64) != Some(chunk.total)
                 {
                     return Err(AppError::conflict("恢复值分块不一致"));
                 }
                 let bytes = STANDARD
                     .decode(
                         value
-                            .get("bytes_b64")
+                            .get("data_b64")
                             .and_then(Value::as_str)
                             .ok_or_else(|| AppError::invalid("恢复值分块缺失"))?,
                     )

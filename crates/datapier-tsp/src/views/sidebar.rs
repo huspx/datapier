@@ -205,257 +205,339 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                 )
                 .child(icon_button("repeat", "刷新资源", "navigation-refresh")),
         );
-        if let Some(tree) = app
-            .profile
-            .as_ref()
-            .and_then(|p| app.navigation.databases.get(&p.id))
-        {
-            if tree.loading {
-                panel = panel
-                    .child(html::span(crate::i18n::tr("加载中…").into_owned()).class("empty-note"));
-            }
-            if let Some(error) = &tree.error {
-                panel = panel.child(html::span(error.clone()).class("connection-error"));
-            }
-            let needle = app.field("object_filter").to_lowercase();
-            for database in &tree.databases {
-                if app
-                    .profile
-                    .as_ref()
-                    .and_then(|profile| app.profiles.iter().find(|saved| saved.id == profile.id))
-                    .and_then(crate::navigation::navigation_visible_databases)
-                    .is_some_and(|visible| !visible.contains(&database.name))
-                {
-                    continue;
-                }
-                let node = tree.nodes.get(&database.name);
-                let can_drop = app.profile.as_ref().is_some_and(|profile| {
-                    !profile.is_archery()
-                        && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
-                });
-                let expanded = node.is_some_and(|node| node.expanded);
-                let mut database_menu = ui::Actions::new()
-                    .menu(ui::MenuEntry::header(database.name.clone()))
-                    .menu(
-                        ui::MenuItem::new("toggle", crate::i18n::tr("打开 / 折叠").into_owned())
-                            .icon(if expanded { "chev" } else { "chev-r" }),
-                    )
-                    .menu(
-                        ui::MenuItem::new("refresh", crate::i18n::tr("刷新资源").into_owned())
-                            .icon("repeat"),
-                    )
-                    .menu(
-                        ui::MenuItem::new(
-                            "database-copy-name",
-                            crate::i18n::tr("复制名称").into_owned(),
-                        )
-                        .icon("copy"),
-                    );
-                if !app
-                    .profile
-                    .as_ref()
-                    .is_some_and(|profile| profile.is_archery())
-                {
-                    database_menu = database_menu.menu(ui::MenuEntry::Separator).menu(
-                        ui::MenuItem::new("delete", crate::i18n::tr("删除数据库").into_owned())
-                            .icon("trash")
-                            .danger(true)
-                            .disabled(!can_drop),
+        let resource_tree = {
+            let mut panel = html::div()
+                .class("resource-tree")
+                .attr("role", "tree")
+                .attr("aria-label", crate::i18n::tr("数据库资源").into_owned());
+            if let Some(tree) = app
+                .profile
+                .as_ref()
+                .and_then(|p| app.navigation.databases.get(&p.id))
+            {
+                if tree.loading {
+                    panel = panel.child(
+                        html::span(crate::i18n::tr("加载中…").into_owned()).class("empty-note"),
                     );
                 }
-                panel = panel.child(
-                    html::button("")
-                        .class(
-                            if app.profile.as_ref().is_some_and(|profile| {
-                                profile.is_archery()
-                                    && profile.provider == datapier_core::model::ProviderKind::Mysql
-                                    && app.database.as_deref() == Some(database.name.as_str())
-                            }) {
-                                "resource nav-item database-node active"
-                            } else {
-                                "resource nav-item database-node"
-                            },
-                        )
-                        .child(ui::icon(if expanded { "chev" } else { "chev-r" }))
-                        .child(ui::icon("database"))
-                        .child(html::span(database.name.clone()))
-                        .actions(database_menu)
-                        .on_action(
-                            "toggle",
-                            Msg::Action(format!("navigation-db:{}", database.name)),
-                        )
-                        .on_action(
-                            "refresh",
-                            Msg::Action(format!("navigation-db-refresh:{}", database.name)),
-                        )
-                        .on_action("database-copy-name", Msg::CopyText(database.name.clone()))
-                        .on_action(
-                            "delete",
-                            Msg::Action(format!("navigation-drop-db:{}", database.name)),
-                        )
-                        .on_click(Msg::Action(format!("navigation-db:{}", database.name))),
-                );
-                if let Some(node) = node.filter(|node| node.expanded) {
-                    if node.loading {
-                        panel = panel.child(
-                            html::span(crate::i18n::tr("加载中…").into_owned()).class("empty-note"),
-                        );
-                    }
-                    if let Some(error) = &node.error {
-                        panel = panel.child(html::span(error.clone()).class("connection-error"));
-                    }
-                    for (kind, title) in
-                        [("table", "表"), ("view", "视图"), ("unknown", "未知类型")]
+                if let Some(error) = &tree.error {
+                    panel = panel.child(html::span(error.clone()).class("connection-error"));
+                }
+                let needle = app.field("object_filter").to_lowercase();
+                let tree_items = app.workspace_tree_items();
+                let tree_indices: std::collections::HashMap<_, _> = tree_items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| (item.0.as_str(), index))
+                    .collect();
+                let focused = app
+                    .focus
+                    .strip_prefix("workspace-tree-")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|index| *index < tree_items.len())
+                    .unwrap_or(0);
+                for database in &tree.databases {
+                    if app
+                        .profile
+                        .as_ref()
+                        .and_then(|profile| {
+                            app.profiles.iter().find(|saved| saved.id == profile.id)
+                        })
+                        .and_then(crate::navigation::navigation_visible_databases)
+                        .is_some_and(|visible| !visible.contains(&database.name))
                     {
-                        let collapsed = node.collapsed_kinds.contains(kind);
-                        let mut count = 0;
-                        let mut items = html::div().class("resource-group-items");
-                        for (index, resource) in node.resources.iter().enumerate() {
-                            if resource.kind != kind
-                                || !resource.name.to_lowercase().contains(&needle)
-                            {
-                                continue;
-                            }
-                            count += 1;
-                            if collapsed {
-                                continue;
-                            }
-                            let action = format!("navigation-resource:{}:{index}", database.name);
-                            let selected = app.target.as_ref().is_some_and(|target| {
-                                target.name == resource.name
-                                    && target.database == resource.database
-                                    && target.kind == resource.kind
-                            });
-                            let mut menu = ui::Actions::new()
-                                .menu(ui::MenuEntry::header(resource.name.clone()))
-                                .menu(
-                                    ui::MenuItem::new("open", crate::i18n::tr("打开").into_owned())
-                                        .icon("eye"),
-                                )
-                                .menu(
-                                    ui::MenuItem::new(
-                                        "structure",
-                                        crate::i18n::tr("结构").into_owned(),
-                                    )
-                                    .icon("table"),
-                                )
-                                .menu(ui::MenuItem::new("ddl", "DDL").icon("code"))
-                                .menu(
-                                    ui::MenuItem::new(
-                                        "refresh",
-                                        crate::i18n::tr("刷新资源").into_owned(),
-                                    )
-                                    .icon("repeat"),
-                                )
-                                .menu(
-                                    ui::MenuItem::new(
-                                        "resource-copy-name",
-                                        crate::i18n::tr("复制名称").into_owned(),
-                                    )
-                                    .icon("copy"),
-                                );
-                            if resource.kind == "table" {
-                                menu = menu.menu(
-                                    ui::MenuItem::new(
-                                        "triggers",
-                                        crate::i18n::tr("触发器").into_owned(),
-                                    )
-                                    .icon("code"),
-                                );
-                            }
-                            if resource.kind == "table"
-                                && !app
-                                    .profile
-                                    .as_ref()
-                                    .is_some_and(|profile| profile.is_archery())
-                            {
-                                menu = menu.menu(ui::MenuEntry::Separator).menu(
-                                    ui::MenuItem::new(
-                                        "delete",
-                                        crate::i18n::tr("删除表").into_owned(),
-                                    )
-                                    .icon("trash")
-                                    .danger(true)
-                                    .disabled(!can_drop),
-                                );
-                            }
-                            let resource_button = html::button("")
-                                .class(if selected {
-                                    "resource nav-item tree-object active"
-                                } else {
-                                    "resource nav-item tree-object"
-                                })
-                                .child(ui::icon(if resource.kind == "view" {
-                                    "eye"
-                                } else {
-                                    "table"
-                                }))
-                                .child(html::span(resource.name.clone()))
-                                .actions(menu)
-                                .on_action("open", Msg::Action(action.clone()))
-                                .on_action(
-                                    "structure",
-                                    Msg::Action(format!(
-                                        "navigation-resource-section:structure:{}:{index}",
-                                        database.name
-                                    )),
-                                )
-                                .on_action(
-                                    "ddl",
-                                    Msg::Action(format!(
-                                        "navigation-resource-section:ddl:{}:{index}",
-                                        database.name
-                                    )),
-                                )
-                                .on_action(
-                                    "triggers",
-                                    Msg::Action(format!(
-                                        "navigation-triggers:{}:{index}",
-                                        database.name
-                                    )),
-                                )
-                                .on_action(
-                                    "refresh",
-                                    Msg::Action(format!("navigation-db-refresh:{}", database.name)),
-                                )
-                                .on_action(
-                                    "resource-copy-name",
-                                    Msg::CopyText(resource.name.clone()),
-                                )
-                                .on_action(
-                                    "delete",
-                                    Msg::Action(format!(
-                                        "navigation-drop-table:{}:{index}",
-                                        database.name
-                                    )),
-                                )
-                                .on_click(Msg::Action(action));
-                            items = items.child(resource_button);
-                        }
-                        let mut header = html::button("")
-                            .class("resource-group-title")
-                            .child(ui::icon(if collapsed { "chev-r" } else { "chev" }))
-                            .child(html::span(crate::i18n::tr(title).into_owned()))
-                            .child(html::span("").class("spacer"))
-                            .child(html::span(count.to_string()).class("tree-count"));
-                        if count == 0 {
-                            header = header.attr("disabled", true);
-                        } else {
-                            header = header.on_click(Msg::Action(format!(
-                                "navigation-group:{kind}:{}",
-                                database.name
-                            )));
-                        }
-                        panel = panel.child(
-                            html::div()
-                                .class("resource-group")
-                                .child(header)
-                                .child(items),
+                        continue;
+                    }
+                    let node = tree.nodes.get(&database.name);
+                    let db_index = tree_indices
+                        .get(format!("navigation-db:{}", database.name).as_str())
+                        .copied()
+                        .unwrap_or(0);
+                    let can_drop = app.profile.as_ref().is_some_and(|profile| {
+                        !profile.is_archery()
+                            && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
+                    });
+                    let expanded = node.is_some_and(|node| node.expanded);
+                    let mut database_menu = ui::Actions::new()
+                        .menu(ui::MenuEntry::header(database.name.clone()))
+                        .menu(
+                            ui::MenuItem::new(
+                                "toggle",
+                                crate::i18n::tr("打开 / 折叠").into_owned(),
+                            )
+                            .icon(if expanded {
+                                "chev"
+                            } else {
+                                "chev-r"
+                            }),
+                        )
+                        .menu(
+                            ui::MenuItem::new("refresh", crate::i18n::tr("刷新资源").into_owned())
+                                .icon("repeat"),
+                        )
+                        .menu(
+                            ui::MenuItem::new(
+                                "database-copy-name",
+                                crate::i18n::tr("复制名称").into_owned(),
+                            )
+                            .icon("copy"),
                         );
+                    if !app
+                        .profile
+                        .as_ref()
+                        .is_some_and(|profile| profile.is_archery())
+                    {
+                        database_menu = database_menu.menu(ui::MenuEntry::Separator).menu(
+                            ui::MenuItem::new("delete", crate::i18n::tr("删除数据库").into_owned())
+                                .icon("trash")
+                                .danger(true)
+                                .disabled(!can_drop),
+                        );
+                    }
+                    panel = panel.child(
+                        html::button("")
+                            .class(
+                                if app.profile.as_ref().is_some_and(|profile| {
+                                    profile.is_archery()
+                                        && profile.provider
+                                            == datapier_core::model::ProviderKind::Mysql
+                                        && app.database.as_deref() == Some(database.name.as_str())
+                                }) {
+                                    "resource nav-item database-node active"
+                                } else {
+                                    "resource nav-item database-node"
+                                },
+                            )
+                            .prop("title", database.name.clone())
+                            .attr("aria-label", database.name.clone())
+                            .key(format!("input-workspace-tree-{db_index}"))
+                            .attr("role", "treeitem")
+                            .attr("aria-expanded", expanded)
+                            .attr("tabindex", if db_index == focused { 0 } else { -1 })
+                            .on_focus(Msg::Focus(format!("workspace-tree-{db_index}")))
+                            .child(ui::icon(if expanded { "chev" } else { "chev-r" }))
+                            .child(ui::icon("database"))
+                            .child(html::span(database.name.clone()))
+                            .actions(database_menu)
+                            .on_action(
+                                "toggle",
+                                Msg::Action(format!("navigation-db:{}", database.name)),
+                            )
+                            .on_action(
+                                "refresh",
+                                Msg::Action(format!("navigation-db-refresh:{}", database.name)),
+                            )
+                            .on_action("database-copy-name", Msg::CopyText(database.name.clone()))
+                            .on_action(
+                                "delete",
+                                Msg::Action(format!("navigation-drop-db:{}", database.name)),
+                            )
+                            .on_click(Msg::Action(format!("navigation-db:{}", database.name))),
+                    );
+                    if let Some(node) = node.filter(|node| node.expanded) {
+                        if node.loading {
+                            panel = panel.child(
+                                html::span(crate::i18n::tr("加载中…").into_owned())
+                                    .class("empty-note"),
+                            );
+                        }
+                        if let Some(error) = &node.error {
+                            panel =
+                                panel.child(html::span(error.clone()).class("connection-error"));
+                        }
+                        if !needle.is_empty()
+                            && !node.loading
+                            && node.error.is_none()
+                            && !node
+                                .resources
+                                .iter()
+                                .any(|resource| resource.name.to_lowercase().contains(&needle))
+                        {
+                            panel = panel.child(
+                                html::span(crate::i18n::tr("没有匹配对象").into_owned())
+                                    .class("empty-note"),
+                            );
+                        }
+                        for (kind, title) in
+                            [("table", "表"), ("view", "视图"), ("unknown", "未知类型")]
+                        {
+                            let collapsed = node.collapsed_kinds.contains(kind);
+                            let mut count = 0;
+                            let mut items = html::div().class("resource-group-items");
+                            for (index, resource) in node.resources.iter().enumerate() {
+                                if resource.kind != kind
+                                    || !resource.name.to_lowercase().contains(&needle)
+                                {
+                                    continue;
+                                }
+                                count += 1;
+                                if collapsed {
+                                    continue;
+                                }
+                                let action =
+                                    format!("navigation-resource:{}:{index}", database.name);
+                                let item_index =
+                                    tree_indices.get(action.as_str()).copied().unwrap_or(0);
+                                let selected = app.target.as_ref().is_some_and(|target| {
+                                    target.name == resource.name
+                                        && target.database == resource.database
+                                        && target.kind == resource.kind
+                                });
+                                let mut menu = ui::Actions::new()
+                                    .menu(ui::MenuEntry::header(resource.name.clone()))
+                                    .menu(
+                                        ui::MenuItem::new(
+                                            "open",
+                                            crate::i18n::tr("打开").into_owned(),
+                                        )
+                                        .icon("eye"),
+                                    )
+                                    .menu(
+                                        ui::MenuItem::new(
+                                            "structure",
+                                            crate::i18n::tr("结构").into_owned(),
+                                        )
+                                        .icon("table"),
+                                    )
+                                    .menu(ui::MenuItem::new("ddl", "DDL").icon("code"))
+                                    .menu(
+                                        ui::MenuItem::new(
+                                            "refresh",
+                                            crate::i18n::tr("刷新资源").into_owned(),
+                                        )
+                                        .icon("repeat"),
+                                    )
+                                    .menu(
+                                        ui::MenuItem::new(
+                                            "resource-copy-name",
+                                            crate::i18n::tr("复制名称").into_owned(),
+                                        )
+                                        .icon("copy"),
+                                    );
+                                if resource.kind == "table" {
+                                    menu = menu.menu(
+                                        ui::MenuItem::new(
+                                            "triggers",
+                                            crate::i18n::tr("触发器").into_owned(),
+                                        )
+                                        .icon("code"),
+                                    );
+                                }
+                                if resource.kind == "table"
+                                    && !app
+                                        .profile
+                                        .as_ref()
+                                        .is_some_and(|profile| profile.is_archery())
+                                {
+                                    menu = menu.menu(ui::MenuEntry::Separator).menu(
+                                        ui::MenuItem::new(
+                                            "delete",
+                                            crate::i18n::tr("删除表").into_owned(),
+                                        )
+                                        .icon("trash")
+                                        .danger(true)
+                                        .disabled(!can_drop),
+                                    );
+                                }
+                                let resource_button = html::button("")
+                                    .class(if selected {
+                                        "resource nav-item tree-object active"
+                                    } else {
+                                        "resource nav-item tree-object"
+                                    })
+                                    .prop("title", resource.name.clone())
+                                    .attr("aria-label", resource.name.clone())
+                                    .key(format!("input-workspace-tree-{item_index}"))
+                                    .attr("role", "treeitem")
+                                    .attr("tabindex", if item_index == focused { 0 } else { -1 })
+                                    .on_focus(Msg::Focus(format!("workspace-tree-{item_index}")))
+                                    .child(ui::icon(if resource.kind == "view" {
+                                        "eye"
+                                    } else {
+                                        "table"
+                                    }))
+                                    .child(html::span(resource.name.clone()))
+                                    .actions(menu)
+                                    .on_action("open", Msg::Action(action.clone()))
+                                    .on_action(
+                                        "structure",
+                                        Msg::Action(format!(
+                                            "navigation-resource-section:structure:{}:{index}",
+                                            database.name
+                                        )),
+                                    )
+                                    .on_action(
+                                        "ddl",
+                                        Msg::Action(format!(
+                                            "navigation-resource-section:ddl:{}:{index}",
+                                            database.name
+                                        )),
+                                    )
+                                    .on_action(
+                                        "triggers",
+                                        Msg::Action(format!(
+                                            "navigation-triggers:{}:{index}",
+                                            database.name
+                                        )),
+                                    )
+                                    .on_action(
+                                        "refresh",
+                                        Msg::Action(format!(
+                                            "navigation-db-refresh:{}",
+                                            database.name
+                                        )),
+                                    )
+                                    .on_action(
+                                        "resource-copy-name",
+                                        Msg::CopyText(resource.name.clone()),
+                                    )
+                                    .on_action(
+                                        "delete",
+                                        Msg::Action(format!(
+                                            "navigation-drop-table:{}:{index}",
+                                            database.name
+                                        )),
+                                    )
+                                    .on_click(Msg::Action(action));
+                                items = items.child(resource_button);
+                            }
+                            let mut header = html::button("")
+                                .class("resource-group-title")
+                                .child(ui::icon(if collapsed { "chev-r" } else { "chev" }))
+                                .child(html::span(crate::i18n::tr(title).into_owned()))
+                                .child(html::span("").class("spacer"))
+                                .child(html::span(count.to_string()).class("tree-count"));
+                            if count != 0 {
+                                let action = format!("navigation-group:{kind}:{}", database.name);
+                                let index = tree_indices.get(action.as_str()).copied().unwrap_or(0);
+                                header = header
+                                    .key(format!("input-workspace-tree-{index}"))
+                                    .attr("role", "treeitem")
+                                    .attr("aria-expanded", !collapsed)
+                                    .attr("tabindex", if index == focused { 0 } else { -1 })
+                                    .on_focus(Msg::Focus(format!("workspace-tree-{index}")));
+                            }
+                            if count == 0 {
+                                header = header.attr("disabled", true);
+                            } else {
+                                header = header.on_click(Msg::Action(format!(
+                                    "navigation-group:{kind}:{}",
+                                    database.name
+                                )));
+                            }
+                            panel = panel.child(
+                                html::div()
+                                    .class("resource-group")
+                                    .child(header)
+                                    .child(items),
+                            );
+                        }
                     }
                 }
             }
-        }
+            panel
+        };
+        panel = panel.child(resource_tree);
         panel = panel
             .child(html::span(crate::i18n::tr("工作区").into_owned()).class("group-title"))
             .child(sidebar_action("terminal", "SQL 查询", "view-query", false))

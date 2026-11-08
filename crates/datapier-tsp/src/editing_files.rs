@@ -9,6 +9,7 @@ pub(super) struct FileManagement {
     pub pending: Option<(Uuid, String)>,
     pub selected: Option<String>,
     pub confirm_cleanup: bool,
+    pub cleanup_target: Option<Value>,
     pub refresh_pending: bool,
     pub loaded: bool,
     pub error: Option<String>,
@@ -94,6 +95,7 @@ impl App {
             {
                 self.editing_files.selected = Some(id.to_owned());
                 self.editing_files.confirm_cleanup = false;
+                self.editing_files.cleanup_target = None;
             }
             return true;
         }
@@ -112,14 +114,21 @@ impl App {
         }
         if name == "editing-files-cleanup-cancel" {
             self.editing_files.confirm_cleanup = false;
+            self.editing_files.cleanup_target = None;
             return true;
         }
         if name == "editing-files-cleanup" {
-            self.editing_files.confirm_cleanup = self.editing_files.items.iter().any(|item| {
-                item["id"].as_str() == self.editing_files.selected.as_deref()
-                    && self.editing_files.has_claim(item)
-                    && item["referenced"] == false
-            });
+            self.editing_files.cleanup_target = self
+                .editing_files
+                .items
+                .iter()
+                .find(|item| {
+                    item["id"].as_str() == self.editing_files.selected.as_deref()
+                        && self.editing_files.has_claim(item)
+                        && item["referenced"] == false
+                })
+                .cloned();
+            self.editing_files.confirm_cleanup = self.editing_files.cleanup_target.is_some();
             return true;
         }
         let Some(id) = self.editing_files.selected.clone() else {
@@ -136,6 +145,22 @@ impl App {
         let Some(revision) = item["revision"].as_u64() else {
             return true;
         };
+        if name == "editing-files-cleanup-confirm"
+            && !self
+                .editing_files
+                .cleanup_target
+                .as_ref()
+                .is_some_and(|frozen| {
+                    frozen["id"] == item["id"]
+                        && frozen["revision"] == item["revision"]
+                        && frozen["referenced"] == item["referenced"]
+                })
+        {
+            self.editing_files.confirm_cleanup = false;
+            self.editing_files.cleanup_target = None;
+            self.editing_files.error = Some(i18n::tr("文件状态已变化，请重新确认").into_owned());
+            return true;
+        }
         let allowed = match name {
             "editing-files-claim" => FileManagement::can_claim(item),
             "editing-files-export" => {
@@ -163,6 +188,7 @@ impl App {
             ),
         };
         self.editing_files.confirm_cleanup = false;
+        self.editing_files.cleanup_target = None;
         self.editing_file_request(backend, method, params);
         true
     }
@@ -204,6 +230,7 @@ impl App {
                 }) {
                     self.editing_files.selected = None;
                     self.editing_files.confirm_cleanup = false;
+                    self.editing_files.cleanup_target = None;
                 }
             }
             Ok(value) => {

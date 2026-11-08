@@ -15,6 +15,8 @@ pub(crate) struct FileUi {
     pub terminal_handoff: Option<uuid::Uuid>,
     pub pending: bool,
     pub error: Option<String>,
+    /// 确认步骤冻结文件身份、版本和展示路径。
+    pub confirm_clean: Option<(String, u64, String)>,
 }
 
 impl FileUi {
@@ -91,9 +93,31 @@ impl FileUi {
             "advanced-external-keep" => self
                 .external_close(true)
                 .map(|params| ("value.external.close", params)),
-            "advanced-external-clean" => self
-                .external_close(false)
-                .map(|params| ("value.external.close", params)),
+            "advanced-external-clean" => {
+                if let (Some(session), Some(path)) = (&self.file_session, &self.external_path) {
+                    self.error = None;
+                    self.confirm_clean = Some((session.clone(), self.file_revision, path.clone()));
+                }
+                None
+            }
+            "advanced-external-clean-cancel" => {
+                self.error = None;
+                self.confirm_clean = None;
+                None
+            }
+            "advanced-external-clean-confirm" => {
+                self.error = None;
+                let (session, revision, _) = self.confirm_clean.as_ref()?;
+                if self.file_session.as_ref() != Some(session) || self.file_revision != *revision {
+                    self.error = Some(tr("文件会话已变化，请重新确认清理。").into_owned());
+                    self.confirm_clean = None;
+                    return None;
+                }
+                Some((
+                    "value.external.close",
+                    json!({"file_session":session,"revision":revision,"keep":false}),
+                ))
+            }
             _ => None,
         }
     }
@@ -157,6 +181,7 @@ impl FileUi {
         self.external_path = None;
         self.file_revision = 0;
         self.terminal_handoff = None;
+        self.confirm_clean = None;
     }
 }
 
@@ -169,11 +194,34 @@ fn button(label: &str, action: &str, enabled: bool) -> Node<Msg> {
 }
 
 /// 所有动作仅生成界面事件，调用方使用 Engine 响应更新会话与错误。
-pub(crate) fn view(state: &FileUi, writable: bool, value_ready: bool) -> Node<Msg> {
-    let ready = value_ready && !state.pending;
+pub(crate) fn view(state: &FileUi, writable: bool, value_ready: bool, dirty: bool) -> Node<Msg> {
+    let ready = value_ready && !state.pending && !dirty;
     let mut panel = html::div()
         .class("value-files advanced-panel")
         .child(html::strong(tr("文件操作").into_owned()));
+    if let Some((_, _, path)) = &state.confirm_clean {
+        if let Some(error) = &state.error {
+            panel = panel.child(html::p(error.clone()).class("notice"));
+        }
+        return panel
+            .child(
+                html::p(tr("确认清理外部编辑文件？清理后文件无法恢复。").into_owned())
+                    .class("notice"),
+            )
+            .child(html::p(path.clone()).class("mono"))
+            .child(button(
+                "继续编辑",
+                "advanced-external-clean-cancel",
+                !state.pending,
+            ))
+            .child(
+                ui::button(tr("结束并清理").into_owned())
+                    .variant(ui::ButtonVariant::Danger)
+                    .disabled(state.pending)
+                    .on_click(Msg::Action("advanced-external-clean-confirm".into())),
+            )
+            .into();
+    }
     if state.pending {
         panel = panel.child(html::p(tr("处理中").into_owned()).class("muted"));
     }
@@ -230,6 +278,36 @@ pub(crate) fn view(state: &FileUi, writable: bool, value_ready: bool) -> Node<Ms
                 ready && writable && state.file_session.is_none(),
             )),
     );
+    if !value_ready {
+        panel = panel.child(
+            html::p(tr("导入、导出和外部编辑不可用：值会话尚未就绪。").into_owned())
+                .class("notice"),
+        );
+    } else if dirty {
+        panel = panel
+            .child(html::p(tr("文件操作不可用：请先应用当前修改。").into_owned()).class("notice"));
+    } else if state.pending {
+        panel = panel.child(
+            html::p(tr("导入、导出和外部编辑不可用：文件操作处理中。").into_owned())
+                .class("notice"),
+        );
+    } else {
+        if state.path.text.is_empty() {
+            panel = panel.child(
+                html::p(tr("导入和导出不可用：请填写文件路径。").into_owned()).class("notice"),
+            );
+        }
+        if !writable {
+            panel = panel.child(
+                html::p(tr("导入和外部编辑不可用：当前值只读。").into_owned()).class("notice"),
+            );
+        } else if state.file_session.is_some() {
+            panel = panel.child(
+                html::p(tr("准备外部编辑不可用：请先结束当前文件会话。").into_owned())
+                    .class("notice"),
+            );
+        }
+    }
     if let Some(path) = &state.external_path {
         panel = panel.child(html::p(path.clone()).class("mono"));
         panel = panel.child(

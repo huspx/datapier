@@ -890,11 +890,11 @@ fn readonly_redis_large_values_load_in_chunks_without_edit_baseline() {
         assert_eq!(request.method, "result.value");
         let tag = request.tag.splitn(3, ':').nth(2).unwrap();
         let split = bytes.len() / 2;
-        app.large_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total":bytes.len()}), &backend);
+        app.large_response(tag, json!({"data_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total_bytes":bytes.len()}), &backend);
         let request = requests.try_recv().unwrap();
         assert_eq!(request.params["offset"], split);
         let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-        app.large_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total":bytes.len()}), &backend);
+        app.large_response(tag, json!({"data_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total_bytes":bytes.len()}), &backend);
         assert_eq!(
             app.grid.as_ref().unwrap().value(Cell { row: 0, column: 0 }),
             Some(&full)

@@ -33,6 +33,92 @@ fn language_saves_are_serialized_and_coalesce_to_latest_selection() {
 }
 
 #[test]
+fn clean_settings_refresh_updates_form_and_revision_together() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("window-a".into());
+    let original = app.settings.clone();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&original).unwrap()),
+        },
+        &backend,
+    );
+
+    let mut other_window = original.clone();
+    other_window.revision += 1;
+    other_window.paging.mysql_table_rows = 137;
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&other_window).unwrap()),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("settings-paging-mysql_table_rows"), "137");
+    assert!(!app.settings_form_dirty());
+    app.field_set("settings-paging-sql_rows", "123");
+    app.application_action("settings-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(
+        request.params["settings"]["revision"],
+        json!(other_window.revision)
+    );
+    assert_eq!(
+        request.params["settings"]["paging"]["mysql_table_rows"],
+        json!(137)
+    );
+    assert_eq!(request.params["settings"]["paging"]["sql_rows"], json!(123));
+}
+
+#[test]
+fn dirty_closed_settings_keep_revision_and_conflict_after_remote_refresh() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("window-a".into());
+    let original = app.settings.clone();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&original).unwrap()),
+        },
+        &backend,
+    );
+    app.field_set("settings-paging-sql_rows", "123");
+    app.workbench.overlay = None;
+
+    let mut other_window = original.clone();
+    other_window.revision += 1;
+    other_window.paging.mysql_table_rows = 137;
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&other_window).unwrap()),
+        },
+        &backend,
+    );
+    assert_eq!(app.settings.revision, original.revision);
+    assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    assert!(app.settings_form_dirty());
+
+    app.application_action("settings-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(
+        request.params["settings"]["revision"],
+        json!(original.revision)
+    );
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("revision_conflict", "conflict")),
+        },
+        &backend,
+    );
+    assert!(app.field("settings-error").contains("conflict"));
+    assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    assert!(app.settings_form_dirty());
+}
+
+#[test]
 fn failed_settings_write_keeps_selection_until_explicit_reload() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("test".into());
@@ -143,8 +229,18 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
     app.field_set("external_args", "--wait\n{file}\n{file}");
     app.application_action("settings-save", &backend);
     assert!(requests.try_recv().is_err());
-    assert!(!app.field("settings-error").is_empty());
+    assert_eq!(
+        app.workbench
+            .field_error
+            .as_ref()
+            .map(|error| error.field.as_str()),
+        Some("external_args")
+    );
+    assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
     app.application_action("settings-reload", &backend);
+    assert_eq!(app.field("settings-reload-confirm"), "true");
+    assert!(requests.try_recv().is_err());
+    app.application_action("settings-reload-confirm", &backend);
     let request = requests.try_recv().unwrap();
     app.settings_response(
         Response {
@@ -156,6 +252,8 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
     assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
     assert!(app.field("settings-error").contains("reload failed"));
     app.application_action("settings-reload", &backend);
+    assert!(requests.try_recv().is_err());
+    app.application_action("settings-reload-confirm", &backend);
     let request = requests.try_recv().unwrap();
     let persisted = serde_json::to_value(&app.settings).unwrap();
     app.settings_response(

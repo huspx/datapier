@@ -1,12 +1,3 @@
-/* 全局保持语义 field 的标签与必填标记同排，不改写输入控件皮肤。 */
-.sf-field-lbl {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  flex-wrap: nowrap;
-  white-space: nowrap;
-  gap: 4px;
-}
 .cell.inline-editing {
   position: relative;
   overflow: visible;

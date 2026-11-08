@@ -182,7 +182,13 @@ impl App {
             }
             Err(error) => {
                 self.advanced_value.format_undo = None;
-                self.advanced_value.error = Some(error.to_string());
+                if operation == "value.external.close"
+                    && self.advanced_files.confirm_clean.is_some()
+                {
+                    self.advanced_files.error = Some(error.to_string());
+                } else {
+                    self.advanced_value.error = Some(error.to_string());
+                }
             }
         }
     }
@@ -290,7 +296,7 @@ impl App {
             .iter()
             .map(|(cell, value)| json!([cell.row, cell.column, value]))
             .collect();
-        let source = json!({"session":self.session_id(),"target":self.target,"edit_token":self.edit_token,
+        let source = json!({"session":self.session_id(),"connection":self.profile.as_ref().map(|p| &p.name),"target":self.target,"edit_token":self.edit_token,
             "result_id":grid.page.result.id,"row":cell.row,"column":cell.column,"column_name":column_name,"original":original,
             "draft_revision":params["draft_revision"],"grid_edits":grid_edits,"pending_rows":self.pending_rows,"redis_revision":self.redis_changes_revision});
         self.advanced_value = ValueUi {
@@ -316,15 +322,35 @@ impl App {
         {
             return false;
         }
-        if action == "advanced-value-close" {
+        if action == "advanced-value-close" && self.advanced_files.confirm_clean.is_some() {
+            self.advanced_files.confirm_clean = None;
+            return true;
+        }
+        if action == "advanced-value-continue"
+            || (action == "advanced-value-close" && self.advanced_value.confirm_close)
+        {
+            self.advanced_value.confirm_close = false;
+            return true;
+        }
+        if let Some(open) = action.strip_prefix("advanced-value-kind-open:") {
+            self.advanced_value.kind_select_open = open == "true";
+            return true;
+        }
+        if self.advanced_value.confirm_close && action != "advanced-value-discard" {
+            return true;
+        }
+        if matches!(action, "advanced-value-close" | "advanced-value-discard") {
             if self.advanced_value.pending {
                 return true;
             }
             if self.advanced_files.file_session.is_some() {
                 self.advanced_value.error =
                     Some(i18n::tr("请先选择保留或清理编辑文件").into_owned());
-            } else if self.advanced_value.dirty() {
-                self.advanced_value.error = Some(i18n::tr("请先应用当前修改").into_owned());
+            } else if (self.advanced_value.dirty()
+                || (self.advanced_value.applied && !self.advanced_value.staged))
+                && action != "advanced-value-discard"
+            {
+                self.advanced_value.confirm_close = true;
             } else {
                 self.advanced_value.invalidate_preview();
                 if !self.advanced_value_release_previews(backend) {
@@ -368,6 +394,13 @@ impl App {
                 self.advanced_value_send(backend, method, method, params);
             }
         } else {
+            if let Some(mode) = action.strip_prefix("advanced-value-mode:")
+                && matches!(mode, "text" | "hex" | "json" | "xml" | "image")
+                && !self.advanced_value.pending
+            {
+                self.focus = format!("advanced-value-tab-{mode}");
+                self.workbench.focus_request = Some(String::new());
+            }
             if matches!(
                 action,
                 "advanced-value-stage" | "advanced-value-set-null" | "advanced-value-replace-null"
@@ -438,7 +471,13 @@ impl App {
             Ok(value) => value,
             Err(error) => {
                 self.advanced_value.format_undo = None;
-                self.advanced_value.error = Some(error.to_string());
+                if operation == "value.external.close"
+                    && self.advanced_files.confirm_clean.is_some()
+                {
+                    self.advanced_files.error = Some(error.to_string());
+                } else {
+                    self.advanced_value.error = Some(error.to_string());
+                }
                 return true;
             }
         };
@@ -500,6 +539,19 @@ impl App {
             }
             _ => Err(crate::AppError::invalid("未知值编辑响应")),
         };
+        if next.is_ok()
+            && matches!(
+                operation.as_str(),
+                "advanced-value-patch"
+                    | "advanced-value-format"
+                    | "value.file.import"
+                    | "value.external.read"
+                    | "advanced-value-set-null"
+                    | "advanced-value-replace-null"
+            )
+        {
+            self.advanced_value.applied = true;
+        }
         if next.is_err() {
             self.advanced_value_release_stale_preview(backend, result);
             self.advanced_value.invalidate_preview();
@@ -720,9 +772,10 @@ impl App {
                 self.status = i18n::UiMessage::key("没有变化");
                 return Ok(());
             }
-            // 提交引用固定该 revision；继续修改应通过新会话处理。
-            self.advanced_value.writable = false;
         }
+        // 提交引用固定该 revision；继续修改应通过新会话处理。
+        self.advanced_value.writable = false;
+        self.advanced_value.staged = true;
         self.draft_revision = self.draft_revision.wrapping_add(1);
         self.dirty = true;
         self.status = i18n::UiMessage::key("已加入待提交变更");

@@ -24,6 +24,31 @@ pub(super) const PROFILE_DEFAULTS: &[(&str, &str)] = &[
 ];
 
 impl App {
+    pub(crate) fn connection_draft_capture(&mut self) {
+        self.archery.direct_draft = Some((
+            PROFILE_DEFAULTS
+                .iter()
+                .map(|(name, _)| self.field(name).to_owned())
+                .collect(),
+            self.navigation.form.all,
+            self.navigation.form.selected.clone(),
+        ));
+    }
+
+    pub(crate) fn connection_draft_dirty(&self) -> bool {
+        self.archery
+            .direct_draft
+            .as_ref()
+            .is_some_and(|(fields, all, selected)| {
+                PROFILE_DEFAULTS
+                    .iter()
+                    .zip(fields)
+                    .any(|((name, _), value)| self.field(name) != value)
+                    || self.navigation.form.all != *all
+                    || (!*all && self.navigation.form.selected != *selected)
+            })
+    }
+
     pub(super) fn connection_form_busy(&self) -> bool {
         self.form_id
             .is_some_and(|id| self.profile_saves.contains(&id))
@@ -124,6 +149,7 @@ impl App {
                 direct.tls.client_key_path.clone().unwrap_or_default(),
             );
         }
+        self.connection_draft_capture();
         self.workbench.profile_tls_details = self.field("tls") == "true";
         self.workbench.overlay = Some("profile".into());
         self.workbench.focus_request = Some("input-name".into());

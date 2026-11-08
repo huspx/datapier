@@ -3,6 +3,8 @@ use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use datapier_core::model::{AccessMode, Value as DataValue};
 
+type RedisSelectedRow = (u64, Vec<DataValue>);
+
 #[derive(Clone)]
 pub(super) struct RedisRowPending {
     tab: Uuid,
@@ -16,7 +18,9 @@ pub(super) struct RedisRowPending {
     schema: Value,
     token: Value,
     revision: u64,
-    rows: Vec<(u64, Vec<DataValue>)>,
+    rows: Vec<RedisSelectedRow>,
+    resolved: Option<Vec<Vec<DataValue>>>,
+    error: Option<String>,
     tag: Option<String>,
 }
 
@@ -102,6 +106,45 @@ impl App {
                 .is_some_and(|g| g.selected_row_count() > 0)
     }
 
+    pub(super) fn redis_row_delete_targets(
+        &self,
+    ) -> Option<(&ResourceTarget, &[RedisSelectedRow])> {
+        self.workbench
+            .redis_row_pending
+            .as_ref()
+            .map(|pending| (&pending.target, pending.rows.as_slice()))
+    }
+    pub(super) fn redis_row_delete_resolved(&self) -> Option<&[Vec<DataValue>]> {
+        self.workbench
+            .redis_row_pending
+            .as_ref()?
+            .resolved
+            .as_deref()
+    }
+
+    pub(super) fn redis_row_delete_error(&self) -> Option<&str> {
+        self.workbench.redis_row_pending.as_ref()?.error.as_deref()
+    }
+
+    pub(super) fn load_redis_row_delete_targets(&mut self, backend: &Backend) {
+        let Some(mut pending) = self.workbench.redis_row_pending.take() else {
+            return;
+        };
+        if pending.tag.is_some() || !pending.matches(self) {
+            self.workbench.redis_row_pending = Some(pending);
+            return;
+        }
+        let tag = format!("redis.rows.preview/{}", Uuid::new_v4());
+        let routed = format!("{}:{}:{tag}", pending.tab, pending.generation);
+        let rows = pending.rows.iter().map(|(_, row)| row.clone()).collect();
+        pending.error = None;
+        match backend.redis_selected_rows(routed, rows, None) {
+            Ok(()) => pending.tag = Some(tag),
+            Err(error) => pending.error = Some(error.to_string()),
+        }
+        self.workbench.redis_row_pending = Some(pending);
+    }
+
     pub(super) fn redis_row_delete_count(&self) -> usize {
         self.workbench
             .redis_row_pending
@@ -138,6 +181,8 @@ impl App {
             token: self.edit_token.clone().unwrap(),
             revision: self.redis_changes_revision,
             rows,
+            resolved: None,
+            error: None,
             tag: None,
         });
         self.workbench.overlay = Some("redis-delete-rows".into());
@@ -152,6 +197,9 @@ impl App {
 
     pub(super) fn confirm_redis_row_delete(&mut self, backend: &Backend) {
         if self.workbench.overlay.as_deref() != Some("redis-delete-rows") {
+            return;
+        }
+        if self.redis_row_delete_resolution_pending() {
             return;
         }
         self.workbench.overlay = None;
@@ -180,7 +228,8 @@ impl App {
         tag: &str,
         result: &datapier_core::Result<Value>,
     ) -> bool {
-        if !tag.starts_with("redis.rows.delete/") {
+        let preview = tag.starts_with("redis.rows.preview/");
+        if !preview && !tag.starts_with("redis.rows.delete/") {
             return false;
         }
         if self
@@ -192,7 +241,7 @@ impl App {
         {
             return true;
         }
-        let pending = self.workbench.redis_row_pending.take().unwrap();
+        let mut pending = self.workbench.redis_row_pending.take().unwrap();
         if !pending.matches(self) {
             self.status = i18n::UiMessage::key("Redis 上下文已变化，请重新选择条目");
             return true;
@@ -202,14 +251,31 @@ impl App {
                 Ok(rows) => rows,
                 Err(error) => {
                     self.status = i18n::UiMessage::raw(error.to_string());
+                    if preview {
+                        pending.tag = None;
+                        pending.error = Some(error.to_string());
+                        self.workbench.redis_row_pending = Some(pending);
+                    }
                     return true;
                 }
             },
             Err(error) => {
                 self.status = i18n::UiMessage::raw(error.to_string());
+                if preview {
+                    pending.tag = None;
+                    pending.error = Some(error.to_string());
+                    self.workbench.redis_row_pending = Some(pending);
+                }
                 return true;
             }
         };
+        if preview {
+            pending.tag = None;
+            pending.resolved = Some(rows);
+            pending.error = None;
+            self.workbench.redis_row_pending = Some(pending);
+            return true;
+        }
         let staged = self.redis_row_deletions(&pending, rows);
         match staged {
             Ok(changes) => {

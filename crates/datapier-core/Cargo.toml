@@ -7,6 +7,8 @@ rust-version.workspace = true
 [dependencies]
 base64.workspace = true
 bigdecimal.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 csv.workspace = true
 futures-util.workspace = true

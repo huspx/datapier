@@ -1,5 +1,6 @@
 .config-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 20px;
   border-bottom: 1px solid var(--border);
 }
@@ -8,6 +9,7 @@
   border-bottom: 2px solid transparent;
   border-radius: 0;
   background: transparent;
+  white-space: nowrap;
   padding: 8px 2px;
 }
 .config-tabs button[aria-selected="true"] {
@@ -30,6 +32,45 @@
 .config-row > input, .config-row > select {
   width: 100%;
   min-width: 0;
+}
+.config-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.config-field input, .config-field textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.config-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+.config-field small {
+  overflow-wrap: anywhere;
+}
+.config-file-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 4px 0;
+  white-space: normal;
+}
+.config-file-row[aria-pressed="true"] {
+  background: var(--selected);
+}
+.config-file-detail {
+  margin-top: 12px;
+}
+.config-file-detail dl, .config-preview dl {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr);
+  gap: 6px 12px;
+}
+.config-preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .config-row > .config-switch {
   justify-self: end;
@@ -149,6 +190,9 @@
   .config-row {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
+  }
+  .config-field {
+    grid-column: 1 / -1;
   }
   .config-server-group {
     grid-template-columns: minmax(0, 1fr);

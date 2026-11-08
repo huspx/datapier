@@ -7,6 +7,27 @@ use uuid::Uuid;
 
 const PAGE_SIZE: u64 = 20;
 
+/// 显示少量真实目标，避免大型选集或筛选值撑满工作台。
+fn scope_summary(items: &[Value]) -> String {
+    const MAX_ITEMS: usize = 3;
+    const MAX_CHARS: usize = 160;
+    let mut parts = Vec::new();
+    for item in items.iter().take(MAX_ITEMS) {
+        let text = item.to_string();
+        let mut chars = text.chars();
+        let mut excerpt: String = chars.by_ref().take(MAX_CHARS).collect();
+        if chars.next().is_some() {
+            excerpt.push('…');
+        }
+        parts.push(excerpt);
+    }
+    let count = items.len();
+    if count > MAX_ITEMS {
+        parts.push(format!("… +{}", count - MAX_ITEMS));
+    }
+    format!("{}: {}", count, parts.join(", "))
+}
+
 /// 由调用方从当前会话和真实选集构造；键必须是完整可靠键而非行号。
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
@@ -73,6 +94,8 @@ pub(crate) struct ReplaceState {
     result: Option<Value>,
     detail: Option<ReplaceDetail>,
     invalid: bool,
+    page_size: u64,
+    select_open: Option<String>,
 }
 
 impl ReplaceState {
@@ -323,8 +346,7 @@ impl ReplaceState {
         let Some((id, revision)) = self.plan() else {
             return;
         };
-        let params =
-            json!({"plan_id": id, "revision": revision, "offset": offset, "limit": PAGE_SIZE});
+        let params = json!({"plan_id": id, "revision": revision, "offset": offset, "limit": self.page_size.max(PAGE_SIZE)});
         self.request(backend, route, Operation::Read, "replace.read", params);
     }
 
@@ -427,6 +449,26 @@ impl ReplaceState {
             return true;
         }
         match action {
+            _ if action.starts_with("replace:select-open:") => {
+                let value = &action[20..];
+                self.select_open = value.strip_suffix(":true").map(str::to_owned);
+            }
+            _ if action.starts_with("replace:size:") => {
+                if let Ok(size @ (20 | 50 | 100)) = action[13..].parse::<u64>()
+                    && (size == 20 || matches!(self.target, Some(ReplaceTarget::Mysql { .. })))
+                {
+                    self.page_size = size;
+                    self.read(backend, route, 0);
+                }
+            }
+            _ if action.starts_with("replace:scope:") && self.summary.is_none() => {
+                self.scope = match &action[14..] {
+                    "selected" => Some(ReplaceScope::Selected),
+                    "page" => Some(ReplaceScope::CurrentPage),
+                    "filtered" => Some(ReplaceScope::Filtered),
+                    _ => self.scope,
+                };
+            }
             "replace:reset" if self.invalid && self.summary.is_none() => {
                 *self = Self::default();
             }
@@ -440,7 +482,7 @@ impl ReplaceState {
                     .and_then(|p| p.get("offset"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0)
-                    .saturating_sub(PAGE_SIZE);
+                    .saturating_sub(self.page_size.max(PAGE_SIZE));
                 self.read(backend, route, offset);
             }
             "replace:next" => {
@@ -764,12 +806,11 @@ fn button(label: &str, action: String, disabled: bool) -> Node<Msg> {
         .into()
 }
 fn choice(label: &str, action: String, selected: bool, disabled: bool) -> Node<Msg> {
-    let mark = if selected { "☑ " } else { "☐ " };
-    ui::button(format!("{mark}{}", i18n::tr(label)))
-        .variant(ui::ButtonVariant::Quiet)
-        .on(selected)
+    html::button(i18n::tr(label).into_owned())
+        .attr("role", "checkbox")
         .key(action.clone())
-        .disabled(disabled)
+        .attr("aria-checked", selected)
+        .attr("disabled", disabled)
         .on_click(Msg::Action(action))
         .into()
 }
@@ -818,20 +859,7 @@ fn display(value: &Value) -> String {
 pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
     let frozen = state.summary.is_some() || state.task.is_some();
     let busy = state.pending.is_some() || state.task.is_some();
-    let mut panel = html::div()
-        .class("change-preview advanced-panel")
-        .child(field(
-            "replace-pattern",
-            "查找",
-            &state.pattern,
-            frozen || busy,
-        ))
-        .child(field(
-            "replace-replacement",
-            "替换为",
-            &state.replacement,
-            frozen || busy,
-        ));
+    let mut panel = html::div().class("change-preview advanced-panel");
     if let Some(ReplaceTarget::Mysql { target, .. }) = &state.target {
         let mut context = html::div().class("advanced-facts");
         for (key, label) in [("database", "数据库"), ("name", "对象名称")] {
@@ -866,56 +894,58 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
     if state.invalid && !frozen && !busy {
         panel = panel.child(button("丢弃替换草稿", "replace:reset".into(), false));
     }
-    for (label, action, enabled) in [
-        ("正则表达式", "replace:regex", state.regex),
-        ("区分大小写", "replace:case", state.case_sensitive),
-        ("多行", "replace:multiline", state.multi_line),
-        ("点匹配换行", "replace:dot", state.dot_matches_new_line),
-    ] {
-        let action = action.to_owned();
-        panel = panel.child(
-            ui::field(i18n::tr(label).into_owned()).child(
-                ui::switch(i18n::tr(label).into_owned())
-                    .on(enabled)
-                    .disabled(frozen || busy)
-                    .on_change(move |_| Msg::Action(action.clone())),
-            ),
-        );
-    }
     if let Some(target) = &state.target {
         match target {
-            ReplaceTarget::Mysql { columns, .. } => {
-                let mut scopes = html::div().class("advanced-actions");
-                for (label, action, scope) in [
-                    ("选中行", "replace:selected", ReplaceScope::Selected),
-                    ("当前页", "replace:page", ReplaceScope::CurrentPage),
-                    ("筛选结果", "replace:filtered", ReplaceScope::Filtered),
+            ReplaceTarget::Mysql {
+                columns,
+                selected_keys,
+                page_keys,
+                filters,
+                ..
+            } => {
+                let mut scopes = ui::select()
+                    .aria(i18n::tr("范围").into_owned())
+                    .value(match state.scope {
+                        Some(ReplaceScope::CurrentPage) => "page",
+                        Some(ReplaceScope::Filtered) => "filtered",
+                        _ => "selected",
+                    })
+                    .disabled(frozen || busy)
+                    .open(state.select_open.as_deref() == Some("scope"))
+                    .on_toggle(|collapsed| {
+                        Msg::Action(format!("replace:select-open:scope:{}", !collapsed))
+                    })
+                    .on_change(|change| {
+                        Msg::Action(format!(
+                            "replace:scope:{}",
+                            change.value.as_str().unwrap_or_default()
+                        ))
+                    });
+                for (value, label) in [
+                    ("selected", "选中行"),
+                    ("page", "当前页"),
+                    ("filtered", "筛选结果"),
                 ] {
-                    scopes = scopes.child(choice(
-                        label,
-                        action.into(),
-                        state.scope == Some(scope),
-                        frozen || busy,
-                    ));
+                    scopes =
+                        scopes.option(ui::SelectOption::new(value, i18n::tr(label).into_owned()));
                 }
-                panel = panel.child(scopes);
+                panel = panel.child(ui::field(i18n::tr("范围").into_owned()).child(scopes));
+                let (label, items) = match state.scope {
+                    Some(ReplaceScope::CurrentPage) => ("当前页可靠键", page_keys),
+                    Some(ReplaceScope::Filtered) => ("筛选条件", filters),
+                    _ => ("选中行可靠键", selected_keys),
+                };
+                panel = panel.child(super::fact(label, scope_summary(items)));
                 panel = panel.child(html::strong(i18n::tr("替换列").into_owned()));
                 let mut choices = html::div().class("advanced-actions");
                 for (index, column) in columns.iter().enumerate() {
                     let action = format!("replace:column:{index}");
-                    let mark = if state.columns.contains(column) {
-                        "☑ "
-                    } else {
-                        "☐ "
-                    };
-                    choices = choices.child(
-                        ui::button(format!("{mark}{column}"))
-                            .variant(ui::ButtonVariant::Quiet)
-                            .on(state.columns.contains(column))
-                            .key(action.clone())
-                            .disabled(frozen || busy)
-                            .on_click(Msg::Action(action)),
-                    );
+                    choices = choices.child(choice(
+                        column,
+                        action,
+                        state.columns.contains(column),
+                        frozen || busy,
+                    ));
                 }
                 panel = panel.child(choices);
             }
@@ -933,6 +963,35 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                 panel = panel.child(choices);
             }
         }
+    }
+    panel = panel
+        .child(field(
+            "replace-pattern",
+            "查找",
+            &state.pattern,
+            frozen || busy,
+        ))
+        .child(field(
+            "replace-replacement",
+            "替换为",
+            &state.replacement,
+            frozen || busy,
+        ));
+    for (label, action, enabled) in [
+        ("正则表达式", "replace:regex", state.regex),
+        ("区分大小写", "replace:case", state.case_sensitive),
+        ("多行", "replace:multiline", state.multi_line),
+        ("点匹配换行", "replace:dot", state.dot_matches_new_line),
+    ] {
+        let action = action.to_owned();
+        panel = panel.child(
+            ui::field(i18n::tr(label).into_owned()).child(
+                ui::switch(i18n::tr(label).into_owned())
+                    .on(enabled)
+                    .disabled(frozen || busy)
+                    .on_change(move |_| Msg::Action(action.clone())),
+            ),
+        );
     }
     if state.restored {
         panel = panel.child(html::p(i18n::tr("已恢复替换条件和目标；不会恢复 grid 选中状态，请准备预览以重新确认数据库基线。").into_owned()).class("notice"));
@@ -978,6 +1037,10 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
             .child(html::strong(i18n::tr("变更预览").into_owned()))
             .child(facts)
             .child(super::diagnostic("replace-summary-diagnostic", summary));
+        panel = panel.child(
+            html::p(i18n::tr("当前计划未提供完整命令及有序参数，无法预览执行命令。").into_owned())
+                .class("notice"),
+        );
     }
     if state.summary.is_some() && state.page.is_none() && !busy {
         panel = panel.child(button("刷新预览", "replace:read".into(), false));
@@ -990,7 +1053,7 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
     {
         for (index, item) in items.iter().enumerate() {
             let selected = item.get("selected").and_then(Value::as_bool);
-            let mut row = html::div().class("draft-item");
+            let mut row = html::div().class("replace-comparison");
             if let Some(selected) = selected {
                 row = row.child(choice(
                     "包含",
@@ -1054,8 +1117,31 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
             .and_then(|p| p.get("next_offset"))
             .and_then(Value::as_u64)
             .is_some();
+        let size = state.page_size.max(PAGE_SIZE);
+        let mut sizes = ui::select()
+            .aria(i18n::tr("每页行数").into_owned())
+            .value(size.to_string())
+            .disabled(busy)
+            .open(state.select_open.as_deref() == Some("size"))
+            .on_toggle(|collapsed| Msg::Action(format!("replace:select-open:size:{}", !collapsed)))
+            .on_change(|change| {
+                Msg::Action(format!(
+                    "replace:size:{}",
+                    change.value.as_str().unwrap_or_default()
+                ))
+            });
+        for value in [20, 50, 100] {
+            if value == 20 || matches!(state.target, Some(ReplaceTarget::Mysql { .. })) {
+                sizes = sizes.option(ui::SelectOption::new(value.to_string(), value.to_string()));
+            }
+        }
         panel = panel
+            .child(sizes)
             .child(button("上一页", "replace:prev".into(), busy || offset == 0))
+            .child(html::span(crate::i18n::format_message(
+                "第 {number} 页",
+                &[("number", &(offset / size + 1).to_string())],
+            )))
             .child(button("下一页", "replace:next".into(), busy || !next));
     }
     if let Some((_, _, offset, bytes, next)) = &state.detail {
@@ -1112,27 +1198,51 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
             .child(section)
             .child(super::diagnostic("replace-result-diagnostic", result));
     }
-    panel = panel.child(button(
-        "准备预览",
-        "replace:prepare".into(),
-        busy || frozen || state.invalid,
-    ));
+    if busy {
+        panel =
+            panel.child(html::p(i18n::tr("处理中，操作暂不可用。").into_owned()).class("notice"));
+    } else if frozen && !can_submit(state) {
+        panel = panel.child(
+            html::p(i18n::tr("计划不完整或不可提交，请检查预览原因。").into_owned())
+                .class("notice"),
+        );
+    }
+    panel.into()
+}
+
+fn can_submit(state: &ReplaceState) -> bool {
+    state.summary.as_ref().is_some_and(|s| {
+        s.get("complete").and_then(Value::as_bool) == Some(true)
+            && s.get("submittable").and_then(Value::as_bool) == Some(true)
+            && s.get("plan_digest")
+                .or_else(|| s.get("digest"))
+                .and_then(Value::as_str)
+                .is_some()
+    })
+}
+
+/// 固定操作区，宿主 dialog 将其挂载到 footer。
+pub(crate) fn footer(state: &ReplaceState) -> html::El<Msg> {
+    let busy = state.pending.is_some() || state.task.is_some();
+    let frozen = state.summary.is_some() || state.task.is_some();
+    let mut footer = html::div()
+        .class("modal-footer")
+        .child(html::span("").class("spacer"));
+    footer = footer.child(button("关闭", "overlay-close".into(), busy));
     if frozen {
-        let can_submit = state.summary.as_ref().is_some_and(|s| {
-            s.get("complete").and_then(Value::as_bool) == Some(true)
-                && s.get("submittable").and_then(Value::as_bool) == Some(true)
-                && s.get("plan_digest")
-                    .or_else(|| s.get("digest"))
-                    .and_then(Value::as_str)
-                    .is_some()
-        });
-        panel = panel
+        footer = footer
             .child(button("丢弃", "replace:discard".into(), busy))
             .child(button(
                 "提交",
                 "replace:submit".into(),
-                busy || state.invalid || !can_submit,
+                busy || state.invalid || !can_submit(state),
             ));
+    } else {
+        footer = footer.child(button(
+            "准备预览",
+            "replace:prepare".into(),
+            busy || state.invalid,
+        ));
     }
-    panel.into()
+    footer
 }

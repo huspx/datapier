@@ -1,6 +1,159 @@
 use super::*;
 
 impl App {
+    pub(crate) fn workspace_tree_items(&self) -> Vec<(String, usize, Option<bool>)> {
+        let mut items = Vec::new();
+        let Some(profile) = self.profile.as_ref() else {
+            return items;
+        };
+        if self.is_redis() {
+            if !self.workbench.tree || !self.redis_tree_matches_resources() || self.tabs.is_empty()
+            {
+                return items;
+            }
+            let db = self.tabs[self.active]
+                .browse
+                .redis_db
+                .unwrap_or_else(|| profile.redis_db());
+            let rows = self
+                .workbench
+                .redis_tree
+                .rows(&self.workbench.redis_expansion, Some((profile.id, db)));
+            let count = rows.len().div_ceil(crate::workbench::KEY_PAGE_SIZE).max(1);
+            let start = self.workbench.key_page.min(count - 1) * crate::workbench::KEY_PAGE_SIZE;
+            for row in rows
+                .iter()
+                .skip(start)
+                .take(crate::workbench::KEY_PAGE_SIZE)
+            {
+                let (action, expanded) = match &row.kind {
+                    crate::redis_tree::Kind::Directory { prefix, expanded } => (
+                        format!("redis-tree:{}", crate::redis_tree::encoded(prefix)),
+                        Some(*expanded),
+                    ),
+                    crate::redis_tree::Kind::Key { index } => {
+                        let r = &self.resources[*index];
+                        (
+                            format!(
+                                "redis-key-click:{}:{}:{index}:{}",
+                                self.tabs[self.active].id,
+                                self.generation,
+                                r.key_b64.as_deref().unwrap_or("!")
+                            ),
+                            None,
+                        )
+                    }
+                };
+                items.push((action, row.depth, expanded));
+            }
+            return items;
+        }
+        let Some(tree) = self.navigation.databases.get(&profile.id) else {
+            return items;
+        };
+        let needle = self.field("object_filter").to_lowercase();
+        let visible = self
+            .profiles
+            .iter()
+            .find(|saved| saved.id == profile.id)
+            .and_then(navigation_visible_databases);
+        for database in &tree.databases {
+            if visible.is_some_and(|names| !names.contains(&database.name)) {
+                continue;
+            }
+            let node = tree.nodes.get(&database.name);
+            let expanded = node.is_some_and(|node| node.expanded);
+            items.push((
+                format!("navigation-db:{}", database.name),
+                0,
+                Some(expanded),
+            ));
+            let Some(node) = node.filter(|node| node.expanded) else {
+                continue;
+            };
+            for kind in ["table", "view", "unknown"] {
+                let matching: Vec<_> = node
+                    .resources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, resource)| {
+                        resource.kind == kind && resource.name.to_lowercase().contains(&needle)
+                    })
+                    .collect();
+                if matching.is_empty() {
+                    continue;
+                }
+                let expanded = !node.collapsed_kinds.contains(kind);
+                items.push((
+                    format!("navigation-group:{kind}:{}", database.name),
+                    1,
+                    Some(expanded),
+                ));
+                if expanded {
+                    for (index, _) in matching {
+                        items.push((
+                            format!("navigation-resource:{}:{index}", database.name),
+                            2,
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+        items
+    }
+
+    pub(crate) fn workspace_composite_key(
+        &mut self,
+        key: &tern_sdk::Key,
+        backend: &Backend,
+    ) -> bool {
+        if key.ctrl || key.meta || key.alt {
+            return false;
+        }
+        let Some(index) = self
+            .focus
+            .strip_prefix("workspace-tree-")
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            return false;
+        };
+        let items = self.workspace_tree_items();
+        let Some((action, depth, expanded)) = items.get(index) else {
+            return false;
+        };
+        let next = match key.name.as_str() {
+            "up" => index.saturating_sub(1),
+            "down" => (index + 1).min(items.len() - 1),
+            "home" => 0,
+            "end" => items.len() - 1,
+            "right" if *expanded == Some(false) => {
+                let action = action.clone();
+                self.action(&action, backend);
+                index
+            }
+            "right"
+                if *expanded == Some(true)
+                    && items.get(index + 1).is_some_and(|item| item.1 > *depth) =>
+            {
+                index + 1
+            }
+            "right" => index,
+            "left" if *expanded == Some(true) => {
+                let action = action.clone();
+                self.action(&action, backend);
+                index
+            }
+            "left" => (0..index)
+                .rev()
+                .find(|&i| items[i].1 < *depth)
+                .unwrap_or(index),
+            _ => return false,
+        };
+        self.focus = format!("workspace-tree-{next}");
+        self.workbench.focus_request = Some(format!("input-workspace-tree-{next}"));
+        true
+    }
     pub(crate) fn navigation_apply_queued_section(&mut self) {
         let tab = self.tabs[self.active].id;
         if let Some(queued) = self.navigation.queued_sections.remove(&tab)
@@ -402,7 +555,7 @@ impl App {
                             );
                             self.action("open", backend);
                         } else {
-                            self.workbench.section = section.into();
+                            self.action(&format!("section:{section}"), backend);
                         }
                     } else if self.target.is_some()
                         || self.task.is_some()
@@ -422,7 +575,7 @@ impl App {
                         self.action("open", backend);
                     } else {
                         self.load_target(target, backend);
-                        self.workbench.section = section.into();
+                        self.action(&format!("section:{section}"), backend);
                     }
                 }
             }

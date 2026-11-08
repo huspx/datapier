@@ -117,6 +117,37 @@ impl App {
         }
     }
 
+    /// 在当前表标签内初始化结构编辑；已有草稿和计划不得被覆盖。
+    pub(crate) fn advanced_schema_open_existing(
+        &mut self,
+        backend: &Backend,
+        target: ResourceTarget,
+    ) {
+        if self.advanced_schema.is_some() {
+            return;
+        }
+        let Some(profile) = self.profile.as_ref() else {
+            self.status = i18n::UiMessage::key("请先连接数据库");
+            return;
+        };
+        if profile.provider != datapier_core::model::ProviderKind::Mysql
+            || target.kind != "table"
+            || target.database.as_deref().is_none_or(str::is_empty)
+        {
+            return;
+        }
+        let session = self.session_id().unwrap_or(Value::Null);
+        let mut state = SchemaEditor::new(session, target, profile.revision.to_string(), None);
+        state.embedded = true;
+        let request = state.describe(false);
+        self.advanced_schema = Some(state);
+        if let Some(request) = request {
+            self.advanced_schema_send(backend, request);
+        } else {
+            self.advanced_schema_connect(backend);
+        }
+    }
+
     /// 新开独立会话的结构标签。新触发器可传入当前表名，保存为可恢复的操作。
     pub(crate) fn advanced_schema_open(
         &mut self,
@@ -179,14 +210,28 @@ impl App {
         }
         self.database = draft.target.database.clone();
         self.target = Some(draft.target.clone());
-        self.view = "advanced-schema".into();
-        self.advanced_schema = Some(SchemaEditor::restore(
-            Value::Null,
-            String::new(),
-            draft,
-            initial,
-        ));
-        self.advanced_schema_connect(backend);
+        let embedded = draft.embedded;
+        let session = if embedded {
+            self.session_id().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+        let revision = self
+            .profile
+            .as_ref()
+            .map_or_else(String::new, |profile| profile.revision.to_string());
+        self.view = if embedded { "data" } else { "advanced-schema" }.into();
+        if embedded {
+            self.workbench.section = "structure".into();
+        }
+        let mut state = SchemaEditor::restore(session, revision, draft, initial);
+        let request = state.describe(false);
+        self.advanced_schema = Some(state);
+        if let Some(request) = request {
+            self.advanced_schema_send(backend, request);
+        } else {
+            self.advanced_schema_connect(backend);
+        }
     }
 
     /// 活动和后台 tab 分别从对应运行态取得，不序列化快照、预览或请求。
@@ -196,7 +241,7 @@ impl App {
         } else {
             self.tabs.get(index)?.runtime.advanced_schema.as_ref()
         }?;
-        Some(state.draft.clone())
+        state.workspace_draft()
     }
 
     fn advanced_schema_connect(&mut self, backend: &Backend) {
@@ -250,8 +295,101 @@ impl App {
         }
     }
 
+    fn advanced_schema_reference_sync(&mut self) {
+        if let Some(state) = &mut self.advanced_schema {
+            let mut references = std::mem::take(&mut state.references);
+            references.sync(state);
+            state.references = references;
+        }
+    }
+
+    fn advanced_schema_reference_send(&mut self, backend: &Backend, mut request: SchemaRequest) {
+        request.params["workspace_id"] = json!(self.workspace_id);
+        let tag = format!(
+            "{}:{}:{}",
+            self.tabs[self.active].id, self.generation, request.tag
+        );
+        if let Err(error) = backend.request(tag, request.method, request.params) {
+            self.advanced_schema_response(&request.tag, &Err(error), backend);
+        }
+    }
+
+    fn advanced_schema_reference_load(&mut self, id: &str, part: &str, backend: &Backend) {
+        let request = self.advanced_schema.as_mut().and_then(|state| {
+            let mut references = std::mem::take(&mut state.references);
+            let request = references.load(state, id, part);
+            state.references = references;
+            request
+        });
+        if let Some(request) = request {
+            self.advanced_schema_reference_send(backend, request);
+        }
+    }
+
+    fn advanced_schema_reference_load_missing(&mut self, backend: &Backend) {
+        self.advanced_schema_reference_sync();
+        let requests: Vec<(String, &str)> = self
+            .advanced_schema
+            .as_ref()
+            .map(|state| {
+                let mut requests = Vec::new();
+                if let Some(SchemaDefinition::Table(table)) = state.definition.as_ref() {
+                    for constraint in &table.constraints {
+                        if let datapier_core::model::schema::ConstraintDefinition::ForeignKey {
+                            id,
+                            referenced_database,
+                            referenced_table,
+                            ..
+                        } = constraint
+                        {
+                            let database = if referenced_database.is_empty() {
+                                state.draft.target.database.as_deref().unwrap_or("")
+                            } else {
+                                referenced_database.as_str()
+                            };
+                            let entry = state.references.entries.get(id);
+                            if !database.is_empty()
+                                && entry.is_none_or(|e| {
+                                    !e.tables_complete
+                                        && !e.tables_loading
+                                        && e.tables_error.is_none()
+                                })
+                            {
+                                requests.push((id.clone(), "tables"));
+                            }
+                            let self_reference = database
+                                == state.draft.target.database.as_deref().unwrap_or("")
+                                && referenced_table == &state.draft.target.name;
+                            if !database.is_empty()
+                                && !referenced_table.is_empty()
+                                && !self_reference
+                                && entry.is_none_or(|e| {
+                                    !e.columns_complete
+                                        && !e.columns_loading
+                                        && e.columns_error.is_none()
+                                })
+                            {
+                                requests.push((id.clone(), "columns"));
+                            }
+                        }
+                    }
+                }
+                requests
+            })
+            .unwrap_or_default();
+        for (id, part) in requests {
+            self.advanced_schema_reference_load(&id, part, backend);
+        }
+    }
+
     /// 在通用 action 前调用；会由确认按钮显式触发提交。
     pub(crate) fn advanced_schema_action(&mut self, action: &str, backend: &Backend) -> bool {
+        if let Some(rest) = action.strip_prefix("schema-ref:load:") {
+            if let Some((id, part)) = rest.split_once(':') {
+                self.advanced_schema_reference_load(id, part, backend);
+            }
+            return true;
+        }
         if action == "schema-connect" {
             self.advanced_schema_connect(backend);
             return true;
@@ -293,10 +431,40 @@ impl App {
         }
         if action == "schema-draft-discard-confirm" {
             if state.confirm_discard && !state.busy() && state.summary.is_none() {
-                self.advanced_schema = None;
-                self.view = "query".into();
-                self.target = None;
+                if state.embedded {
+                    let mut clean = SchemaEditor::new(
+                        state.session.clone(),
+                        state.draft.target.clone(),
+                        state.profile_revision.clone(),
+                        None,
+                    );
+                    clean.embedded = true;
+                    clean.section = state.section.clone();
+                    clean.snapshot = state.snapshot.clone();
+                    clean.definition = clean
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.definition.clone());
+                    clean.draft.baseline_fingerprint = clean
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.fingerprint.clone());
+                    *state = clean;
+                } else {
+                    self.advanced_schema = None;
+                    self.view = "query".into();
+                    self.target = None;
+                }
                 self.dirty = true;
+            }
+            return true;
+        }
+        if let Some(section) = action.strip_prefix("schema-section:") {
+            state.action(&format!("schema-op:section:{section}:"));
+            self.focus = format!("schema-section-{section}");
+            self.workbench.focus_request = Some(String::new());
+            if section == "foreign_keys" {
+                self.advanced_schema_reference_load_missing(backend);
             }
             return true;
         }
@@ -305,12 +473,27 @@ impl App {
             if consumed && state.dirty {
                 self.dirty = true;
             }
+            self.advanced_schema_reference_sync();
+            if action.starts_with("schema-op:add:/constraints:foreign_key")
+                || (action.starts_with("schema-op:choice:/constraints/")
+                    && action.contains("/referenced_table:"))
+            {
+                self.advanced_schema_reference_load_missing(backend);
+            }
             return consumed;
         }
         let request = match action {
             "schema-describe" => state.describe(true),
             "schema-plan" => state.plan(),
-            "schema-preview" => state.preview_page(0),
+            "schema-preview" => {
+                let request = state.preview_page(0);
+                if request.is_some()
+                    && matches!(state.definition.as_ref(), Some(SchemaDefinition::Table(_)))
+                {
+                    state.action("schema-op:section:ddl_preview:");
+                }
+                request
+            }
             "schema-preview-next" => state
                 .preview
                 .as_ref()
@@ -323,6 +506,9 @@ impl App {
             "schema-submit" => {
                 if state.preview.is_some() && !state.busy() {
                     state.confirm_submit = true;
+                    if matches!(state.definition.as_ref(), Some(SchemaDefinition::Table(_))) {
+                        state.action("schema-op:section:ddl_preview:");
+                    }
                 }
                 None
             }
@@ -361,6 +547,7 @@ impl App {
             }
             _ => return false,
         };
+        self.advanced_schema_reference_sync();
         if let Some(request) = request {
             self.advanced_schema_send(backend, request);
         }
@@ -379,6 +566,11 @@ impl App {
             Msg::Undo(name) => state.undo(name),
             _ => false,
         };
+        if handled {
+            let mut references = std::mem::take(&mut state.references);
+            references.sync(state);
+            state.references = references;
+        }
         if handled && state.dirty {
             self.dirty = true;
         }
@@ -392,6 +584,18 @@ impl App {
         result: &Result<Value>,
         backend: &Backend,
     ) -> bool {
+        if let Some(token) = tag.strip_prefix("schema-ref/") {
+            let request = self.advanced_schema.as_mut().and_then(|state| {
+                let mut references = std::mem::take(&mut state.references);
+                let request = references.response(state, token, result);
+                state.references = references;
+                request
+            });
+            if let Some(request) = request {
+                self.advanced_schema_reference_send(backend, request);
+            }
+            return true;
+        }
         if let Some(token) = tag.strip_prefix("schema-connect/") {
             let Some(state) = &mut self.advanced_schema else {
                 return true;
@@ -413,8 +617,10 @@ impl App {
                     if let (Some(session), Some(profile)) = (session, profile) {
                         state.profile_revision = profile.revision.to_string();
                         state.session = session;
-                        self.profile = Some(profile);
-                        self.session = Some(value.clone());
+                        if !state.embedded {
+                            self.profile = Some(profile);
+                            self.session = Some(value.clone());
+                        }
                         let request = if state.draft.creating {
                             None
                         } else {
@@ -437,8 +643,22 @@ impl App {
         let Some(state) = &mut self.advanced_schema else {
             return true;
         };
+        let plan_response = result.is_ok() && state.is_plan_response(tag);
         if !state.response(tag, result) {
             return true;
+        }
+        let mut references = std::mem::take(&mut state.references);
+        references.sync(state);
+        state.references = references;
+        if plan_response
+            && state.error.is_none()
+            && state.section == "ddl_preview"
+            && state.summary.is_some()
+            && (self.view == "advanced-schema"
+                || (state.embedded && self.view == "data" && self.workbench.section == "structure"))
+        {
+            self.focus = "schema-section-ddl_preview".into();
+            self.workbench.focus_request = Some(String::new());
         }
         if let Some(task) = state
             .execution
@@ -501,6 +721,8 @@ impl App {
             return true;
         }
         self.task = None;
+        // 此标志只保护结构变化前的任务结果；结构任务已结束，后续表数据任务必须能显示读回结果。
+        self.workbench.schema_invalidated_task = false;
         let outcome = value.pointer("/summary/state").and_then(Value::as_str);
         if matches!(phase, "outcome_unknown" | "wait_stopped") || outcome == Some("outcome_unknown")
         {
@@ -523,8 +745,26 @@ impl App {
         if let Some(id) = execution_id
             && state.execution_finished(&id, applied)
         {
+            let embedded = state.embedded;
             self.dirty = true;
-            let request = state.describe(true);
+            if embedded
+                && self.view == "data"
+                && !self.has_live_drafts()
+                && self.advanced_value.session.is_none()
+                && !self.operation_pending
+                && let Some(target) = self.target.clone()
+            {
+                // 先刷新数据并更新代次，再派发结构读回，避免读回响应被新代次丢弃。
+                let section = self.workbench.section.clone();
+                let focus = self.workbench.focus_request.clone();
+                self.load_target(target, backend);
+                self.workbench.section = section;
+                self.workbench.focus_request = focus;
+            }
+            let request = self
+                .advanced_schema
+                .as_mut()
+                .and_then(|state| state.describe(true));
             if let Some(request) = request {
                 self.advanced_schema_send(backend, request);
             }

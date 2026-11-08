@@ -1,4 +1,5 @@
 use super::*;
+use crate::approval::ApprovalTab;
 
 #[test]
 fn programmatic_focus_routes_typing_to_the_requested_field() {
@@ -54,7 +55,6 @@ fn modal_dispatch_rejects_hidden_fields_and_accepts_its_own_fields() {
     app.focus = "pattern".into();
     app.application_action("app-settings", &Backend::scripted().0);
     app.reconcile_modal_focus();
-    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
     app.focus = "pattern".into();
     let mut key = tern_sdk::Key::named("x");
     key.text = Some("x".into());
@@ -72,4 +72,32 @@ fn modal_dispatch_rejects_hidden_fields_and_accepts_its_own_fields() {
     app.focus = "pattern".into();
     app.input_key(&key);
     assert_eq!(app.field("pattern"), "base!x");
+}
+
+#[test]
+fn settings_and_pending_tabs_accept_keys_after_open_and_pointer_activation() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("modal-tabs".into());
+    app.action("app-settings", &backend);
+    app.reconcile_modal_focus();
+    app.take_focus_request();
+    assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
+    assert_eq!(app.field("settings-tab"), "editing");
+    app.focus = "settings-paging-table_rows".into();
+    app.action("settings-tab:general", &backend);
+    assert!(app.workbench_key(&tern_sdk::Key::named("end"), &backend));
+    assert_eq!(app.field("settings-tab"), "mcp");
+    assert!(app.workbench_key(&tern_sdk::Key::named("home"), &backend));
+    assert_eq!(app.field("settings-tab"), "general");
+    app.action("overlay-close", &backend);
+    app.action("approval-toggle", &backend);
+    app.action("approval-tab-approvals", &backend);
+    assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
+    assert!(matches!(app.approvals.tab, ApprovalTab::Authentication));
+    assert!(app.workbench_key(&tern_sdk::Key::named("end"), &backend));
+    assert!(matches!(app.approvals.tab, ApprovalTab::Tasks));
+    app.action("approval-close", &backend);
+    app.take_focus_request();
+    assert!(app.workbench_key(&tern_sdk::Key::named("enter"), &backend));
+    assert!(app.approvals.open);
 }

@@ -153,12 +153,45 @@ function cliSummary(value) {
   const chars = Array.from(line);
   return chars.length > 32 ? chars.slice(0, 32).join('') + '…' : line;
 }
+document.addEventListener('click', event => {
+  const action = event.target.closest('[data-direct-cli-action]')?.dataset.directCliAction;
+  if (!action || state.cliState === 'running') return;
+  const located = state.cliEntries[state.cliSelected ?? state.cliEntries.length - 1];
+  if (action === 'copy' && state.cliEntries.length) {
+    copy(
+      state.cliEntries.map(entry =>
+        `${entry.instance} · DB ${entry.database}\n› ${entry.command}\n${
+          entry.rows
+            ? entry.rows.map(row => row.join('\t')).join('\n')
+            : entry.text || ''
+        }`
+      ).join('\n\n'),
+    );
+  } else if (action === 'export' && located && located.status !== 'running') {
+    toast(
+      az(
+        '导出定位的缓存结果：CSV / JSON；设计预览不生成文件。',
+        'Export the located cached result as CSV / JSON; this preview creates no files.',
+      ),
+    );
+  }
+});
 function cli() {
   const running = state.cliState === 'running';
   const located = state.cliEntries[state.cliSelected ?? state.cliEntries.length - 1];
   const locatedIndex = state.cliSelected ?? state.cliEntries.length - 1;
   const cliPageId = `cli:${locatedIndex}`;
   const locatedValues = located?.rows || (located ? String(located.text || '').split('\n') : []);
+  const copyReason = running
+    ? az('执行中无法复制记录', 'Cannot copy the log while running')
+    : !state.cliEntries.length
+    ? az('没有执行记录', 'No execution log')
+    : '';
+  const exportReason = running || located?.status === 'running'
+    ? az('执行中无法导出结果', 'Cannot export a running result')
+    : !located
+    ? az('没有定位结果', 'No located result')
+    : '';
   const locatedPage = resultPageSlice(locatedValues, cliPageId, 20);
   const displayEntries = state.cliEntries.map((entry, index) =>
     index !== locatedIndex ? entry : {
@@ -178,7 +211,15 @@ function cli() {
     icon('terminal')
   } Redis CLI</span><span class="muted small">${az('当前输入', 'Current input')}: Cache / DB ${
     state.cliDb ?? az('未知', 'Unknown')
-  }</span><span class="spacer"></span>${ib('history', t('commandHistory'), 'cli-history')}${
+  }</span><span class="spacer"></span><button class="icon-button" data-direct-cli-action="copy" aria-label="${
+    h(az('复制执行记录', 'Copy execution log'))
+  }" title="${h(copyReason || az('复制执行记录', 'Copy execution log'))}" ${copyReason ? 'disabled' : ''}>${
+    icon('copy')
+  }</button><button class="icon-button" data-direct-cli-action="export" aria-label="${
+    h(az('导出定位结果', 'Export located result'))
+  }" title="${h(exportReason || az('导出定位结果', 'Export located result'))}" ${exportReason ? 'disabled' : ''}>${
+    icon('download')
+  }</button>${ib('history', t('commandHistory'), 'cli-history')}${
     ib(
       'stop',
       t('cancelExecution'),
@@ -186,6 +227,12 @@ function cli() {
       running ? '' : 'disabled',
     )
   }${ib('chev', t('collapseCli'), 'cli-toggle')}</div>${
+    copyReason || exportReason
+      ? `<div class="cli-head muted small">${
+        h([...new Set([copyReason, exportReason].filter(Boolean))].join('；'))
+      }</div>`
+      : ''
+  }${
     located
       ? `<div class="cli-head"><span class="muted small" title="${h(located.command)} · ${h(located.instance)}">${
         az('定位结果', 'Located result')

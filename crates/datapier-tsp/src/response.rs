@@ -65,6 +65,10 @@ impl App {
                     && self.advanced_value.session.is_none()
                     && self.task.is_none()
                     && !self.operation_pending
+                    && !self
+                        .advanced_schema
+                        .as_ref()
+                        .is_some_and(|schema| schema.has_pending_request())
                     && let Some(target) = self.target.clone()
                 {
                     self.load_target(target, backend);
@@ -447,6 +451,9 @@ impl App {
                                 }
                             }
                             self.navigation_apply_queued_section();
+                            if self.workbench.section == "structure" {
+                                self.action("section:structure", backend);
+                            }
                             self.action("list", backend);
                             self.refresh_query_mode(backend);
                             self.navigation_load_tree(backend, false);

@@ -252,3 +252,33 @@ tr.selected {
   font-size: 10px;
   padding: 1px 5px;
 }
+
+.workarea {
+  position: relative;
+}
+.cell-drawer {
+  position: absolute;
+  z-index: 4;
+  inset: 0 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 100%);
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+.cell-drawer .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.cell-drawer label {
+  display: block;
+  margin-bottom: 12px;
+}
+.cell-drawer textarea, .cell-drawer select {
+  display: block;
+  width: 100%;
+}
+.cell-drawer .modal-foot {
+  flex-wrap: wrap;
+}

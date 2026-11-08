@@ -43,6 +43,8 @@ fn diagnostic_label(key: &str) -> std::borrow::Cow<'_, str> {
         "before" => "原值",
         "values" => "新值",
         "items" => "条目",
+        "redis" => "Redis 变更",
+        "changes" => "变更",
         "results" => "结果",
         "status" => "状态",
         "schema" => "结构",
@@ -83,91 +85,122 @@ fn diagnostic_scalar(key: &str, value: &Value) -> String {
     diagnostic_text(value)
 }
 
-pub(super) fn diagnostic_content(
-    label: &str,
-    value: &Value,
-    depth: usize,
-    budget: &mut usize,
-) -> Node<Msg> {
-    let mut section = html::div()
-        .class("diagnostic-section")
-        .child(html::strong(diagnostic_label(label).into_owned()).class("section-title"));
-    if depth >= 6 || *budget == 0 {
-        return section.into();
-    }
-    match value {
-        Value::Object(fields) => {
-            // 先展示标识、状态等事实，避免大量行或列耗尽展示预算。
-            let priority = [
-                "id",
-                "method",
-                "operation",
-                "state",
-                "status",
-                "target",
-                "summary",
-                "error",
-            ];
-            let ordered = priority
-                .iter()
-                .filter_map(|key| fields.get_key_value(*key))
-                .chain(fields.iter().filter(|(key, child)| {
-                    !priority.contains(&key.as_str()) && !child.is_object() && !child.is_array()
-                }))
-                .chain(fields.iter().filter(|(key, child)| {
-                    !priority.contains(&key.as_str()) && (child.is_object() || child.is_array())
-                }));
-            for (key, child) in ordered {
-                if *budget == 0 {
-                    break;
-                }
-                *budget -= 1;
-                if child.is_object() || child.is_array() {
-                    section = section.child(diagnostic_content(key, child, depth + 1, budget));
-                } else {
-                    section = section.child(
-                        html::div()
-                            .class("diagnostic-row")
-                            .child(html::span(diagnostic_label(key).into_owned()).class("muted"))
-                            .child(html::span(diagnostic_scalar(key, child))),
-                    );
-                }
-            }
-        }
-        Value::Array(values) => {
-            for (index, child) in values.iter().enumerate().take(20) {
-                if *budget == 0 {
-                    break;
-                }
-                *budget -= 1;
-                if child.is_object() || child.is_array() {
-                    section = section.child(diagnostic_content(
-                        &(index + 1).to_string(),
-                        child,
-                        depth + 1,
-                        budget,
-                    ));
-                } else {
-                    section = section.child(
-                        html::div()
-                            .class("diagnostic-row")
-                            .child(html::span((index + 1).to_string()).class("muted"))
-                            .child(html::span(diagnostic_scalar("", child))),
-                    );
-                }
-            }
-        }
-        _ => section = section.child(html::span(diagnostic_scalar(label, value))),
-    }
-    section.into()
-}
-
 fn diagnostic_fact(label: &str, text: String) -> Node<Msg> {
     html::div()
         .class("task-fact")
         .child(html::span(crate::i18n::tr(label).into_owned()).class("muted"))
         .child(html::span(text).class("task-fact-value"))
         .into()
+}
+fn detail_value(value: &Value, depth: usize) -> String {
+    if let Ok(data) = serde_json::from_value::<datapier_core::model::Value>(value.clone()) {
+        return value_text(&data, true).into_owned();
+    }
+    if depth >= 3 {
+        return crate::i18n::tr("详见完整诊断").into_owned();
+    }
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "id" | "token" | "owner" | "digest" | "result_id" | "workspace_id"
+                )
+            })
+            .take(50)
+            .map(|(key, value)| {
+                format!(
+                    "{}: {}",
+                    diagnostic_label(key),
+                    detail_value(value, depth + 1)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · "),
+        Value::Array(items) => items
+            .iter()
+            .take(50)
+            .map(|item| detail_value(item, depth + 1))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => diagnostic_text(value),
+    }
+}
+
+/// 根据详情类型展示业务字段，协议原文由外层的完整诊断承载。
+pub(super) fn diagnostic_detail(kind: &str, value: &Value) -> Node<Msg> {
+    let fields: &[&str] = match kind {
+        "草稿详情" | "恢复详情" => &[
+            "operation",
+            "target",
+            "key",
+            "before",
+            "values",
+            "items",
+            "rows",
+            "redis",
+            "changes",
+        ],
+        "导入预览" => &[
+            "format",
+            "target",
+            "columns",
+            "mapping",
+            "row_count",
+            "rows",
+            "errors",
+            "sample_complete",
+        ],
+        "资源详情" => &[
+            "name",
+            "database",
+            "kind",
+            "type",
+            "native_type",
+            "length",
+            "ttl_ms",
+            "engine",
+            "comment",
+            "columns",
+            "keys",
+            "ddl",
+        ],
+        "错误详情" => &["message", "code", "database_code", "details"],
+        _ => &["message", "state", "summary", "error"],
+    };
+    let mut section = html::div().class("task-details");
+    let value = if kind == "资源详情" {
+        value
+            .get("schema")
+            .filter(|schema| schema.is_object())
+            .unwrap_or(value)
+    } else {
+        value
+    };
+    let records: Vec<&Value> = match value.as_array() {
+        Some(items) => items.iter().take(50).collect(),
+        None => vec![value],
+    };
+    for record in records {
+        let mut facts = html::div().class("task-facts");
+        let mut found = false;
+        for key in fields {
+            if let Some(field) = record.get(*key).filter(|field| !field.is_null()) {
+                found = true;
+                let display = if field.is_boolean() || key == &"ttl_ms" {
+                    diagnostic_scalar(key, field)
+                } else {
+                    detail_value(field, 0)
+                };
+                facts = facts.child(diagnostic_fact(&diagnostic_label(key), display));
+            }
+        }
+        if found {
+            section = section.child(facts);
+        }
+    }
+    section.into()
 }
 
 fn task_result_type(method: &str, result: &Value) -> String {
@@ -278,21 +311,23 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
         if result.get("kind").and_then(Value::as_str) == Some("columns_unknown") {
             crate::i18n::tr("结果定义未知").into_owned()
         } else {
-            let rows = result
-                .get("row_count")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                .to_string();
-            match result.get("column_count").and_then(Value::as_u64) {
-                Some(columns) => crate::i18n::format_message(
-                    if result.get("complete").and_then(Value::as_bool) == Some(true) {
-                        "{rows} 行 · {columns} 列"
-                    } else {
-                        "已读取 {rows} 行 · {columns} 列"
-                    },
-                    &[("rows", &rows), ("columns", &columns.to_string())],
-                ),
-                None => crate::i18n::format_message("{rows} 行 · 列数未记录", &[("rows", &rows)]),
+            if let Some(rows) = result.get("row_count").and_then(Value::as_u64) {
+                let rows = rows.to_string();
+                match result.get("column_count").and_then(Value::as_u64) {
+                    Some(columns) => crate::i18n::format_message(
+                        if result.get("complete").and_then(Value::as_bool) == Some(true) {
+                            "{rows} 行 · {columns} 列"
+                        } else {
+                            "已读取 {rows} 行 · {columns} 列"
+                        },
+                        &[("rows", &rows), ("columns", &columns.to_string())],
+                    ),
+                    None => {
+                        crate::i18n::format_message("{rows} 行 · 列数未记录", &[("rows", &rows)])
+                    }
+                }
+            } else {
+                crate::i18n::tr("行数未记录").into_owned()
             }
         }
     } else if !results.is_empty() {
@@ -321,7 +356,6 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
     } else {
         timestamp_text(value.get("started_at"))
     };
-    let id = value.get("id").and_then(Value::as_str).unwrap_or("");
     let facts = html::div()
         .class("task-facts")
         .child(diagnostic_fact(
@@ -336,21 +370,7 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
         .child(diagnostic_fact("资源", resource))
         .child(diagnostic_fact("耗时", elapsed))
         .child(diagnostic_fact("结果", result_text))
-        .child(diagnostic_fact("开始时间", started))
-        .child(
-            html::div()
-                .class("task-fact")
-                .child(html::span(crate::i18n::tr("任务 ID").into_owned()).class("muted"))
-                .child(
-                    html::span(if id.is_empty() {
-                        missing.to_string()
-                    } else {
-                        id.to_owned()
-                    })
-                    .class("task-fact-value")
-                    .prop("title", id),
-                ),
-        );
+        .child(diagnostic_fact("开始时间", started));
     let mut section = html::div()
         .class("task-details")
         .child(
@@ -414,7 +434,8 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
                     } else {
                         result
                             .get("row_count")
-                            .map_or_else(|| missing.to_string(), Value::to_string)
+                            .and_then(Value::as_u64)
+                            .map_or_else(|| missing.to_string(), |count| count.to_string())
                     }))
                     .child(html::span(
                         crate::i18n::tr(if unknown {

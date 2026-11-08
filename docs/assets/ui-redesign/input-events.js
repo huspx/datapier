@@ -1,6 +1,12 @@
 'use strict';
 document.addEventListener('input', event => {
   const target = event.target;
+  if (target.id === 'cell-value') {
+    state.cellInspectorValue = target.value;
+    state.cellInspectorIsNull = false;
+    state.cellInspectorDirty = true;
+    target.parentElement.querySelector('.null')?.remove();
+  }
   if (target.dataset.advancedValue) {
     state.advancedDemoValues ||= {};
     state.advancedDemoValues[target.dataset.advancedValue] = target.value;
@@ -116,6 +122,28 @@ document.addEventListener('contextmenu', event => {
   const row = event.target.closest('#mysql-grid tbody tr');
   if (!row) return;
   event.preventDefault();
+  if (
+    state.cellDrawer && state.cellInspectorDirty
+    && (row.dataset.row !== state.menuRow
+      || (event.target.closest('[data-cell]')?.dataset.cell || state.menuCell) !== state.menuCell)
+  ) {
+    const rowIdValue = row.dataset.row,
+      column = event.target.closest('[data-cell]')?.dataset.cell,
+      x = event.clientX,
+      y = event.clientY;
+    requestDialogClose(() => {
+      state.cellDrawer = false;
+      state.cellInspectorValue = null;
+      render();
+      const target = document.querySelector(
+        `#mysql-grid tr[data-row="${CSS.escape(rowIdValue)}"] ${
+          column ? `td[data-cell="${CSS.escape(column)}"]` : 'td'
+        }`,
+      );
+      target?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    });
+    return;
+  }
   const id = row.dataset.row;
   if (!state.selected.has(id)) {
     state.selected = new Set([id]);
@@ -231,8 +259,18 @@ document.addEventListener('change', event => {
     return;
   }
   if (id === 'cell-field') {
-    state.menuCell = event.target.value;
-    render();
+    const next = event.target.value;
+    event.target.value = state.menuCell;
+    requestDialogClose(() => {
+      state.menuCell = next;
+      state.cellInspectorValue = null;
+      state.cellInspectorIsNull = databases[state.database][state.table].find(row =>
+        rowId(row) === state.menuRow
+      )?.[next] === null;
+      state.cellInspectorDirty = false;
+      render();
+      document.getElementById('cell-field')?.focus();
+    }, state.cellInspectorDirty);
     return;
   }
   if (id === 'language-preference') {
@@ -326,6 +364,45 @@ document.addEventListener('change', event => {
       render();
       return;
     }
+    if (kind.startsWith('sample-')) {
+      state.overlay = kind;
+      render();
+      return;
+    }
+    if (kind.startsWith('schema-create-')) {
+      previewSource = 'direct';
+      $('#preview-source').value = 'direct';
+      state.provider = 'mysql';
+      const type = kind === 'schema-create-table' ? 'new-table' : kind === 'schema-create-view' ? 'view' : 'trigger';
+      if (!schemaCreateWorkspace(type)) {
+        render();
+        toast(
+          language === 'zh-CN'
+            ? '只读连接或数据库不可用，不能新建对象。'
+            : 'Cannot create an object on a read-only connection or without a database.',
+        );
+      }
+      return;
+    }
+    if (kind === 'schema-trigger-list') {
+      previewSource = 'direct';
+      $('#preview-source').value = 'direct';
+      state.provider = 'mysql';
+      const existing = state.tabs.find(tab =>
+        !tab.query && !tab.schemaCreateKind && tab.database === 'commerce' && tab.table === 'orders'
+      );
+      if (existing && schemaHasDraft(existing)) {
+        render();
+        toast(t('closeBlocked'));
+        return;
+      }
+      openTable('commerce', 'orders');
+      if (!schemaOpenExample('trigger-list')) {
+        render();
+        toast(language === 'zh-CN' ? '无法打开触发器列表。' : 'Unable to open the trigger list.');
+      }
+      return;
+    }
     if (kind === 'schema-design') {
       previewSource = 'direct';
       $('#preview-source').value = 'direct';
@@ -336,6 +413,10 @@ document.addEventListener('change', event => {
       return;
     }
     if (['advanced-value', 'replace-design'].includes(kind)) {
+      if (kind === 'advanced-value') {
+        state.cellValueTarget = null;
+        state.valuePreviewTarget = null;
+      }
       state.overlay = kind;
       state.replaceDemoPlanned = false;
       state.replaceDemoExcluded = false;
@@ -418,6 +499,58 @@ document.addEventListener('change', event => {
     }
   } else return;
   render();
+});
+function syncMysqlTree() {
+  const nodes = [
+    ...document.querySelectorAll(
+      '.nav-content [data-db], .nav-content [data-tree-group], .nav-content [data-open-table], .nav-content [data-view-preview]',
+    ),
+  ];
+  nodes.forEach((node, index) => {
+    node.setAttribute('role', 'treeitem');
+    node.tabIndex = index ? -1 : 0;
+  });
+  if (nodes.length) nodes[0].parentElement.setAttribute('role', 'tree');
+}
+document.addEventListener('focusin', event => {
+  const item = event.target.closest?.('.nav-content [role="treeitem"]');
+  if (!item) return;
+  item.parentElement.querySelectorAll('[role="treeitem"]').forEach(node => {
+    node.tabIndex = node === item ? 0 : -1;
+  });
+});
+document.addEventListener('keydown', event => {
+  const item = event.target.closest?.('.nav-content [role="treeitem"]');
+  if (!item || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const nodes = [...item.parentElement.querySelectorAll('[role="treeitem"]')];
+  const index = nodes.indexOf(item), expanded = item.getAttribute('aria-expanded');
+  event.preventDefault();
+  if ((event.key === 'ArrowRight' && expanded === 'false') || (event.key === 'ArrowLeft' && expanded === 'true')) {
+    const selector = item.dataset.db
+      ? `[data-db="${CSS.escape(item.dataset.db)}"]`
+      : `[data-tree-group="${CSS.escape(item.dataset.treeGroup)}"]`;
+    item.click();
+    document.querySelector(selector)?.focus();
+    return;
+  }
+  let next = index;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight' && expanded === 'true') {
+    next = Math.min(nodes.length - 1, index + 1);
+  }
+  if (event.key === 'ArrowUp') next = Math.max(0, index - 1);
+  if (event.key === 'Home') next = 0;
+  if (event.key === 'End') next = nodes.length - 1;
+  if (event.key === 'ArrowLeft' && expanded !== 'true') {
+    const depth = item.classList.contains('depth-2') ? 2 : item.classList.contains('depth-1') ? 1 : 0;
+    for (let i = index - 1; depth && i >= 0; i--) {
+      const parentDepth = nodes[i].classList.contains('depth-2') ? 2 : nodes[i].classList.contains('depth-1') ? 1 : 0;
+      if (parentDepth < depth) {
+        next = i;
+        break;
+      }
+    }
+  }
+  nodes[next]?.focus();
 });
 document.addEventListener('keydown', event => {
   if (
@@ -504,13 +637,26 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (
-    event.target.dataset.connectionType
-    && ['ArrowLeft', 'ArrowRight'].includes(event.key)
+    event.target.matches('.provider-options [role="radio"]')
+    && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)
   ) {
-    event.preventDefault();
-    document.querySelector(
-      `[data-connection-type="${event.target.dataset.connectionType === 'mysql' ? 'redis' : 'mysql'}"]`,
-    ).click();
+    const choices = [
+      ...event.target.closest('.provider-options').querySelectorAll(
+        '[role="radio"]:not(:disabled):not([aria-disabled="true"])',
+      ),
+    ];
+    const index = choices.indexOf(event.target);
+    if (index >= 0 && choices.length) {
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End'
+        ? choices.length - 1
+        : (index + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1) + choices.length) % choices.length;
+      const choice = choices[next];
+      choice.click();
+      if (!document.querySelector('[data-discard-confirmation]')) {
+        document.querySelector('.provider-options [role="radio"][aria-checked="true"]')?.focus();
+      }
+    }
     return;
   }
   if (
@@ -530,18 +676,39 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (event.key === 'Escape') {
-    state.menu = null;
-    if (serverForm || serverDelete || connectionDelete || authStage) {
-      serverForm = null;
-      serverDelete = null;
-      connectionDelete = null;
-      authStage = null;
-    } else if (state.overlay) state.overlay = null;
-    else if (ap.modal) ap.modal = false;
-    else if (previewSource === 'archery' && ap.view === 'history') {
+    if (document.querySelector('[data-discard-confirmation]')) {
+      document.querySelector('[data-continue-editing]')?.click();
+    } else if (state.menu) {
+      state.menu = null;
+      render();
+    } else if (serverForm || serverDelete || connectionDelete || authStage) {
+      requestDialogClose(() => {
+        if (authStage) {
+          closeArcheryAuth();
+        } else {
+          serverForm = null;
+          serverDelete = null;
+          connectionDelete = null;
+        }
+        render();
+      });
+    } else if (state.overlay) {
+      requestDialogClose(closePreviewDialog);
+    } else if (ap.modal) {
+      requestDialogClose(() => {
+        ap.modal = false;
+        render();
+      });
+    } else if (state.cellDrawer) {
+      requestDialogClose(() => {
+        state.cellDrawer = false;
+        state.cellInspectorValue = null;
+        render();
+      });
+    } else if (previewSource === 'archery' && ap.view === 'history') {
       ap.view = ap.historyReturn || 'query';
+      render();
     }
-    render();
   }
   if (event.target.id === 'cli-command' && event.key === 'Enter') {
     event.preventDefault();

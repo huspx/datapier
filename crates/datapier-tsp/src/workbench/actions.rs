@@ -153,6 +153,7 @@ impl App {
                 "persist" => RedisTtlPolicy::Persist,
                 _ => return true,
             };
+            self.workbench.generic_select = None;
             return true;
         }
         if let Some(operation) = name.strip_prefix("redis-op:") {
@@ -225,7 +226,14 @@ impl App {
             if let Some((field, value)) = rest.split_once(':')
                 && matches!(
                     field,
-                    "provider" | "type" | "access" | "tls" | "format" | "external_mode"
+                    "provider"
+                        | "type"
+                        | "access"
+                        | "tls"
+                        | "format"
+                        | "external_mode"
+                        | "backslash_escape"
+                        | "column"
                 )
             {
                 if field == "provider" {
@@ -246,9 +254,26 @@ impl App {
             }
             return true;
         }
+        if let Some(section) = name.strip_prefix("schema-read-section:") {
+            if matches!(
+                section,
+                "columns" | "indexes" | "foreign_keys" | "checks" | "options"
+            ) {
+                self.workbench.schema_section = section.into();
+                self.focus = format!("schema-section-{section}");
+                self.workbench.focus_request = Some(String::new());
+            }
+            return true;
+        }
         if let Some(section) = name.strip_prefix("section:") {
             if matches!(section, "data" | "structure" | "ddl") && self.finish_inline(true) {
                 self.workbench.section = section.into();
+                if section == "structure"
+                    && let Some(target) =
+                        self.target.clone().filter(|target| target.kind == "table")
+                {
+                    self.advanced_schema_open_existing(backend, target);
+                }
             }
             return true;
         }
@@ -620,6 +645,19 @@ impl App {
                 self.workbench.field_error = None;
                 self.workbench.delete_rows = None;
                 self.workbench.redis_identity = None;
+                self.workbench.overlay_close_confirm = false;
+                self.workbench.modal_draft = None;
+                if let Some(focus) = self.workbench.modal_return_focus.take() {
+                    let key = match focus.as_str() {
+                        "query" => "query-editor".to_owned(),
+                        "grid" => "grid".to_owned(),
+                        "" => String::new(),
+                        _ if self.fields.contains_key(&focus) => format!("input-{focus}"),
+                        _ => focus.clone(),
+                    };
+                    self.focus = focus;
+                    self.workbench.focus_request = Some(key);
+                }
             }
             "inline-begin" => {
                 self.begin_inline(backend);
