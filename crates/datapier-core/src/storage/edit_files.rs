@@ -6,6 +6,8 @@ use super::*;
 use crate::model::editing::{
     EditFilePurpose, EditFileRegistration, EditFileState, EditorFileRecord,
 };
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use std::io::{Read, Write};
 mod draft;
 
@@ -75,55 +77,79 @@ fn validate_record(r: &EditorFileRecord) -> Result<()> {
     }
     Ok(())
 }
-fn check_component(path: &Path, directory: bool) -> Result<std::fs::Metadata> {
-    let meta = std::fs::symlink_metadata(path)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if meta.file_attributes() & 0x400 != 0 {
-            return Err(AppError::new("permission_denied", "拒绝 reparse point"));
+struct EditPath {
+    dir: Dir,
+    name: String,
+}
+
+fn open_directory(parent: &Dir, name: &str, create: bool) -> Result<Dir> {
+    if create {
+        let mut builder = cap_std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use cap_std::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match parent.create_dir_with(name, &builder) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error.into()),
         }
     }
-    if meta.file_type().is_symlink()
-        || (directory && !meta.is_dir())
-        || (!directory && !meta.is_file())
-    {
+    let metadata = parent.symlink_metadata(name)?;
+    if metadata.is_symlink() || !metadata.is_dir() {
         return Err(AppError::new(
             "permission_denied",
             "编辑路径不是普通文件或目录",
         ));
     }
+    let dir = parent.open_dir_nofollow(name)?;
     #[cfg(unix)]
-    if directory {
+    {
         use std::os::unix::fs::MetadataExt;
-        if meta.mode() & 0o077 != 0 {
+        if dir.try_clone()?.into_std_file().metadata()?.mode() & 0o077 != 0 {
             return Err(AppError::new("permission_denied", "编辑目录权限不安全"));
         }
     }
+    Ok(dir)
+}
+
+fn edit_dir(root: &Dir, record: &EditorFileRecord, create: bool) -> Result<Dir> {
+    validate_record(record)?;
+    let base = open_directory(root, "edit-files", create)?;
+    open_directory(&base, &record.id.to_string(), create)
+}
+
+fn file_path(root: &Dir, record: &EditorFileRecord) -> Result<EditPath> {
+    Ok(EditPath {
+        dir: edit_dir(root, record, false)?,
+        name: format!("{}.{}", record.id, record.format),
+    })
+}
+
+fn check_edit_file(path: &EditPath) -> Result<cap_std::fs::Metadata> {
+    let meta = path.dir.symlink_metadata(&path.name)?;
+    if meta.is_symlink() || !meta.is_file() {
+        return Err(AppError::new(
+            "permission_denied",
+            "编辑路径不是普通文件或目录",
+        ));
+    }
     Ok(meta)
 }
-fn ensure_dir(path: &Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
+
+fn new_edit_file(dir: &Dir, name: &str) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    match builder.create(path) {
-        Ok(()) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
-        Err(e) => return Err(e.into()),
-    }
-    check_component(path, true)?;
-    Ok(())
-}
-fn file_path(root: &Path, record: &EditorFileRecord) -> Result<PathBuf> {
-    validate_record(record)?;
-    let base = root.join("edit-files");
-    check_component(&base, true)?;
-    let dir = base.join(record.id.to_string());
-    check_component(&dir, true)?;
-    Ok(dir.join(format!("{}.{}", record.id, record.format)))
+    Ok(dir.open_with(name, &options)?.into_std())
 }
 fn new_private_file(path: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
@@ -136,35 +162,24 @@ fn new_private_file(path: &Path) -> Result<std::fs::File> {
     Ok(options.open(path)?)
 }
 fn read_stable_with<T>(
-    path: &Path,
+    path: &EditPath,
     limit: usize,
     read: impl FnOnce(&mut std::fs::File) -> Result<T>,
 ) -> Result<T> {
-    let before_path = check_component(path, false)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x00200000);
-    }
-    let mut file = options.open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::new("file_busy", "编辑文件读取时正在保存")
-        } else {
-            e.into()
-        }
-    })?;
+    let before_path = check_edit_file(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = path
+        .dir
+        .open_with(&path.name, &options)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AppError::new("file_busy", "编辑文件读取时正在保存")
+            } else {
+                e.into()
+            }
+        })?
+        .into_std();
     let before = file.metadata()?;
     if !before.is_file() {
         return Err(AppError::new("permission_denied", "编辑文件不是普通文件"));
@@ -181,11 +196,13 @@ fn read_stable_with<T>(
     }
     let value = read(&mut file)?;
     let after = file.metadata()?;
-    let after_path = match check_component(path, false) {
+    let after_path = match check_edit_file(path) {
         Ok(meta) => meta,
         Err(error)
             if error.code == "io"
-                && std::fs::symlink_metadata(path)
+                && path
+                    .dir
+                    .symlink_metadata(&path.name)
                     .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
         {
             return Err(AppError::new("file_busy", "编辑文件读取时正在保存"));
@@ -197,17 +214,18 @@ fn read_stable_with<T>(
     }
     let changed = before.len() != after.len()
         || before.modified()? != after.modified()?
-        || after.modified()? != after_path.modified()?
+        || after.modified()? != after_path.modified()?.into_std()
         || before_path.len() != before.len()
-        || before_path.modified()? != before.modified()?;
+        || before_path.modified()?.into_std() != before.modified()?;
     #[cfg(unix)]
     let changed = {
+        use cap_fs_ext::MetadataExt as CapMetadataExt;
         use std::os::unix::fs::MetadataExt;
         changed
-            || before.dev() != before_path.dev()
-            || before.ino() != before_path.ino()
-            || after.dev() != after_path.dev()
-            || after.ino() != after_path.ino()
+            || MetadataExt::dev(&before) != CapMetadataExt::dev(&before_path)
+            || MetadataExt::ino(&before) != CapMetadataExt::ino(&before_path)
+            || MetadataExt::dev(&after) != CapMetadataExt::dev(&after_path)
+            || MetadataExt::ino(&after) != CapMetadataExt::ino(&after_path)
             || before.ctime() != after.ctime()
             || before.ctime_nsec() != after.ctime_nsec()
     };
@@ -216,7 +234,7 @@ fn read_stable_with<T>(
     }
     Ok(value)
 }
-fn read_stable(path: &Path, limit: usize) -> Result<Vec<u8>> {
+fn read_stable(path: &EditPath, limit: usize) -> Result<Vec<u8>> {
     read_stable_with(path, limit, |file| {
         let mut bytes = Vec::new();
         file.take((limit as u64).saturating_add(1))
@@ -496,24 +514,20 @@ impl Store {
         if record.revision != revision || record.state != EditFileState::Preparing {
             return Err(AppError::conflict("编辑文件已经发布或版本已变化"));
         }
-        let base = self.root.join("edit-files");
-        ensure_dir(&base)?;
-        let dir = base.join(id.to_string());
-        ensure_dir(&dir)?;
-        let dest = file_path(&self.root, &record)?;
+        let dir = edit_dir(&self.retired_cache_root, &record, true)?;
+        let dest = format!("{id}.{}", record.format);
         let path = if record.purpose == EditFilePurpose::Draft {
-            dir.join(format!("{id}.pending"))
+            format!("{id}.pending")
         } else {
             dest.clone()
         };
-        let mut file = new_private_file(&path)?;
+        let mut file = new_edit_file(&dir, &path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         if record.purpose == EditFilePurpose::Draft {
-            // hard_link 以 create-new 语义发布，避免并发发布覆盖已存在的不可变草稿。
-            std::fs::hard_link(&path, &dest)?;
-            std::fs::remove_file(&path)?;
+            dir.hard_link(&path, &dir, &dest)?;
+            dir.remove_file(&path)?;
         }
         self.transition_edit_file(id, revision, EditFileState::Ready)
             .await
@@ -524,7 +538,7 @@ impl Store {
         if record.revision != revision || record.state == EditFileState::Preparing {
             return Err(AppError::conflict("编辑文件版本或状态无效"));
         }
-        read_stable(&file_path(&self.root, &record)?, limit)
+        read_stable(&file_path(&self.retired_cache_root, &record)?, limit)
     }
     /// 导出到用户指定的新路径；以同目录临时文件发布，已有目标不会覆盖。
     pub async fn export_edit_file(
@@ -565,9 +579,32 @@ impl Store {
         {
             return Err(AppError::conflict("编辑文件版本或用途无效"));
         }
-        let path = file_path(&self.root, &record)?;
-        check_component(&path, false)?;
-        Ok(path)
+        let path = file_path(&self.retired_cache_root, &record)?;
+        check_edit_file(&path)?;
+        // 外部程序需要路径；只有根路径仍指向打开的目录时才可交付。
+        let current = Dir::open_ambient_dir(&*self.root, cap_std::ambient_authority())?;
+        let opened = self
+            .retired_cache_root
+            .try_clone()?
+            .into_std_file()
+            .metadata()?;
+        let current = current.into_std_file().metadata()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened.dev() != current.dev() || opened.ino() != current.ino() {
+                return Err(AppError::conflict("数据目录已被替换"));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (opened, current);
+        }
+        Ok(self
+            .root
+            .join("edit-files")
+            .join(id.to_string())
+            .join(path.name))
     }
     /// 保存工作区及文件引用的同一事务；旧引用解除后才标记可清理。
     pub async fn workspace_save_with_edit_files(
@@ -666,41 +703,64 @@ impl Store {
             return Err(AppError::conflict("草稿文件仍被保存的工作区引用"));
         }
         tx.commit().await?;
-        let base = self.root.join("edit-files");
-        match check_component(&base, true) {
-            Ok(_) => {
-                let dir = base.join(id.to_string());
-                match check_component(&dir, true) {
-                    Ok(_) => {
-                        for path in [
-                            dir.join(format!("{id}.{}", record.format)),
-                            dir.join(format!("{id}.pending")),
-                        ] {
-                            match check_component(&path, false) {
-                                Ok(_) => std::fs::remove_file(path)?,
-                                Err(e)
-                                    if e.code == "io"
-                                        && !path.exists()
-                                        && std::fs::symlink_metadata(&path).is_err_and(|x| {
-                                            x.kind() == std::io::ErrorKind::NotFound
-                                        }) => {}
-                                Err(e) => return Err(e),
-                            }
-                        }
-                        std::fs::remove_dir(dir)?;
-                    }
-                    Err(e)
-                        if e.code == "io"
-                            && std::fs::symlink_metadata(&dir)
-                                .is_err_and(|x| x.kind() == std::io::ErrorKind::NotFound) => {}
-                    Err(e) => return Err(e),
-                }
+        let base = match open_directory(&self.retired_cache_root, "edit-files", false) {
+            Ok(base) => Some(base),
+            Err(error)
+                if error.code == "io"
+                    && self
+                        .retired_cache_root
+                        .symlink_metadata("edit-files")
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                None
             }
-            Err(e)
-                if e.code == "io"
-                    && std::fs::symlink_metadata(&base)
-                        .is_err_and(|x| x.kind() == std::io::ErrorKind::NotFound) => {}
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
+        };
+        if let Some(base) = base {
+            let name = id.to_string();
+            let dir = match open_directory(&base, &name, false) {
+                Ok(dir) => Some(dir),
+                Err(error)
+                    if error.code == "io"
+                        && base
+                            .symlink_metadata(&name)
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(dir) = dir {
+                for name in [format!("{id}.{}", record.format), format!("{id}.pending")] {
+                    match dir.symlink_metadata(&name) {
+                        Ok(meta) if meta.is_file() && !meta.is_symlink() => {
+                            dir.remove_file(&name)?
+                        }
+                        Ok(_) => {
+                            return Err(AppError::new(
+                                "permission_denied",
+                                "编辑路径不是普通文件或目录",
+                            ));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    use cap_fs_ext::MetadataExt;
+                    let current = base.symlink_metadata(&name)?;
+                    let opened = dir.dir_metadata()?;
+                    if !current.is_dir()
+                        || current.is_symlink()
+                        || current.dev() != opened.dev()
+                        || current.ino() != opened.ino()
+                    {
+                        return Err(AppError::conflict("编辑目录已被替换"));
+                    }
+                }
+                base.remove_dir(&name)?;
+            }
         }
         let deleted = sqlx::query(
             "DELETE FROM value_edit_files WHERE id=? AND state='cleanup_pending' AND revision=?",

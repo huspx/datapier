@@ -44,6 +44,7 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     (store, profile, secret)
@@ -222,6 +223,129 @@ async fn mysql_preserves_values_empty_columns_and_conflicting_edits() {
     execute(&mut db, &store, &format!("DROP TABLE `{table}`"))
         .await
         .unwrap();
+    db.close().await.unwrap();
+    clean(store).await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离的 MySQL 5.7、8.0 或 8.4 实例"]
+async fn mysql_decimal_baselines_match_zero_and_small_values_on_tables_and_views() {
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let mut db = ProviderSession::connect(profile, secret).await.unwrap();
+    for engine in ["InnoDB", "MyISAM"] {
+        let table = format!("dp_decimal_{}", Uuid::new_v4().simple());
+        let view = format!("{table}_view");
+        execute(&mut db, &store, &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, amount DECIMAL(30,20), label VARCHAR(20)) ENGINE={engine}")).await.unwrap();
+        execute(
+            &mut db,
+            &store,
+            &format!("INSERT INTO `{table}` VALUES (1,0,'old'),(2,0.00000000000000000001,'old')"),
+        )
+        .await
+        .unwrap();
+        execute(
+            &mut db,
+            &store,
+            &format!("CREATE VIEW `{view}` AS SELECT id,amount,label FROM `{table}`"),
+        )
+        .await
+        .unwrap();
+        for (name, kind) in [(&table, "table"), (&view, "view")] {
+            let target = ResourceTarget {
+                database: Some("datapier_fixture".into()),
+                name: name.clone(),
+                key_b64: None,
+                kind: kind.into(),
+            };
+            let schema: TableSchema = serde_json::from_value(
+                call(
+                    &mut db,
+                    &store,
+                    "resource.describe",
+                    json!({"target":target}),
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            let queried = execute(
+                &mut db,
+                &store,
+                &format!("SELECT * FROM `{name}` ORDER BY id"),
+            )
+            .await
+            .unwrap();
+            let rows = result_rows(&store, &queried).await;
+            let opened = call(&mut db, &store, "change.open", json!({"target":target}))
+                .await
+                .unwrap();
+            let changes: Vec<RowChange> = rows
+                .iter()
+                .map(|row| RowChange {
+                    operation: "update".into(),
+                    key: BTreeMap::from([("id".into(), row[0].clone())]),
+                    before: schema
+                        .columns
+                        .iter()
+                        .zip(row)
+                        .map(|(c, v)| (c.name.clone(), v.clone()))
+                        .collect(),
+                    values: BTreeMap::from([(
+                        "label".into(),
+                        Value::Text(format!("updated_{kind}")),
+                    )]),
+                })
+                .collect();
+            let result = call(
+                &mut db,
+                &store,
+                "change.submit",
+                json!({"target":target,"token":opened["token"],"rows":changes}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["items"][0]["status"], "applied", "{result}");
+            assert_eq!(result["items"][1]["status"], "applied", "{result}");
+        }
+        let target = ResourceTarget {
+            database: Some("datapier_fixture".into()),
+            name: table.clone(),
+            key_b64: None,
+            kind: "table".into(),
+        };
+        let spec = json!({"pattern":"updated_view","replacement":"replaced","regex":false,"case_sensitive":true,"multi_line":false,"dot_matches_new_line":false,"scope":"filtered","columns":["label"],"roles":[]});
+        let plan = call(
+            &mut db,
+            &store,
+            "replace.prepare",
+            json!({"target":target,"spec":spec}),
+        )
+        .await
+        .unwrap();
+        let summary = &plan["summary"];
+        assert_eq!(summary["total_items"], 2);
+        call(&mut db, &store, "replace.submit", json!({"plan_id":summary["id"],"revision":summary["revision"],"digest":summary["plan_digest"]})).await.unwrap();
+        let result = execute(
+            &mut db,
+            &store,
+            &format!("SELECT label FROM `{table}` ORDER BY id"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result_rows(&store, &result).await,
+            vec![
+                vec![Value::Text("replaced".into())],
+                vec![Value::Text("replaced".into())]
+            ]
+        );
+        execute(&mut db, &store, &format!("DROP VIEW `{view}`"))
+            .await
+            .unwrap();
+        execute(&mut db, &store, &format!("DROP TABLE `{table}`"))
+            .await
+            .unwrap();
+    }
     db.close().await.unwrap();
     clean(store).await;
 }

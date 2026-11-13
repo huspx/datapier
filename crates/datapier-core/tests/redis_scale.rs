@@ -33,7 +33,7 @@ async fn million_keys_resource_list() -> TestResult<()> {
         let profile = Profile { id: Uuid::new_v4(), name: "redis-scale".into(), revision: 1, approval_policy: ApprovalPolicy::Dangerous, provider: ProviderKind::Redis,
         access_mode: AccessMode::ReadWrite, connection: ConnectionConfig::Direct(DirectConnection {
         host: "127.0.0.1".into(), port, username: String::new(), database: None,
-        redis_db: 15, redis_databases_override: None, tls: TlsConfig::default(), visible_databases: None }) };
+        redis_db: 15, redis_databases_override: None, tls: TlsConfig::default(), visible_databases: None, mysql: Default::default() }) };
         let mut session = ProviderSession::connect(profile, None).await?;
         let task = store.create_task(Uuid::new_v4(), "redis-scale", "execution.start", json!({}), false).await?;
         let sink = ExecutionSink::new(store.clone(), task.id);

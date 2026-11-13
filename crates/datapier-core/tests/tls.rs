@@ -52,6 +52,7 @@ async fn exercise(kind: ProviderKind) {
                 ..Default::default()
             },
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let root =
@@ -165,6 +166,7 @@ async fn mysql_57_secure_transport_requires_and_negotiates_tls() {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let secret = Some(env("DATAPIER_TLS_MYSQL57_SECRET"));

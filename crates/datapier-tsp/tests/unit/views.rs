@@ -87,6 +87,44 @@ fn schema_view_preserves_comments_and_empty_values() {
 }
 
 #[test]
+fn limited_scan_is_not_shown_as_complete_or_empty_match() {
+    fn texts(node: &Node<Msg>, out: &mut Vec<String>) {
+        if let Some(text) = node.props().get("text").and_then(Value::as_str) {
+            out.push(text.to_owned());
+        }
+        for child in node.child_nodes() {
+            texts(child, out);
+        }
+    }
+    let (backend, _, _) = crate::backend::Backend::scripted();
+    let mut app = App::new("redis-limited".into());
+    app.profile_form(None);
+    app.field_set("provider", "redis");
+    app.profile = Some(app.form_profile().unwrap());
+    app.response(
+        crate::backend::Response {
+            tag: "resource.list".into(),
+            result: Ok(json!({
+                "resources":[], "cursor":null, "complete":false, "resource_limited":true
+            })),
+        },
+        &backend,
+    );
+    let view = View::new().main(vec![redis_browser(&app)]);
+    let mut actual = Vec::new();
+    texts(view.regions()[0].unwrap(), &mut actual);
+    let limited = crate::i18n::tr("扫描受内存限制，结果不完整");
+    assert!(actual.iter().any(|text| text.contains(limited.as_ref())));
+    assert!(
+        !actual
+            .iter()
+            .any(|text| text == crate::i18n::tr("没有匹配的 key").as_ref())
+    );
+    assert!(!app.workbench.query_ui.redis_scan_complete);
+    assert!(app.workbench.query_ui.redis_scan_limited);
+}
+
+#[test]
 fn tree_pages_preserve_all_visible_keys_without_unbounded_views() {
     let mut app = App::new("test".into());
     app.workbench.tree = true;

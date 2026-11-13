@@ -156,6 +156,7 @@ async fn disconnect_cancels_profile_connection_waits_and_releases_profile_lock()
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     engine
@@ -230,6 +231,7 @@ async fn disconnect_cancels_detached_profile_reads() {
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     for method in ["profile.test", "profile.databases"] {
@@ -288,6 +290,7 @@ async fn disconnect_finishes_running_profile_test_record() {
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
@@ -386,6 +389,7 @@ async fn cancelled_profile_save_keeps_open_snapshot_consistent() {
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     engine
@@ -452,4 +456,88 @@ async fn cancelled_profile_save_keeps_open_snapshot_consistent() {
     engine.store.pool.close().await;
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 实例"]
+async fn schema_read_timeouts_release_the_owner_editing_gate() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    assert!(engine.register(owner));
+    let port = std::env::var("DATAPIER_TEST_MYSQL_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let secret = std::env::var("DATAPIER_TEST_MYSQL_SECRET").unwrap();
+    let mysql = model::MysqlConnectionOptions {
+        query_timeout_seconds: Some(1),
+        ..Default::default()
+    };
+    let profile = Profile {
+        id: Uuid::new_v4(),
+        name: "schema-timeout".into(),
+        revision: 1,
+        approval_policy: Default::default(),
+        provider: model::ProviderKind::Mysql,
+        access_mode: AccessMode::ReadWrite,
+        connection: model::ConnectionConfig::Direct(model::DirectConnection {
+            host: "127.0.0.1".into(),
+            port,
+            username: "datapier".into(),
+            database: Some("datapier_fixture".into()),
+            redis_db: 0,
+            redis_databases_override: None,
+            tls: model::TlsConfig::default(),
+            visible_databases: None,
+            mysql,
+        }),
+    };
+    engine
+        .store
+        .save_profile(&profile, Some(secret), false)
+        .await
+        .unwrap();
+    let opened = engine
+        .dispatch(owner, "connection.open", json!({"profile_id":profile.id}))
+        .await
+        .unwrap();
+    let session_id: Uuid = serde_json::from_value(opened["session_id"].clone()).unwrap();
+    let db = engine.state.lock().unwrap().databases[&session_id].clone();
+    let target = json!({"kind":"table","name":"timeout_test","database":"datapier_fixture"});
+    for (method, params) in [
+        (
+            "schema.describe",
+            json!({"session_id":session_id,"target":target}),
+        ),
+        (
+            "schema.plan",
+            json!({"session_id":session_id,"intent":{"target":target,"baseline":null,"definition":null,"profile_revision":"","algorithm":null,"lock":null,"server_version":"","sql_mode":""}}),
+        ),
+    ] {
+        let guard = db.session.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            engine.dispatch(owner, method, params),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(result.code, "timeout");
+        drop(guard);
+        let next = tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.dispatch(
+                owner,
+                "schema.discard",
+                json!({"plan_id":Uuid::new_v4(),"revision":1}),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(next.code, "handle_expired");
+    }
+    engine.disconnect(owner).await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
 }

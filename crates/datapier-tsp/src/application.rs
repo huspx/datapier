@@ -14,7 +14,7 @@ pub(super) const SETTINGS_FIELDS: &[(&str, &str, &str)] = &[
     ("limits", "response_bytes", "响应字节上限"),
     ("limits", "value_preview_bytes", "值预览字节数"),
     ("limits", "connect_timeout_seconds", "连接超时（秒）"),
-    ("limits", "query_timeout_seconds", "查询超时（秒）"),
+    ("limits", "query_timeout_seconds", "执行超时（秒）"),
     ("limits", "count_timeout_seconds", "计数超时（秒）"),
     ("limits", "result_idle_seconds", "结果空闲回收（秒）"),
     (
@@ -398,15 +398,13 @@ impl App {
                 json!({"session_id":session,"workspace_id":self.workspace_id,"database":database,"text":text}));
             return true;
         }
-        if matches!(
-            name,
-            "history-search"
-                | "history-prev"
-                | "history-next"
-                | "history-size:20"
-                | "history-size:50"
-                | "history-size:100"
-        ) {
+        let history_size = name
+            .strip_prefix("history-size:")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|size| (1..=1000).contains(size));
+        if matches!(name, "history-search" | "history-prev" | "history-next")
+            || history_size.is_some()
+        {
             let draft = self.field("history_filter").to_owned();
             let history = &mut self.workbench.archery_history;
             match name {
@@ -422,7 +420,7 @@ impl App {
                     history.offset += history.limit;
                 }
                 _ => {
-                    history.limit = name[13..].parse().unwrap_or(20);
+                    history.limit = history_size.unwrap();
                     history.offset = 0;
                 }
             }
@@ -1035,7 +1033,7 @@ impl App {
             .as_ref()
             .is_some_and(|profile| profile.is_archery())
         {
-            params["limit"] = json!(self.workbench.query_ui.request_limit);
+            params["limit"] = json!(self.archery_request_limit());
         }
         self.request(backend, "execution.start", "execution.start", params);
     }
@@ -1051,7 +1049,7 @@ impl App {
             self.invalidate_history(backend);
             self.field_set("history_filter", "");
             self.workbench.archery_history = ArcheryHistory {
-                limit: 20,
+                limit: self.settings.paging.history_rows as u64,
                 visible,
                 ..Default::default()
             };
@@ -1149,7 +1147,6 @@ impl App {
             || history.profile != self.profile.as_ref().map(|profile| profile.id)
             || history.database != self.database
             || (history.visible && history.session != self.session_id())
-            || self.workbench.overlay.as_deref() != Some("history")
         {
             return;
         }
@@ -1241,7 +1238,6 @@ impl App {
             || history.tab != self.tabs.get(self.active).map(|tab| tab.id)
             || history.profile != self.profile.as_ref().map(|profile| profile.id)
             || history.database != self.database
-            || self.workbench.overlay.as_deref() != Some("history")
             || history
                 .selected
                 .and_then(|index| history.items.get(index))

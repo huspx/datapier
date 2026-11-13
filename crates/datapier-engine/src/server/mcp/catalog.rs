@@ -436,10 +436,7 @@ impl Engine {
                 .get("name")
                 .and_then(Value::as_str)
                 .is_none_or(str::is_empty)
-                && target
-                    .get("key_b64")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
+                && target.get("key_b64").and_then(Value::as_str).is_none()
             {
                 return Err(AppError::invalid("目标资源名称不能为空"));
             }
@@ -575,6 +572,9 @@ impl Engine {
             .and_then(|n| n.checked_mul(size as u64))
             .ok_or_else(|| AppError::invalid("分页超出范围"))?;
         if source == "local" {
+            if params.get("cursor").is_some() {
+                return Err(AppError::invalid("本地历史不支持游标"));
+            }
             let workspace = self.mcp_context(owner)?.workspace;
             let mut offset = 0u64;
             let mut count = 0u64;
@@ -625,6 +625,9 @@ impl Engine {
         }
         let filters = json!({"search":search,"page_size":size});
         let cursor = self.mcp_cursor(owner, "platform_history", id, params)?;
+        if cursor.is_some() && params.get("page").is_some() {
+            return Err(AppError::invalid("游标与页码不能同时使用"));
+        }
         if cursor
             .as_ref()
             .is_some_and(|c| c.params.get("filters") != Some(&filters))

@@ -2,6 +2,29 @@
 use super::*;
 use datapier_core::model::schema::{SchemaEditIntent, SchemaSnapshot};
 
+async fn schema_read_with_timeout<T>(
+    cancel: &CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+    read: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    match deadline {
+        Some(deadline) => tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(AppError::cancelled()),
+            result = read => result,
+            _ = tokio::time::sleep_until(deadline) => {
+                // 元数据使用独立连接；直接丢弃 future，避免等待协议清理阻塞编辑锁。
+                cancel.cancel();
+                Err(AppError::new("timeout", "查询超时"))
+            }
+        },
+        None => tokio::select! {
+            _ = cancel.cancelled() => Err(AppError::cancelled()),
+            result = read => result,
+        },
+    }
+}
+
 fn summary(id: Uuid, draft: &SchemaDraft) -> Value {
     json!({"id":id,"plan_id":id,"revision":draft.revision,
         "state":if draft.execution.is_some() {"submitted"} else {"ready"},
@@ -24,7 +47,21 @@ impl Engine {
                 let session_id = model::param(&params, "session_id")?;
                 let db = self.editing_profile(owner, session_id).await?;
                 let target: model::ResourceTarget = model::param(&params, "target")?;
-                self.describe_edit_schema(owner, db, target).await
+                let owner_cancel = self.editing_cancel(owner)?;
+                if db.profile.provider == model::ProviderKind::Mysql && !db.profile.is_archery() {
+                    let fallback = self.store.settings().await?.limits.query_timeout_seconds;
+                    let timeout = mysql_query_timeout(&db.profile, fallback);
+                    let cancel = owner_cancel.child_token();
+                    schema_read_with_timeout(
+                        &cancel,
+                        Some(tokio::time::Instant::now() + Duration::from_secs(timeout)),
+                        self.describe_edit_schema(owner, db, target, &cancel),
+                    )
+                    .await
+                } else {
+                    self.describe_edit_schema(owner, db, target, &owner_cancel)
+                        .await
+                }
             }
             "schema.plan" => self.prepare_schema(owner, params).await,
             "schema.preview" => self.preview_schema(owner, &params).await,
@@ -39,8 +76,8 @@ impl Engine {
         owner: Uuid,
         db: Arc<Database>,
         target: model::ResourceTarget,
+        cancel: &CancellationToken,
     ) -> Result<Value> {
-        let cancel = self.editing_cancel(owner)?;
         let mut session = tokio::select! {
             _ = cancel.cancelled() => return Err(AppError::cancelled()),
             session = db.session.lock() => session,
@@ -48,7 +85,7 @@ impl Engine {
         match &mut *session {
             ProviderSession::Mysql(mysql) => {
                 mysql
-                    .schema_describe(json!({"target":target}), &cancel)
+                    .schema_describe(json!({"target":target}), cancel)
                     .await
             }
             ProviderSession::Archery(archery) => {
@@ -65,12 +102,7 @@ impl Engine {
                     .await?;
                 let sink = ExecutionSink::new(self.store.clone(), record.id);
                 let result = archery
-                    .call(
-                        "resource.describe",
-                        json!({"target":target}),
-                        &sink,
-                        &cancel,
-                    )
+                    .call("resource.describe", json!({"target":target}), &sink, cancel)
                     .await;
                 let safe_summary = match &result {
                     Ok(_) => json!({"described":true}),
@@ -113,16 +145,49 @@ impl Engine {
         if db.profile.provider != model::ProviderKind::Mysql {
             return Err(AppError::invalid("结构设计仅适用于 MySQL"));
         }
+        let cancel = self.editing_cancel(owner)?.child_token();
+        let deadline = if db.profile.is_archery() {
+            None
+        } else {
+            let fallback = self.store.settings().await?.limits.query_timeout_seconds;
+            let timeout = mysql_query_timeout(&db.profile, fallback);
+            Some(tokio::time::Instant::now() + Duration::from_secs(timeout))
+        };
+        self.prepare_schema_inner(owner, params, session_id, db, &cancel, deadline)
+            .await
+    }
+
+    async fn prepare_schema_inner(
+        self: &Arc<Self>,
+        owner: Uuid,
+        params: Value,
+        session_id: Uuid,
+        db: Arc<Database>,
+        cancel: &CancellationToken,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Value> {
         let mut intent: SchemaEditIntent = model::param(&params, "intent")?;
+        if intent.target.kind.eq_ignore_ascii_case("database") {
+            if !matches!(&db.profile.connection, model::ConnectionConfig::Direct(_)) {
+                return Err(AppError::new("permission_denied", "仅直连支持新建数据库"));
+            }
+            db.profile.ensure_write()?;
+            if intent.target.database.as_deref() != Some(intent.target.name.as_str()) {
+                return Err(AppError::invalid("数据库目标不匹配"));
+            }
+        }
         let previous_id: Option<Uuid> = optional(&params, "plan_id")?;
         let id = previous_id.unwrap_or_else(Uuid::new_v4);
         let gate = match previous_id {
             Some(id) => self.schema_gate(owner, id)?,
             None => Arc::new(AsyncMutex::new(())),
         };
-        let _guard = gate.lock().await;
+        let _guard =
+            schema_read_with_timeout(cancel, deadline, async { Ok(gate.lock().await) }).await?;
         let profile_gate = self.editing_gate(db.profile.id);
-        let _profile_guard = profile_gate.lock().await;
+        let _profile_guard =
+            schema_read_with_timeout(cancel, deadline, async { Ok(profile_gate.lock().await) })
+                .await?;
         let expected: Option<u64> = optional(&params, "expected_revision")?;
         let revision = if previous_id.is_some() {
             let state = self.state.lock().unwrap();
@@ -143,50 +208,65 @@ impl Engine {
         } else {
             1
         };
-        let cancel = self.editing_cancel(owner)?;
-        if let Some(baseline) = &intent.baseline {
-            let actual: SchemaSnapshot = serde_json::from_value(
-                self.describe_edit_schema(owner, db.clone(), intent.target.clone())
-                    .await?,
-            )?;
-            if actual.fingerprint != baseline.fingerprint {
-                return Err(AppError::new(
-                    "schema_conflict",
-                    "数据库结构已变化，请重新读取并确认草稿",
-                ));
+        let metadata = async {
+            if let Some(baseline) = &intent.baseline {
+                let actual: SchemaSnapshot = serde_json::from_value(
+                    self.describe_edit_schema(owner, db.clone(), intent.target.clone(), cancel)
+                        .await?,
+                )?;
+                if actual.fingerprint != baseline.fingerprint {
+                    return Err(AppError::new(
+                        "schema_conflict",
+                        "数据库结构已变化，请重新读取并确认草稿",
+                    ));
+                }
+                intent.baseline = Some(actual);
+            } else if !db.profile.is_archery() {
+                match self
+                    .describe_edit_schema(owner, db.clone(), intent.target.clone(), cancel)
+                    .await
+                {
+                    Ok(_) => return Err(AppError::new("schema_conflict", "新建对象的名称已存在")),
+                    Err(error) if error.code == "not_found" => (),
+                    Err(error) => return Err(error),
+                }
             }
-            intent.baseline = Some(actual);
-        } else if !db.profile.is_archery() {
-            match self
-                .describe_edit_schema(owner, db.clone(), intent.target.clone())
-                .await
-            {
-                Ok(_) => return Err(AppError::new("schema_conflict", "新建对象的名称已存在")),
-                Err(error) if error.code == "not_found" => (),
-                Err(error) => return Err(error),
+            if db.profile.is_archery() {
+                // 平台未提供服务端版本时，只能生成不依赖高级版本属性的本地 SQL 草稿。
+                intent.server_version = intent
+                    .baseline
+                    .as_ref()
+                    .map(|b| b.server_version.clone())
+                    .unwrap_or_default();
+                intent.sql_mode = intent
+                    .baseline
+                    .as_ref()
+                    .map(|b| b.sql_mode.clone())
+                    .unwrap_or_default();
+            } else {
+                let mut provider = db.session.lock().await;
+                let ProviderSession::Mysql(mysql) = &mut *provider else {
+                    return Err(AppError::invalid("非 MySQL 会话"));
+                };
+                let (version, mode, charset, collation) = mysql.schema_context(cancel).await?;
+                intent.server_version = version;
+                intent.sql_mode = mode.clone();
+                match intent.definition.as_mut() {
+                    Some(model::schema::SchemaDefinition::View(view)) => {
+                        view.character_set_client = Some(charset);
+                        view.collation_connection = Some(collation);
+                    }
+                    Some(model::schema::SchemaDefinition::Trigger(trigger)) => {
+                        trigger.sql_mode = mode;
+                        trigger.character_set_client = Some(charset);
+                        trigger.collation_connection = Some(collation);
+                    }
+                    _ => {}
+                }
             }
-        }
-        if db.profile.is_archery() {
-            // 平台未提供服务端版本时，只能生成不依赖高级版本属性的本地 SQL 草稿。
-            intent.server_version = intent
-                .baseline
-                .as_ref()
-                .map(|b| b.server_version.clone())
-                .unwrap_or_default();
-            intent.sql_mode = intent
-                .baseline
-                .as_ref()
-                .map(|b| b.sql_mode.clone())
-                .unwrap_or_default();
-        } else {
-            let mut provider = db.session.lock().await;
-            let ProviderSession::Mysql(mysql) = &mut *provider else {
-                return Err(AppError::invalid("非 MySQL 会话"));
-            };
-            let (version, mode) = mysql.schema_context(&cancel).await?;
-            intent.server_version = version;
-            intent.sql_mode = mode;
-        }
+            Ok(())
+        };
+        schema_read_with_timeout(cancel, deadline, metadata).await?;
         intent.profile_revision = db.profile.revision.to_string();
         let plan = datapier_core::providers::mysql::schema::build_plan(&intent)?;
         let settings = self.store.settings().await?;

@@ -274,9 +274,9 @@ impl App {
                 };
                 // 使用结果原始 Large 句柄，Engine 按结果归属解引用；不传 UI 展示值。
                 let identity_value = match (name, raw_identity) {
-                    ("index", DataValue::Integer(value)) => match value.parse::<u64>() {
-                        Ok(index) => json!(index),
-                        Err(_) => {
+                    ("index", DataValue::Integer(value)) => match value.parse::<i64>() {
+                        Ok(index) if index >= 0 => json!(index),
+                        _ => {
                             self.status = i18n::UiMessage::key("Redis 行缺少字段");
                             return;
                         }
@@ -287,6 +287,13 @@ impl App {
                     }
                     (_, value) => json!(value),
                 };
+                if name == "index" {
+                    let original = identity_value.as_i64().unwrap();
+                    if let Err(error) = self.redis_list_index(original, false) {
+                        self.status = error;
+                        return;
+                    }
+                }
                 params[name] = identity_value;
             }
         }
@@ -632,7 +639,7 @@ impl App {
             return Err(crate::AppError::conflict("值目标或草稿已变化"));
         }
         if self.is_redis() {
-            let changes = response
+            let mut changes = response
                 .get("redis_changes")
                 .and_then(Value::as_array)
                 .filter(|items| items.iter().all(Value::is_object))
@@ -641,6 +648,41 @@ impl App {
             if changes.is_empty() {
                 self.status = i18n::UiMessage::key("没有变化");
                 return Ok(());
+            }
+            if self
+                .schema
+                .as_ref()
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str)
+                == Some("list")
+                && source["column_name"].as_str() == Some("value")
+            {
+                let index_column = grid
+                    .page
+                    .result
+                    .columns
+                    .iter()
+                    .position(|c| c.name == "index")
+                    .ok_or_else(|| crate::AppError::invalid("Redis 行缺少索引"))?;
+                let original = match grid.original(Cell {
+                    row,
+                    column: index_column,
+                }) {
+                    Some(DataValue::Integer(index)) => index
+                        .parse::<i64>()
+                        .map_err(|_| crate::AppError::invalid("List 原始索引无效"))?,
+                    _ => return Err(crate::AppError::invalid("Redis 行缺少索引")),
+                };
+                if changes.len() != 1
+                    || changes[0].get("operation").and_then(Value::as_str) != Some("list_set")
+                    || changes[0].get("index").and_then(Value::as_i64) != Some(original)
+                {
+                    return Err(crate::AppError::invalid("List 值草稿无效"));
+                }
+                let index = self
+                    .redis_list_index(original, false)
+                    .map_err(|error| crate::AppError::invalid(error.render().into_owned()))?;
+                changes[0]["index"] = json!(index);
             }
             if self
                 .schema

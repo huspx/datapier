@@ -34,6 +34,33 @@ fn target(kind: &str) -> ResourceTarget {
         kind: kind.into(),
     }
 }
+#[test]
+fn database_creation_quotes_name_and_binds_authorization_target() {
+    let mut intent = SchemaEditIntent {
+        target: ResourceTarget {
+            database: Some("a`b".into()),
+            name: "a`b".into(),
+            key_b64: None,
+            kind: "database".into(),
+        },
+        baseline: None,
+        definition: Some(SchemaDefinition::Database(DatabaseDefinition {
+            charset: None,
+            collation: None,
+        })),
+        profile_revision: "r1".into(),
+        algorithm: None,
+        lock: None,
+        server_version: "8.0.36".into(),
+        sql_mode: String::new(),
+    };
+    let plan = build_plan(&intent).unwrap();
+    assert_eq!(plan.steps[0].sql, "CREATE DATABASE `a``b`");
+    assert_eq!(plan.steps[0].precondition, SchemaPrecondition::Absent);
+    intent.target.database = Some("other".into());
+    assert!(build_plan(&intent).is_err());
+}
+
 fn view() -> ViewDefinition {
     ViewDefinition {
         select: "SELECT 1 AS x".into(),

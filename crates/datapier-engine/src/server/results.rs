@@ -82,7 +82,6 @@ impl Engine {
             None => None,
         };
         let cancel = CancellationToken::new();
-        let sink = ExecutionSink::new(self.store.clone(), meta.execution_id);
         let mut session = if method == "result.count" {
             db.session
                 .try_lock()
@@ -95,8 +94,28 @@ impl Engine {
             }
         };
         self.editing_apply_invalidation(session_id, &mut session);
+        let is_mcp = self
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&db.owner)
+            .is_some_and(|context| matches!(context.kind, model::ClientKind::Mcp));
+        let current_revision = self.store.profile(db.profile.id).await?.revision;
+        if !is_mcp && current_revision != db.profile.revision {
+            return Err(AppError::new("invalidated", "连接设置已变化，请重新连接"));
+        }
         self.mcp_revalidate_result(owner, &db, meta.execution_id, &mut session)
             .await?;
+        let sink = ExecutionSink::new(self.store.clone(), meta.execution_id).with_profile_revision(
+            db.profile.id,
+            if is_mcp {
+                current_revision
+            } else {
+                db.profile.revision
+            },
+            self.profile_lock(db.profile.id),
+        );
         let call = session.call(method, params, &sink, &cancel);
         tokio::pin!(call);
         let disconnected = tokio::select! {
@@ -106,7 +125,18 @@ impl Engine {
         };
         // 不能丢弃持有物理连接的 provider future；取消后等待协议尾部。
         cancel.cancel();
-        let _ = call.await;
+        if method == "result.count" {
+            if tokio::time::timeout(Duration::from_secs(2), &mut call)
+                .await
+                .is_err()
+            {
+                // 无法完成协议清理的连接不得再被后续请求复用。
+                db.closing.store(true, Ordering::Release);
+                self.state.lock().unwrap().databases.remove(&session_id);
+            }
+        } else {
+            let _ = call.await;
+        }
         Err(if disconnected {
             AppError::cancelled()
         } else {
@@ -128,6 +158,15 @@ impl Engine {
         if self.store.task(meta.execution_id).await?.owner != owner {
             return serialize(self.store.peek_result_page(id, start, rows, bytes).await?);
         }
+        let query_timeout = {
+            let state = self.state.lock().unwrap();
+            state
+                .result_sessions
+                .get(&meta.execution_id)
+                .and_then(|session_id| state.databases.get(session_id))
+                .map(|db| mysql_query_timeout(&db.profile, settings.limits.query_timeout_seconds))
+                .unwrap_or(settings.limits.query_timeout_seconds)
+        };
         if meta.summary.get("retrieval_mode").and_then(Value::as_str) == Some("live_page") {
             return self
                 .result_provider(
@@ -135,14 +174,14 @@ impl Engine {
                     &meta,
                     "result.read",
                     json!({"result_id":id,"start":start,"max_rows":rows,"max_bytes":bytes}),
-                    settings.limits.query_timeout_seconds,
+                    query_timeout,
                 )
                 .await;
         }
         let through = start.saturating_add(rows as u64);
         self.store.set_result_demand(id, through).await?;
         tokio::time::timeout(
-            Duration::from_secs(settings.limits.query_timeout_seconds),
+            Duration::from_secs(query_timeout),
             self.store.wait_result_rows(id, through),
         )
         .await

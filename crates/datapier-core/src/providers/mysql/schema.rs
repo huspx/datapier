@@ -104,6 +104,38 @@ async fn describe_on(
     conn: &mut MySqlConnection,
     target: ResourceTarget,
 ) -> Result<Option<SchemaSnapshot>> {
+    if target.kind.eq_ignore_ascii_case("database") {
+        let row = sqlx::query("SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?")
+            .bind(&target.name).fetch_optional(&mut *conn).await?;
+        let Some(row) = row else { return Ok(None) };
+        let context = sqlx::query("SELECT VERSION() AS version, @@SESSION.sql_mode AS sql_mode")
+            .fetch_one(&mut *conn)
+            .await?;
+        let server_version: String = context.try_get("version")?;
+        let sql_mode: String = context.try_get("sql_mode")?;
+        let name = super::quote_ident(&target.name)?;
+        let ddlrow = sqlx::query(sqlx::AssertSqlSafe(format!("SHOW CREATE DATABASE {name}")))
+            .fetch_one(&mut *conn)
+            .await?;
+        let ddl: String = ddlrow.try_get(1)?;
+        return Ok(Some(SchemaSnapshot {
+            definition: SchemaDefinition::Database(DatabaseDefinition {
+                charset: Some(row.try_get("DEFAULT_CHARACTER_SET_NAME")?),
+                collation: Some(row.try_get("DEFAULT_COLLATION_NAME")?),
+            }),
+            fingerprint: fingerprint(&ddl, &sql_mode),
+            target,
+            server_version: server_version.clone(),
+            sql_mode,
+            ddl,
+            dependencies: vec![],
+            completeness: Completeness {
+                state: CompletenessState::Complete,
+                reasons: vec![],
+            },
+            capabilities: capabilities(&server_version),
+        }));
+    }
     let db = target
         .database
         .as_deref()
@@ -424,6 +456,7 @@ fn equivalent(
 pub struct MysqlSchemaExecutor {
     options: sqlx::mysql::MySqlConnectOptions,
     access_mode: crate::model::AccessMode,
+    connect_timeout: std::time::Duration,
 }
 
 impl MysqlSchemaExecutor {
@@ -439,11 +472,19 @@ impl MysqlSchemaExecutor {
 
 impl MysqlSession {
     /// 从独立连接读取计划所绑定的版本和会话模式。
-    pub async fn schema_context(&mut self, cancel: &CancellationToken) -> Result<(String, String)> {
+    pub async fn schema_context(
+        &mut self,
+        cancel: &CancellationToken,
+    ) -> Result<(String, String, String, String)> {
         ensure_not_cancelled(cancel)?;
         let mut conn = self.new_connection().await?;
-        let row = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), result = sqlx::query("SELECT VERSION() AS version, @@SESSION.sql_mode AS sql_mode").fetch_one(&mut conn) => result? };
-        Ok((row.try_get("version")?, row.try_get("sql_mode")?))
+        let row = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), result = sqlx::query("SELECT VERSION() AS version, @@SESSION.sql_mode AS sql_mode, @@SESSION.character_set_client AS charset, @@SESSION.collation_connection AS collation").fetch_one(&mut conn) => result? };
+        Ok((
+            row.try_get("version")?,
+            row.try_get("sql_mode")?,
+            row.try_get("charset")?,
+            row.try_get("collation")?,
+        ))
     }
     /// 读取结构快照；不存在与权限不足均不伪装成空结构。
     pub async fn schema_describe(
@@ -454,6 +495,22 @@ impl MysqlSession {
         let target: ResourceTarget = param(&params, "target")?;
         ensure_not_cancelled(cancel)?;
         let mut conn = self.new_connection().await?;
+        if target.kind == "database_options" {
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(AppError::cancelled()),
+                result = async {
+                    let defaults = sqlx::query("SELECT @@GLOBAL.character_set_server AS charset, @@GLOBAL.collation_server AS collation").fetch_one(&mut conn).await?;
+                    let rows = sqlx::query("SELECT CHARACTER_SET_NAME, COLLATION_NAME, IS_DEFAULT FROM information_schema.COLLATIONS ORDER BY CHARACTER_SET_NAME, COLLATION_NAME").fetch_all(&mut conn).await?;
+                    let mut collations = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        collations.push(json!({"charset":row.try_get::<String,_>("CHARACTER_SET_NAME")?, "name":row.try_get::<String,_>("COLLATION_NAME")?, "default":row.try_get::<Option<String>,_>("IS_DEFAULT")?.as_deref() == Some("Yes")}));
+                    }
+                    Ok::<_, sqlx::Error>(json!({"charset":defaults.try_get::<String,_>("charset")?, "collation":defaults.try_get::<String,_>("collation")?, "collations":collations}))
+                } => result?,
+            };
+            return Ok(result);
+        }
         let value = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), result = describe_on(&mut conn,target) => result? };
         Ok(serde_json::to_value(value.ok_or_else(|| {
             AppError::new("not_found", "对象不存在或不可见")
@@ -468,6 +525,7 @@ impl MysqlSession {
         Ok(MysqlSchemaExecutor {
             options: self.options.clone(),
             access_mode: self.profile.access_mode,
+            connect_timeout: self.connect_timeout,
         })
     }
 }
@@ -485,22 +543,43 @@ async fn execute_plan(
     {
         return Err(AppError::invalid("计划摘要或内容不匹配"));
     }
-    let mut conn = super::connect_initialized(&executor.options, executor.access_mode).await?;
-    let context = sqlx::query("SELECT VERSION() AS version, @@SESSION.sql_mode AS sql_mode")
+    let mut conn = super::connect_initialized(
+        &executor.options,
+        executor.access_mode,
+        executor.connect_timeout,
+    )
+    .await?;
+    let context = sqlx::query("SELECT VERSION() AS version, @@SESSION.sql_mode AS sql_mode, @@SESSION.character_set_client AS character_set_client, @@SESSION.collation_connection AS collation_connection")
         .fetch_one(&mut conn)
         .await?;
     let actual_version: String = context.try_get("version")?;
     let actual_mode: String = context.try_get("sql_mode")?;
+    let actual_charset: String = context.try_get("character_set_client")?;
+    let actual_collation: String = context.try_get("collation_connection")?;
     if actual_version != plan.intent.server_version || actual_mode != plan.intent.sql_mode {
         return Err(AppError::new(
             "schema_conflict",
             "服务端版本或 SQL 模式已变化，请重新生成计划",
         ));
     }
-    sqlx::query("SET SESSION sql_mode = ?")
-        .bind(&plan.intent.sql_mode)
-        .execute(&mut conn)
-        .await?;
+    let context_matches = match &plan.intent.definition {
+        Some(SchemaDefinition::View(view)) => {
+            view.character_set_client.as_deref() == Some(actual_charset.as_str())
+                && view.collation_connection.as_deref() == Some(actual_collation.as_str())
+        }
+        Some(SchemaDefinition::Trigger(trigger)) => {
+            trigger.sql_mode == actual_mode
+                && trigger.character_set_client.as_deref() == Some(actual_charset.as_str())
+                && trigger.collation_connection.as_deref() == Some(actual_collation.as_str())
+        }
+        _ => true,
+    };
+    if !context_matches {
+        return Err(AppError::new(
+            "schema_conflict",
+            "连接字符集或排序规则已变化，请重新生成计划",
+        ));
+    }
     let creation_defaults = match (&plan.intent.baseline, &plan.intent.definition) {
         (None, Some(SchemaDefinition::Table(table))) => Some(
             catalog::creation_defaults(
@@ -511,6 +590,36 @@ async fn execute_plan(
             .await?,
         ),
         _ => None,
+    };
+    let database_defaults = if let Some(SchemaDefinition::Database(database)) =
+        &plan.intent.definition
+    {
+        let charset = match &database.charset {
+            Some(charset) => charset.clone(),
+            None => {
+                sqlx::query_scalar::<_, String>("SELECT @@GLOBAL.character_set_server")
+                    .fetch_one(&mut conn)
+                    .await?
+            }
+        };
+        let row = sqlx::query("SELECT CHARACTER_SET_NAME, DEFAULT_COLLATE_NAME FROM information_schema.CHARACTER_SETS WHERE CHARACTER_SET_NAME = ?")
+            .bind(&charset).fetch_optional(&mut conn).await?
+            .ok_or_else(|| AppError::invalid("数据库字符集不存在"))?;
+        let charset: String = row.try_get("CHARACTER_SET_NAME")?;
+        let collation: String = if let Some(collation) = &database.collation {
+            sqlx::query_scalar("SELECT COLLATION_NAME FROM information_schema.COLLATIONS WHERE COLLATION_NAME = ? AND CHARACTER_SET_NAME = ?")
+                .bind(collation).bind(&charset).fetch_optional(&mut conn).await?
+                .ok_or_else(|| AppError::invalid("排序规则不属于所选字符集"))?
+        } else if database.charset.is_none() {
+            sqlx::query_scalar("SELECT @@GLOBAL.collation_server")
+                .fetch_one(&mut conn)
+                .await?
+        } else {
+            row.try_get("DEFAULT_COLLATE_NAME")?
+        };
+        Some((charset, collation))
+    } else {
+        None
     };
     let mut results = vec![json!({"state":"not_sent"}); plan.steps.len()];
     for (idx, step) in plan.steps.iter().enumerate() {
@@ -542,52 +651,12 @@ async fn execute_plan(
                 return Ok(json!({"state":"conflict", "steps":results}));
             }
         }
-        let configured: Result<()> = async {
-            let mode = match &plan.intent.definition {
-                Some(SchemaDefinition::Trigger(t)) if step.sql.starts_with("CREATE ") => {
-                    t.sql_mode.as_str()
-                }
-                _ => plan.intent.sql_mode.as_str(),
-            };
-            sqlx::query("SET SESSION sql_mode = ?")
-                .bind(mode)
-                .execute(&mut conn)
-                .await?;
-            let context = match &plan.intent.definition {
-                Some(SchemaDefinition::Trigger(t)) if step.sql.starts_with("CREATE ") => {
-                    Some((&t.character_set_client, &t.collation_connection))
-                }
-                Some(SchemaDefinition::View(v)) => {
-                    Some((&v.character_set_client, &v.collation_connection))
-                }
-                _ => None,
-            };
-            if let Some((charset, collation)) = context {
-                if let Some(charset) = charset {
-                    let mut sql = format!("SET NAMES {}", super::quote_ident(charset)?);
-                    if let Some(collation) = collation {
-                        sql += &format!(" COLLATE {}", super::quote_ident(collation)?);
-                    }
-                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                        .execute(&mut conn)
-                        .await?;
-                } else if collation.is_some() {
-                    return Err(AppError::invalid("缺少对象字符集上下文"));
-                }
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(error) = configured {
-            results[idx] = json!({"state":"failed", "error":error.to_string()});
-            return Ok(json!({"state":"failed", "steps":results}));
-        }
         sink.mark_sent(true).await?;
         // 一旦发送，等待服务端终态；取消不能销毁连接并假装撤销 DDL。
-        let sent = sqlx::raw_sql(sqlx::AssertSqlSafe(step.sql.as_str()))
+        match sqlx::raw_sql(sqlx::AssertSqlSafe(step.sql.as_str()))
             .execute(&mut conn)
-            .await;
-        match sent {
+            .await
+        {
             Err(e) => {
                 let state = if matches!(&e, sqlx::Error::Database(_)) {
                     "failed"
@@ -611,7 +680,27 @@ async fn execute_plan(
             );
         }
     };
-    let verified = match (&plan.intent.definition, &actual) {
+    // 对象的历史创建上下文仅是基线；新定义按本次独立连接的真实上下文核对。
+    let mut expected_definition = plan.intent.definition.clone();
+    match expected_definition.as_mut() {
+        Some(SchemaDefinition::Database(database)) => {
+            if let Some((charset, collation)) = database_defaults {
+                database.charset = Some(charset);
+                database.collation = Some(collation);
+            }
+        }
+        Some(SchemaDefinition::View(view)) => {
+            view.character_set_client = Some(actual_charset.clone());
+            view.collation_connection = Some(actual_collation.clone());
+        }
+        Some(SchemaDefinition::Trigger(trigger)) => {
+            trigger.sql_mode = actual_mode;
+            trigger.character_set_client = Some(actual_charset);
+            trigger.collation_connection = Some(actual_collation);
+        }
+        _ => {}
+    }
+    let verified = match (&expected_definition, &actual) {
         (None, None) => true,
         (Some(expected), Some(actual)) => {
             actual.completeness.state == CompletenessState::Complete

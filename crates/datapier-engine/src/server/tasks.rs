@@ -139,6 +139,16 @@ impl Engine {
             self.editing_plan_current(id)?;
         }
         let mut session = tokio::select! { _ = cancel.cancelled() => return Err(AppError::cancelled()), lock = db.session.lock() => lock };
+        let is_mcp = self
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&db.owner)
+            .is_some_and(|context| matches!(context.kind, model::ClientKind::Mcp));
+        if !is_mcp && self.store.profile(db.profile.id).await?.revision != db.profile.revision {
+            return Err(AppError::new("invalidated", "连接设置已变化，请重新连接"));
+        }
         self.editing_apply_invalidation(session_id, &mut session);
         let mut params = params;
         if method == "change.submit" && gate.is_some() {
@@ -154,14 +164,7 @@ impl Engine {
         }
         let invalidation_scope = params.get("target").cloned();
         let executing_plan = optional::<Uuid>(&params, "plan_id")?;
-        if self
-            .state
-            .lock()
-            .unwrap()
-            .contexts
-            .get(&db.owner)
-            .is_some_and(|context| matches!(context.kind, model::ClientKind::Mcp))
-        {
+        if is_mcp {
             self.mcp_before_send(db.owner, &db, method, &params, &mut session)
                 .await?;
         }
@@ -499,14 +502,30 @@ impl Engine {
     ) -> Result<Value> {
         let db = self.database(owner, &params)?;
         let session_id: Uuid = model::param(&params, "session_id")?;
-        let initial_workspace = self
+        let (initial_workspace, is_mcp) = self
             .state
             .lock()
             .unwrap()
             .contexts
             .get(&owner)
-            .map(|context| context.workspace.clone())
+            .map(|context| {
+                (
+                    context.workspace.clone(),
+                    matches!(context.kind, model::ClientKind::Mcp),
+                )
+            })
             .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
+        let dispatch_revision = if is_mcp {
+            match params
+                .pointer("/_access_proof/profile_revision")
+                .and_then(Value::as_u64)
+            {
+                Some(revision) => revision,
+                None => self.store.profile(db.profile.id).await?.revision,
+            }
+        } else {
+            db.profile.revision
+        };
         let prepare_budget = if method == "replace.prepare" {
             optional::<Uuid>(&params, "_editing_plan_budget")?
         } else {
@@ -649,7 +668,10 @@ impl Engine {
         drop(service_guard);
         self.emit_state(owner, id, "queued");
         let timeout_engine = Arc::downgrade(self);
-        let timeout_duration = Duration::from_secs(limits.query_timeout_seconds);
+        let timeout_duration = Duration::from_secs(mysql_query_timeout(
+            &db.profile,
+            limits.query_timeout_seconds,
+        ));
         tokio::spawn(async move {
             if let Some(engine) = timeout_engine.upgrade() {
                 let mut activity = engine.store.subscribe_result_activity().await;
@@ -694,7 +716,12 @@ impl Engine {
         let method = method.to_owned();
         let future = async move {
             let sink = ExecutionSink::new(engine.store.clone(), id)
-                .with_dispatch_control(transition.clone(), cancel.clone());
+                .with_dispatch_control(transition.clone(), cancel.clone())
+                .with_profile_revision(
+                    db.profile.id,
+                    dispatch_revision,
+                    engine.profile_lock(db.profile.id),
+                );
             let mut result = if cancel.is_cancelled() {
                 Err(AppError::cancelled())
             } else {

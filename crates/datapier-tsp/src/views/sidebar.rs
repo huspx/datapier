@@ -64,6 +64,7 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
             .as_ref()
             .is_some_and(|selected| selected.id == p.id);
         let (state, reason) = app.navigation_connection_state(p.id);
+        let connected = state == "已连接";
         let dot_class = match state {
             "已连接" => "connection-dot connected",
             "连接中" => "connection-dot connecting",
@@ -140,38 +141,70 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                     .child(html::span(endpoint).class("muted")),
             );
         }
+        let mut actions = ui::Actions::new()
+            .menu(ui::MenuEntry::header(p.name.clone()))
+            .menu(
+                ui::MenuItem::new("settings", crate::i18n::tr("连接设置").into_owned())
+                    .icon("gear"),
+            )
+            .menu(
+                ui::MenuItem::new(
+                    "profile-copy-name",
+                    crate::i18n::tr("复制连接名称").into_owned(),
+                )
+                .icon("copy"),
+            );
+        if p.provider == datapier_core::model::ProviderKind::Mysql
+            && matches!(
+                &p.connection,
+                datapier_core::model::ConnectionConfig::Direct(_)
+            )
+        {
+            let writable = p.ensure_write().is_ok();
+            actions = actions.menu(
+                ui::MenuItem::new(
+                    "profile-create-database",
+                    crate::i18n::tr(if !writable {
+                        "新建数据库…（只读连接）"
+                    } else if !connected {
+                        "新建数据库…（请先连接）"
+                    } else {
+                        "新建数据库…"
+                    })
+                    .into_owned(),
+                )
+                .disabled(!writable || !connected),
+            );
+            actions = actions.menu(ui::MenuItem::new(
+                "profile-close",
+                crate::i18n::tr("关闭连接").into_owned(),
+            ));
+        }
+        actions = actions.menu(ui::MenuEntry::Separator).menu(
+            ui::MenuItem::new("delete", crate::i18n::tr("删除连接").into_owned())
+                .icon("trash")
+                .danger(true),
+        );
         panel = panel.child(
-            card.actions(
-                ui::Actions::new()
-                    .menu(ui::MenuEntry::header(p.name.clone()))
-                    .menu(
-                        ui::MenuItem::new("settings", crate::i18n::tr("连接设置").into_owned())
-                            .icon("gear"),
-                    )
-                    .menu(
-                        ui::MenuItem::new(
-                            "profile-copy-name",
-                            crate::i18n::tr("复制连接名称").into_owned(),
-                        )
-                        .icon("copy"),
-                    )
-                    .menu(ui::MenuEntry::Separator)
-                    .menu(
-                        ui::MenuItem::new("delete", crate::i18n::tr("删除连接").into_owned())
-                            .icon("trash")
-                            .danger(true),
-                    ),
-            )
-            .on_action(
-                "settings",
-                Msg::Action(format!("profile-settings:{}", p.id)),
-            )
-            .on_action("profile-copy-name", Msg::CopyText(p.name.clone()))
-            .on_action(
-                "delete",
-                Msg::Action(format!("profile-delete-request:{}", p.id)),
-            )
-            .on_click(Msg::Profile(i)),
+            card.actions(actions)
+                .on_action(
+                    "settings",
+                    Msg::Action(format!("profile-settings:{}", p.id)),
+                )
+                .on_action("profile-copy-name", Msg::CopyText(p.name.clone()))
+                .on_action(
+                    "profile-create-database",
+                    Msg::Action(format!("profile-create-database:{}", p.id)),
+                )
+                .on_action(
+                    "profile-close",
+                    Msg::Action(format!("profile-close:{}", p.id)),
+                )
+                .on_action(
+                    "delete",
+                    Msg::Action(format!("profile-delete-request:{}", p.id)),
+                )
+                .on_click(Msg::Profile(i)),
         );
     }
     if !compact && app.session.is_some() && !app.is_redis() {

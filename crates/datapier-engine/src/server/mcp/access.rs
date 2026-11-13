@@ -432,18 +432,17 @@ impl Engine {
                 proof.objects = access.objects;
                 proof.dangerous = access.dangerous;
                 proof.transaction_actions = access.transaction_actions;
-                if proof
-                    .transaction_actions
-                    .iter()
-                    .any(|action| matches!(action.as_str(), "commit" | "implicit_commit"))
-                    && let Some(queued) = self
-                        .state
-                        .lock()
-                        .unwrap()
-                        .mcp
-                        .sessions
-                        .get(&session_id)
-                        .and_then(|entry| entry.queued.as_ref())
+                if proof.transaction_actions.iter().any(|action| {
+                    matches!(action.as_str(), "commit" | "implicit_commit")
+                        || (action == "begin" && info["transaction"] == true)
+                }) && let Some(queued) = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .mcp
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|entry| entry.queued.as_ref())
                 {
                     proof
                         .read_databases
@@ -807,7 +806,8 @@ impl Engine {
                 for action in &fresh.transaction_actions {
                     match action.as_str() {
                         "begin" => entry.queued = Some(fresh.clone()),
-                        "commit" | "rollback" | "implicit_commit" => entry.queued = None,
+                        // 只有物理会话确认事务结束后才清空；发送前取消不能抹去已有范围。
+                        "commit" | "rollback" | "implicit_commit" => (),
                         _ => (),
                     }
                 }

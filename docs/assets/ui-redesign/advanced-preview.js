@@ -472,6 +472,40 @@ function replacementPreview(info) {
   );
 }
 
+function formatAdvancedJson(source, format) {
+  const token =
+    /[ \t\r\n]+|"(?:\\.|[^"\\])*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null|[{}\[\],:]/gy;
+  const tokens = [];
+  let offset = 0;
+  while (offset < source.length) {
+    token.lastIndex = offset;
+    const match = token.exec(source);
+    if (!match) throw new SyntaxError('Invalid JSON');
+    offset = token.lastIndex;
+    if (!/^[ \t\r\n]+$/.test(match[0])) tokens.push(match[0]);
+  }
+  // Validate structure and strings without converting the original numbers to Number.
+  JSON.parse(tokens.map(part => /^-?[0-9]/.test(part) ? '0' : part).join(' '));
+  if (!format) return source;
+  let result = '', depth = 0;
+  const indent = () => '  '.repeat(depth);
+  for (let i = 0; i < tokens.length; i++) {
+    const part = tokens[i], previous = tokens[i - 1], next = tokens[i + 1];
+    if (part === '{' || part === '[') {
+      result += part;
+      depth++;
+      if (next !== '}' && next !== ']') result += '\n' + indent();
+    } else if (part === '}' || part === ']') {
+      depth--;
+      if (previous !== '{' && previous !== '[') result += '\n' + indent();
+      result += part;
+    } else if (part === ',') result += ',\n' + indent();
+    else if (part === ':') result += ': ';
+    else result += part;
+  }
+  return result;
+}
+
 function advancedValuePreview(info) {
   const t = advancedText;
   const s = state.valuePreview ||= {
@@ -805,6 +839,38 @@ function initialKindForReplacement() {
   return { STR: 'string', HASH: 'hash', LIST: 'list', SET: 'set', ZSET: 'zset' }[key?.type] || 'string';
 }
 
+function updateAdvancedHex(target, text) {
+  const start = target.phase === 'large' ? (target.chunk - 1) * 64 : 0;
+  const count = Math.min(target.phase === 'large' ? 64 : target.bytes.length, target.bytes.length - start);
+  const parts = text.trim() ? text.trim().split(/\s+/) : [];
+  if (parts.length !== count || parts.some(part => !/^[0-9a-f]{2}$/i.test(part))) {
+    target.hexError = true;
+    target.hexDraft = text;
+    target.validation = advancedText(
+      '请为当前窗口输入相同数量的两位十六进制字节。',
+      'Enter the same number of two-digit hexadecimal bytes for this window.',
+    );
+    return;
+  }
+  const bytes = target.bytes.slice();
+  bytes.set(parts.map(part => parseInt(part, 16)), start);
+  target.bytes = bytes;
+  target.hexDraft = null;
+  target.dirty = true;
+  target.isNull = false;
+  try {
+    target.value = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    target.hexError = false;
+    target.validation = '';
+  } catch (_) {
+    target.hexError = true;
+    target.validation = advancedText(
+      '当前文本目标要求有效 UTF-8；字节已保留，请修正后应用。',
+      'This text target requires valid UTF-8; bytes are retained until corrected.',
+    );
+  }
+}
+
 document.addEventListener('change', event => {
   const el = event.target;
   if (!(el instanceof HTMLElement)) return;
@@ -849,46 +915,8 @@ document.addEventListener('change', event => {
     const isValue = el.closest('.advanced-preview').querySelector('[data-preview-field="value-phase"]');
     const target = isValue ? value : replacement;
     if (!target) return;
-    if (isValue && field === 'hexWindow') {
-      const start = target.phase === 'large' ? (target.chunk - 1) * 64 : 0;
-      const count = Math.min(target.phase === 'large' ? 64 : target.bytes.length, target.bytes.length - start);
-      const parts = el.value.trim() ? el.value.trim().split(/\s+/) : [];
-      if (parts.length !== count || parts.some(part => !/^[0-9a-f]{2}$/i.test(part))) {
-        target.hexError = true;
-        target.hexDraft = el.value;
-        target.validation = advancedText(
-          '请为当前窗口输入相同数量的两位十六进制字节。',
-          'Enter the same number of two-digit hexadecimal bytes for this window.',
-        );
-      } else {
-        const bytes = target.bytes.slice();
-        bytes.set(parts.map(part => parseInt(part, 16)), start);
-        target.bytes = bytes;
-        target.hexDraft = null;
-        target.dirty = true;
-        target.isNull = false;
-        try {
-          target.value = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-          target.hexError = false;
-          target.validation = '';
-        } catch (_) {
-          target.hexError = true;
-          target.validation = advancedText(
-            '当前文本目标要求有效 UTF-8；字节已保留，请修正后应用。',
-            'This text target requires valid UTF-8; bytes are retained until corrected.',
-          );
-        }
-      }
-      render();
-      return;
-    }
+    if (isValue && (field === 'hexWindow' || field === 'value')) return;
     target[field] = el.type === 'checkbox' ? el.checked : el.value;
-    if (isValue && field === 'value') {
-      target.bytes = null;
-      target.dirty = true;
-      target.isNull = false;
-      if (target.phase === 'null') target.phase = 'normal';
-    }
     if (!isValue && field === 'kind') target.roles = [el.value === 'set' || el.value === 'zset' ? 'member' : 'value'];
     if (!isValue && field === 'source' && el.value === 'redis') {
       target.kind = initialKindForReplacement();
@@ -908,14 +936,17 @@ document.addEventListener('input', event => {
   if (!target || el.type === 'checkbox') return;
   target[el.dataset.previewField] = el.value;
   if (isValue && el.dataset.previewField === 'hexWindow') {
-    target.hexDraft = el.value;
-    return;
+    updateAdvancedHex(target, el.value);
   }
   if (isValue && el.dataset.previewField === 'value') {
     target.bytes = null;
     target.dirty = true;
     target.isNull = false;
     if (target.phase === 'null') target.phase = 'normal';
+  }
+  if (isValue && ['value', 'hexWindow'].includes(el.dataset.previewField)) {
+    const button = el.closest('.advanced-preview').querySelector('[data-preview-action="value-apply"]');
+    if (button) button.disabled = !target.dirty || !!target.hexError;
   }
 });
 document.addEventListener('click', event => {
@@ -1006,9 +1037,9 @@ document.addEventListener('click', event => {
   } else if (action === 'value-validate' || action === 'value-format') {
     try {
       if (v.mode === 'json') {
-        const parsed = JSON.parse(v.value);
+        const formatted = formatAdvancedJson(v.value, action === 'value-format');
         if (action === 'value-format') {
-          v.value = JSON.stringify(parsed, null, 2);
+          v.value = formatted;
           v.dirty = true;
         }
       } else {

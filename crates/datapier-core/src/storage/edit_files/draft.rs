@@ -244,22 +244,23 @@ impl Store {
                         draft_revision: old.draft_revision,
                     })
                     .await?;
-                let base = self.root.join("edit-files");
-                ensure_dir(&base)?;
-                let dir = base.join(new.id.to_string());
-                ensure_dir(&dir)?;
-                let pending = dir.join(format!("{}.pending", new.id));
-                let dest = file_path(&self.root, &new)?;
-                let mut output = new_private_file(&pending)?;
+                let dir = edit_dir(&self.retired_cache_root, &new, true)?;
+                let pending = format!("{}.pending", new.id);
+                let dest = format!("{}.{}", new.id, new.format);
+                let mut output = new_edit_file(&dir, &pending)?;
                 // 流式复制避免一个很小的引用触发完整大值分配。
-                read_stable_with(&file_path(&self.root, &old)?, usize::MAX, |input| {
-                    std::io::copy(input, &mut output)?;
-                    output.sync_all()?;
-                    Ok(())
-                })?;
+                read_stable_with(
+                    &file_path(&self.retired_cache_root, &old)?,
+                    usize::MAX,
+                    |input| {
+                        std::io::copy(input, &mut output)?;
+                        output.sync_all()?;
+                        Ok(())
+                    },
+                )?;
                 drop(output);
-                std::fs::hard_link(&pending, &dest)?;
-                std::fs::remove_file(&pending)?;
+                dir.hard_link(&pending, &dir, &dest)?;
+                dir.remove_file(&pending)?;
                 let new = self
                     .transition_edit_file(new.id, new.revision, EditFileState::Ready)
                     .await?;
@@ -573,7 +574,7 @@ impl Store {
                     {
                         return Err(AppError::conflict("意图文件归属、类型或版本无效"));
                     }
-                    let path = file_path(&self.root, &record)?;
+                    let path = file_path(&self.retired_cache_root, &record)?;
                     let remaining = memory_budget
                         .saturating_sub(charged)
                         .checked_sub(8192)
@@ -657,25 +658,29 @@ impl Store {
             .max_value_bytes
             .saturating_mul(6)
             .saturating_add(1024);
-        read_stable_with(&file_path(&self.root, &record)?, limit, |file| {
-            let mut estimate = crate::model::editing::JsonMemoryEstimate::default();
-            let mut buffer = [0u8; 8192];
-            let mut size = 0usize;
-            loop {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
+        read_stable_with(
+            &file_path(&self.retired_cache_root, &record)?,
+            limit,
+            |file| {
+                let mut estimate = crate::model::editing::JsonMemoryEstimate::default();
+                let mut buffer = [0u8; 8192];
+                let mut size = 0usize;
+                loop {
+                    let n = file.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
+                    }
+                    size = size.saturating_add(n);
+                    if size > limit {
+                        return Err(AppError::new("resource_limit", "草稿文件过大"));
+                    }
+                    estimate.feed(&buffer[..n]);
                 }
-                size = size.saturating_add(n);
-                if size > limit {
-                    return Err(AppError::new("resource_limit", "草稿文件过大"));
-                }
-                estimate.feed(&buffer[..n]);
-            }
-            Ok(size
-                .saturating_add(estimate.heap_bound())
-                .saturating_add(8192))
-        })
+                Ok(size
+                    .saturating_add(estimate.heap_bound())
+                    .saturating_add(8192))
+            },
+        )
     }
 
     /// 用预留上界约束同一份扫描和解析字节，即使文件在预留后变化也不能超额分配。
@@ -710,35 +715,39 @@ impl Store {
             .max_value_bytes
             .saturating_mul(6)
             .saturating_add(1024);
-        let value: Value = read_stable_with(&file_path(&self.root, record)?, limit, |file| {
-            let size = usize::try_from(file.metadata()?.len())
-                .map_err(|_| AppError::new("resource_limit", "草稿文件过大"))?;
-            if size.saturating_add(8192) > budget {
-                return Err(AppError::new("resource_limit", "草稿值超过内存预算"));
-            }
-            let mut bytes = Vec::with_capacity(size);
-            let mut estimate = crate::model::editing::JsonMemoryEstimate::default();
-            let mut buffer = [0u8; 8192];
-            loop {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                if bytes.len().saturating_add(n) > size {
-                    return Err(AppError::new("file_busy", "草稿文件读取时发生变化"));
-                }
-                estimate.feed(&buffer[..n]);
-                if size
-                    .saturating_add(estimate.heap_bound())
-                    .saturating_add(8192)
-                    > budget
-                {
+        let value: Value = read_stable_with(
+            &file_path(&self.retired_cache_root, record)?,
+            limit,
+            |file| {
+                let size = usize::try_from(file.metadata()?.len())
+                    .map_err(|_| AppError::new("resource_limit", "草稿文件过大"))?;
+                if size.saturating_add(8192) > budget {
                     return Err(AppError::new("resource_limit", "草稿值超过内存预算"));
                 }
-                bytes.extend_from_slice(&buffer[..n]);
-            }
-            Ok(serde_json::from_slice(&bytes)?)
-        })?;
+                let mut bytes = Vec::with_capacity(size);
+                let mut estimate = crate::model::editing::JsonMemoryEstimate::default();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let n = file.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
+                    }
+                    if bytes.len().saturating_add(n) > size {
+                        return Err(AppError::new("file_busy", "草稿文件读取时发生变化"));
+                    }
+                    estimate.feed(&buffer[..n]);
+                    if size
+                        .saturating_add(estimate.heap_bound())
+                        .saturating_add(8192)
+                        > budget
+                    {
+                        return Err(AppError::new("resource_limit", "草稿值超过内存预算"));
+                    }
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                Ok(serde_json::from_slice(&bytes)?)
+            },
+        )?;
         if record.format == "intent" && !matches!(value, Value::Text(_) | Value::Bytes(_)) {
             return Err(AppError::invalid("定位身份必须是文本或字节"));
         }
@@ -768,7 +777,7 @@ impl Store {
             .max_value_bytes
             .saturating_mul(6)
             .saturating_add(1024);
-        let path = file_path(&self.root, &record)?;
+        let path = file_path(&self.retired_cache_root, &record)?;
         let chunk = read_stable_with(&path, limit, |file| {
             let total = file.metadata()?.len();
             if offset > total {

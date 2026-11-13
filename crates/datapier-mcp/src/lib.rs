@@ -89,7 +89,7 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "list_databases",
         description: "Discover accessible databases.",
-        fields: &[CONNECTION, f("refresh", Kind::Bool, false)],
+        fields: &[CONNECTION, f("refresh", Kind::Bool, false), CURSOR],
         read_only: true,
         destructive: false,
     },
@@ -256,6 +256,7 @@ const SPECS: &[Spec] = &[
             f("search", Kind::Text, false),
             PAGE,
             PAGE_SIZE,
+            CURSOR,
         ],
         read_only: true,
         destructive: false,

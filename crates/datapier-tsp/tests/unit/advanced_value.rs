@@ -178,3 +178,35 @@ fn selecting_mode_establishes_keyboard_focus() {
     assert_eq!(app.focus, "advanced-value-tab-hex");
     assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
 }
+
+#[test]
+fn keyboard_fallback_edits_value_and_file_path_with_utf16_and_undo() {
+    let (backend, _requests, _responses) = crate::Backend::scripted();
+    let mut app = value_app(&backend);
+    app.focus = "advanced-value".into();
+    let mut paste = tern_sdk::Key::named("paste");
+    paste.text = Some("😀中".into());
+    app.input_key(&paste);
+    assert_eq!(app.advanced_value.editor.text, "before😀中");
+    app.input_key(&tern_sdk::Key::named("backspace"));
+    assert_eq!(app.advanced_value.editor.text, "before😀");
+    let mut undo = tern_sdk::Key::named("z");
+    undo.ctrl = true;
+    app.input_key(&undo);
+    assert_eq!(app.advanced_value.editor.text, "before😀中");
+    app.advanced_value.pending = true;
+    app.input_key(&paste);
+    assert_eq!(app.advanced_value.editor.text, "before😀中");
+    app.advanced_value.pending = false;
+
+    app.focus = "advanced-file-path".into();
+    app.input_key(&paste);
+    assert_eq!(app.advanced_files.path.text, "😀中");
+    app.input_key(&tern_sdk::Key::named("backspace"));
+    assert_eq!(app.advanced_files.path.text, "😀");
+    app.input_key(&undo);
+    assert_eq!(app.advanced_files.path.text, "😀中");
+    app.advanced_files.pending = true;
+    app.input_key(&paste);
+    assert_eq!(app.advanced_files.path.text, "😀中");
+}

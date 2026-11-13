@@ -1,4 +1,29 @@
 use super::*;
+fn supports_field_expiry(info: &str) -> Result<bool> {
+    let version = info
+        .lines()
+        .find_map(|line| line.strip_prefix("redis_version:"))
+        .ok_or_else(|| AppError::new("database", "无法确定 Redis 字段期限能力"))?;
+    let mut parts = version.split('.');
+    let major: u32 = parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| AppError::new("database", "无效 Redis 版本"))?;
+    let minor: u32 = parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| AppError::new("database", "无效 Redis 版本"))?;
+    Ok(major > 7 || major == 7 && minor >= 4)
+}
+
+#[test]
+fn redis_field_expiry_version_support() {
+    assert!(!supports_field_expiry("redis_version:6.2.14\r\n").unwrap());
+    assert!(!supports_field_expiry("redis_version:7.2.5\r\n").unwrap());
+    assert!(supports_field_expiry("redis_version:7.4.0\r\n").unwrap());
+    assert!(supports_field_expiry("redis_version:8.0.0\r\n").unwrap());
+    assert!(supports_field_expiry("unknown").is_err());
+}
 
 impl RedisSession {
     pub(super) async fn export_meta(&mut self, p: &Json) -> Result<Json> {
@@ -31,6 +56,12 @@ impl RedisSession {
         if actual != kind {
             return Err(AppError::conflict("导出期间 key 类型发生变化"));
         }
+        let field_expiry_supported = if kind == "hash" {
+            let info: String = query(conn, &args(&["INFO", "server"])).await?;
+            supports_field_expiry(&info)?
+        } else {
+            false
+        };
         let (rows, next): (Vec<Vec<Value>>, Option<u64>) = match kind.as_str() {
             "string" => {
                 let end = position
@@ -94,7 +125,7 @@ impl RedisSession {
                     conn,
                     &[
                         cmd.as_bytes().to_vec(),
-                        k,
+                        k.clone(),
                         position.to_string().into_bytes(),
                         b"COUNT".to_vec(),
                         b"100".to_vec(),
@@ -107,7 +138,7 @@ impl RedisSession {
                 let mut rows = Vec::new();
                 let mut iter = values.into_iter();
                 while let Some(member) = iter.next() {
-                    let mut row = vec![val(member)];
+                    let mut row = vec![val(member.clone())];
                     if kind != "set" {
                         let value = iter.next().unwrap();
                         row.push(if kind == "hash" {
@@ -118,6 +149,30 @@ impl RedisSession {
                                     .map_err(|e| AppError::new("database", e.to_string()))?,
                             )
                         });
+                        if kind == "hash" {
+                            let expiry = if field_expiry_supported {
+                                let expiry: Vec<i64> = query(
+                                    conn,
+                                    &[
+                                        b"HPEXPIRETIME".to_vec(),
+                                        k.clone(),
+                                        b"FIELDS".to_vec(),
+                                        b"1".to_vec(),
+                                        member,
+                                    ],
+                                )
+                                .await?;
+                                *expiry.first().ok_or_else(|| {
+                                    AppError::new("database", "缺少 Hash 字段期限")
+                                })?
+                            } else {
+                                -1
+                            };
+                            if expiry < -1 {
+                                return Err(AppError::conflict("导出期间 Hash 字段消失"));
+                            }
+                            row.push(Value::Integer(expiry.to_string()));
+                        }
                     }
                     rows.push(row);
                 }
@@ -229,7 +284,18 @@ return 1
                     }
                     vec![b"SET".to_vec(), k, bytes(v)?]
                 }
-                ("hash", [f, v]) => vec![b"HSET".to_vec(), k, bytes(f)?, bytes(v)?],
+                ("hash", [f, v, Value::Integer(expiry)]) => {
+                    if expiry.parse::<i64>().ok().is_none_or(|n| n < -1) {
+                        return Err(AppError::invalid("无效 Hash 字段期限"));
+                    }
+                    vec![
+                        b"HSET".to_vec(),
+                        k,
+                        bytes(f)?,
+                        bytes(v)?,
+                        expiry.as_bytes().to_vec(),
+                    ]
+                }
                 ("list", [Value::Integer(i) | Value::Unsigned(i), v]) => {
                     if i.parse::<u64>().ok() != Some(import.count + commands.len() as u64) {
                         return Err(AppError::invalid("List 索引不连续"));
@@ -263,6 +329,11 @@ if rotate then
 end
 local r
 if k == 'string' then r = redis.pcall('SET', KEYS[1], m .. ARGV[6], 'KEEPTTL')
+elseif k == 'hash' then
+    r = redis.pcall(unpack(ARGV, 4, #ARGV - 1))
+    if not (type(r) == 'table' and r.err) and ARGV[#ARGV] ~= '-1' then
+        r = redis.pcall('HPEXPIREAT', KEYS[1], ARGV[#ARGV], 'FIELDS', 1, ARGV[6])
+    end
 else r = redis.pcall(unpack(ARGV, 4)) end
 if type(r) == 'table' and r.err then
     if rotate then
@@ -343,16 +414,39 @@ local expiry = tonumber(ARGV[3])
 if expiry and expiry <= now then redis.call('DEL', KEYS[1]); return -1 end
 if redis.call('EXISTS', KEYS[2]) ~= 0 then return 0 end
 local k, m = ARGV[1], ARGV[2]
+-- The destination is absent and scripts are atomic, so these probes cannot
+-- change data. They check the same command and key used after RENAMENX.
+local probe
 if k == 'string' then
-    local v = redis.call('GET', KEYS[1])
-    redis.call('SET', KEYS[1], string.sub(v, string.len(m) + 1), 'KEEPTTL')
-elseif k == 'hash' then redis.call('HDEL', KEYS[1], m)
-elseif k == 'list' then redis.call('LPOP', KEYS[1])
-elseif k == 'set' then redis.call('SREM', KEYS[1], m)
-else redis.call('ZREM', KEYS[1], m) end
-if expiry then redis.call('PEXPIREAT', KEYS[1], ARGV[3])
-else redis.call('PERSIST', KEYS[1]) end
-return redis.call('RENAMENX', KEYS[1], KEYS[2])
+    probe = redis.pcall('GET', KEYS[2])
+    if type(probe) == 'table' and probe.err then return probe end
+    probe = redis.pcall('SET', KEYS[2], '', 'XX', 'KEEPTTL')
+elseif k == 'hash' then probe = redis.pcall('HDEL', KEYS[2], m)
+elseif k == 'list' then probe = redis.pcall('LPOP', KEYS[2])
+elseif k == 'set' then probe = redis.pcall('SREM', KEYS[2], m)
+else probe = redis.pcall('ZREM', KEYS[2], m) end
+if type(probe) == 'table' and probe.err then return probe end
+if expiry then probe = redis.pcall('PEXPIREAT', KEYS[2], ARGV[3])
+else probe = redis.pcall('PERSIST', KEYS[2]) end
+if type(probe) == 'table' and probe.err then return probe end
+local published = redis.pcall('RENAMENX', KEYS[1], KEYS[2])
+if type(published) == 'table' and published.err then return published end
+if published == 0 then return 0 end
+local dst = KEYS[2]
+local result
+if k == 'string' then
+    local v = redis.pcall('GET', dst)
+    if type(v) == 'table' and v.err then return -3 end
+    result = redis.pcall('SET', dst, string.sub(v, string.len(m) + 1), 'KEEPTTL')
+elseif k == 'hash' then result = redis.pcall('HDEL', dst, m)
+elseif k == 'list' then result = redis.pcall('LPOP', dst)
+elseif k == 'set' then result = redis.pcall('SREM', dst, m)
+else result = redis.pcall('ZREM', dst, m) end
+if type(result) == 'table' and result.err then return -3 end
+if expiry then result = redis.pcall('PEXPIREAT', dst, ARGV[3])
+else result = redis.pcall('PERSIST', dst) end
+if type(result) == 'table' and result.err then return -3 end
+return 1
 "#
         );
         let expiry = import.expires.map(|n| n.to_string()).unwrap_or_default();
@@ -385,6 +479,14 @@ return redis.call('RENAMENX', KEYS[1], KEYS[2])
             0 => {
                 import.valid = false;
                 Err(AppError::conflict("目标 key 已存在"))
+            }
+            -3 => {
+                import.temp = import.key.clone();
+                import.valid = false;
+                Err(AppError::new(
+                    "import_failed",
+                    "发布后未能完成清理，目标保留有限期限",
+                ))
             }
             _ => {
                 import.valid = false;

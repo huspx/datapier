@@ -73,7 +73,16 @@ async fn database(
     current.ok_or_else(|| AppError::invalid("请选择数据库"))
 }
 
-pub(super) async fn databases(s: &mut MysqlSession) -> Result<Json> {
+pub(super) async fn databases(s: &mut MysqlSession, cancel: &CancellationToken) -> Result<Json> {
+    // 发现使用独立只读连接；取消时丢弃连接及其未完成的协议状态，保留原会话。
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(AppError::cancelled()),
+        result = databases_inner(s) => result,
+    }
+}
+
+async fn databases_inner(s: &mut MysqlSession) -> Result<Json> {
     let mut conn = s.new_connection().await?;
     let databases: Vec<String> = sqlx::query_scalar(
         "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME",
@@ -401,6 +410,7 @@ async fn list_inner(s: &mut MysqlSession, params: Json) -> Result<Json> {
             resources,
             cursor: None,
             complete,
+            resource_limited: false,
         })?);
     }
     if let Some(db) = requested {
@@ -442,6 +452,7 @@ async fn list_inner(s: &mut MysqlSession, params: Json) -> Result<Json> {
         resources,
         cursor: None,
         complete: true,
+        resource_limited: false,
     })?)
 }
 
@@ -789,12 +800,36 @@ pub(super) async fn browse(
         .and_then(Json::as_u64)
         .unwrap_or(sink.store.settings().await?.paging.mysql_table_rows as u64)
         .clamp(1, 1000) as usize;
+    let context = crate::policy::SqlContext {
+        database: Some(db.to_owned()),
+        ..Default::default()
+    };
+    let objects = vec![crate::policy::ObjectAccess {
+        database: db.to_owned(),
+        name: table.target.name.clone(),
+        write: false,
+    }];
+    if !live::dependencies_replayable(s, objects.clone(), &context, true, cancel).await? {
+        let mut conn = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(AppError::cancelled()),
+            result = s.new_connection() => result?,
+        };
+        sink.mark_sent(false).await?;
+        let (ids, affected) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(AppError::cancelled()),
+            result = super::results::execute_statement(&mut conn, &sql, sink, cancel, false, size, &bindings) => result?,
+        };
+        return Ok(json!({"results": ids, "affected_rows": affected}));
+    }
     let recipe = Recipe {
         sql,
         bindings,
         source_columns: Some(table.columns),
         independent: true,
         context: None,
+        proof: Some((objects, context)),
     };
     live::start(s, recipe, size, sink, cancel).await
 }

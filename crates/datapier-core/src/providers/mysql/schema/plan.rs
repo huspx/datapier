@@ -532,18 +532,34 @@ fn table_alter(
 }
 /// 根据完整基线和稳定 ID 生成冻结的 DDL，不访问数据库。
 pub fn build_plan(intent: &SchemaEditIntent) -> Result<SchemaPlan> {
-    let db = intent
-        .target
-        .database
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| AppError::invalid("必须指定数据库"))?;
-    let target = qualified(db, &intent.target.name)?;
+    let is_database = intent.target.kind.eq_ignore_ascii_case("database");
+    let db = if is_database {
+        if intent.target.name.trim().is_empty()
+            || intent.target.database.as_deref() != Some(intent.target.name.as_str())
+            || intent.baseline.is_some()
+        {
+            return Err(AppError::invalid("新建数据库目标无效"));
+        }
+        ""
+    } else {
+        intent
+            .target
+            .database
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| AppError::invalid("必须指定数据库"))?
+    };
+    let target = if is_database {
+        ident(&intent.target.name)?
+    } else {
+        qualified(db, &intent.target.name)?
+    };
     let definition = intent
         .definition
         .as_ref()
         .or_else(|| intent.baseline.as_ref().map(|b| &b.definition));
     let kind = match definition {
+        Some(SchemaDefinition::Database(_)) => "database",
         Some(SchemaDefinition::Table(_)) => "table",
         Some(SchemaDefinition::View(_)) => "view",
         Some(SchemaDefinition::Trigger(_)) => "trigger",
@@ -595,6 +611,9 @@ pub fn build_plan(intent: &SchemaEditIntent) -> Result<SchemaPlan> {
         (None, None) => return Err(AppError::invalid("缺少结构变更")),
         (Some(b), None) => {
             let kind = match &b.definition {
+                SchemaDefinition::Database(_) => {
+                    return Err(AppError::invalid("不支持修改或删除数据库结构"));
+                }
                 SchemaDefinition::Table(_) => "TABLE",
                 SchemaDefinition::View(_) => "VIEW",
                 SchemaDefinition::Trigger(_) => "TRIGGER",
@@ -605,6 +624,19 @@ pub fn build_plan(intent: &SchemaEditIntent) -> Result<SchemaPlan> {
                 vec!["删除对象可能丢失数据".into()],
                 vec![],
             );
+        }
+        (None, Some(SchemaDefinition::Database(database))) => {
+            if database.charset.is_none() && database.collation.is_some() {
+                return Err(AppError::invalid("选择排序规则时必须指定字符集"));
+            }
+            let mut sql = format!("CREATE DATABASE {target}");
+            if let Some(charset) = &database.charset {
+                sql += &format!(" CHARACTER SET {}", ident(charset)?);
+            }
+            if let Some(collation) = &database.collation {
+                sql += &format!(" COLLATE {}", ident(collation)?);
+            }
+            add(sql, before, vec![], vec![]);
         }
         (None, Some(SchemaDefinition::Table(t))) => {
             if t.columns.is_empty() {
@@ -698,6 +730,50 @@ pub fn build_plan(intent: &SchemaEditIntent) -> Result<SchemaPlan> {
             }
             _ => return Err(AppError::invalid("不能更改对象种类")),
         },
+    }
+    if matches!(
+        intent.definition.as_ref(),
+        Some(SchemaDefinition::View(_) | SchemaDefinition::Trigger(_))
+    ) {
+        let previous = intent
+            .baseline
+            .as_ref()
+            .and_then(|baseline| match &baseline.definition {
+                SchemaDefinition::View(view) => Some(format!(
+                    "原创建字符集：{}，原排序规则：{}",
+                    view.character_set_client.as_deref().unwrap_or("未知"),
+                    view.collation_connection.as_deref().unwrap_or("未知")
+                )),
+                SchemaDefinition::Trigger(trigger) => Some(format!(
+                    "原 SQL 模式：{}，原创建字符集：{}，原排序规则：{}",
+                    trigger.sql_mode,
+                    trigger.character_set_client.as_deref().unwrap_or("未知"),
+                    trigger.collation_connection.as_deref().unwrap_or("未知")
+                )),
+                _ => None,
+            });
+        let (charset, collation) = match intent.definition.as_ref() {
+            Some(SchemaDefinition::View(view)) => (
+                view.character_set_client.as_deref(),
+                view.collation_connection.as_deref(),
+            ),
+            Some(SchemaDefinition::Trigger(trigger)) => (
+                trigger.character_set_client.as_deref(),
+                trigger.collation_connection.as_deref(),
+            ),
+            _ => (None, None),
+        };
+        for step in &mut steps {
+            if step.sql.starts_with("CREATE ") || step.sql.starts_with("ALTER VIEW ") {
+                step.warnings.push(format!(
+                    "{}；新 SQL 模式：{}，新创建字符集：{}，新排序规则：{}",
+                    previous.as_deref().unwrap_or("新建对象"),
+                    intent.sql_mode,
+                    charset.unwrap_or("未知"),
+                    collation.unwrap_or("未知")
+                ));
+            }
+        }
     }
     if intent.server_version.is_empty() {
         for step in &mut steps {

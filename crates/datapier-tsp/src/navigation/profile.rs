@@ -6,9 +6,7 @@ impl App {
             .delete_confirmation
             .as_ref()
             .filter(|confirmation| {
-                self.tabs
-                    .get(self.active)
-                    .is_some_and(|tab| tab.id == confirmation.tab)
+                self.tabs.get(self.active).map(|tab| tab.id) == confirmation.tab
                     && self.workbench.overlay.as_deref() == Some("profile-delete")
             })
     }
@@ -18,83 +16,77 @@ impl App {
             || self.navigation.pending.values().any(|pending| matches!(pending, Pending::DeleteProfile { id: pending_id, .. } if *pending_id == id))
     }
 
-    pub(super) fn navigation_profile_delete_unlock(&mut self, id: Uuid) {
-        for index in 0..self.tabs.len() {
-            if self.tabs[index].profile_id == Some(id) {
-                if index == self.active {
-                    self.operation_pending = false;
-                } else {
-                    self.tabs[index].runtime.operation_pending = false;
-                }
-            }
+    pub(crate) fn navigation_profile_delete_abort(&mut self, token: Uuid, error: String) {
+        if self
+            .navigation
+            .delete_operation
+            .as_ref()
+            .is_none_or(|operation| operation.token != token)
+        {
+            return;
         }
+        self.navigation.delete_operation = None;
+        if let Some(confirmation) = self
+            .navigation
+            .delete_confirmation
+            .as_mut()
+            .filter(|confirmation| confirmation.token == token)
+        {
+            confirmation.busy = false;
+            confirmation.error = Some(error.clone());
+            confirmation.tab = self.tabs.get(self.active).map(|tab| tab.id);
+        }
+        self.status = UiMessage::raw(error);
     }
 
-    pub(super) fn navigation_profile_delete_next(&mut self, backend: &Backend) {
-        let Some(operation) = self.navigation.delete_operation.as_mut() else {
+    pub(crate) fn navigation_profile_delete_after_tabs(&mut self, token: Uuid, backend: &Backend) {
+        let Some(operation) = self
+            .navigation
+            .delete_operation
+            .as_ref()
+            .filter(|operation| operation.token == token)
+        else {
             return;
         };
         let id = operation.id;
-        let token = operation.token;
-        if let Some((tab, session)) = operation.sessions.pop() {
-            self.navigation_request(
-                backend,
-                Pending::CloseProfileSession {
-                    token,
-                    tab,
-                    session: session.clone(),
-                },
-                "connection.close",
-                json!({"session_id":session}),
-            );
-        } else {
-            self.navigation_request(
-                backend,
-                Pending::DeleteProfile { id, token },
-                "profile.delete",
-                json!({"profile_id":id}),
-            );
+        let valid = self
+            .navigation
+            .delete_confirmation
+            .as_ref()
+            .filter(|confirmation| confirmation.token == token)
+            .and_then(|confirmation| {
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .and_then(|profile| serde_json::to_value(profile).ok())
+                    .map(|profile| profile == confirmation.profile)
+            })
+            .unwrap_or(false);
+        if !valid {
+            self.navigation_profile_delete_abort(token, "连接配置不存在或已更改".into());
+            return;
         }
+        if let Some(confirmation) = self.navigation.delete_confirmation.as_mut() {
+            confirmation.tab = self.tabs.get(self.active).map(|tab| tab.id);
+        }
+        self.navigation_invalidate_profile(id);
+        self.navigation_request(
+            backend,
+            Pending::DeleteProfile { id, token },
+            "profile.delete",
+            json!({"profile_id":id}),
+        );
     }
 
-    pub(super) fn navigation_profile_session_closed(&mut self, tab: Uuid, session: &Value) {
-        let Some(index) = self.tabs.iter().position(|item| item.id == tab) else {
-            return;
-        };
-        let old = self.active;
-        self.switch_tab(index);
-        if self.session_id().as_ref() == Some(session) {
-            self.session = None;
-            self.generation = self.generation.wrapping_add(1);
-            self.resources.clear();
-            self.workbench.redis_tree.reset(&[]);
-            self.workbench.redis_tree_owner = None;
-            self.cursor = None;
-            self.scan_token = None;
-            self.schema = None;
-            self.edit_token = None;
-            if self.has_live_drafts()
-                || !self.tabs[self.active].pending.is_null()
-                || self.workbench.inline.is_some()
-            {
-                if let Some(grid) = self.grid.as_mut() {
-                    grid.editable = false;
-                }
-            } else {
-                self.grid = None;
-                self.results.clear();
-                self.result_id = None;
-                self.page_token = None;
-                self.page_history.clear();
-                self.large = None;
-                self.browse_result = false;
-                self.clear_cli_session();
-            }
-            self.workbench.queued_target = None;
-        }
-        self.switch_tab(old);
-    }
     pub(crate) fn navigation_profile_has_pending_work(&self, id: Uuid) -> bool {
+        if self
+            .navigation
+            .create_database
+            .as_ref()
+            .is_some_and(|form| form.profile_id == id)
+        {
+            return true;
+        }
         if self
             .navigation
             .drop_operation
@@ -113,9 +105,14 @@ impl App {
             if !tab.pending.is_null() {
                 return true;
             }
+            if self.tab_has_advanced_work(index) {
+                return true;
+            }
             if index == self.active {
                 self.has_live_drafts()
                     || self.workbench.inline.is_some()
+                    || self.workbench.draft_scope_pending.is_some()
+                    || !self.workbench.draft_scope_recovery.is_empty()
                     || self.task.is_some()
                     || self.operation_pending
                     || self.workbench.cli_running
@@ -131,6 +128,8 @@ impl App {
                     || runtime.paste_preview.is_some()
                     || self.redis_key_delete_tab_pending(tab.id)
                     || runtime.workbench.inline.is_some()
+                    || runtime.workbench.draft_scope_pending.is_some()
+                    || !runtime.workbench.draft_scope_recovery.is_empty()
                     || runtime.task.is_some()
                     || runtime.operation_pending
                     || runtime.workbench.cli_running
@@ -140,6 +139,19 @@ impl App {
     }
 
     pub(super) fn navigation_profile_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if let Some(value) = name.strip_prefix("profile-close:") {
+            let Ok(id) = Uuid::parse_str(value) else {
+                return true;
+            };
+            if self.navigation.delete_operation.is_some()
+                || self.navigation_profile_has_pending_work(id)
+            {
+                self.status = UiMessage::key("该连接存在草稿或任务，请先处理");
+                return true;
+            }
+            self.close_profile_tabs_then(&[id], &format!("profile-close-finished:{id}"), backend);
+            return true;
+        }
         if let Some(value) = name.strip_prefix("profile-delete-request:") {
             let Some(id) = Uuid::parse_str(value).ok() else {
                 return true;
@@ -154,13 +166,17 @@ impl App {
                 self.status = UiMessage::key("正在删除连接，请等待");
                 return true;
             }
+            if self.navigation_profile_has_pending_work(id) {
+                self.status = UiMessage::key("该连接存在草稿或任务，请先处理");
+                return true;
+            }
             self.navigation.delete_confirmation = Some(ProfileDeleteConfirmation {
                 token: Uuid::new_v4(),
                 id,
                 name: profile.name.clone(),
                 busy: false,
                 error: None,
-                tab: self.tabs[self.active].id,
+                tab: self.tabs.get(self.active).map(|tab| tab.id),
                 profile: serde_json::to_value(profile).unwrap_or(Value::Null),
             });
             self.workbench.overlay = Some("profile-delete".into());
@@ -208,31 +224,20 @@ impl App {
             let confirmation_state = self.navigation.delete_confirmation.as_mut().unwrap();
             confirmation_state.busy = true;
             confirmation_state.error = None;
-            let mut sessions = Vec::new();
-            for index in 0..self.tabs.len() {
-                if self.tabs[index].profile_id != Some(confirmation.id) {
-                    continue;
-                }
-                let session = if index == self.active {
-                    self.session.as_ref()
-                } else {
-                    self.tabs[index].runtime.session.as_ref()
-                };
-                if let Some(session) = session.and_then(|session| session.get("session_id")) {
-                    sessions.push((self.tabs[index].id, session.clone()));
-                }
-                if index == self.active {
-                    self.operation_pending = true;
-                } else {
-                    self.tabs[index].runtime.operation_pending = true;
-                }
-            }
             self.navigation.delete_operation = Some(ProfileDeleteOperation {
                 id: confirmation.id,
                 token: confirmation.token,
-                sessions,
             });
-            self.navigation_profile_delete_next(backend);
+            if !self.close_profile_tabs_then(
+                &[confirmation.id],
+                &format!("profile-delete-tabs-closed:{}", confirmation.token),
+                backend,
+            ) {
+                self.navigation_profile_delete_abort(
+                    confirmation.token,
+                    "该连接存在草稿或任务，请先处理".into(),
+                );
+            }
             return true;
         }
         false

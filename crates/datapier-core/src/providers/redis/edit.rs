@@ -1,7 +1,7 @@
 use super::*;
 
-// Redis 8 的 HSETEX KEEPTTL 将新值和字段期限作为同一条命令更新，避免
-// HSET 成功后恢复期限失败。旧版本不具备字段期限，只有确认命令不存在才走 HSET。
+// 优先使用 Redis 8 的 HSETEX KEEPTTL；Redis 7.4 使用脚本恢复字段期限，
+// 恢复失败时报告部分生效。旧版本不支持字段期限，可直接 HSET。
 const HASH_SET_KEEP_FIELD_TTL: &str = r#"
 local key, field, value, expected = KEYS[1], ARGV[1], ARGV[2], ARGV[3]
 if redis.call('HEXISTS', key, field) ~= 1 then return redis.error_reply('DATAPIER_CONFLICT hash field missing') end
@@ -17,20 +17,31 @@ end
 if type(expiry) ~= 'table' or type(expiry[1]) ~= 'number' then return redis.error_reply('invalid field expiry response') end
 if expiry[1] == -2 then return redis.error_reply('DATAPIER_CONFLICT hash field expired') end
 if expected ~= '*' and expiry[1] ~= tonumber(expected) then return redis.error_reply('DATAPIER_CONFLICT field expiry changed') end
+if expiry[1] == -1 then return redis.call('HSET', key, field, value) end
 local result = redis.pcall('HSETEX', key, 'FXX', 'KEEPTTL', 'FIELDS', 1, field, value)
-if type(result) == 'table' and result.err then return redis.error_reply('field update failed: ' .. result.err) end
+if type(result) == 'table' and result.err then
+  local message = string.lower(result.err)
+  if not string.find(message, 'unknown redis command', 1, true) and not string.find(message, 'unknown command', 1, true) then return redis.error_reply('field update failed: ' .. result.err) end
+  if redis.acl_check_cmd and (not redis.acl_check_cmd('HSET', key, field, value) or not redis.acl_check_cmd('HPEXPIREAT', key, expiry[1], 'FIELDS', 1, field)) then return redis.error_reply('field update permission denied') end
+  local written = redis.pcall('HSET', key, field, value)
+  if type(written) == 'table' and written.err then return redis.error_reply('field update failed: ' .. written.err) end
+  local restored = redis.pcall('HPEXPIREAT', key, expiry[1], 'FIELDS', 1, field)
+  if type(restored) ~= 'table' or restored.err or restored[1] ~= 1 then return {'DATAPIER_PARTIAL', 'field expiry restoration failed'} end
+  return 1
+end
 if result ~= 1 then return redis.error_reply('DATAPIER_CONFLICT hash field missing') end
 return result
 "#;
 
-// 成员身份变化使用同一 WATCH/EXEC 和脚本；ZSet 的 score 在脚本中读取，
-// 不落工作区。Redis 脚本不会回滚已执行的命令，部分失败必须单独报告。
+// 成员身份变化使用 WATCH/EXEC 和脚本；原 score 仅在脚本内读取。
+// Redis 脚本不会回滚已执行的命令，部分失败必须单独报告。
 const REPLACE_MEMBER: &str = r#"
 local key, old, new, kind = KEYS[1], ARGV[1], ARGV[2], ARGV[3]
 local score
 if kind == 'zset' then
   score = redis.call('ZSCORE', key, old)
   if not score then return redis.error_reply('DATAPIER_CONFLICT source member missing') end
+  if ARGV[4] ~= '' then score = ARGV[4] end
 else
   if redis.call('SISMEMBER', key, old) ~= 1 then return redis.error_reply('DATAPIER_CONFLICT source member missing') end
 end
@@ -53,6 +64,38 @@ if added ~= 1 then return redis.error_reply('DATAPIER_CONFLICT destination membe
 local removed = redis.pcall(unpack(remove))
 if type(removed) == 'table' and removed.err then return {'DATAPIER_PARTIAL', removed.err} end
 if removed ~= 1 then return {'DATAPIER_PARTIAL', 'source member was not removed'} end
+return 1
+"#;
+
+// 创建目标后再删除源字段，避免单字段 hash 消失导致 key TTL 丢失。
+const REPLACE_HASH_FIELD: &str = r#"
+local key, old, new = KEYS[1], ARGV[1], ARGV[2]
+local value = redis.call('HGET', key, old)
+if not value then return redis.error_reply('DATAPIER_CONFLICT source field missing') end
+if ARGV[3] == '1' then value = ARGV[4] end
+if old == new then return redis.error_reply('DATAPIER_CONFLICT source and destination field are identical') end
+if redis.call('HEXISTS', key, new) == 1 then return redis.error_reply('DATAPIER_CONFLICT destination field exists') end
+local expiry = redis.pcall('HPEXPIRETIME', key, 'FIELDS', 1, old)
+if type(expiry) == 'table' and expiry.err then
+  local message = string.lower(expiry.err)
+  if not string.find(message, 'unknown redis command', 1, true) and not string.find(message, 'unknown command', 1, true) then return redis.error_reply('field expiry check failed: ' .. expiry.err) end
+  expiry = -1
+elseif type(expiry) == 'table' and type(expiry[1]) == 'number' then
+  expiry = expiry[1]
+else return redis.error_reply('invalid field expiry response') end
+if expiry == -2 then return redis.error_reply('DATAPIER_CONFLICT source field expired') end
+if redis.acl_check_cmd then
+  if not redis.acl_check_cmd('HSET', key, new, value) or not redis.acl_check_cmd('HDEL', key, old) or (expiry >= 0 and not redis.acl_check_cmd('HPEXPIREAT', key, expiry, 'FIELDS', 1, new)) then return redis.error_reply('field replacement permission denied') end
+end
+local created = redis.pcall('HSET', key, new, value)
+if type(created) == 'table' and created.err then return redis.error_reply('field creation failed: ' .. created.err) end
+if expiry >= 0 then
+  local set_expiry = redis.pcall('HPEXPIREAT', key, expiry, 'FIELDS', 1, new)
+  if type(set_expiry) ~= 'table' or set_expiry.err or set_expiry[1] ~= 1 then return {'DATAPIER_PARTIAL', 'destination field expiry failed'} end
+end
+local removed = redis.pcall('HDEL', key, old)
+if type(removed) == 'table' and removed.err then return {'DATAPIER_PARTIAL', removed.err} end
+if removed ~= 1 then return {'DATAPIER_PARTIAL', 'source field was not removed'} end
 return 1
 "#;
 
@@ -241,15 +284,45 @@ fn hash_set_command(edit: &Edit, key: Vec<u8>, change: &Json) -> Result<Vec<Vec<
     ])
 }
 
+fn replace_hash_field_command(key: Vec<u8>, change: &Json) -> Result<Vec<Vec<u8>>> {
+    let value = if change.get("value").is_some() {
+        Some(field(change, "value")?)
+    } else {
+        None
+    };
+    Ok(vec![
+        b"EVAL".to_vec(),
+        REPLACE_HASH_FIELD.as_bytes().to_vec(),
+        b"1".to_vec(),
+        key,
+        field(change, "field")?,
+        field(change, "new_field")?,
+        if value.is_some() {
+            b"1".to_vec()
+        } else {
+            b"0".to_vec()
+        },
+        value.unwrap_or_default(),
+    ])
+}
+
 fn replace_member_command(key: Vec<u8>, change: &Json, kind: &str) -> Result<Vec<Vec<u8>>> {
-    if kind == "zset"
-        && (change.get("preserve_score").and_then(Json::as_bool) != Some(true)
-            || change.get("score").is_some())
-    {
-        return Err(AppError::invalid(
-            "成员替换必须保留原 score，不能指定新分值",
-        ));
-    }
+    let score = if kind == "zset" {
+        match (change.get("preserve_score"), change.get("score")) {
+            (Some(Json::Bool(true)), None) => String::new(),
+            (None | Some(Json::Bool(false)), Some(Json::String(score))) => {
+                crate::execution::transfer::validate_redis_score(score)?;
+                score.clone()
+            }
+            _ => {
+                return Err(AppError::invalid(
+                    "成员替换必须选择保留原 score 或指定新 score",
+                ));
+            }
+        }
+    } else {
+        String::new()
+    };
     Ok(vec![
         b"EVAL".to_vec(),
         REPLACE_MEMBER.as_bytes().to_vec(),
@@ -258,6 +331,7 @@ fn replace_member_command(key: Vec<u8>, change: &Json, kind: &str) -> Result<Vec
         field(change, "member")?,
         field(change, "new_member")?,
         kind.as_bytes().to_vec(),
+        score.into_bytes(),
     ])
 }
 
@@ -466,7 +540,14 @@ impl RedisSession {
                         return Err(AppError::new("database", error));
                     }
                 }
-                Ok(json!({"items":items,"results":[],"ttl_checked":has_expiry}))
+                let result = json!({"items":items,"results":[],"ttl_checked":has_expiry});
+                if result["items"].as_array().is_some_and(|items| items.iter().any(|item| item["status"] != "applied")) {
+                    let mut error = AppError::new("partial_failure", "Redis 变更包含失败项，其他命令可能已生效");
+                    error.details = Box::new(result);
+                    Err(error)
+                } else {
+                    Ok(result)
+                }
             }
             _ => Err(AppError::new("database", "无效 EXEC 响应")),
         }
@@ -526,6 +607,7 @@ fn change_plan(edit: &Edit, changes: &[Json], preview: bool) -> Result<ChangePla
         let cmd=match op {
    "set_string" if edit.kind=="string"||edit.kind=="none" => vec![b"SET".to_vec(),k,field(change,"value")?,b"KEEPTTL".to_vec()],
    "hash_set" if edit.kind=="hash"=>hash_set_command(edit,k,change)?,
+   "hash_replace_field" if edit.kind=="hash"=>replace_hash_field_command(k,change)?,
    "hash_delete" if edit.kind=="hash"=>vec![b"HDEL".to_vec(),k,field(change,"field")?],
    "list_set" if edit.kind=="list"=>vec![b"LSET".to_vec(),k,index(change)?,field(change,"value")?],
    "list_insert" if edit.kind=="list"=>vec![b"EVAL".to_vec(),b"local n=redis.call('LLEN',KEYS[1]); local i=tonumber(ARGV[1]); if not i or i<0 or i>n then return redis.error_reply('index out of range') end; if i==n then return redis.call('RPUSH',KEYS[1],ARGV[2]) end; local last=redis.call('LINDEX',KEYS[1],n-1); redis.call('RPUSH',KEYS[1],last); for j=n-1,i+1,-1 do redis.call('LSET',KEYS[1],j,redis.call('LINDEX',KEYS[1],j-1)) end; redis.call('LSET',KEYS[1],i,ARGV[2]); return n+1".to_vec(),b"1".to_vec(),k,index(change)?,field(change,"value")?],

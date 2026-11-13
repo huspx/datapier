@@ -38,6 +38,7 @@ impl Fixture {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         };
         let session = ProviderSession::connect(profile, None).await.unwrap();

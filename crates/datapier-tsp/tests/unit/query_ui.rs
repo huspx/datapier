@@ -9,6 +9,63 @@ fn query_app(sql: &str) -> App {
 }
 
 #[test]
+fn query_info_updates_only_its_own_tab_and_rejects_stale_generation() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app("USE two");
+    app.database = Some("one".into());
+    app.tabs[0].browse.database = app.database.clone();
+    app.refresh_query_mode(&backend);
+    let info = requests.try_recv().unwrap();
+    app.create_query_tab();
+    app.database = Some("other".into());
+    app.tabs[1].browse.database = app.database.clone();
+    app.routed_response(
+        Response {
+            tag: info.tag.clone(),
+            result: Ok(json!({"database":"two", "sql_mode":""})),
+        },
+        &backend,
+    );
+    assert_eq!(app.database.as_deref(), Some("other"));
+    app.switch_tab(0);
+    assert_eq!(app.database.as_deref(), Some("two"));
+    assert_eq!(app.tabs[0].browse.database.as_deref(), Some("two"));
+    let generation = app.generation;
+    app.routed_response(
+        Response {
+            tag: info.tag,
+            result: Ok(json!({"database":"stale", "sql_mode":""})),
+        },
+        &backend,
+    );
+    assert_eq!(app.database.as_deref(), Some("two"));
+    assert_eq!(app.generation, generation);
+}
+
+#[test]
+fn archery_request_limit_uses_setting_until_explicitly_selected() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = query_app("SELECT 1");
+    app.settings.archery.request_rows = 500;
+    app.profile = Some(
+        serde_json::from_value(json!({
+            "id": Uuid::new_v4(), "name":"Archery", "provider":"mysql", "access_mode":"read_only",
+            "connection":{"kind":"archery", "server_id":Uuid::new_v4(), "instance_id":1,
+                "instance_name":"mysql", "databases":["one"], "default_database":"one"}
+        }))
+        .unwrap(),
+    );
+    assert_eq!(app.archery_request_limit(), 500);
+    app.workbench_action("archery-request-limit:100", &backend);
+    app.settings.archery.request_rows = 1000;
+    assert_eq!(app.archery_request_limit(), 100);
+    app.create_query_tab();
+    assert_eq!(app.archery_request_limit(), 1000);
+    app.switch_tab(0);
+    assert_eq!(app.archery_request_limit(), 100);
+}
+
+#[test]
 fn plan_executes_selection_before_current_statement() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = query_app("SELECT '中文😀;'; SELECT 2");

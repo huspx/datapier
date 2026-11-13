@@ -40,9 +40,16 @@ pub struct SchemaSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SchemaDefinition {
+    Database(DatabaseDefinition),
     Table(TableDefinition),
     View(ViewDefinition),
     Trigger(TriggerDefinition),
+}
+/// 新建数据库的字符集与排序规则；空值使用服务端相应默认值。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseDefinition {
+    pub charset: Option<String>,
+    pub collation: Option<String>,
 }
 /// 默认值种类不能根据文本猜测。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

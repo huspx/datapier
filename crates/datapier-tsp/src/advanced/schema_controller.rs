@@ -117,7 +117,7 @@ impl App {
         }
     }
 
-    /// 在当前表标签内初始化结构编辑；已有草稿和计划不得被覆盖。
+    /// 在当前对象标签内初始化结构编辑；已有草稿和计划不得被覆盖。
     pub(crate) fn advanced_schema_open_existing(
         &mut self,
         backend: &Backend,
@@ -131,7 +131,7 @@ impl App {
             return;
         };
         if profile.provider != datapier_core::model::ProviderKind::Mysql
-            || target.kind != "table"
+            || !matches!(target.kind.as_str(), "table" | "view")
             || target.database.as_deref().is_none_or(str::is_empty)
         {
             return;

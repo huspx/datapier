@@ -43,6 +43,7 @@ impl Fixture {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         };
         let client = Client::open(format!("redis://127.0.0.1:{port}/15")).unwrap();
@@ -553,7 +554,11 @@ async fn import_replacement_never_mutates_or_deletes_external_key() {
             f.keys.push(temp.clone());
             let row = match kind {
                 "string" | "set" => json!([binary(b"first\0value")]),
-                "hash" => json!([binary(b"field"), binary(b"first\0value")]),
+                "hash" => json!([
+                    binary(b"field"),
+                    binary(b"first\0value"),
+                    Value::Integer("-1".into())
+                ]),
                 "list" => json!([Value::Unsigned("0".into()), binary(b"first\0value")]),
                 _ => json!([binary(b"member"), Value::Float("1.5".into())]),
             };
@@ -654,6 +659,85 @@ async fn import_replacement_never_mutates_or_deletes_external_key() {
 }
 
 #[tokio::test]
+#[ignore = "requires isolated Redis 6.2+ with ACL administration"]
+async fn import_rename_acl_denial_preserves_owned_expiring_staging_key() {
+    let mut f = Fixture::new().await;
+    let username = format!("datapier-{}", Uuid::new_v4().simple());
+    let password = Uuid::new_v4().to_string();
+    let _: () = redis::cmd("ACL")
+        .arg("SETUSER")
+        .arg(&username)
+        .arg("on")
+        .arg(format!(">{password}"))
+        .arg("~*")
+        .arg("+@all")
+        .arg("-renamenx")
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let mut profile = f.profile.clone();
+    if let ConnectionConfig::Direct(direct) = &mut profile.connection {
+        direct.username = username.clone();
+    }
+    let mut session = ProviderSession::connect(profile, Some(password))
+        .await
+        .unwrap();
+    let target = f.target(b"acl-denied", "string");
+    let sink = f.sink().await;
+    let cancel = CancellationToken::new();
+    let begin = session
+        .call(
+            "import.begin",
+            json!({"target":target,"type":"string"}),
+            &sink,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let token = begin["token"].clone();
+    let temp = format!("__datapier_import_{}", token.as_str().unwrap());
+    session
+        .call(
+            "import.append",
+            json!({"token":token,"rows":[[binary(b"value")]]}),
+            &sink,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        session
+            .call("import.finish", json!({"token":token}), &sink, &cancel)
+            .await
+            .is_err()
+    );
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&temp)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert!(ttl > 0);
+    session
+        .call("import.discard", json!({"token":token}), &sink, &cancel)
+        .await
+        .unwrap();
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg(&temp)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    assert_eq!(exists, 0);
+    let _: i64 = redis::cmd("ACL")
+        .arg("DELUSER")
+        .arg(&username)
+        .query_async(&mut f.raw)
+        .await
+        .unwrap();
+    let _ = session.close().await;
+    f.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis 6.2/7.2/8.0 instance"]
 async fn import_preserves_values_and_removes_owned_staging_keys() {
     let mut f = Fixture::new().await;
@@ -692,7 +776,11 @@ async fn import_preserves_values_and_removes_owned_staging_keys() {
         };
         let row = match kind {
             "string" => json!([binary(b"binary\0value")]),
-            "hash" => json!([binary(&marker), binary(b"binary\0value")]),
+            "hash" => json!([
+                binary(&marker),
+                binary(b"binary\0value"),
+                Value::Integer("-1".into())
+            ]),
             "list" => json!([Value::Unsigned("0".into()), binary(b"binary\0value")]),
             "set" => json!([binary(&marker)]),
             _ => json!([binary(&marker), Value::Float("1.5".into())]),
@@ -806,7 +894,11 @@ async fn import_close_preserves_replacement_and_cleans_owned_key() {
             f.keys.push(temp.clone());
             let row = match kind {
                 "string" | "set" => json!([binary(b"initial")]),
-                "hash" => json!([binary(b"field"), binary(b"initial")]),
+                "hash" => json!([
+                    binary(b"field"),
+                    binary(b"initial"),
+                    Value::Integer("-1".into())
+                ]),
                 "list" => json!([Value::Unsigned("0".into()), binary(b"initial")]),
                 _ => json!([binary(b"member"), Value::Float("1".into())]),
             };
@@ -948,9 +1040,10 @@ async fn preview_list_dynamic_marker_pagination_ttl_and_exec_errors() {
     assert_eq!(last["items"][2]["index"], Json::Null);
     let ttl = &last["items"][2]["statements"][0]["parameters"];
     assert_eq!(ttl[5]["display"], "\"60000\"");
-    let result = f.call("change.submit", params).await.unwrap();
-    assert_eq!(result["items"][0]["status"], "applied");
-    assert_eq!(result["items"][1]["status"], "error");
+    let error = f.call("change.submit", params).await.unwrap_err();
+    assert_eq!(error.code, "partial_failure");
+    assert_eq!(error.details["items"][0]["status"], "applied");
+    assert_eq!(error.details["items"][1]["status"], "error");
     let values: Vec<Vec<u8>> = redis::cmd("LRANGE")
         .arg(&key)
         .arg(0)
@@ -1548,8 +1641,9 @@ async fn value_zset_member_replacement_preserves_score_and_rejects_collision() {
         .call("change.open", json!({"target":target}))
         .await
         .unwrap();
-    let result = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"zset_replace_member","member":binary(b"new\0\xff"),"new_member":binary(b"occupied"),"preserve_score":true}]})).await.unwrap();
-    assert_eq!(result["items"][0]["status"], "conflict");
+    let error = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"zset_replace_member","member":binary(b"new\0\xff"),"new_member":binary(b"occupied"),"preserve_score":true}]})).await.unwrap_err();
+    assert_eq!(error.code, "partial_failure");
+    assert_eq!(error.details["items"][0]["status"], "conflict");
     let score: String = redis::cmd("ZSCORE")
         .arg(&key)
         .arg(b"new\0\xff".as_slice())
@@ -1611,8 +1705,9 @@ async fn value_set_member_replacement_rejects_collisions() {
         .call("change.open", json!({"target":target}))
         .await
         .unwrap();
-    let result = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_replace_member","member":binary(b"new\0\xff"),"new_member":binary(b"occupied")}]})).await.unwrap();
-    assert_eq!(result["items"][0]["status"], "conflict");
+    let error = f.call("change.submit", json!({"target":target,"token":opened["token"],"changes":[{"operation":"set_replace_member","member":binary(b"new\0\xff"),"new_member":binary(b"occupied")}]})).await.unwrap_err();
+    assert_eq!(error.code, "partial_failure");
+    assert_eq!(error.details["items"][0]["status"], "conflict");
     let retained: i64 = redis::cmd("SISMEMBER")
         .arg(&key)
         .arg(b"new\0\xff".as_slice())

@@ -198,8 +198,12 @@ impl Store {
             "interrupted",
             "Engine 已中断，原会话不可恢复",
         ))?;
-        sqlx::query("UPDATE executions SET state=CASE WHEN json_extract(params,'$._task_context.source')='archery' THEN 'failed' WHEN sent=1 AND may_write=1 THEN 'outcome_unknown' ELSE 'cancelled' END,error=CASE WHEN json_extract(params,'$._task_context.source')='archery' THEN ? WHEN sent=1 AND may_write=1 THEN ? ELSE ? END WHERE state IN ('queued','running','cancelling')")
-            .bind(&interrupted).bind(unknown).bind(interrupted).execute(&self.pool).await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE approvals SET state=CASE WHEN state='dispatching' AND EXISTS (SELECT 1 FROM executions WHERE id=approvals.execution_id AND sent=1) THEN 'dispatched' ELSE 'invalidated' END,decided_at=COALESCE(decided_at,unixepoch()),decision_source=COALESCE(decision_source,'engine_restart') WHERE state IN ('pending','dispatching')")
+            .execute(&mut *tx).await?;
+        sqlx::query("UPDATE executions SET state=CASE WHEN sent=1 AND may_write=1 THEN 'outcome_unknown' WHEN json_extract(params,'$._task_context.source')='archery' THEN 'failed' ELSE 'cancelled' END,error=CASE WHEN sent=1 AND may_write=1 THEN ? WHEN json_extract(params,'$._task_context.source')='archery' THEN ? ELSE ? END,updated_at=unixepoch('subsec') WHERE state IN ('queued','running','cancelling','approval_required')")
+            .bind(unknown).bind(&interrupted).bind(interrupted).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
     /// 返回未分页授权之前的候选，调用方必须先过滤再统计和输出。

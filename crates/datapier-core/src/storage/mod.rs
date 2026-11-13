@@ -242,10 +242,28 @@ async fn open_database(path: &Path) -> Result<SqlitePool> {
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(10));
-    Ok(SqlitePoolOptions::new()
-        .max_connections(4)
+    let mut warm = [None, None, None, None];
+    let pool = SqlitePoolOptions::new()
+        .max_connections(warm.len() as u32)
+        .idle_timeout(None)
+        .max_lifetime(None)
         .connect_with(options)
-        .await?)
+        .await?;
+    // 先由首个连接完成 WAL 初始化，再顺序建立剩余连接，避免并发修改日志模式。
+    // 全部连接随 Store 存续，目录改名后不再因延迟扩容或定时换连解析旧路径。
+    let ready = async {
+        for connection in &mut warm {
+            *connection = Some(pool.acquire().await?);
+        }
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    drop(warm);
+    if let Err(error) = ready {
+        pool.close().await;
+        return Err(error.into());
+    }
+    Ok(pool)
 }
 
 #[cfg(test)]

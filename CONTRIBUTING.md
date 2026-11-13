@@ -32,7 +32,7 @@ Changelog 按最后一个已发布版本比较：新功能在首次发布前的�
 - 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
 - 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 - 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
-- 当前开发验收基线为 macOS arm64、Tern 0.9.12 与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
+- 当前开发验收基线为 macOS arm64、Tern 0.9.18 与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
 
 构建本地程序，启动普通终端 TUI 或在 Tern 中启动 TSP：
@@ -237,7 +237,7 @@ cargo test -p datapier-core --test tls -- --ignored
 
 普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
 
-按[0.3.0 技术方案验收要求](docs/technical-design-0.3.0.md#131-必须观察的行为)及既有 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)覆盖真实 MCP、普通终端、Tern、数据库、权限审批、实时分页与导出、升级和生命周期，并记录实际平台与环境。本轮 0.3.0 验收按用户最新确认仅覆盖 macOS arm64、Tern 0.9.12，其他平台保留实现与 CI 配置，不作为本轮门禁；历史证据不替代本候选验证。具体发布检查见[发布前检查](RELEASING.md#发布前检查)。
+按[0.3.0 技术方案验收要求](docs/technical-design-0.3.0.md#131-必须观察的行为)及既有 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)覆盖真实 MCP、普通终端、Tern、数据库、权限审批、实时分页与导出、升级和生命周期，并记录实际平台与环境。本轮 0.3.0 验收仅覆盖 macOS arm64、Tern 0.9.18，其他平台保留实现与 CI 配置，不作为本轮门禁；历史证据不替代本候选验证。正常窗口的 window／pane 绑定、bridge 启动终端编辑器与显式回填必须实际验收，不能以 `serve` 渲染或缓存安装成功替代。具体发布检查见[发布前检查](RELEASING.md#发布前检查)。
 
 只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。[0.1.0 历史验收](docs/technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 候选运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)不是当前候选的验证证据；0.2.0 结果记录在[技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)，发布门禁以[发布前检查](RELEASING.md#发布前检查)为准。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
 

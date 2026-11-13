@@ -92,6 +92,28 @@ fn cli_export_uses_selected_result_instead_of_key_result() {
 }
 
 #[test]
+fn redis_key_export_uses_target_while_query_export_uses_cached_result() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.browse_result = true;
+    app.result_id = Some(Uuid::new_v4().to_string());
+    app.field_set("path", "/tmp/redis-export.json");
+    app.action("export", &backend);
+    let key = requests.try_recv().unwrap();
+    assert_eq!(key.method, "transfer.export");
+    assert!(key.params.get("target").is_some());
+    assert!(key.params.get("result_id").is_none());
+    app.operation_pending = false;
+    app.browse_result = false;
+    app.action("export", &backend);
+    let query = requests.try_recv().unwrap();
+    assert_eq!(
+        query.params["result_id"],
+        app.result_id.as_ref().unwrap().as_str()
+    );
+}
+
+#[test]
 fn cli_pages_do_not_replace_key_grid_or_baseline() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = app_for(

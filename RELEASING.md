@@ -2,7 +2,7 @@
 
 ## 当前发布方式与边界
 
-0.1.0 已于 2026-11-01 在 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.1.0) 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。`.github/workflows/native-release.yml` 在目标为 `main` 的 pull request、`main` 的 push 和手动触发时执行格式检查与六目标原生构建、测试、smoke 和单目标打包。PR 与非 main 手动运行仅保留 runner 内临时文件；main push 或 main 手动运行将打包结果直接上传版本草稿 Release，汇总后补齐 plugin 包和校验清单。全部路径均不上传 Actions artifact，不占用其产物保留空间。普通工作分支和 tag 的 push 不自动触发；草稿不会自动发布，也不设为 latest。
+最新正式稳定版为 [0.2.0](https://github.com/huspx/datapier/releases/tag/v0.2.0)，于 2026-11-07 发布。历史版本 0.1.0 于 2026-11-01 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。`.github/workflows/native-release.yml` 在目标为 `main` 的 pull request、`main` 的 push 和手动触发时执行格式检查与六目标原生构建、测试、smoke 和单目标打包。PR 与非 main 手动运行仅保留 runner 内临时文件；main push 或 main 手动运行将打包结果直接上传版本草稿 Release，汇总后补齐 plugin 包和校验清单。全部路径均不上传 Actions artifact，不占用其产物保留空间。普通工作分支和 tag 的 push 不自动触发；草稿不会自动发布，也不设为 latest。
 
 [技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成完整原生验收。0.1.0 经维护者明确接受已披露的验收范围后公开，例外与限制保留在对应 Release 说明中；该次授权不代表其余平台已验收，也不自动放宽后续版本的发布要求。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
@@ -49,7 +49,7 @@ python3 scripts/version.py --check-release
 
 ## 发布前检查
 
-按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)和[0.3.0 验收要求](docs/technical-design-0.3.0.md#131-必须观察的行为)完成适用检查，并回归既有 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)，记录实际命令和结果。本轮 0.3.0 实施验收按用户最新确认仅覆盖 macOS arm64、Tern 0.9.12；其他五个原生目标及六目标 CI 不作为本轮门禁，六目标实现与现有分发构建流程保留。后续按现有流程发布完整六目标附件时，仍须执行对应构建、组包与资源核对。编译、默认测试和版本 smoke 不等于原生运行或端到端验收；默认测试不包含默认忽略的真实数据库专项。
+按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)和[0.3.0 验收要求](docs/technical-design-0.3.0.md#131-必须观察的行为)完成适用检查，并回归既有 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)，记录实际命令和结果。本轮 0.3.0 实施验收仅覆盖 macOS arm64、Tern 0.9.18；其他五个原生目标及六目标 CI 不作为本轮门禁，六目标实现与现有分发构建流程保留。后续按现有流程发布完整六目标附件时，仍须执行对应构建、组包与资源核对。编译、默认测试和版本 smoke 不等于原生运行或端到端验收；默认测试不包含默认忽略的真实数据库专项。
 
 - 使用隔离的真实 MySQL 5.7／8.0／8.4 和 Redis 6.2／7.2／8.0 单节点，按实际版本验证连接、查询、编辑提交、导入导出、只读、并发冲突与取消；覆盖大整数、精确小数、NULL、二进制、普通空结果、多结果、写入断连不重放、Redis List 重复值、WATCH 与 TTL。数据库测试只创建并清理自身隔离资源，不使用生产数据或真实凭据作为样本。
 - 在实际 Tern 中验证完整交互，包括中文／emoji、选区、分页、大字段、草稿恢复、两个 UI、十万行全量导出及百万 key 增量扫描；观察 IPC、客户端退出及 Engine 收尾的进程和资源状态。验证 TLS 成功连接及错误 CA／身份拒绝、系统凭据存取和凭据服务不可用时的行为，确保日志、配置、导出和运行描述不含秘密。

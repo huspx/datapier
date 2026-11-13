@@ -96,12 +96,46 @@ impl App {
             self.archery_global_servers_response(response);
             return;
         }
-        if let Some(token) = response.tag.strip_prefix("history.page/") {
-            self.history_response(token, &response.result, backend);
-            return;
-        }
-        if let Some(token) = response.tag.strip_prefix("history.text/") {
-            self.history_text_response(token, &response.result);
+        if let Some((is_text, token)) = response
+            .tag
+            .strip_prefix("history.page/")
+            .map(|token| (false, token))
+            .or_else(|| {
+                response
+                    .tag
+                    .strip_prefix("history.text/")
+                    .map(|token| (true, token))
+            })
+        {
+            let Ok(operation) = Uuid::parse_str(token) else {
+                return;
+            };
+            let owner = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+                let history = if index == self.active {
+                    &self.workbench.archery_history
+                } else {
+                    &tab.runtime.workbench.archery_history
+                };
+                let matches = if is_text {
+                    history
+                        .text_pending
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id == operation)
+                } else {
+                    history.pending == Some(operation)
+                };
+                matches.then_some(index)
+            });
+            if let Some(index) = owner {
+                let active = self.active;
+                self.switch_tab(index);
+                if is_text {
+                    self.history_text_response(token, &response.result);
+                } else {
+                    self.history_response(token, &response.result, backend);
+                }
+                self.switch_tab(active);
+            }
             return;
         }
         if response.tag.starts_with("archery-ui/") {
@@ -284,6 +318,8 @@ impl App {
             } else if tag.starts_with("schema/") {
                 // SchemaEditor 对每个请求再校验 token 与本地代次；连续失效事件不应丢失提交响应。
                 self.advanced_schema_response(&tag, &response.result, backend);
+            } else if tag.starts_with("replace/") {
+                self.replace_response(&tag, &response.result, backend);
             } else if let Some(task) = tag.strip_prefix("execution.get/")
                 && self.task.as_deref() == Some(task)
                 && self.advanced_schema.as_ref().is_some_and(|schema| {
@@ -305,11 +341,7 @@ impl App {
                 }
             } else if self.workbench.value_schema_generations == Some((generation, self.generation))
             {
-                if tag.starts_with("replace/") {
-                    self.replace_response(&tag, &response.result, backend);
-                } else if tag.starts_with("schema/") {
-                    self.advanced_schema_response(&tag, &response.result, backend);
-                } else if matches!(
+                if matches!(
                     tag.as_str(),
                     "execution.start"
                         | "archery.sql_check"

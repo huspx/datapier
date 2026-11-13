@@ -22,7 +22,7 @@ pub(super) async fn import_redis_csv(
             }
             match &record[1] {
                 "key" => {
-                    if &record[0] != "1" {
+                    if &record[0] != "2" {
                         return Err(AppError::invalid("不支持的 Redis CSV 版本"));
                     }
                     if let Some(key) = active.as_mut() {

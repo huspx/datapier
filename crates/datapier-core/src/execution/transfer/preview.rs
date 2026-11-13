@@ -316,7 +316,7 @@ fn preview_redis_csv(
             break;
         }
         let converted: Result<Vec<Value>> = (|| {
-            if record.len() != REDIS_HEADER.len() || &record[0] != "1" {
+            if record.len() != REDIS_HEADER.len() || &record[0] != "2" {
                 return Err(AppError::invalid("Redis CSV 记录格式错误"));
             }
             if &record[1] == "key" {

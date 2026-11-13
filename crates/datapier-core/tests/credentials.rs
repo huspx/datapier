@@ -5,6 +5,39 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+#[test]
+fn mysql_options_preserve_legacy_defaults_and_reject_unsafe_values() {
+    let legacy = json!({"host":"localhost","port":3306});
+    let mut direct: DirectConnection = serde_json::from_value(legacy).unwrap();
+    assert_eq!(direct.mysql.timezone.as_deref(), Some("+00:00"));
+    assert_eq!(direct.mysql.connect_timeout_seconds, None);
+    direct.mysql.timezone = None;
+    direct.mysql.connect_timeout_seconds = Some(15);
+    direct.mysql.query_timeout_seconds = Some(60);
+    let saved = serde_json::to_value(&direct).unwrap();
+    let restored: DirectConnection = serde_json::from_value(saved).unwrap();
+    assert_eq!(restored.mysql, direct.mysql);
+    for value in ["SYSTEM", "+14:00", "-13:59", "Asia/Shanghai", "Etc/GMT+8"] {
+        direct.mysql.timezone = Some(value.into());
+        assert!(direct.mysql.validate().is_ok(), "{value}");
+    }
+    for value in [
+        "+14:01",
+        "-14:00",
+        "UTC' OR 1=1",
+        "UTC\\x",
+        "Asia/ Shanghai",
+    ] {
+        direct.mysql.timezone = Some(value.into());
+        assert!(direct.mysql.validate().is_err(), "{value}");
+    }
+    direct.mysql.timezone = None;
+    for seconds in [0, 86_401] {
+        direct.mysql.query_timeout_seconds = Some(seconds);
+        assert!(direct.mysql.validate().is_err());
+    }
+}
+
 #[tokio::test]
 #[ignore = "需显式启用本机系统凭据服务验收"]
 async fn credentials_survive_store_reopen_without_entering_sqlite() {
@@ -27,6 +60,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let secret = Uuid::new_v4().to_string();

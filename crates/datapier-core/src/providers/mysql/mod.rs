@@ -24,6 +24,7 @@ use serde_json::{Value as Json, json};
 use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlSslMode};
 use sqlx::{Connection, Row};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ pub struct MysqlSession {
     connection: Option<MySqlConnection>,
     thread_id: u64,
     options: MySqlConnectOptions,
+    connect_timeout: Duration,
     has_index_expression: bool,
     edits: HashMap<Uuid, changes::EditToken>,
     replace_plans: HashMap<Uuid, replace::ReplacePlan>,
@@ -61,6 +63,11 @@ impl MysqlSession {
             .host(&direct.host)
             .port(direct.port)
             .username(&direct.username)
+            .charset("utf8mb4")
+            // SQLx 默认会修改 sql_mode；关闭两个选项以保留服务端会话模式。
+            .pipes_as_concat(false)
+            .no_engine_substitution(false)
+            .timezone(direct.mysql.timezone.clone())
             .ssl_mode(if tls.enabled {
                 MySqlSslMode::VerifyIdentity
             } else {
@@ -81,7 +88,10 @@ impl MysqlSession {
         if let Some(path) = &tls.client_key_path {
             options = options.ssl_client_key(path);
         }
-        let mut connection = connect_initialized(&options, profile.access_mode).await?;
+        let connect_timeout =
+            Duration::from_secs(direct.mysql.connect_timeout_seconds.unwrap_or(10));
+        let mut connection =
+            connect_initialized(&options, profile.access_mode, connect_timeout).await?;
         // 5.7 没有表达式索引列；按实际元数据探测，避免误判兼容服务端的版本号。
         let has_index_expression: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'information_schema' AND TABLE_NAME = 'STATISTICS' AND COLUMN_NAME = 'EXPRESSION'")
             .fetch_one(&mut connection)
@@ -96,6 +106,7 @@ impl MysqlSession {
             connection: Some(connection),
             thread_id,
             options,
+            connect_timeout,
             has_index_expression: has_index_expression != 0,
             edits: HashMap::new(),
             replace_plans: HashMap::new(),
@@ -134,7 +145,12 @@ impl MysqlSession {
         if self.connection.is_none() {
             return Err(AppError::new("connection_closed", "连接已关闭"));
         }
-        connect_initialized(&self.options, self.profile.access_mode).await
+        connect_initialized(
+            &self.options,
+            self.profile.access_mode,
+            self.connect_timeout,
+        )
+        .await
     }
     pub(super) fn connection(&mut self) -> Result<&mut MySqlConnection> {
         self.connection
@@ -160,6 +176,11 @@ impl MysqlSession {
                 "会话 SQL 无法证明在独立连接上保持事务与临时表语义",
             ));
         }
+        if let Some((objects, context)) = &recipe.proof
+            && !live::dependencies_replayable(self, objects.clone(), context, true, cancel).await?
+        {
+            return Err(AppError::new("conflict", "查询依赖已变化，请重新执行"));
+        }
         Ok((
             self.new_connection().await?,
             recipe.sql.clone(),
@@ -181,6 +202,18 @@ impl MysqlSession {
             return Err(AppError::new("unsupported", "表浏览应使用独立连接导出"));
         }
         live::validate_context(self, &recipe).await?;
+        if let Some((objects, context)) = &recipe.proof
+            && !live::dependencies_replayable(
+                self,
+                objects.clone(),
+                context,
+                false,
+                &CancellationToken::new(),
+            )
+            .await?
+        {
+            return Err(AppError::new("conflict", "查询依赖已变化，请重新执行"));
+        }
         let args = recipe.arguments()?;
         Ok((self.connection()?, recipe.sql, args))
     }
@@ -228,10 +261,10 @@ impl MysqlSession {
                     json!({"server_version": row.try_get::<String,_>("version")?, "database": row.try_get::<Option<String>,_>("db")?, "sql_mode": row.try_get::<String,_>("sql_mode")?, "lower_case_table_names": row.try_get::<u64,_>("lower_case_table_names")?, "transaction":self.transaction}),
                 )
             }
-            "database.list" => catalog::databases(self).await,
+            "database.list" => catalog::databases(self, cancel).await,
             "policy.inspect" => catalog::inspect(self, &params).await,
             "result.read" => live::read(self, &params, sink, cancel).await,
-            "result.count" => live::count(self, &params, sink).await,
+            "result.count" => live::count(self, &params, sink, cancel).await,
             "transaction.begin" | "transaction.commit" | "transaction.rollback" => {
                 let text = match method {
                     "transaction.begin" => "BEGIN",
@@ -305,7 +338,13 @@ impl MysqlSession {
             ignore_space: modes.contains(&"IGNORE_SPACE"),
             lower_case_table_names: row.try_get::<u64, _>("lower_case_table_names")? as u8,
         };
-        if !crate::policy::analyze_mysql(statement, &context).is_ok_and(|proof| proof.replayable) {
+        let proof = match crate::policy::analyze_mysql(statement, &context) {
+            Ok(proof) if proof.replayable => proof,
+            _ => return Ok(None),
+        };
+        if !live::dependencies_replayable(self, proof.objects.clone(), &context, false, cancel)
+            .await?
+        {
             return Ok(None);
         }
         let recipe = live::Recipe {
@@ -313,6 +352,7 @@ impl MysqlSession {
             bindings: parameters,
             source_columns: None,
             independent: false,
+            proof: Some((proof.objects, context)),
             context: Some((database.clone(), mode.clone())),
         };
         // 派生表不支持某些合法 SELECT（例如重复列名），这些查询仍走一次流。
@@ -435,10 +475,14 @@ impl MysqlSession {
                 .await
             {
                 Ok((ids, count)) => {
-                    // SQLx 不暴露服务端事务状态；任意 SQL、隐式提交和 autocommit
-                    // 都可能改变状态，只有显式开始成功可证明事务正在进行。
                     self.transaction = match sql::transaction_control(statement) {
                         Some(sql::TransactionControl::Begin) => Some(true),
+                        Some(
+                            sql::TransactionControl::Commit | sql::TransactionControl::Rollback,
+                        ) => None,
+                        _ if sql::readonly(statement) || is_plain_dml(statement) => {
+                            self.transaction
+                        }
                         _ => None,
                     };
                     statements.push(json!({"index":statements.len(),"text":statement,"status":"executed","may_write":may_write,"affected_rows":count,"results":ids,"transaction_state":"unknown"}));
@@ -488,6 +532,7 @@ impl MysqlSession {
         sink.mark_sent(may_write).await?;
         *sent = true;
         let options = self.options.clone();
+        let connect_timeout = self.connect_timeout;
         let outcome = {
             let batch_size = sink.store.settings().await?.paging.sql_rows as usize;
             let future = execute_statement(
@@ -513,12 +558,13 @@ impl MysqlSession {
             _ = cancel.cancelled(), if !may_write => {
                 // 控制连接上的 KILL 可能与目标语句完成竞态。两者都结束前保持
                 // 对目标连接的独占借用，避免迟到的 KILL 命中下一条语句。
-                let killed = match MySqlConnection::connect_with(&options).await {
-                    Ok(mut control) => {
+                let killed = match tokio::time::timeout(connect_timeout, MySqlConnection::connect_with(&options)).await {
+                    Ok(Ok(mut control)) => {
                         let kill = format!("KILL QUERY {thread_id}");
-                        sqlx::raw_sql(sqlx::AssertSqlSafe(kill)).execute(&mut control).await.map(|_| ())
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(kill)).execute(&mut control).await.map(|_| ()).map_err(errors::mysql_error)
                     }
-                    Err(error) => Err(error),
+                    Ok(Err(error)) => Err(errors::mysql_error(error)),
+                    Err(_) => Err(AppError::new("timeout", "连接超时")),
                 };
                 let final_result = future.await;
                 match (killed, final_result) {
@@ -553,6 +599,17 @@ impl MysqlSession {
     }
 }
 
+fn is_plain_dml(statement: &str) -> bool {
+    let first = statement
+        .trim_start()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    ["INSERT", "UPDATE", "DELETE", "REPLACE"]
+        .iter()
+        .any(|keyword| first.eq_ignore_ascii_case(keyword))
+}
+
 fn script_error(
     mut error: AppError,
     completed: &[Json],
@@ -582,18 +639,23 @@ fn script_error(
 async fn connect_initialized(
     options: &MySqlConnectOptions,
     mode: AccessMode,
+    connect_timeout: Duration,
 ) -> Result<MySqlConnection> {
-    let mut connection = MySqlConnection::connect_with(options)
-        .await
-        .map_err(errors::mysql_error)?;
-    // 每条新物理连接都设置服务端约束，补充 SQL 只读判定。
-    if mode == AccessMode::ReadOnly {
-        sqlx::raw_sql("SET SESSION TRANSACTION READ ONLY")
-            .execute(&mut connection)
+    tokio::time::timeout(connect_timeout, async {
+        let mut connection = MySqlConnection::connect_with(options)
             .await
             .map_err(errors::mysql_error)?;
-    }
-    Ok(connection)
+        // 每条新物理连接都设置服务端约束，补充 SQL 只读判定。
+        if mode == AccessMode::ReadOnly {
+            sqlx::raw_sql("SET SESSION TRANSACTION READ ONLY")
+                .execute(&mut connection)
+                .await
+                .map_err(errors::mysql_error)?;
+        }
+        Ok(connection)
+    })
+    .await
+    .map_err(|_| AppError::new("timeout", "连接超时"))?
 }
 
 pub(super) fn quote_ident(name: &str) -> Result<String> {

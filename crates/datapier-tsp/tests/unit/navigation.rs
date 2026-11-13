@@ -3,6 +3,8 @@ use datapier_core::model::RowChange;
 
 #[path = "navigation/archery.rs"]
 mod archery;
+#[path = "navigation/create.rs"]
+mod create;
 #[path = "navigation/drop.rs"]
 mod drop;
 #[path = "navigation/profile.rs"]

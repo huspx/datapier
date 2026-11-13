@@ -37,7 +37,8 @@ impl Engine {
         method: &str,
         params: Value,
     ) -> Result<Value> {
-        self.dispatch_inner(owner, method, params, true).await
+        // MCP 等内部调用会重新进入大型 RPC 分派器；把递归层放到堆上，避免在工作线程栈内嵌套完整 future。
+        Box::pin(self.dispatch_inner(owner, method, params, true)).await
     }
     async fn dispatch_inner(
         self: &Arc<Self>,
@@ -208,6 +209,8 @@ impl Engine {
                 let id = model::param(&params, "profile_id")?;
                 let revision = model::param(&params, "expected_revision")?;
                 let policy = model::param(&params, "approval_policy")?;
+                let lock = self.profile_lock(id);
+                let _guard = lock.lock().await;
                 let profile = self
                     .store
                     .set_profile_approval(id, revision, policy)
@@ -227,6 +230,8 @@ impl Engine {
                 let id: Uuid = model::param(&params, "profile_id")?;
                 let expected = model::param(&params, "expected_revision")?;
                 let rules: Vec<model::McpAccessRule> = model::param(&params, "rules")?;
+                let lock = self.profile_lock(id);
+                let _guard = lock.lock().await;
                 let revision = self.store.save_mcp_rules(id, expected, &rules).await?;
                 self.emit_connections_changed();
                 Ok(json!({"revision":revision}))
@@ -266,7 +271,16 @@ impl Engine {
                             Some(value) => Some(value),
                             None => self.store.secret(profile.id).await?,
                         };
-                        ProviderSession::connect(profile.clone(), secret).await
+                        if profile.provider == model::ProviderKind::Mysql {
+                            let fallback = self.store.settings().await?.limits.connect_timeout_seconds;
+                            let timeout = mysql_connect_timeout(&profile, fallback);
+                            tokio::time::timeout(
+                                Duration::from_secs(timeout),
+                                ProviderSession::connect(profile_with_connect_timeout(&profile, timeout), secret),
+                            ).await.map_err(|_| AppError::new("timeout", "连接超时"))?
+                        } else {
+                            ProviderSession::connect(profile.clone(), secret).await
+                        }
                     } => result?,
                 };
                 let record = self
@@ -282,13 +296,34 @@ impl Engine {
                     started = Some(instant);
                     self.emit_state(owner, record.id, "running");
                     let sink = ExecutionSink::new(self.store.clone(), record.id);
-                    tokio::select! {
-                        biased;
-                        _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
-                        result = provider.call(
+                    if profile.provider == model::ProviderKind::Mysql {
+                        let fallback = self.store.settings().await?.limits.query_timeout_seconds;
+                        let timeout = mysql_query_timeout(&profile, fallback);
+                        let cancel = owner_cancel.child_token();
+                        let call = provider.call(
                             if method == "profile.test" { "connection.info" } else { "resource.list" },
-                            json!({}), &sink, &owner_cancel,
-                        ) => result,
+                            json!({}), &sink, &cancel,
+                        );
+                        tokio::pin!(call);
+                        tokio::select! {
+                            biased;
+                            _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
+                            result = &mut call => result,
+                            _ = tokio::time::sleep(Duration::from_secs(timeout)) => {
+                                cancel.cancel();
+                                let _ = call.await;
+                                Err(AppError::new("timeout", "查询超时"))
+                            }
+                        }
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
+                            result = provider.call(
+                                if method == "profile.test" { "connection.info" } else { "resource.list" },
+                                json!({}), &sink, &owner_cancel,
+                            ) => result,
+                        }
                     }
                 }.await;
                 // 已中断的只读连接直接丢弃，避免关闭握手再次阻塞断线清理。
@@ -451,8 +486,9 @@ impl Engine {
                             Some(s) => Some(s),
                             None => self.store.secret(id).await?,
                         };
-                        let timeout = self.store.settings().await?.limits.connect_timeout_seconds;
-                        let session = tokio::time::timeout(Duration::from_secs(timeout), ProviderSession::connect(profile.clone(), secret))
+                        let fallback = self.store.settings().await?.limits.connect_timeout_seconds;
+                        let timeout = mysql_connect_timeout(&profile, fallback);
+                        let session = tokio::time::timeout(Duration::from_secs(timeout), ProviderSession::connect(profile_with_connect_timeout(&profile, timeout), secret))
                             .await.map_err(|_| AppError::new("timeout", "连接超时"))??;
                         Ok::<_, AppError>((profile, session))
                     } => result?,
@@ -509,7 +545,35 @@ impl Engine {
                     self.cancel_if_safe(task_id, cancel, transition).await;
                 }
                 let result = db.session.lock().await.close().await;
-                self.state.lock().unwrap().databases.remove(&id);
+                let executions = {
+                    let mut state = self.state.lock().unwrap();
+                    state.databases.remove(&id);
+                    let executions: Vec<_> = state
+                        .result_sessions
+                        .iter()
+                        .filter_map(|(execution, session)| (*session == id).then_some(*execution))
+                        .collect();
+                    state.result_sessions.retain(|_, session| *session != id);
+                    executions
+                };
+                let mut results = HashSet::new();
+                for execution in executions {
+                    let task = match self.store.task(execution).await {
+                        Ok(task) => task,
+                        Err(error) if error.code == "not_found" => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if task.owner == owner {
+                        for result_id in task.results {
+                            self.store.release_result(result_id).await?;
+                            results.insert(result_id);
+                        }
+                    }
+                }
+                {
+                    let mut state = self.state.lock().unwrap();
+                    state.mcp.release_session_handles(owner, id, &results);
+                }
                 result?;
                 Ok(json!({"closed":true}))
             }

@@ -40,6 +40,7 @@ async fn live_pages_and_explicit_count_keep_original_session_and_limit() {
             username: "datapier".into(),
             database: Some("datapier_fixture".into()),
             visible_databases: None,
+            mysql: Default::default(),
             redis_db: 0,
             redis_databases_override: None,
             tls: TlsConfig::default(),
@@ -64,6 +65,17 @@ async fn live_pages_and_explicit_count_keep_original_session_and_limit() {
         json!({"text":"INSERT INTO datapier_live_fixture VALUES (1),(2),(3),(4)"}),
     )
     .await;
+    call(
+        &mut db,
+        &store,
+        "execution.run",
+        json!({"text":"UPDATE datapier_live_fixture SET id=id WHERE id=1"}),
+    )
+    .await;
+    assert_eq!(
+        call(&mut db, &store, "connection.info", json!({})).await["transaction"],
+        true
+    );
     let result = call(&mut db, &store, "execution.run", json!({"text":"SELECT id FROM datapier_live_fixture WHERE id > ? ORDER BY id LIMIT 3", "parameters":[{"type":"integer","value":"0"}], "page_size":1})).await;
     let id: Uuid = serde_json::from_value(result["results"][0].clone()).unwrap();
     let meta = store.result_meta(id).await.unwrap();

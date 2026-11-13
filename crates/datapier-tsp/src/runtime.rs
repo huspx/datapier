@@ -106,6 +106,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             app.advanced_schema_restore(&backend, draft);
         }
         changed |= app.navigation_poll_drop(&backend);
+        changed |= app.navigation_poll_create_database(&backend);
         clipboard.observe_redis_context(&app);
         while let Some(mut reply) = backend.receive() {
             if reply.tag == "window.bind" {

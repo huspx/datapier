@@ -102,7 +102,8 @@ impl App {
             .strip_prefix("archery-request-limit:")
             .and_then(|value| value.parse::<u64>().ok())
         {
-            if matches!(limit, 100 | 500 | 1000)
+            if (matches!(limit, 100 | 500 | 1000)
+                || limit == self.settings.archery.request_rows as u64)
                 && self
                     .profile
                     .as_ref()
@@ -269,8 +270,10 @@ impl App {
             if matches!(section, "data" | "structure" | "ddl") && self.finish_inline(true) {
                 self.workbench.section = section.into();
                 if section == "structure"
-                    && let Some(target) =
-                        self.target.clone().filter(|target| target.kind == "table")
+                    && let Some(target) = self
+                        .target
+                        .clone()
+                        .filter(|target| matches!(target.kind.as_str(), "table" | "view"))
                 {
                     self.advanced_schema_open_existing(backend, target);
                 }
@@ -484,6 +487,9 @@ impl App {
                     self.dirty = true;
                 }
             }
+            "profile-timeouts-toggle" => {
+                self.workbench.profile_timeout_details = !self.workbench.profile_timeout_details;
+            }
             "profile-tls-toggle" => {
                 self.workbench.profile_tls_details = !self.workbench.profile_tls_details;
             }
@@ -562,7 +568,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|profile| profile.is_archery())
                 {
-                    params["limit"] = json!(self.workbench.query_ui.request_limit);
+                    params["limit"] = json!(self.archery_request_limit());
                 }
                 self.request(backend, "cli.start", "execution.start", params);
                 if self.operation_pending {
@@ -631,6 +637,11 @@ impl App {
                 self.redis_prune_key_selection();
             }
             "overlay-close" => {
+                if self.workbench.overlay.as_deref() == Some("replace")
+                    && self.advanced_replace.busy()
+                {
+                    return true;
+                }
                 if self.workbench.overlay.as_deref() == Some("profile")
                     && self.connection_form_busy()
                 {

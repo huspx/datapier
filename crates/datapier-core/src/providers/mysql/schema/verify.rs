@@ -68,18 +68,68 @@ pub(super) fn normalized_type(value: &str) -> String {
     let split = value
         .find(|c: char| c == '(' || c.is_ascii_whitespace())
         .unwrap_or(value.len());
-    let (base, rest) = value.split_at(split);
-    let base = base.to_ascii_lowercase();
-    let base = if base == "integer" {
-        "int"
-    } else {
-        base.as_str()
+    let (base, mut rest) = value.split_at(split);
+    let mut base = base.to_ascii_lowercase();
+    let suffix = rest.trim_start();
+    if matches!(base.as_str(), "char" | "character")
+        && suffix.to_ascii_lowercase().starts_with("varying")
+        && suffix["varying".len()..].starts_with(|c: char| c == '(' || c.is_ascii_whitespace())
+    {
+        base = "varchar".into();
+        rest = &suffix["varying".len()..];
+    } else if base == "double"
+        && suffix.to_ascii_lowercase().starts_with("precision")
+        && (suffix.len() == "precision".len()
+            || suffix["precision".len()..]
+                .starts_with(|c: char| c == '(' || c.is_ascii_whitespace()))
+    {
+        rest = &suffix["precision".len()..];
+    }
+    let base = match base.as_str() {
+        "integer" | "int4" => "int",
+        "bool" | "boolean" | "int1" => "tinyint",
+        "int2" => "smallint",
+        "int3" | "middleint" => "mediumint",
+        "int8" => "bigint",
+        "float4" => "float",
+        "float8" => "double",
+        "character" => "char",
+        "numeric" | "dec" | "fixed" => "decimal",
+        other => other,
     };
+    if base == "decimal" {
+        let rest = rest.to_ascii_lowercase();
+        let compact: String = rest.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let compact = if compact.is_empty() {
+            "(10,0)".to_owned()
+        } else {
+            compact
+        };
+        let compact = if let Some(arguments) = compact.strip_prefix('(') {
+            if let Some((args, suffix)) = arguments.split_once(')') {
+                if !args.contains(',') {
+                    format!("({args},0){suffix}")
+                } else {
+                    compact
+                }
+            } else {
+                compact
+            }
+        } else {
+            format!("(10,0){compact}")
+        };
+        return format!("decimal{compact}");
+    }
     if !matches!(
         base,
         "tinyint" | "smallint" | "mediumint" | "int" | "bigint"
     ) {
         // ENUM/SET 的字符串值区分大小写，不能把整个类型文本转为小写。
+        let rest = if rest.trim_start().starts_with('(') {
+            rest.trim_start()
+        } else {
+            rest
+        };
         return format!("{base}{rest}");
     }
     let rest = rest.trim();
@@ -99,10 +149,10 @@ pub(super) fn normalized_type(value: &str) -> String {
     } else {
         rest
     };
-    if rest.is_empty() {
+    if rest.is_empty() || rest.eq_ignore_ascii_case("signed") {
         base.to_owned()
-    } else if rest.eq_ignore_ascii_case("unsigned") || rest.eq_ignore_ascii_case("signed") {
-        format!("{base} {}", rest.to_ascii_lowercase())
+    } else if rest.eq_ignore_ascii_case("unsigned") {
+        format!("{base} unsigned")
     } else {
         format!("{base} {rest}")
     }

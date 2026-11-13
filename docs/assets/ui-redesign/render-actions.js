@@ -38,6 +38,12 @@ for (const type of ['input', 'change']) {
   }, true);
 }
 function requestDialogClose(onDiscard, force = false) {
+  if (state.overlay === 'new-database') {
+    dialogDraftDirty = false;
+    onDiscard();
+    restoreDialogOpener();
+    return;
+  }
   if (state.overlay === 'app-settings') {
     if (configPreview.confirm) {
       configCancelConfirm();
@@ -184,13 +190,6 @@ function render() {
       if (owner === previousOwner) body.scrollTop = previousScroll;
     }
   };
-  if (previewSource === 'archery') {
-    renderArchery();
-    renderMcpPreview();
-    restoreDialogScroll();
-    syncDialogFocus();
-    return;
-  }
   const focused = document.activeElement;
   const focusId = focused?.id;
   const selectable = focused instanceof HTMLTextAreaElement
@@ -198,6 +197,47 @@ function render() {
   const selection = selectable
     ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection]
     : null;
+  const restoreFocus = () => {
+    const attributes = [
+      'data-config-action',
+      'data-config-field',
+      'data-config-tab',
+      'data-config-key',
+      'data-config-profile',
+      'data-config-policy-owner',
+      'data-config-level',
+      'data-schema-column',
+      'data-schema-field',
+      'data-schema-section',
+      'data-schema-example',
+      'data-schema-create-target',
+      'data-schema-collection-field',
+      'data-collection',
+      'data-collection-id',
+      'data-part-id',
+      'data-mapping-id',
+    ].filter(name => focused?.hasAttribute(name));
+    const selector = attributes.map(name => `[${name}="${CSS.escape(focused.getAttribute(name))}"]`).join('');
+    const replacement = focusId ? document.getElementById(focusId) : selector ? document.querySelector(selector) : null;
+    if (replacement && (!state.overlay || focused?.closest('.modal'))) {
+      replacement.focus({ preventScroll: true });
+      if (
+        selection && (replacement instanceof HTMLTextAreaElement
+          || (replacement instanceof HTMLInputElement
+            && ['text', 'search', 'url', 'tel', 'password'].includes(replacement.type)))
+      ) {
+        replacement.setSelectionRange(...selection);
+      }
+    }
+  };
+  if (previewSource === 'archery') {
+    renderArchery();
+    renderMcpPreview();
+    restoreDialogScroll();
+    syncDialogFocus();
+    restoreFocus();
+    return;
+  }
   if (state.previewEmpty) state.provider = null;
   else if (!state.connections.has(state.provider)) {
     state.provider = [...state.connections][0] ?? null;
@@ -273,42 +313,7 @@ function render() {
     );
     syncSqlEditor();
   }
-  const configAttributes = [
-    'data-config-action',
-    'data-config-field',
-    'data-config-tab',
-    'data-config-key',
-    'data-config-profile',
-    'data-config-policy-owner',
-    'data-config-level',
-    'data-schema-column',
-    'data-schema-field',
-    'data-schema-section',
-    'data-schema-example',
-    'data-schema-create-target',
-    'data-schema-collection-field',
-    'data-collection',
-    'data-collection-id',
-    'data-part-id',
-    'data-mapping-id',
-  ]
-    .filter(name => focused?.hasAttribute(name));
-  const configSelector = configAttributes.map(name => `[${name}="${CSS.escape(focused.getAttribute(name))}"]`).join('');
-  const replacement = focusId
-    ? document.getElementById(focusId)
-    : configSelector
-    ? document.querySelector(configSelector)
-    : null;
-  if (replacement && (!state.overlay || focused?.closest('.modal'))) {
-    replacement.focus({ preventScroll: true });
-    if (
-      selection && (replacement instanceof HTMLTextAreaElement
-        || (replacement instanceof HTMLInputElement
-          && ['text', 'search', 'url', 'tel', 'password'].includes(replacement.type)))
-    ) {
-      replacement.setSelectionRange(...selection);
-    }
-  }
+  restoreFocus();
 }
 function toast(text) {
   document.querySelector('.toast')?.remove();

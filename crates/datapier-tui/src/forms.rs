@@ -122,6 +122,11 @@ pub fn direct(profile: Option<&Value>, default_policy: &Value) -> Form {
     let p = profile.cloned().unwrap_or_else(|| json!({"id":Uuid::new_v4(),"revision":1,"name":"","provider":"mysql","access_mode":"read_only","approval_policy":default_policy.as_str().unwrap_or("dangerous"),"connection":{"kind":"direct","host":"localhost","port":3306,"username":"","database":null,"visible_databases":null,"redis_db":0,"redis_databases_override":null,"tls":{"enabled":false,"ca_path":null,"client_cert_path":null,"client_key_path":null}}}));
     let c = &p["connection"];
     let tls = &c["tls"];
+    let mysql = &c["mysql"];
+    let timezone = mysql
+        .get("timezone")
+        .cloned()
+        .unwrap_or_else(|| json!("+00:00"));
     let visible = match &c["visible_databases"] {
         Value::Null => "*".into(),
         Value::Array(a) => a
@@ -153,11 +158,24 @@ pub fn direct(profile: Option<&Value>, default_policy: &Value) -> Form {
             Field::new("password", "密码（留空保留）", "Password (empty keeps)", "").secret(),
             Field::new("credential", "凭据操作", "Credential action", "keep")
                 .choices(&["keep", "keyring", "session", "clear"]),
+            field("database", "默认数据库", "Default database", &c["database"]),
             field(
-                "database",
-                "默认 MySQL 数据库",
-                "Default MySQL database",
-                &c["database"],
+                "mysql_timezone",
+                "时区（SYSTEM、±HH:MM 或时区名称；空为服务端默认）",
+                "Time zone (SYSTEM, ±HH:MM or name; empty uses server default)",
+                &timezone,
+            ),
+            field(
+                "mysql_connect_timeout_seconds",
+                "连接超时秒数（1–86400；空继承全局）",
+                "Connect timeout seconds (1–86400; empty inherits global)",
+                &mysql["connect_timeout_seconds"],
+            ),
+            field(
+                "mysql_query_timeout_seconds",
+                "执行超时秒数（1–86400；空继承全局）",
+                "Execution timeout seconds (1–86400; empty inherits global)",
+                &mysql["query_timeout_seconds"],
             ),
             Field::new(
                 "visible",
@@ -232,8 +250,29 @@ pub fn direct_value(f: &Form) -> Result<Value, String> {
     } else {
         json!(number("redis_override")?)
     };
+    let timeout = |key: &str| -> Result<Value, String> {
+        if f.get(key).is_empty() {
+            return Ok(Value::Null);
+        }
+        match f.get(key).parse::<u64>() {
+            Ok(value) if f.get("provider") != "mysql" || (1..=86400).contains(&value) => {
+                Ok(json!(value))
+            }
+            _ if f.get("provider") != "mysql" => Ok(Value::Null),
+            _ => Err(format!("{}: expected 1–86400 seconds", key)),
+        }
+    };
+    if f.get("provider") == "mysql" {
+        datapier_core::model::MysqlConnectionOptions {
+            timezone: (!f.get("mysql_timezone").is_empty())
+                .then(|| f.get("mysql_timezone").to_owned()),
+            ..Default::default()
+        }
+        .validate()
+        .map_err(|error| format!("mysql_timezone: {error}"))?;
+    }
     Ok(
-        json!({"id":f.get("id"),"revision":number("revision")?,"name":f.get("name"),"provider":f.get("provider"),"access_mode":f.get("access"),"approval_policy":f.get("approval"),"connection":{"kind":"direct","host":f.get("host"),"port":number("port")?,"username":f.get("username"),"database":optional("database"),"visible_databases":visible,"redis_db":number("redis_db")?,"redis_databases_override":override_count,"tls":{"enabled":f.get("tls")=="true","ca_path":optional("ca"),"client_cert_path":optional("cert"),"client_key_path":optional("key")}}}),
+        json!({"id":f.get("id"),"revision":number("revision")?,"name":f.get("name"),"provider":f.get("provider"),"access_mode":f.get("access"),"approval_policy":f.get("approval"),"connection":{"kind":"direct","host":f.get("host"),"port":number("port")?,"username":f.get("username"),"database":optional("database"),"visible_databases":visible,"redis_db":number("redis_db")?,"redis_databases_override":override_count,"mysql":{"timezone":optional("mysql_timezone"),"connect_timeout_seconds":timeout("mysql_connect_timeout_seconds")?,"query_timeout_seconds":timeout("mysql_query_timeout_seconds")?},"tls":{"enabled":f.get("tls")=="true","ca_path":optional("ca"),"client_cert_path":optional("cert"),"client_key_path":optional("key")}}}),
     )
 }
 
@@ -266,6 +305,52 @@ pub fn server(server: Option<&Value>) -> Form {
 }
 pub fn server_value(f: &Form) -> Value {
     json!({"id":f.get("id"),"revision":f.get("revision").parse::<u64>().unwrap_or(0),"name":f.get("name"),"base_url":f.get("base_url"),"username":f.get("username"),"http_tls":{"ca_path":if f.get("ca").is_empty(){Value::Null}else{json!(f.get("ca"))}},"totp_mode":f.get("totp_mode")})
+}
+pub fn server_credential_updates(form: &Form) -> Result<Value, &'static str> {
+    let update = |action: &str, value: &str| match action {
+        "clear" => Ok(json!({"kind":"clear"})),
+        "keyring" | "session" if value.is_empty() => {
+            Err("Enter the password or TOTP URI selected for saving")
+        }
+        "keyring" | "session" => {
+            Ok(json!({"kind":"replace","value":value,"persist":action == "keyring"}))
+        }
+        _ => Ok(json!({"kind":"keep"})),
+    };
+    Ok(json!({
+        "password_update": update(form.get("password_action"), form.get("password"))?,
+        "totp_update": update(form.get("totp_action"), form.get("totp"))?,
+    }))
+}
+
+pub fn credentials_match_login(updates: &Value, staged: Option<&Value>) -> bool {
+    match staged {
+        Some(staged) => staged == updates,
+        None => {
+            updates["password_update"]["kind"] == "keep" && updates["totp_update"]["kind"] == "keep"
+        }
+    }
+}
+
+pub fn visible_tail(text: &str, width: usize) -> String {
+    if ratatui::text::Span::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut start = text.len();
+    let mut used = 1;
+    for (index, ch) in text.char_indices().rev() {
+        let mut buf = [0; 4];
+        let char_width = ratatui::text::Span::raw(ch.encode_utf8(&mut buf) as &str).width();
+        if used + char_width > width {
+            break;
+        }
+        used += char_width;
+        start = index;
+    }
+    format!("…{}", &text[start..])
 }
 
 pub fn settings_group(key: &str, english: bool) -> &'static str {
@@ -371,8 +456,8 @@ pub fn settings(settings: &Value) -> Form {
         ),
         (
             "limits.query_timeout_seconds",
-            "查询超时（秒）",
-            "Query timeout seconds",
+            "执行超时（秒）",
+            "Execution timeout seconds",
         ),
         (
             "limits.count_timeout_seconds",

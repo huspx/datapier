@@ -2598,6 +2598,15 @@ fn render_value(
                 let locked_identity = path.is_empty()
                     && map.get("kind").and_then(Value::as_str) == Some("trigger")
                     && matches!(key.as_str(), "name" | "database");
+                let creation_context = path.is_empty()
+                    && matches!(
+                        map.get("kind").and_then(Value::as_str),
+                        Some("view" | "trigger")
+                    )
+                    && matches!(
+                        key.as_str(),
+                        "sql_mode" | "character_set_client" | "collation_connection"
+                    );
                 if let Value::Bool(on) = value {
                     let action = format!("schema-op:toggle:{child}");
                     container = container.child(
@@ -2621,7 +2630,7 @@ fn render_value(
                         value,
                         &child,
                         editors,
-                        disabled || locked_identity,
+                        disabled || locked_identity || creation_context,
                         table,
                         selected_column,
                         SchemaChoices { open_select, root },
@@ -2636,8 +2645,6 @@ fn render_value(
                             | "prefix_length"
                             | "definer"
                             | "check_option"
-                            | "character_set_client"
-                            | "collation_connection"
                             | "order"
                     ) || (key == "on_update" && path.starts_with("/columns/"))
                         || (matches!(key.as_str(), "column" | "expression")
@@ -2645,7 +2652,7 @@ fn render_value(
                 {
                     field = field.child(
                         ui::button(tr("清除").into_owned())
-                            .disabled(disabled)
+                            .disabled(disabled || creation_context)
                             .on_click(Msg::Action(format!("schema-op:set:{child}:null"))),
                     );
                 }

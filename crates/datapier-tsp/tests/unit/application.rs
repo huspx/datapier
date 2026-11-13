@@ -269,6 +269,48 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
 }
 
 #[test]
+fn history_sizes_use_saved_default_and_all_pager_options() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("history-sizes".into());
+    app.settings.paging.history_rows = 200;
+    app.open_history(&backend);
+    assert_eq!(requests.try_recv().unwrap().params["limit"], 200);
+    for size in [20, 50, 100, 137, 200, 500, 1000] {
+        app.application_action(&format!("history-size:{size}"), &backend);
+        let request = requests.try_recv().unwrap();
+        assert_eq!(request.params["limit"], size);
+    }
+    app.workbench.overlay = None;
+    app.settings.paging.history_rows = 50;
+    app.open_history(&backend);
+    assert_eq!(app.workbench.archery_history.limit, 1000);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn closed_history_response_is_cached_for_its_own_tab() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("history-late".into());
+    app.open_history(&backend);
+    let request = requests.try_recv().unwrap();
+    app.action("overlay-close", &backend);
+    app.create_query_tab();
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"items":[{"text":"saved"}],"total":1,"offset":0,"limit":20})),
+        },
+        &backend,
+    );
+    assert_eq!(app.active, 1);
+    app.switch_tab(0);
+    assert!(app.workbench.archery_history.pending.is_none());
+    app.open_history(&backend);
+    assert_eq!(app.history_selected_text(), Some("saved"));
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
 fn history_search_and_pagination_use_only_applied_condition() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("history".into());

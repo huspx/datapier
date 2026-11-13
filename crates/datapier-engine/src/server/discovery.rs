@@ -38,28 +38,30 @@ impl Engine {
         {
             return Ok(value.clone());
         }
-        let timeout = self.store.settings().await?.limits.connect_timeout_seconds;
+        let limits = self.store.settings().await?.limits;
+        let connect_timeout = mysql_connect_timeout(&profile, limits.connect_timeout_seconds);
+        let query_timeout = (profile.provider == model::ProviderKind::Mysql)
+            .then(|| mysql_query_timeout(&profile, limits.query_timeout_seconds));
         let cancel = CancellationToken::new();
         let sink = ExecutionSink::new(self.store.clone(), Uuid::new_v4());
         let discovery = if let Some(db) = db {
             let mut session = db.session.lock().await;
-            session
-                .call("database.list", json!({}), &sink, &cancel)
-                .await?
+            discovery_call(&mut session, &sink, &cancel, query_timeout).await?
         } else {
             let secret = match optional::<String>(params, "secret")? {
                 Some(secret) => Some(secret),
                 None => self.store.secret(profile.id).await?,
             };
             let mut session = tokio::time::timeout(
-                Duration::from_secs(timeout),
-                ProviderSession::connect(profile.clone(), secret),
+                Duration::from_secs(connect_timeout),
+                ProviderSession::connect(
+                    profile_with_connect_timeout(&profile, connect_timeout),
+                    secret,
+                ),
             )
             .await
             .map_err(|_| AppError::new("timeout", "连接超时"))??;
-            let value = session
-                .call("database.list", json!({}), &sink, &cancel)
-                .await;
+            let value = discovery_call(&mut session, &sink, &cancel, query_timeout).await;
             let _ = session.close().await;
             value?
         };
@@ -71,5 +73,27 @@ impl Engine {
                 .insert(profile.id, (profile.revision, discovery.clone()));
         }
         Ok(discovery)
+    }
+}
+
+async fn discovery_call(
+    session: &mut ProviderSession,
+    sink: &ExecutionSink,
+    cancel: &CancellationToken,
+    timeout: Option<u64>,
+) -> Result<Value> {
+    let Some(timeout) = timeout else {
+        return session.call("database.list", json!({}), sink, cancel).await;
+    };
+    let call = session.call("database.list", json!({}), sink, cancel);
+    tokio::pin!(call);
+    tokio::select! {
+        result = &mut call => result,
+        _ = tokio::time::sleep(Duration::from_secs(timeout)) => {
+            // 已发送的命令必须完成协议清理后才能复用连接。
+            cancel.cancel();
+            let _ = call.await;
+            Err(AppError::new("timeout", "数据库发现超时"))
+        }
     }
 }

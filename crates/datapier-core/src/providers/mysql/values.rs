@@ -68,7 +68,7 @@ impl MysqlSession {
         let value = before
             .get(&column)
             .ok_or_else(|| AppError::conflict("完整行缺少目标列"))?;
-        let (_, sql_mode) = self.schema_context(cancel).await?;
+        let (_, sql_mode, _, _) = self.schema_context(cancel).await?;
         let ddl_fingerprint = super::schema::fingerprint(&schema.ddl, &sql_mode);
         let fingerprint = format!(
             "{:x}",

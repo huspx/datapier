@@ -1,6 +1,6 @@
 use super::*;
 use datapier_core::model::{
-    AccessMode, ConnectionConfig, DirectConnection, ProviderKind, TlsConfig,
+    AccessMode, ConnectionConfig, DirectConnection, MysqlConnectionOptions, ProviderKind, TlsConfig,
 };
 pub(super) mod archery;
 
@@ -12,6 +12,9 @@ pub(super) const PROFILE_DEFAULTS: &[(&str, &str)] = &[
     ("user", ""),
     ("password", ""),
     ("database", ""),
+    ("mysql_timezone", "+00:00"),
+    ("mysql_connect_timeout_seconds", ""),
+    ("mysql_query_timeout_seconds", ""),
     ("redis_db", "0"),
     ("redis_databases_override", ""),
     ("profile_revision", "1"),
@@ -118,6 +121,26 @@ impl App {
             self.field_set("database", direct.database.clone().unwrap_or_default());
             self.field_set("redis_db", direct.redis_db.to_string());
             self.field_set(
+                "mysql_timezone",
+                direct.mysql.timezone.clone().unwrap_or_default(),
+            );
+            self.field_set(
+                "mysql_connect_timeout_seconds",
+                direct
+                    .mysql
+                    .connect_timeout_seconds
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            );
+            self.field_set(
+                "mysql_query_timeout_seconds",
+                direct
+                    .mysql
+                    .query_timeout_seconds
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            );
+            self.field_set(
                 "redis_databases_override",
                 direct
                     .redis_databases_override
@@ -151,6 +174,7 @@ impl App {
         }
         self.connection_draft_capture();
         self.workbench.profile_tls_details = self.field("tls") == "true";
+        self.workbench.profile_timeout_details = false;
         self.workbench.overlay = Some("profile".into());
         self.workbench.focus_request = Some("input-name".into());
     }
@@ -177,13 +201,43 @@ impl App {
                 username: self.field("user").to_owned(),
                 database: optional("database"),
                 visible_databases: self.navigation_form_selection(),
-                redis_db: self
-                    .field("redis_db")
-                    .parse::<u32>()
-                    .map_err(|e| e.to_string())?,
-                redis_databases_override: optional("redis_databases_override")
-                    .map(|value| value.parse::<u32>().map_err(|e| e.to_string()))
-                    .transpose()?,
+                redis_db: if self.field("provider") == "redis" {
+                    self.field("redis_db")
+                        .parse::<u32>()
+                        .map_err(|e| e.to_string())?
+                } else {
+                    0
+                },
+                redis_databases_override: if self.field("provider") == "redis" {
+                    optional("redis_databases_override")
+                        .map(|value| value.parse::<u32>().map_err(|e| e.to_string()))
+                        .transpose()?
+                } else {
+                    None
+                },
+                mysql: MysqlConnectionOptions {
+                    timezone: optional("mysql_timezone"),
+                    connect_timeout_seconds: optional("mysql_connect_timeout_seconds")
+                        .map(|value| value.parse::<u64>())
+                        .transpose()
+                        .or_else(|error| {
+                            if self.field("provider") == "redis" {
+                                Ok(None)
+                            } else {
+                                Err(error.to_string())
+                            }
+                        })?,
+                    query_timeout_seconds: optional("mysql_query_timeout_seconds")
+                        .map(|value| value.parse::<u64>())
+                        .transpose()
+                        .or_else(|error| {
+                            if self.field("provider") == "redis" {
+                                Ok(None)
+                            } else {
+                                Err(error.to_string())
+                            }
+                        })?,
+                },
                 tls: TlsConfig {
                     enabled: self
                         .field("tls")
@@ -220,9 +274,12 @@ impl App {
             .is_none()
         {
             Some(("port", "请输入有效端口"))
-        } else if self.field("redis_db").parse::<u32>().is_err() {
+        } else if self.field("provider") == "redis"
+            && self.field("redis_db").parse::<u32>().is_err()
+        {
             Some(("redis_db", "请输入有效 Redis DB"))
-        } else if !self.field("redis_databases_override").is_empty()
+        } else if self.field("provider") == "redis"
+            && !self.field("redis_databases_override").is_empty()
             && self
                 .field("redis_databases_override")
                 .parse::<u32>()
@@ -231,6 +288,36 @@ impl App {
                 .is_none()
         {
             Some(("redis_databases_override", "请输入有效 Redis DB 数量"))
+        } else if self.field("provider") == "mysql"
+            && (MysqlConnectionOptions {
+                timezone: (!self.field("mysql_timezone").is_empty())
+                    .then(|| self.field("mysql_timezone").to_owned()),
+                ..Default::default()
+            })
+            .validate()
+            .is_err()
+        {
+            Some(("mysql_timezone", "时区格式无效"))
+        } else if let Some(field) = (self.field("provider") == "mysql")
+            .then(|| {
+                [
+                    "mysql_connect_timeout_seconds",
+                    "mysql_query_timeout_seconds",
+                ]
+                .into_iter()
+                .find(|field| {
+                    !self.field(field).is_empty()
+                        && self
+                            .field(field)
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|value| (1..=86400).contains(value))
+                            .is_none()
+                })
+            })
+            .flatten()
+        {
+            Some((field, "超时秒数须为 1–86400 的整数，留空继承全局设置"))
         } else if !matches!(self.field("provider"), "mysql" | "redis") {
             Some(("provider", "未知数据库类型"))
         } else if !matches!(self.field("access"), "read_only" | "read_write") {
@@ -263,6 +350,12 @@ impl App {
         if let Some((field, message)) = error {
             if matches!(field, "ca" | "cert" | "key" | "tls") {
                 self.workbench.profile_tls_details = true;
+            }
+            if matches!(
+                field,
+                "mysql_connect_timeout_seconds" | "mysql_query_timeout_seconds"
+            ) {
+                self.workbench.profile_timeout_details = true;
             }
             self.field_error(field, i18n::UiMessage::key(message));
             return false;

@@ -469,6 +469,8 @@ impl App {
             "resource.list" => match serde_json::from_value::<ResourcePage>(value) {
                 Ok(page) => {
                     if self.is_redis() {
+                        self.workbench.query_ui.redis_scan_complete = page.complete;
+                        self.workbench.query_ui.redis_scan_limited = page.resource_limited;
                         let owner = self.redis_selection_scope();
                         if self.workbench.redis_tree_owner != owner {
                             self.resources.clear();
@@ -560,6 +562,26 @@ impl App {
                 }
             }
             "query.info" => {
+                if let Some(database) = value.get("database")
+                    && (database.is_null() || database.is_string())
+                {
+                    let database = database.as_str().map(str::to_owned);
+                    if self.database != database {
+                        self.database = database.clone();
+                        self.tabs[self.active].browse.database = database;
+                        self.generation = self.generation.wrapping_add(1);
+                        self.resources.clear();
+                        self.cursor = None;
+                        self.scan_token = None;
+                        if self.page_token.take().is_some()
+                            && let Some(id) = self.result_id.as_ref()
+                        {
+                            let start = self.result_saved_start(id);
+                            self.page(backend, start);
+                        }
+                        self.dirty = true;
+                    }
+                }
                 self.workbench.sql_mode = application::mysql_mode(&value);
                 if self.workbench.sql_mode.is_none() {
                     self.status = i18n::UiMessage::key("数据库未返回 sql_mode，无法安全处理选区");
@@ -689,9 +711,9 @@ impl App {
                         }
                         let applied = state == "succeeded"
                             && value["summary"]["items"].as_array().is_some_and(|items| {
-                                items
-                                    .iter()
-                                    .all(|item| item["status"].as_str() == Some("applied"))
+                                items.iter().all(|item| {
+                                    matches!(item["status"].as_str(), Some("applied" | "unchanged"))
+                                })
                             });
                         if applied {
                             let target_invalidated = self.redis_changes.iter().any(|change| {

@@ -4,12 +4,14 @@ use super::*;
 pub(super) struct JsonReader {
     input: BufReader<File>,
     pending: Option<u8>,
+    value_limit: usize,
 }
 impl JsonReader {
     fn new(file: File) -> Self {
         Self {
             input: BufReader::new(file),
             pending: None,
+            value_limit: usize::MAX,
         }
     }
     fn byte(&mut self) -> Result<Option<u8>> {
@@ -41,6 +43,12 @@ impl JsonReader {
         Ok(())
     }
     pub(super) fn value<T: serde::de::DeserializeOwned>(&mut self) -> Result<T> {
+        self.value_bounded(self.value_limit).map(|(value, _)| value)
+    }
+    pub(super) fn value_bounded<T: serde::de::DeserializeOwned>(
+        &mut self,
+        limit: usize,
+    ) -> Result<(T, usize)> {
         let first = self
             .nonspace()?
             .ok_or_else(|| AppError::invalid("JSON 提前结束"))?;
@@ -59,6 +67,9 @@ impl JsonReader {
                 if scalar && (b == b',' || b == b']' || b == b'}' || b.is_ascii_whitespace()) {
                     self.pending = Some(b);
                     break;
+                }
+                if data.len() >= limit {
+                    return Err(AppError::new("resource_limit", "JSON 行超过内存预算"));
                 }
                 data.push(b);
                 if in_string {
@@ -84,7 +95,8 @@ impl JsonReader {
                 }
             }
         }
-        serde_json::from_slice(&data).map_err(Into::into)
+        let size = data.len();
+        Ok((serde_json::from_slice(&data)?, size))
     }
     pub(super) fn array_next(&mut self, first: &mut bool) -> Result<bool> {
         let c = self
@@ -225,7 +237,17 @@ pub(super) fn json_document(
     array: &str,
     cancel: &CancellationToken,
 ) -> Result<JsonDocument> {
+    json_document_bounded(file, root, array, cancel, usize::MAX)
+}
+pub(super) fn json_document_bounded(
+    file: File,
+    root: &Path,
+    array: &str,
+    cancel: &CancellationToken,
+    limit: usize,
+) -> Result<JsonDocument> {
     let mut reader = JsonReader::new(file);
+    reader.value_limit = limit;
     reader.expect(b'{')?;
     let mut first = true;
     let mut format: Option<String> = None;
@@ -248,7 +270,9 @@ pub(super) fn json_document(
         }
     }
     reader.end_document()?;
-    if format.as_deref() != Some("datapier") || version != Some(1) {
+    if format.as_deref() != Some("datapier")
+        || version != Some(if array == "records" { 2 } else { 1 })
+    {
         return Err(AppError::invalid("不是受支持的 Datapier 版本化文件"));
     }
     Ok(JsonDocument {

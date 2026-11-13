@@ -317,6 +317,9 @@ impl App {
         }
         if self.application_action(name, backend)
             || ((!self.tabs.is_empty()
+                || name.starts_with("profile-create-database:")
+                || name.starts_with("profile-delete-")
+                || name.starts_with("profile-close:")
                 || (self.workbench.overlay.as_deref() == Some("profile")
                     && (name.starts_with("profile-databases-")
                         || name.starts_with("form-redis-db"))))
@@ -486,6 +489,8 @@ impl App {
                         let token = Uuid::new_v4();
                         self.scan_token = Some(token);
                         if name == "list" {
+                            self.workbench.query_ui.redis_scan_complete = false;
+                            self.workbench.query_ui.redis_scan_limited = false;
                             self.cursor = None;
                             self.resources.clear();
                             self.workbench.redis_tree.reset(&[]);
@@ -725,7 +730,17 @@ impl App {
                         return;
                     }
                     if name == "export" {
-                        if let Some(id) = result_id {
+                        let direct_redis_key = self.is_redis()
+                            && !archery
+                            && !self.workbench.cli_export
+                            && self.browse_result
+                            && self.target.as_ref().is_some_and(|target| {
+                                matches!(
+                                    target.kind.as_str(),
+                                    "string" | "hash" | "list" | "set" | "zset"
+                                )
+                            });
+                        if let Some(id) = result_id.filter(|_| !direct_redis_key) {
                             params["result_id"] = json!(id);
                         }
                         self.request(backend, "transfer.export", "transfer.export", params);

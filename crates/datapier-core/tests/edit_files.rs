@@ -231,6 +231,63 @@ async fn external_symlink_is_rejected_and_cleanup_record_is_retained() {
     cleanup(store).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn replaced_data_root_never_redirects_edit_files() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let store = store().await;
+    let file = store
+        .register_edit_file(EditFileRegistration {
+            workspace_id: "workspace",
+            profile_id: "profile",
+            purpose: EditFilePurpose::External,
+            target: json!({}),
+            format: "txt",
+            baseline_digest: "digest",
+            draft_revision: 1,
+        })
+        .await
+        .unwrap();
+    let file = store
+        .publish_edit_file(file.id, file.revision, b"original", 64)
+        .await
+        .unwrap();
+    let root = (*store.root).clone();
+    let moved = root.with_extension("moved");
+    let outside = root.with_extension("outside");
+    std::fs::rename(&root, &moved).unwrap();
+    let outside_dir = outside.join("edit-files").join(file.id.to_string());
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::fs::set_permissions(
+        outside.join("edit-files"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(&outside_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sentinel = outside_dir.join(format!("{}.txt", file.id));
+    std::fs::write(&sentinel, b"sentinel").unwrap();
+    symlink(&outside, &root).unwrap();
+    assert_eq!(
+        store
+            .read_edit_file(file.id, file.revision, 64)
+            .await
+            .unwrap(),
+        b"original"
+    );
+    assert!(store.edit_file_path(file.id, file.revision).await.is_err());
+    store
+        .cleanup_edit_file(file.id, file.revision)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
+    assert!(!moved.join("edit-files").join(file.id.to_string()).exists());
+    store.pool.close().await;
+    drop(store);
+    std::fs::remove_file(&root).unwrap();
+    std::fs::remove_dir_all(moved).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
 #[tokio::test]
 async fn concurrent_workspace_saves_return_revision_conflicts_instead_of_sqlite_busy() {
     let store = store().await;

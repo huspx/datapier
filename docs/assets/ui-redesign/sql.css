@@ -12,7 +12,8 @@
   border-bottom: 1px solid var(--border);
 }
 .has-sql-results .sql-editor-wrap {
-  flex: 0 0 55%;
+  flex: 1 1 38%;
+  min-height: 72px;
 }
 .sql-gutter {
   width: 76px;
@@ -136,6 +137,9 @@
   min-height: 100px;
   overflow: auto;
 }
+.sql-workbench:not(.archery-query-workbench) > .sql-results {
+  flex: 1 0 190px;
+}
 .sql-results-head {
   display: flex;
   align-items: center;
@@ -143,6 +147,16 @@
   padding: 8px 16px;
   border-bottom: 1px solid var(--border);
   font-size: 11px;
+}
+.sql-workbench > .toolbar, .sql-results-head {
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.sql-results > .toolbar, .sql-results > .result-pager {
+  flex-shrink: 0;
+}
+.sql-results > .table-wrap {
+  min-height: 84px;
 }
 .sql-execution-text {
   margin: 0;

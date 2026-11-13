@@ -188,6 +188,20 @@ function validateConnection() {
     );
     return false;
   }
+  if (form.provider === 'mysql') {
+    for (const key of ['mysqlConnectTimeout', 'mysqlQueryTimeout']) {
+      if (form[key] && (!/^\d+$/.test(form[key]) || Number(form[key]) < 1 || Number(form[key]) > 86400)) {
+        fieldError(
+          document.querySelector(`[data-connection-field="${key}"]`),
+          az(
+            '请输入 1–86400 的整数，留空继承全局设置。',
+            'Enter an integer from 1 to 86400, or leave empty to inherit global settings.',
+          ),
+        );
+        return false;
+      }
+    }
+  }
   if (
     (!form.tls && (form.ca || form.cert || form.key))
     || Boolean(form.cert) !== Boolean(form.key)

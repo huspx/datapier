@@ -27,6 +27,7 @@ struct FileSession {
     value: Uuid,
     value_revision: u64,
 }
+#[derive(Clone)]
 struct Handoff {
     owner: Uuid,
     file: Uuid,
@@ -725,26 +726,27 @@ impl Engine {
             ));
         }
         let id = file_id(params, "handoff")?;
-        let handoff = self
-            .state
-            .lock()
-            .unwrap()
-            .editing
-            .files
-            .handoffs
-            .remove(&id)
-            .ok_or_else(|| AppError::new("expired", "编辑器交接不存在或已消费"))?;
-        if handoff.helper.is_some() || handoff.expires <= Instant::now() {
-            return Err(AppError::new("expired", "编辑器交接已失效"));
-        }
-        let source_active = self
-            .state
-            .lock()
-            .unwrap()
-            .contexts
-            .get(&handoff.owner)
-            .is_some_and(|c| c.kind == model::ClientKind::Tsp);
-        if !source_active || self.store.settings().await?.revision != handoff.settings_revision {
+        let handoff = {
+            let state = self.state.lock().unwrap();
+            let handoff = state
+                .editing
+                .files
+                .handoffs
+                .get(&id)
+                .ok_or_else(|| AppError::new("expired", "编辑器交接不存在或已消费"))?;
+            if handoff.helper.is_some() || handoff.expires <= Instant::now() {
+                return Err(AppError::new("expired", "编辑器交接已失效"));
+            }
+            if !state
+                .contexts
+                .get(&handoff.owner)
+                .is_some_and(|c| c.kind == model::ClientKind::Tsp)
+            {
+                return Err(AppError::conflict("源会话或编辑器配置已变化"));
+            }
+            handoff.clone()
+        };
+        if self.store.settings().await?.revision != handoff.settings_revision {
             return Err(AppError::conflict("源会话或编辑器配置已变化"));
         }
         self.file_owner(handoff.owner, handoff.file)?;
@@ -756,13 +758,26 @@ impl Engine {
         let program = handoff.config.program.clone();
         let file = handoff.file;
         let file_revision = handoff.file_revision;
-        self.state.lock().unwrap().editing.files.handoffs.insert(
-            id,
-            Handoff {
-                helper: Some(owner),
-                ..handoff
-            },
-        );
+        {
+            let mut state = self.state.lock().unwrap();
+            if !state
+                .contexts
+                .get(&handoff.owner)
+                .is_some_and(|c| c.kind == model::ClientKind::Tsp)
+            {
+                return Err(AppError::conflict("源会话或编辑器配置已变化"));
+            }
+            let current = state
+                .editing
+                .files
+                .handoffs
+                .get_mut(&id)
+                .ok_or_else(|| AppError::new("expired", "编辑器交接不存在或已消费"))?;
+            if current.helper.is_some() || current.expires <= Instant::now() {
+                return Err(AppError::new("expired", "编辑器交接已失效"));
+            }
+            current.helper = Some(owner);
+        }
         Ok(json!({"program":program,"args":args,"file_session":file,"file_revision":file_revision}))
     }
     async fn editor_finish(&self, owner: Uuid, params: &Value) -> Result<Value> {
@@ -909,5 +924,147 @@ impl Engine {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::ClientContext;
+
+    #[tokio::test]
+    async fn repeated_claim_preserves_busy_handoff_until_finish() {
+        let (engine, root) = crate::server::tests::engine().await;
+        let source = Uuid::new_v4();
+        let helper = Uuid::new_v4();
+        assert!(engine.register(source));
+        assert!(engine.register_with(
+            helper,
+            ClientContext {
+                kind: model::ClientKind::ValueEditor,
+                workspace: "default".into(),
+                allow_connections: vec![],
+            }
+        ));
+        let record = engine
+            .store
+            .register_edit_file(EditFileRegistration {
+                workspace_id: "default",
+                profile_id: "profile",
+                purpose: EditFilePurpose::External,
+                target: json!({}),
+                format: "txt",
+                baseline_digest: "digest",
+                draft_revision: 1,
+            })
+            .await
+            .unwrap();
+        let record = engine
+            .store
+            .publish_edit_file(record.id, record.revision, b"value", 64)
+            .await
+            .unwrap();
+        let handoff = Uuid::new_v4();
+        let settings_revision = engine.store.settings().await.unwrap().revision;
+        {
+            let mut state = engine.state.lock().unwrap();
+            state.editing.files.owners.insert(record.id, source);
+            state.editing.files.handoffs.insert(
+                handoff,
+                Handoff {
+                    owner: source,
+                    file: record.id,
+                    file_revision: record.revision,
+                    settings_revision,
+                    config: ExternalEditorConfig {
+                        mode: ExternalEditorMode::Terminal,
+                        program: "vi".into(),
+                        args: vec!["{file}".into()],
+                    },
+                    expires: Instant::now() + Duration::from_secs(60),
+                    helper: None,
+                },
+            );
+        }
+        let params = json!({"handoff": handoff});
+        {
+            let mut state = engine.state.lock().unwrap();
+            state
+                .editing
+                .files
+                .handoffs
+                .get_mut(&handoff)
+                .unwrap()
+                .expires = Instant::now();
+        }
+        assert_eq!(
+            engine
+                .file_rpc(helper, "value.editor.claim", params.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "expired"
+        );
+        let source_context = {
+            let mut state = engine.state.lock().unwrap();
+            state
+                .editing
+                .files
+                .handoffs
+                .get_mut(&handoff)
+                .unwrap()
+                .expires = Instant::now() + Duration::from_secs(60);
+            state.contexts.remove(&source).unwrap()
+        };
+        assert_eq!(
+            engine
+                .file_rpc(helper, "value.editor.claim", params.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "conflict"
+        );
+        engine
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .insert(source, source_context);
+        engine
+            .file_rpc(helper, "value.editor.claim", params.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            engine
+                .file_rpc(helper, "value.editor.claim", params.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "expired"
+        );
+        let close = json!({"file_session":record.id,"revision":record.revision,"keep":false});
+        assert_eq!(
+            engine
+                .file_rpc(source, "value.external.close", close.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "busy"
+        );
+        engine
+            .file_rpc(
+                helper,
+                "value.editor.finish",
+                json!({"handoff":handoff,"status":0}),
+            )
+            .await
+            .unwrap();
+        engine
+            .file_rpc(source, "value.external.close", close)
+            .await
+            .unwrap();
+        engine.store.pool.close().await;
+        drop(engine);
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

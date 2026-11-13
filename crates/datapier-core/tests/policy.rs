@@ -66,7 +66,12 @@ fn show_create_view_reads_only_query_dependencies() {
     );
     assert!(access.write_databases.is_empty());
     assert!(access.objects.iter().all(|o| !o.write && o.name != "v"));
-    assert!(!access.replayable);
+    assert!(access.replayable);
+    assert!(
+        !analyze_view_ddl("CREATE VIEW v AS SELECT RAND()", &context())
+            .unwrap()
+            .replayable
+    );
     for sql in [
         "CREATE VIEW v AS SELECT @secret",
         "CREATE VIEW v AS SELECT * FROM information_schema.tables",

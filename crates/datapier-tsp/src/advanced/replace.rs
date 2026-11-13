@@ -204,6 +204,10 @@ impl ReplaceState {
         self.summary.is_some() || self.task.is_some() || self.pending.is_some()
     }
 
+    pub(crate) fn busy(&self) -> bool {
+        self.pending.is_some() || self.task.is_some()
+    }
+
     /// App 的编辑器分派应将这两个字段转发到这里。
     pub(crate) fn editor(&mut self, name: &str) -> Option<&mut Editor> {
         if self.summary.is_some() || self.task.is_some() || self.pending.is_some() {
@@ -469,7 +473,7 @@ impl ReplaceState {
                     _ => self.scope,
                 };
             }
-            "replace:reset" if self.invalid && self.summary.is_none() => {
+            "replace:reset" if self.summary.is_none() => {
                 *self = Self::default();
             }
             "replace:prepare" => self.prepare(backend, route),
@@ -1223,7 +1227,7 @@ fn can_submit(state: &ReplaceState) -> bool {
 
 /// 固定操作区，宿主 dialog 将其挂载到 footer。
 pub(crate) fn footer(state: &ReplaceState) -> html::El<Msg> {
-    let busy = state.pending.is_some() || state.task.is_some();
+    let busy = state.busy();
     let frozen = state.summary.is_some() || state.task.is_some();
     let mut footer = html::div()
         .class("modal-footer")
@@ -1238,6 +1242,7 @@ pub(crate) fn footer(state: &ReplaceState) -> html::El<Msg> {
                 busy || state.invalid || !can_submit(state),
             ));
     } else {
+        footer = footer.child(button("丢弃", "replace:reset".into(), busy));
         footer = footer.child(button(
             "准备预览",
             "replace:prepare".into(),

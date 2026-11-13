@@ -579,7 +579,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                         .child(ui::code(ddl).lang("sql").numbers(true)),
                 );
             } else {
-                if target.kind == "table" {
+                if matches!(target.kind.as_str(), "table" | "view") {
                     if let Some(schema) = &app.advanced_schema {
                         body = body.child(schema.view());
                     } else {

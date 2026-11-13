@@ -38,6 +38,7 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     engine
@@ -361,6 +362,7 @@ async fn direct_only_profile_list_keeps_existing_response_limit() {
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     engine

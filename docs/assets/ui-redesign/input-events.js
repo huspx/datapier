@@ -210,6 +210,11 @@ document.addEventListener('input', event => {
     syncDatabaseOptions();
     return;
   }
+  if (event.target.dataset.newDatabaseField) {
+    state.newDatabaseForm[event.target.dataset.newDatabaseField] = event.target.value;
+    updateDatabasePreview();
+    return;
+  }
   if (event.target.dataset.connectionField) {
     state.connectionForm[event.target.dataset.connectionField] = event.target.value;
     return;
@@ -296,6 +301,19 @@ document.addEventListener('change', event => {
       ? selected.add(event.target.dataset.databaseChoice)
       : selected.delete(event.target.dataset.databaseChoice);
     syncDatabaseOptions();
+    return;
+  }
+  if (event.target.dataset.newDatabaseField) {
+    const key = event.target.dataset.newDatabaseField;
+    state.newDatabaseForm[key] = event.target.value;
+    if (key === 'charset') {
+      state.newDatabaseForm.collation = '';
+      const options = databasePreviewCollations[event.target.value];
+      document.querySelector('[data-new-database-field="collation"]').innerHTML =
+        `<option value="">${az('字符集默认', 'Character set default')}</option>`
+        + options.map(value => `<option>${value}</option>`).join('');
+    }
+    updateDatabasePreview();
     return;
   }
   if (event.target.dataset.connectionField) {

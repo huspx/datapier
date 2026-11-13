@@ -35,6 +35,21 @@ impl McpState {
         self.authentication
             .retain(|(client, _), _| *client != owner);
     }
+    pub(super) fn release_session_handles(
+        &mut self,
+        owner: Uuid,
+        session: Uuid,
+        results: &HashSet<Uuid>,
+    ) {
+        self.cursors.retain(|_, cursor| {
+            cursor.owner != owner
+                || (cursor.resource != session && !results.contains(&cursor.resource))
+        });
+        self.pages
+            .retain(|(client, result, _), _| *client != owner || !results.contains(result));
+        self.values
+            .retain(|_, (client, result)| *client != owner || !results.contains(result));
+    }
 }
 #[derive(Clone)]
 struct AuthenticationRequest {

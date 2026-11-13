@@ -684,7 +684,14 @@ impl RedisSession {
                 return Err(AppError::invalid("扫描条件与令牌不匹配"));
             }
             let mut resources = Vec::with_capacity(limit);
-            let mut size = 0usize;
+            // 精确计算页封装及最长 TTL 数字，保证实际资源可填满预算。
+            let mut size = serde_json::to_vec(&ResourcePage {
+                resources: Vec::new(),
+                cursor: Some(id.to_string()),
+                complete: false,
+                resource_limited: false,
+            })?
+            .len();
             loop {
                 ensure_not_cancelled(cancel)?;
                 while let Some((key, kind)) = scan.pending.front() {
@@ -693,10 +700,11 @@ impl RedisSession {
                         kind: kind.clone(),
                         database: Some(self.profile.redis_db().to_string()),
                         key_b64: Some(STANDARD.encode(key)),
-                        data: Json::Null,
+                        data: json!({"ttl_ms":i64::MIN}),
                     };
-                    let bytes = serde_json::to_vec(&resource)?.len() + 33;
-                    if size.saturating_add(bytes) > response_budget.saturating_sub(1024) {
+                    let bytes =
+                        serde_json::to_vec(&resource)?.len() + usize::from(!resources.is_empty());
+                    if size.saturating_add(bytes) > response_budget {
                         if resources.is_empty() {
                             return Err(AppError::new(
                                 "result_too_large",
@@ -814,18 +822,16 @@ impl RedisSession {
                     Some(id.to_string())
                 },
                 complete,
+                resource_limited: scan.limited,
             })
         }
         .await;
-        let limited = self.scans.get(&id).is_some_and(|scan| scan.limited);
         if ((fresh && result.is_err()) || result.as_ref().is_ok_and(|page| page.cursor.is_none()))
             && let Some(scan) = self.scans.remove(&id)
         {
             scan.store.release_auxiliary(id).await?;
         }
-        let mut value = serde_json::to_value(result?)?;
-        value["resource_limited"] = json!(limited);
-        Ok(value)
+        Ok(serde_json::to_value(result?)?)
     }
     async fn describe(conn: &mut Conn, t: ResourceTarget) -> Result<Json> {
         let k = key(&t)?;

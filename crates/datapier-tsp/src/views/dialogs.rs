@@ -226,6 +226,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
         "redis-delete-rows" => "删除选中条目",
         "redis-key-delete" => "删除选中 key",
         "profile-delete" => "确认删除连接",
+        "database-create" => "新建数据库",
         "resource-drop" => "确认删除资源",
         "shortcuts" => "快捷键帮助",
         "preview" => "变更预览",
@@ -234,7 +235,9 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
         _ => "设置",
     })
     .into_owned();
-    let close = if kind == "profile" && app.connection_form_busy() {
+    let close = if (kind == "profile" && app.connection_form_busy())
+        || (kind == "replace" && app.advanced_replace.busy())
+    {
         ui::button("")
             .variant(ui::ButtonVariant::Quiet)
             .icon("x")
@@ -429,13 +432,168 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 }
             }
         }
+        "database-create" => {
+            if let Some(form) = app.navigation_database_create() {
+                let locked = form.unknown
+                    || form.task.is_some()
+                    || (form.busy && form.preview_input.is_none());
+                let current = app.database_create_input();
+                let preview_current = form.plan_input.is_some() && form.plan_input == current;
+                if locked {
+                    let name = form
+                        .plan
+                        .as_ref()
+                        .and_then(|plan| plan.pointer("/target/name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| app.field("database-create-name"));
+                    panel = panel.child(html::p(format!(
+                        "{}：{}",
+                        crate::i18n::tr("数据库名称"),
+                        name
+                    )));
+                } else {
+                    panel = panel.child(field(app, "database-create-name", "数据库名称"));
+                }
+                if let Some((default_charset, server_collation, rows)) =
+                    form.options.as_ref().and_then(|options| {
+                        Some((
+                            options["charset"].as_str()?,
+                            options["collation"].as_str()?,
+                            options["collations"].as_array()?,
+                        ))
+                    })
+                {
+                    let mut names = std::collections::BTreeSet::new();
+                    for row in rows {
+                        if let Some(name) = row["charset"].as_str() {
+                            names.insert(name);
+                        }
+                    }
+                    let mut charset = ui::select()
+                        .aria(crate::i18n::tr("数据库字符集").into_owned())
+                        .value(form.charset.clone())
+                        .disabled(locked)
+                        .open(form.open_select.as_deref() == Some("charset"))
+                        .on_toggle(|collapsed| {
+                            Msg::Action(format!(
+                                "database-create-select-open:{}",
+                                if collapsed { "" } else { "charset" }
+                            ))
+                        })
+                        .option(ui::SelectOption::new(
+                            "",
+                            format!("{} ({default_charset})", crate::i18n::tr("服务器默认")),
+                        ));
+                    for name in names {
+                        charset = charset.option(ui::SelectOption::new(name, name));
+                    }
+                    panel = panel
+                        .child(html::strong(crate::i18n::tr("数据库字符集").into_owned()))
+                        .child(charset.on_change(|change| {
+                            Msg::Action(format!(
+                                "database-create-charset:{}",
+                                change.value.as_str().unwrap_or_default()
+                            ))
+                        }));
+                    let selected_charset = if form.charset.is_empty() {
+                        default_charset
+                    } else {
+                        &form.charset
+                    };
+                    let default_collation = if form.charset.is_empty() {
+                        Some(server_collation)
+                    } else {
+                        rows.iter()
+                            .find(|row| {
+                                row["charset"] == selected_charset && row["default"] == true
+                            })
+                            .and_then(|row| row["name"].as_str())
+                    };
+                    let mut collation = ui::select()
+                        .aria(crate::i18n::tr("排序规则").into_owned())
+                        .value(form.collation.clone())
+                        .disabled(locked)
+                        .open(form.open_select.as_deref() == Some("collation"))
+                        .on_toggle(|collapsed| {
+                            Msg::Action(format!(
+                                "database-create-select-open:{}",
+                                if collapsed { "" } else { "collation" }
+                            ))
+                        });
+                    if let Some(default_collation) = default_collation {
+                        collation = collation.option(ui::SelectOption::new(
+                            "",
+                            format!("{} ({default_collation})", crate::i18n::tr("字符集默认")),
+                        ));
+                    }
+                    for row in rows {
+                        if row["charset"] == selected_charset
+                            && let Some(name) = row["name"].as_str()
+                        {
+                            collation = collation
+                                .option(ui::SelectOption::new(name.to_owned(), name.to_owned()));
+                        }
+                    }
+                    panel = panel
+                        .child(html::strong(crate::i18n::tr("排序规则").into_owned()))
+                        .child(collation.on_change(|change| {
+                            Msg::Action(format!(
+                                "database-create-collation:{}",
+                                change.value.as_str().unwrap_or_default()
+                            ))
+                        }));
+                } else if form.busy {
+                    panel =
+                        panel.child(html::p(crate::i18n::tr("正在读取数据库选项…").into_owned()));
+                }
+                if preview_current && let Some(sql) = &form.sql {
+                    panel = panel.child(ui::code(sql.clone()).lang("sql"));
+                }
+                if form.options.is_some()
+                    && !preview_current
+                    && !form.unknown
+                    && form.error.is_none()
+                    && !app.field("database-create-name").trim().is_empty()
+                {
+                    panel = panel.child(
+                        html::p(crate::i18n::tr("正在生成 SQL 预览…").into_owned()).class("muted"),
+                    );
+                }
+                if let Some(error) = &form.error {
+                    panel = panel.child(
+                        html::p(crate::i18n::tr(error).into_owned()).class("connection-error"),
+                    );
+                }
+                footer = html::div()
+                    .class("modal-footer")
+                    .child(html::span("").class("spacer"));
+                if !locked {
+                    footer = footer.child(
+                        ui::button(crate::i18n::tr("取消").into_owned())
+                            .disabled(form.busy)
+                            .on_click(Msg::Action("overlay-close".into())),
+                    );
+                    footer = footer.child(
+                        ui::button(crate::i18n::tr("执行").into_owned())
+                            .disabled(form.busy || !preview_current || form.sql.is_none())
+                            .on_click(Msg::Action("database-create-submit".into())),
+                    );
+                } else if form.unknown && !form.busy && form.task.is_none() {
+                    footer = footer.child(button("取消", "overlay-close"));
+                } else {
+                    footer = footer.child(html::span(crate::i18n::tr("操作进行中…").into_owned()));
+                }
+            }
+        }
         "profile-delete" => {
             if let Some(confirmation) = app.navigation_delete_confirmation() {
                 panel = panel
                     .child(html::p(confirmation.name.clone()))
                     .child(html::p(
-                        crate::i18n::tr("关闭当前工作区的相关会话并删除连接配置；数据库数据保留。")
-                            .into_owned(),
+                        crate::i18n::tr(
+                            "关闭当前工作区的相关标签和会话并删除连接配置；数据库数据保留。",
+                        )
+                        .into_owned(),
                     ));
                 if let Some(error) = &confirmation.error {
                     panel = panel.child(

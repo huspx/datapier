@@ -123,7 +123,6 @@ struct State {
 impl State {
     fn stop_if_idle(&mut self) -> bool {
         if self.clients.is_empty()
-            && self.tasks.is_empty()
             && self.workspace_uploads.is_empty()
             && !self.archery.has_persistent_operations()
             && self.idle.elapsed() >= Duration::from_secs(30)
@@ -155,6 +154,39 @@ fn optional<T: serde::de::DeserializeOwned>(params: &Value, key: &str) -> Result
         .filter(|v| !v.is_null())
         .map(|v| serde_json::from_value(v.clone()).map_err(Into::into))
         .transpose()
+}
+fn mysql_connect_timeout(profile: &Profile, fallback: u64) -> u64 {
+    if profile.provider == model::ProviderKind::Mysql {
+        profile
+            .direct()
+            .ok()
+            .and_then(|direct| direct.mysql.connect_timeout_seconds)
+            .unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
+fn mysql_query_timeout(profile: &Profile, fallback: u64) -> u64 {
+    if profile.provider == model::ProviderKind::Mysql {
+        profile
+            .direct()
+            .ok()
+            .and_then(|direct| direct.mysql.query_timeout_seconds)
+            .unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
+fn profile_with_connect_timeout(profile: &Profile, fallback: u64) -> Profile {
+    let mut effective = profile.clone();
+    if effective.provider == model::ProviderKind::Mysql
+        && let Ok(direct) = effective.direct_mut()
+    {
+        direct.mysql.connect_timeout_seconds.get_or_insert(fallback);
+    }
+    effective
 }
 // 执行记录不保留结构化认证字段；SQL 正文属于查询历史，不通过关键词替换改写。
 fn redact(value: &mut Value) {
@@ -283,10 +315,16 @@ pub async fn run(root: PathBuf) -> Result<()> {
         .values()
         .filter_map(|task| task.abort.clone())
         .collect();
-    for abort in aborts {
+    for abort in &aborts {
         abort.abort();
     }
-    tokio::task::yield_now().await;
+    // 等待中止生效再恢复持久化状态，避免尚在运行的任务覆盖恢复结果。
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while aborts.iter().any(|abort| !abort.is_finished()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
     // 无人计时同时是已发送写入的宽限期；到期中断后按持久化阶段记录待确认结果。
     engine.store.recover_tasks().await?;
     let _ = std::fs::remove_file(descriptor);

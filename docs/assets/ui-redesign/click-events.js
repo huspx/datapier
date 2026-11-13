@@ -96,6 +96,9 @@ document.addEventListener('click', event => {
     return;
   }
   if (button.dataset.provider) {
+    if (state.connectionStatus[button.dataset.provider] !== 'connected') {
+      state.connectionStatus[button.dataset.provider] = 'connected';
+    }
     activateProvider(button.dataset.provider);
     state.menu = null;
     render();
@@ -681,6 +684,42 @@ document.addEventListener('click', event => {
     sqlMenuAction(action);
     return;
   }
+  if (action === 'profile-create-database:mysql') {
+    state.menu = null;
+    if (state.connectionStatus.mysql !== 'connected') {
+      render();
+      toast(az('请先连接数据库', 'Connect first'));
+      return;
+    }
+    if (state.connectionModes.mysql) {
+      render();
+      toast(az('当前连接为只读', 'The connection is read-only'));
+      return;
+    }
+    state.newDatabaseForm = { name: '', charset: '', collation: '', sql: '' };
+    state.overlay = 'new-database';
+    render();
+    return;
+  }
+  if (action === 'database-create-execute') {
+    const input = document.querySelector('[data-new-database-field="name"]');
+    if (!input.reportValidity()) return;
+    if (!state.newDatabaseForm.name.trim()) {
+      fieldError(input, az('数据库名称不能为空。', 'Database name is required.'));
+      return;
+    }
+    toast(az('执行请求示例 · 未发送', 'Execute request preview · Not sent'));
+    return;
+  }
+  if (action === 'profile-close:mysql') {
+    state.menu = null;
+    const targets = state.tabs.filter(tab => (tab.provider || 'mysql') === 'mysql');
+    if (!closeTabs(targets.map(tab => tab.id))) return;
+    state.connectionStatus.mysql = 'disconnected';
+    render();
+    toast(az('示例连接已关闭，连接配置保留。', 'The example connection was closed; its configuration was retained.'));
+    return;
+  }
   if (action.startsWith('profile-settings:')) {
     openConnectionForm('connection-settings', action.split(':')[1]);
     return;
@@ -924,7 +963,12 @@ document.addEventListener('click', event => {
         const valid = target && state.connections.has(target.provider)
           && Object.entries(target.context).every(([key, value]) => state[key] === value);
         const hasDrafts = valid && connectionHasDrafts(target.provider);
-        if (valid && !hasDrafts) state.connections.delete(target.provider);
+        if (valid && !hasDrafts) {
+          const targets = state.tabs.filter(tab => (tab.provider || 'mysql') === target.provider);
+          if (!closeTabs(targets.map(tab => tab.id))) return;
+          state.connectionStatus[target.provider] = 'disconnected';
+          state.connections.delete(target.provider);
+        }
         state.deleteConnectionTarget = null;
         state.overlay = null;
         render();
@@ -1075,17 +1119,6 @@ document.addEventListener('click', event => {
       )?.[state.menuCell] === null;
       render();
       document.querySelector('.cell-drawer #cell-value')?.focus();
-      break;
-    case 'inspect-cell-overlay':
-      state.menu = null;
-      state.cellDrawer = false;
-      state.cellInspectorValue = null;
-      state.cellInspectorDirty = false;
-      state.cellOverlayBaseline = null;
-      state.cellInspectorIsNull =
-        databases[state.database][state.table].find(row => rowId(row) === state.menuRow)?.[state.menuCell] === null;
-      state.overlay = 'cell-details';
-      render();
       break;
     case 'close-cell-drawer':
       requestDialogClose(() => {
@@ -1244,7 +1277,15 @@ document.addEventListener('click', event => {
         if (state.connectionForm.provider === 'redis') {
           state.redisDatabasesOverride = state.connectionForm.redisDatabasesOverride;
         }
+        if (state.connectionForm.provider === 'mysql') {
+          state.mysqlOptions = {
+            timezone: state.connectionForm.mysqlTimezone,
+            connectTimeout: state.connectionForm.mysqlConnectTimeout,
+            queryTimeout: state.connectionForm.mysqlQueryTimeout,
+          };
+        }
         state.connectionModes[state.connectionForm.provider] = state.connectionForm.readOnly;
+        state.connectionStatus[state.connectionForm.provider] = 'connected';
         state.overlay = null;
         render();
       }

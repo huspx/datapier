@@ -344,6 +344,7 @@ function overlay() {
       }</button><button class="primary row" data-action="copy-sql">${icon('copy')} ${t('copy')}</button>`,
     );
   }
+  if (state.overlay === 'new-database') return newDatabaseDialog();
   if (
     state.overlay === 'new-connection'
     || state.overlay === 'connection-settings'
@@ -481,7 +482,23 @@ function menu() {
         c?.name
           || (provider === 'mysql' ? 'Commerce · MySQL' : 'Cache · Redis'),
       )
-    }</div><button role="menuitem" ${attrs('edit')}>${icon('gear')} ${
+    }</div>${
+      !aid && provider === 'mysql'
+        ? `<button role="menuitem" data-action="profile-create-database:mysql" ${
+          state.connectionModes.mysql || state.connectionStatus.mysql !== 'connected' ? 'disabled' : ''
+        } title="${
+          state.connectionStatus.mysql !== 'connected'
+            ? h(az('请先连接数据库', 'Connect first'))
+            : state.connectionModes.mysql
+            ? h(az('当前连接为只读', 'The connection is read-only'))
+            : ''
+        }">${icon('plus')} ${
+          az('新建数据库…', 'Create database…')
+        }</button><button role="menuitem" data-action="profile-close:mysql">${icon('x')} ${
+          az('关闭连接', 'Close connection')
+        }</button>`
+        : ''
+    }<button role="menuitem" ${attrs('edit')}>${icon('gear')} ${
       t('connectionSettings')
     }</button><button role="menuitem" ${attrs('copy')}>${icon('copy')} ${
       t('copyConnectionName')
@@ -541,11 +558,7 @@ function menu() {
     t('selectedRows', { count: state.selected.size })
   }</div>${
     state.menu.cell
-      ? `<button role="menuitem" data-action="copy-menu-cells">${icon('copy')} ${
-        t('copySelectedCells')
-      }</button><button role="menuitem" data-action="inspect-cell-overlay">${
-        language === 'zh-CN' ? '打开完整值' : 'Open full value'
-      }</button>`
+      ? `<button role="menuitem" data-action="copy-menu-cells">${icon('copy')} ${t('copySelectedCells')}</button>`
       : ''
   }<button role="menuitem" data-action="copy-rows">${icon('copy')} ${
     t('copyRows')
@@ -609,6 +622,16 @@ function activateProvider(provider) {
       title: state.key,
       key: state.key,
       redisDb: state.redisDb,
+    };
+    state.tabs.push(tab);
+  } else if (!tab && provider === 'mysql') {
+    tab = {
+      id: state.nextTab++,
+      provider: 'mysql',
+      query: true,
+      title: t('queryFile', { number: state.nextTab }),
+      sql: '',
+      database: state.database,
     };
     state.tabs.push(tab);
   }

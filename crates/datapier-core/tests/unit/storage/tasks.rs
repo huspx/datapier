@@ -262,6 +262,65 @@ async fn crash_recovery_preserves_unknown_writes_and_finished_tasks() {
     assert_eq!(done.summary["affected_rows"], 1);
     cleanup(store).await;
 }
+#[tokio::test]
+async fn recovery_terminates_orphaned_approvals_without_retrying_sent_writes() {
+    let store = fixture().await;
+    let owner = Uuid::new_v4();
+    let mut cases = Vec::new();
+    for (approval_state, sent) in [
+        ("pending", false),
+        ("dispatching", false),
+        ("dispatching", true),
+    ] {
+        let task = store
+            .create_task(owner, "w", "execution.start", json!({}), false)
+            .await
+            .unwrap();
+        store
+            .update_task(task.id, "approval_required", json!({}), None)
+            .await
+            .unwrap();
+        let approval = crate::model::ApprovalRecord {
+            id: Uuid::new_v4(),
+            execution_id: task.id,
+            owner,
+            session_id: Uuid::new_v4(),
+            profile_id: Uuid::new_v4(),
+            request: json!({"text":"UPDATE t SET a=1"}),
+            digest: "digest".into(),
+            profile_revision: 1,
+            policy_revision: 1,
+            created_at: 1,
+            expires_at: i64::MAX,
+            state: "pending".into(),
+            decided_at: None,
+            decision_source: None,
+        };
+        store.create_approval(&approval).await.unwrap();
+        if approval_state == "dispatching" {
+            store
+                .decide_approval(approval.id, owner, "approve", "test")
+                .await
+                .unwrap();
+        }
+        if sent {
+            store.mark_sent(task.id, true).await.unwrap();
+        }
+        cases.push((task.id, approval.id, sent));
+    }
+    store.recover_tasks().await.unwrap();
+    for (task, approval, sent) in cases {
+        assert_eq!(
+            store.task(task).await.unwrap().state,
+            if sent { "outcome_unknown" } else { "cancelled" }
+        );
+        assert_eq!(
+            store.approval(approval).await.unwrap().state,
+            if sent { "dispatched" } else { "invalidated" }
+        );
+    }
+    cleanup(store).await;
+}
 
 #[tokio::test]
 async fn cancellation_before_dispatch_never_records_a_sent_write() {

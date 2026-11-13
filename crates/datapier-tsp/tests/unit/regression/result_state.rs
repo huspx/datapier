@@ -513,7 +513,12 @@ fn grid_draft_prevents_opening_another_edit_baseline() {
 
 #[test]
 fn successful_submission_retracts_stale_rows_and_retains_column_layout() {
-    for operation in [None, Some("rename"), Some("delete_key")] {
+    for (operation, status) in [
+        (None, "applied"),
+        (None, "unchanged"),
+        (Some("rename"), "applied"),
+        (Some("delete_key"), "applied"),
+    ] {
         let (backend, _requests, _) = Backend::scripted();
         let mut app = app_with_grid_draft();
         app.grid.as_mut().unwrap().settings[0].width = 240;
@@ -525,7 +530,7 @@ fn successful_submission_retracts_stale_rows_and_retains_column_layout() {
                 tag: "execution.get".into(),
                 result: Ok(json!({
                     "state": "succeeded", "method": "change.submit", "results": [],
-                    "summary": {"items": [{"status": "applied"}]}
+                    "summary": {"items": [{"status": status}]}
                 })),
             },
             &backend,
@@ -534,6 +539,25 @@ fn successful_submission_retracts_stale_rows_and_retains_column_layout() {
         assert!(!app.has_live_drafts());
         assert_eq!(app.tabs[0].layout[0].width, 240);
         assert_eq!(app.target.is_none(), operation.is_some());
+    }
+}
+
+#[test]
+fn incomplete_submission_retains_drafts() {
+    for status in ["failed", "outcome_unknown"] {
+        let (backend, _, _) = Backend::scripted();
+        let mut app = app_with_grid_draft();
+        app.response(
+            Response {
+                tag: "execution.get".into(),
+                result: Ok(json!({
+                    "state":"succeeded", "method":"change.submit", "results":[],
+                    "summary":{"items":[{"status":"unchanged"},{"status":status}]}
+                })),
+            },
+            &backend,
+        );
+        assert!(app.has_live_drafts());
     }
 }
 

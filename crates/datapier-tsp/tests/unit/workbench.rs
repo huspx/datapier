@@ -502,18 +502,127 @@ fn redis_hash_rename_preserves_old_binary_field_and_multiline_value() {
     assert_eq!(app.field("redis_value"), "第一行\n第二行");
     app.field_set("redis_field", "新字段");
     app.workbench_action("redis-stage", &backend);
-    assert_eq!(app.redis_changes.len(), 2);
-    assert_eq!(
-        app.redis_changes[0],
-        json!({"operation":"hash_delete","field":{"type":"bytes","value":STANDARD.encode(original)}})
-    );
-    assert_eq!(
-        app.redis_changes[1],
-        json!({"operation":"hash_set","field":{"type":"text","value":"新字段"},"value":{"type":"text","value":"第一行\n第二行"}})
-    );
+    assert_eq!(app.redis_changes.len(), 1);
+    let change = &app.redis_changes[0];
+    assert_eq!(change["operation"], "hash_replace_field");
+    assert_eq!(change["field"]["value"], STANDARD.encode(original));
+    assert_eq!(change["new_field"]["value"], "新字段");
+    assert_eq!(change["value"]["value"], "第一行\n第二行");
     app.workbench_action("redis-undo", &backend);
     assert!(app.redis_changes.is_empty());
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn redis_row_edits_preserve_identity_and_hash_expiry() {
+    let (backend, _, _) = Backend::scripted();
+    let bytes = |s: &str| DataValue::Bytes(STANDARD.encode(s));
+    let mut hash = app_for(
+        "redis",
+        "hash",
+        page(&["field", "value"], vec![vec![bytes("a"), bytes("old")]]),
+    );
+    hash.workbench_action("redis-edit", &backend);
+    hash.field_set("redis_value", "new");
+    hash.workbench_action("redis-stage", &backend);
+    assert_eq!(hash.redis_changes[0]["operation"], "hash_set");
+    assert_eq!(hash.redis_changes[0]["preserve_field_ttl"], true);
+    assert_eq!(hash.redis_changes[0]["value"]["value"], "new");
+
+    for kind in ["set", "zset"] {
+        let (columns, row) = if kind == "set" {
+            (vec!["member"], vec![bytes("a")])
+        } else {
+            (
+                vec!["member", "score"],
+                vec![bytes("a"), DataValue::Float("1".into())],
+            )
+        };
+        let mut app = app_for("redis", kind, page(&columns, vec![row]));
+        app.workbench_action("redis-edit", &backend);
+        app.field_set("redis_member", "b");
+        if kind == "zset" {
+            app.field_set("redis_score", "2");
+        }
+        app.workbench_action("redis-stage", &backend);
+        let replacement = &app.redis_changes[0];
+        assert_eq!(replacement["operation"], format!("{kind}_replace_member"));
+        assert_eq!(replacement["member"]["value"], STANDARD.encode("a"));
+        assert_eq!(replacement["new_member"]["value"], "b");
+        if kind == "zset" {
+            assert_eq!(replacement["score"], "2");
+            assert!(replacement.get("preserve_score").is_none());
+        }
+        assert_eq!(app.redis_changes.len(), 1);
+    }
+}
+
+#[test]
+fn advanced_list_value_uses_original_baseline_and_translates_staged_index() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let rows = ["A", "B"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, value)| {
+            vec![
+                DataValue::Integer(i.to_string()),
+                DataValue::Bytes(STANDARD.encode(value)),
+            ]
+        })
+        .collect();
+    let mut app = app_for("redis", "list", page(&["index", "value"], rows));
+    app.redis_changes
+        .push(json!({"operation":"list_delete","index":0}));
+    let result = app.grid.as_ref().unwrap().page.result.id;
+    let params = |app: &App, row| {
+        json!({"session_id":app.session_id(),"target":app.target,
+        "edit_token":app.edit_token,"result_id":result,"row_no":row,"column":"value"})
+    };
+    app.grid
+        .as_mut()
+        .unwrap()
+        .select(Cell { row: 0, column: 1 }, false)
+        .unwrap();
+    let open = params(&app, 0);
+    app.advanced_value_open(&backend, open);
+    assert!(requests.try_recv().is_err());
+    assert!(app.advanced_value.session.is_none());
+
+    app.grid
+        .as_mut()
+        .unwrap()
+        .select(Cell { row: 1, column: 1 }, false)
+        .unwrap();
+    let open = params(&app, 1);
+    app.advanced_value_open(&backend, open);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.params["index"], 1);
+    let (nonce, _) = app.advanced_value.request.clone().unwrap();
+    let id = Uuid::new_v4().to_string();
+    app.advanced_value_response(
+        &format!("advanced-value/{nonce}"),
+        &Ok(json!({
+            "value_session":id,"revision":1,"total_bytes":1,"writable":true,
+            "kind":"text","is_null":false,"offset":0,"data_b64":STANDARD.encode("B")
+        })),
+        &backend,
+    );
+    app.advanced_value_action("advanced-value-stage", &backend);
+    let (nonce, _) = app.advanced_value.request.clone().unwrap();
+    app.advanced_value_response(
+        &format!("advanced-value/{nonce}"),
+        &Ok(json!({
+            "value_session":id,"revision":1,"result_id":result,"row_no":1,"column":"value",
+            "redis_changes":[{"operation":"list_set","index":1,"value":{"type":"text","value":"X"}}]
+        })),
+        &backend,
+    );
+    assert_eq!(app.redis_changes.len(), 2);
+    assert_eq!(app.redis_changes[1]["index"], 0);
+    let mut list = vec!["A", "B"];
+    list.remove(app.redis_changes[0]["index"].as_u64().unwrap() as usize);
+    list[app.redis_changes[1]["index"].as_u64().unwrap() as usize] = "X";
+    assert_eq!(list, vec!["X"]);
 }
 
 #[test]

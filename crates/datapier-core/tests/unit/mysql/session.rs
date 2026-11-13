@@ -45,6 +45,7 @@ fn fixture_profile(mode: AccessMode) -> (Profile, Option<String>) {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         },
         Some(std::env::var("DATAPIER_TEST_MYSQL_SECRET").unwrap()),
@@ -62,7 +63,7 @@ async fn cancelled_catalog_connection_releases_session_lock() {
         .clone()
         .port(listener.local_addr().unwrap().port());
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
-    for method in ["list", "describe"] {
+    for method in ["list", "describe", "databases"] {
         let cancel = CancellationToken::new();
         let task = {
             let session = session.clone();
@@ -71,6 +72,8 @@ async fn cancelled_catalog_connection_releases_session_lock() {
                 let mut session = session.lock().await;
                 if method == "list" {
                     catalog::list(&mut session, json!({}), &cancel).await
+                } else if method == "databases" {
+                    catalog::databases(&mut session, &cancel).await
                 } else {
                     catalog::describe(
                         &mut session,
@@ -109,6 +112,79 @@ async fn cancelled_catalog_connection_releases_session_lock() {
         drop(socket);
     }
     session.lock().await.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 实例"]
+async fn cancelled_database_discovery_drops_independent_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (profile, secret) = fixture_profile(AccessMode::ReadWrite);
+    let port = profile.direct().unwrap().port;
+    let mut session = MysqlSession::connect(profile, secret).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    session.options = session
+        .options
+        .clone()
+        .port(listener.local_addr().unwrap().port());
+    let (query_sent, query_seen) = tokio::sync::oneshot::channel();
+    let proxy = tokio::spawn(async move {
+        let (client, _) = listener.accept().await.unwrap();
+        let server = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let (mut client_read, mut client_write) = client.into_split();
+        let (mut server_read, mut server_write) = server.into_split();
+        let relay = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut server_read, &mut client_write).await;
+        });
+        loop {
+            let mut header = [0u8; 4];
+            client_read.read_exact(&mut header).await.unwrap();
+            let length = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut packet = vec![0; length];
+            client_read.read_exact(&mut packet).await.unwrap();
+            if packet
+                .windows(b"information_schema.SCHEMATA".len())
+                .any(|part| part == b"information_schema.SCHEMATA")
+            {
+                query_sent.send(()).unwrap();
+                let mut byte = [0; 1];
+                assert_eq!(client_read.read(&mut byte).await.unwrap(), 0);
+                break;
+            }
+            server_write.write_all(&header).await.unwrap();
+            server_write.write_all(&packet).await.unwrap();
+        }
+        relay.abort();
+    });
+    let cancel = CancellationToken::new();
+    let signal = cancel.clone();
+    let cancel_task = tokio::spawn(async move {
+        query_seen.await.unwrap();
+        signal.cancel();
+    });
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        catalog::databases(&mut session, &cancel),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    tokio::time::timeout(std::time::Duration::from_secs(3), proxy)
+        .await
+        .unwrap()
+        .unwrap();
+    cancel_task.await.unwrap();
+    let one: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(session.connection().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(one, 1);
+    session.close().await.unwrap();
 }
 
 #[tokio::test]

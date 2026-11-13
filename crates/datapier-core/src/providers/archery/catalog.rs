@@ -151,6 +151,7 @@ pub(super) async fn list(
         resources,
         cursor: None,
         complete: requested.is_none(),
+        resource_limited: false,
     })?)
 }
 

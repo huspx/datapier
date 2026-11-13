@@ -9,12 +9,11 @@ fn redis_csv_preview_rejects_invalid_key_contents() {
         key_b64: None,
         kind: "database".into(),
     };
-    let header =
-        "version,record,key_b64,type,expires_at_ms,field_b64,index,member_b64,score,value_b64\n";
+    let header = "version,record,key_b64,type,expires_at_ms,field_b64,index,member_b64,score,value_b64,field_expires_at_ms\n";
     for records in [
-        "1,key,aw==,string,permanent,,,,,\n",
-        "1,key,aw==,string,permanent,,,,,\n1,item,aw==,string,,,,,,YQ==\n1,item,aw==,string,,,,,,Yg==\n",
-        "1,key,aw==,list,permanent,,,,,\n1,item,aw==,list,,,1,,,YQ==\n",
+        "2,key,aw==,string,permanent,,,,,,\n",
+        "2,key,aw==,string,permanent,,,,,,\n2,item,aw==,string,,,,,,YQ==,\n2,item,aw==,string,,,,,,Yg==,\n",
+        "2,key,aw==,list,permanent,,,,,,\n2,item,aw==,list,,,1,,,YQ==,\n",
     ] {
         fs::write(&path, format!("{header}{records}")).unwrap();
         let preview = preview_redis_csv(
@@ -53,12 +52,12 @@ async fn redis_score_validation_matches_csv_and_json_previews() {
         let values = vec![Value::Bytes("YQ==".into()), Value::Float(score.into())];
         assert_eq!(redis_csv_row("aw==", "zset", &values).is_ok(), valid);
         let csv = format!(
-            "version,record,key_b64,type,expires_at_ms,field_b64,index,member_b64,score,value_b64\n1,key,aw==,zset,permanent,,,,,\n1,item,aw==,zset,,,,YQ==,{score},\n"
+            "version,record,key_b64,type,expires_at_ms,field_b64,index,member_b64,score,value_b64,field_expires_at_ms\n2,key,aw==,zset,permanent,,,,,,\n2,item,aw==,zset,,,,YQ==,{score},,\n"
         );
         fs::write(&path, csv).unwrap();
         let preview = preview_redis_csv(&target, &cancel, File::open(&path).unwrap()).unwrap();
         assert_eq!(preview.errors.is_empty(), valid, "CSV {score}");
-        let doc = json!({"format":"datapier","version":1,"records":[{"key_b64":"aw==","type":"zset","expires_at_ms":null,"rows":[values]}]});
+        let doc = json!({"format":"datapier","version":2,"records":[{"key_b64":"aw==","type":"zset","expires_at_ms":null,"rows":[values]}]});
         fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
         let preview =
             preview_redis_json(&target, &sink, &cancel, File::open(&path).unwrap()).unwrap();

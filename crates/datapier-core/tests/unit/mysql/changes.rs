@@ -56,6 +56,38 @@ fn decimal_precision_and_scale_are_lossless_for_import_and_write() {
 }
 
 #[test]
+fn decimal_predicate_normalizes_zero_and_exponents_at_column_scale() {
+    let column = Column::new("amount", "decimal(30,20)");
+    let schema = TableSchema {
+        target: ResourceTarget {
+            database: Some("db".into()),
+            name: "t".into(),
+            key_b64: None,
+            kind: "table".into(),
+        },
+        columns: vec![column],
+        keys: Vec::new(),
+        ddl: String::new(),
+        engine: "InnoDB".into(),
+        details: Json::Null,
+    };
+    for (value, expected) in [
+        ("0", "0.00000000000000000000"),
+        ("1E-20", "0.00000000000000000001"),
+    ] {
+        let mut query = StatementPlan::new("");
+        predicate(
+            &mut query,
+            &schema,
+            &BTreeMap::from([("amount".into(), Value::Decimal(value.into()))]),
+        )
+        .unwrap();
+        assert_eq!(query.text, "`amount` <=> CAST(? AS DECIMAL(30,20))");
+        assert!(matches!(&query.parameters[..], [Bind::Text(actual)] if actual == expected));
+    }
+}
+
+#[test]
 fn integer_width_sign_and_year_are_checked_for_import_and_write() {
     for (ty, value, accepted) in [
         ("tinyint", "-128", true),

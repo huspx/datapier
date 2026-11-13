@@ -398,3 +398,17 @@ fn drop_allows_non_connection_profile_metadata_changes() {
     app.navigation_action(&format!("resource-drop-confirm:{token}"), &backend);
     assert_eq!(requests.try_recv().unwrap().method, "connection.open");
 }
+
+#[test]
+fn drop_confirmation_rechecks_background_advanced_draft() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let (mut app, _) = mysql_drop_app();
+    app.create_query_tab();
+    app.session = Some(json!({"session_id":Uuid::new_v4(),"profile":app.profile}));
+    app.navigation_action("navigation-drop-db:db`;x", &backend);
+    let token = app.navigation_drop_confirmation().unwrap().token;
+    app.tabs[0].runtime.advanced_value.session = Some("value-session".into());
+    app.navigation_action(&format!("resource-drop-confirm:{token}"), &backend);
+    assert!(requests.try_recv().is_err());
+    assert!(app.navigation_drop_confirmation().unwrap().error.is_some());
+}

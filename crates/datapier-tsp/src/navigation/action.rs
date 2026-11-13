@@ -3,6 +3,7 @@ use super::*;
 impl App {
     pub(crate) fn navigation_action(&mut self, name: &str, backend: &Backend) -> bool {
         self.navigation_group_action(name)
+            || self.create_database_action(name, backend)
             || self.navigation_drop_action(name, backend)
             || self.navigation_profile_action(name, backend)
             || self.navigation_connection_action(name, backend)

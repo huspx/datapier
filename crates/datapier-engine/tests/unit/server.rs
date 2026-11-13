@@ -68,3 +68,26 @@ async fn schema_conflict_and_cancelled_results_keep_their_task_terminal_state() 
     engine.store.pool.close().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+
+#[tokio::test]
+async fn redis_partial_failure_preserves_item_details() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    let task = engine
+        .store
+        .create_task(owner, "test", "change.submit", json!({}), false)
+        .await
+        .unwrap();
+    engine.store.mark_sent(task.id, true).await.unwrap();
+    let error = AppError::new("partial_failure", "部分操作失败").with_details(
+        json!({"items":[{"status":"applied"},{"status":"error","value_may_have_changed":true}]}),
+    );
+    engine.finish_task(owner, task.id, &Err(error), None).await;
+    let result = engine.store.task(task.id).await.unwrap();
+    assert_eq!(result.state, "failed");
+    assert_eq!(result.summary["items"][1]["value_may_have_changed"], true);
+    assert_eq!(result.error.unwrap().code, "partial_failure");
+    engine.store.pool.close().await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}

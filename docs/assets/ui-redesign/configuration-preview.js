@@ -457,7 +457,7 @@ function settingsPreview() {
     configNumber('responseBytes', '响应字节上限', 'Response byte limit')
   }${configNumber('previewBytes', '值预览字节数', 'Value preview bytes')}${
     configNumber('connectTimeout', '连接超时（秒）', 'Connect timeout (seconds)')
-  }${configNumber('queryTimeout', '查询超时（秒）', 'Query timeout (seconds)')}${
+  }${configNumber('queryTimeout', '执行超时（秒）', 'Execution timeout (seconds)')}${
     configNumber('countTimeout', '计数超时（秒）', 'Count timeout (seconds)')
   }${configNumber('resultIdle', '结果空闲时间（秒）', 'Result idle time (seconds)')}${
     configNumber('resultMemory', '客户端结果内存字节数', 'Result memory bytes per client')

@@ -12,7 +12,7 @@ use self::json::{JsonReader, JsonSpool, json_document};
 #[cfg(test)]
 use export::{ExportFile, export_cached, finish_export};
 use export::{csv_error, export, flush_csv};
-use mysql_import::{import_mysql_csv, import_mysql_json};
+use mysql_import::{MysqlImportInput, import_mysql_csv, import_mysql_json};
 pub use preview::preview;
 use redis_export::export_redis;
 use redis_import::{import_redis_csv, import_redis_json};
@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 const PAGE: usize = 500;
 const BYTES: usize = 1024 * 1024;
-const REDIS_HEADER: [&str; 10] = [
+const REDIS_HEADER: [&str; 11] = [
     "version",
     "record",
     "key_b64",
@@ -53,6 +53,7 @@ const REDIS_HEADER: [&str; 10] = [
     "member_b64",
     "score",
     "value_b64",
+    "field_expires_at_ms",
 ];
 
 // 只统计已确认的行和 key；错误中另附剩余工作与可能的部分文件路径。
@@ -205,7 +206,7 @@ pub(crate) fn validate_redis_score(score: &str) -> Result<()> {
 }
 fn redis_csv_row(key: &str, ty: &str, row: &[Value]) -> Result<Vec<String>> {
     let mut r = vec![
-        "1".into(),
+        "2".into(),
         "item".into(),
         key.into(),
         ty.into(),
@@ -215,12 +216,20 @@ fn redis_csv_row(key: &str, ty: &str, row: &[Value]) -> Result<Vec<String>> {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     ];
     match (ty, row) {
         ("string", [v]) => r[9] = redis_bytes(v)?,
-        ("hash", [f, v]) => {
+        ("hash", [f, v, Value::Integer(expiry)]) => {
+            let expiry_num = expiry
+                .parse::<i64>()
+                .map_err(|_| AppError::invalid("无效 Hash 字段期限"))?;
+            if expiry_num < -1 {
+                return Err(AppError::invalid("无效 Hash 字段期限"));
+            }
             r[5] = redis_bytes(f)?;
             r[9] = redis_bytes(v)?;
+            r[10] = expiry.clone();
         }
         ("list", [i, v]) => {
             r[6] = match i {
@@ -260,20 +269,57 @@ async fn import(
     let source = path(params)?;
     let file = File::open(&source)?;
     let target: ResourceTarget = param(params, "target")?;
-    match (session.profile().provider, fmt) {
+    let reservation = if session.profile().provider == ProviderKind::Mysql {
+        let id = Uuid::new_v4();
+        let owner = sink.store.task(sink.execution_id).await?.owner;
+        let budget = sink.store.available_memory_for_owner(owner).await?;
+        if budget == 0 {
+            return Err(AppError::new("resource_limit", "客户端内存预算已用尽"));
+        }
+        sink.store
+            .reserve_auxiliary(sink.execution_id, id, budget)
+            .await?;
+        Some((id, budget))
+    } else {
+        None
+    };
+    let budget = reservation.map(|(_, bytes)| bytes).unwrap_or(0);
+    let result = match (session.profile().provider, fmt) {
         (ProviderKind::Mysql, "csv") => {
-            import_mysql_csv(session, params, &target, sink, cancel, p, file).await?
+            import_mysql_csv(
+                session,
+                params,
+                &target,
+                sink,
+                cancel,
+                p,
+                MysqlImportInput { file, budget },
+            )
+            .await
         }
         (ProviderKind::Mysql, _) => {
-            import_mysql_json(session, params, &target, sink, cancel, p, file).await?
+            import_mysql_json(
+                session,
+                params,
+                &target,
+                sink,
+                cancel,
+                p,
+                MysqlImportInput { file, budget },
+            )
+            .await
         }
         (ProviderKind::Redis, "csv") => {
-            import_redis_csv(session, &target, sink, cancel, p, file).await?
+            import_redis_csv(session, &target, sink, cancel, p, file).await
         }
         (ProviderKind::Redis, _) => {
-            import_redis_json(session, &target, sink, cancel, p, file).await?
+            import_redis_json(session, &target, sink, cancel, p, file).await
         }
+    };
+    if let Some((id, _)) = reservation {
+        sink.store.release_auxiliary(id).await?;
     }
+    result?;
     Ok(json!({"path":source,"progress":p.details()}))
 }
 struct ColumnProjection {
@@ -709,7 +755,7 @@ async fn cleanup_key(
     error
 }
 fn csv_item(record: &csv::StringRecord, key: &KeyImport) -> Result<Vec<Value>> {
-    if &record[0] != "1" || &record[1] != "item" || record[2] != key.key || record[3] != key.kind {
+    if &record[0] != "2" || &record[1] != "item" || record[2] != key.key || record[3] != key.kind {
         return Err(AppError::invalid("Redis CSV 元素不属于当前 key"));
     }
     let bytes = |n: usize| -> Result<Value> {
@@ -718,7 +764,11 @@ fn csv_item(record: &csv::StringRecord, key: &KeyImport) -> Result<Vec<Value>> {
     };
     match key.kind.as_str() {
         "string" => Ok(vec![bytes(9)?]),
-        "hash" => Ok(vec![bytes(5)?, bytes(9)?]),
+        "hash" => Ok(vec![
+            bytes(5)?,
+            bytes(9)?,
+            Value::Integer(record[10].to_owned()),
+        ]),
         "list" => {
             record[6]
                 .parse::<u64>()

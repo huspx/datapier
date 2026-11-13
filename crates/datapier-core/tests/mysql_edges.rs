@@ -34,6 +34,7 @@ impl Fixture {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         };
         let secret = Some(std::env::var("DATAPIER_TEST_MYSQL_SECRET").expect("设置测试MySQL凭据"));
@@ -74,6 +75,33 @@ impl Fixture {
         self.store.pool.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
+}
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn mysql_session_uses_configured_timezone_and_preserves_server_mode() {
+    let mut f = Fixture::open().await;
+    f.db.close().await.unwrap();
+    f.profile.direct_mut().unwrap().mysql.timezone = Some("+03:00".into());
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    let result = f.sql("SELECT @@session.time_zone, @@character_set_connection, @@session.sql_mode = @@global.sql_mode").await.unwrap();
+    let rows = f.rows(&result).await;
+    assert_eq!(rows[0][0].text(), "+03:00");
+    assert_eq!(rows[0][1].text(), "utf8mb4");
+    assert_eq!(rows[0][2].text(), "1");
+
+    f.db.close().await.unwrap();
+    f.profile.direct_mut().unwrap().mysql.timezone = None;
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    let result = f
+        .sql("SELECT @@session.time_zone = @@global.time_zone")
+        .await
+        .unwrap();
+    assert_eq!(f.rows(&result).await[0][0].text(), "1");
+    f.close().await;
 }
 
 #[tokio::test]
@@ -367,6 +395,131 @@ async fn readonly_view_cannot_call_writing_function() {
     f.sql(&format!("DROP VIEW `{view}`")).await.unwrap();
     f.sql(&format!("DROP FUNCTION `{function}`")).await.unwrap();
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL、CREATE ROUTINE 和 CREATE VIEW 权限"]
+async fn indirect_writing_view_is_never_replayed_for_sql_or_browse() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_effects");
+    let function = name("dp_effect_fn");
+    let inner = name("dp_effect_inner");
+    let outer = name("dp_effect_outer");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT NOT NULL) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("CREATE FUNCTION `{function}`() RETURNS INT MODIFIES SQL DATA SQL SECURITY DEFINER BEGIN INSERT INTO `{table}` VALUES (1); RETURN 1; END")).await.unwrap();
+    f.sql(&format!(
+        "CREATE VIEW `{inner}` AS SELECT `{function}`() AS value"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!(
+        "CREATE VIEW `{outer}` AS SELECT value FROM `{inner}`"
+    ))
+    .await
+    .unwrap();
+    for (method, params) in [
+        (
+            "execution.run",
+            json!({"text":format!("SELECT value FROM `{outer}`"), "page_size":1}),
+        ),
+        (
+            "resource.browse",
+            json!({"target":target(&outer), "page_size":1}),
+        ),
+    ] {
+        f.sql(&format!("DELETE FROM `{table}`")).await.unwrap();
+        let result = f.call(method, params).await.unwrap();
+        let id: Uuid = serde_json::from_value(result["results"][0].clone()).unwrap();
+        assert_eq!(
+            f.store.result_meta(id).await.unwrap().summary["retrieval_mode"],
+            "single_execution_stream"
+        );
+        let _ = f.store.result_page(id, 0, 10, 1024 * 1024).await.unwrap();
+        let count = f
+            .sql(&format!("SELECT COUNT(*) FROM `{table}`"))
+            .await
+            .unwrap();
+        assert_eq!(f.rows(&count).await[0][0].text(), "1");
+    }
+    f.sql(&format!("DROP VIEW `{outer}`")).await.unwrap();
+    f.sql(&format!("DROP VIEW `{inner}`")).await.unwrap();
+    f.sql(&format!("DROP FUNCTION `{function}`")).await.unwrap();
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 和 LOCK TABLES 权限"]
+async fn cancelled_live_queries_and_counts_preserve_transaction() {
+    let mut f = Fixture::open().await;
+    let mut blocker = Fixture::open().await;
+    let table = name("dp_live_lock");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("INSERT INTO `{table}` VALUES (1)"))
+        .await
+        .unwrap();
+    let initial = f.sql(&format!("SELECT id FROM `{table}`")).await.unwrap();
+    let id: Uuid = serde_json::from_value(initial["results"][0].clone()).unwrap();
+    f.sql("CREATE TEMPORARY TABLE dp_cancel_tx (id INT)")
+        .await
+        .unwrap();
+    f.call("transaction.begin", json!({})).await.unwrap();
+    f.sql("INSERT INTO dp_cancel_tx VALUES (7)").await.unwrap();
+    blocker
+        .sql(&format!("LOCK TABLES `{table}` WRITE"))
+        .await
+        .unwrap();
+    for (method, params) in [
+        ("result.count", json!({"result_id":id})),
+        (
+            "execution.run",
+            json!({"text":format!("SELECT id FROM `{table}`")}),
+        ),
+    ] {
+        let task = f
+            .store
+            .create_task(Uuid::new_v4(), "fixture", method, json!({}), false)
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let signal = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            signal.cancel();
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            f.db.call(
+                method,
+                params,
+                &ExecutionSink::new(f.store.clone(), task.id),
+                &cancel,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            f.call("connection.info", json!({})).await.unwrap()["transaction"],
+            true
+        );
+        let result = f.sql("SELECT id FROM dp_cancel_tx").await.unwrap();
+        assert_eq!(f.rows(&result).await[0][0].text(), "7");
+    }
+    blocker.sql("UNLOCK TABLES").await.unwrap();
+    f.call("transaction.rollback", json!({})).await.unwrap();
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    blocker.close().await;
     f.close().await;
 }
 

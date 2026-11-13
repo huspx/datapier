@@ -1,6 +1,31 @@
 use super::*;
 
 #[tokio::test]
+async fn idle_deadline_does_not_wait_for_running_write() {
+    let (engine, root) = engine().await;
+    let id = Uuid::new_v4();
+    {
+        let mut state = engine.state.lock().unwrap();
+        state.idle = Instant::now() - Duration::from_secs(31);
+        state.tasks.insert(
+            id,
+            Running {
+                owner: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                cancel: CancellationToken::new(),
+                transition: Arc::new(AsyncMutex::new(())),
+                started: Some(Instant::now()),
+                abort: None,
+            },
+        );
+        assert!(state.stop_if_idle());
+        assert!(!state.accepting);
+    }
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn invalid_handshake_does_not_extend_idle_lifetime() {
     let (engine, root) = engine().await;
     let idle = engine.state.lock().unwrap().idle;

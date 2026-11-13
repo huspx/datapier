@@ -276,8 +276,12 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
             "条件已更改，请刷新"
         } else if app.scan_token.is_some() {
             "扫描中"
+        } else if app.workbench.query_ui.redis_scan_limited {
+            "扫描受内存限制，结果不完整"
         } else if app.cursor.is_some() {
             "可加载更多"
+        } else if !app.workbench.query_ui.redis_scan_complete {
+            "扫描未完成"
         } else {
             "没有匹配的 key"
         };
@@ -318,8 +322,12 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
                                 "条件已更改，请刷新"
                             } else if app.scan_token.is_some() {
                                 "扫描中"
+                            } else if app.workbench.query_ui.redis_scan_limited {
+                                "扫描受内存限制，结果不完整"
                             } else if app.cursor.is_some() {
                                 "可加载更多"
+                            } else if !app.workbench.query_ui.redis_scan_complete {
+                                "扫描未完成"
                             } else {
                                 "扫描完成"
                             }),

@@ -37,6 +37,7 @@ impl Fixture {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         };
         let session = ProviderSession::connect(profile, None).await.unwrap();
@@ -504,6 +505,7 @@ async fn missing_eval_permission_never_falls_back_to_unwatched_writes() {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let mut session = ProviderSession::connect(profile, Some(password))
@@ -635,6 +637,7 @@ async fn unreadable_field_expiry_rejects_prepare_before_any_write() {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let mut session = ProviderSession::connect(profile, Some(password))

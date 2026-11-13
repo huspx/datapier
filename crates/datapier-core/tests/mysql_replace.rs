@@ -33,6 +33,7 @@ impl Fixture {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         };
         let secret = std::env::var("DATAPIER_TEST_MYSQL_SECRET").expect("设置测试MySQL凭据");

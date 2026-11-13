@@ -462,6 +462,37 @@ fn predicate(
             q.push(ident).push(" IS NULL");
             continue;
         }
+        if let Value::Decimal(text) = value {
+            // 校验后以目标标度转成普通十进制文本，避免科学计数法经浮点解析。
+            bind_value(value, c)?;
+            let args = c
+                .type_name
+                .split_once('(')
+                .and_then(|(_, s)| s.split_once(')'))
+                .map(|(args, _)| args)
+                .ok_or_else(|| AppError::invalid("无效 DECIMAL 类型"))?;
+            let (precision, scale) = args
+                .split_once(',')
+                .ok_or_else(|| AppError::invalid("无效 DECIMAL 类型"))?;
+            let precision: u32 = precision
+                .trim()
+                .parse()
+                .map_err(|_| AppError::invalid("无效 DECIMAL 精度"))?;
+            let scale: u32 = scale
+                .trim()
+                .parse()
+                .map_err(|_| AppError::invalid("无效 DECIMAL 标度"))?;
+            let decimal = text
+                .parse::<bigdecimal::BigDecimal>()
+                .map_err(|_| AppError::invalid("无效 DECIMAL 值"))?;
+            q.push(ident).push(" <=> CAST(");
+            push_bind(
+                q,
+                Bind::Text(decimal.with_scale(i64::from(scale)).to_plain_string()),
+            );
+            q.push(format!(" AS DECIMAL({precision},{scale}))"));
+            continue;
+        }
         if matches!(value, Value::Float(_))
             || c.type_name
                 .split(|c: char| c == '(' || c.is_ascii_whitespace())

@@ -188,6 +188,19 @@ impl App {
         let Some(edit) = edit else {
             return;
         };
+        if name == "advanced-value" {
+            if self.advanced_value.editable() && self.advanced_value.editor.key(edit, key.shift) {
+                self.advanced_value.invalidate_preview();
+                self.dirty = true;
+            }
+            return;
+        }
+        if name == "advanced-file-path" {
+            if !self.advanced_files.pending && self.advanced_files.path.key(edit, key.shift) {
+                self.dirty = true;
+            }
+            return;
+        }
         if let Some(schema) = self.advanced_schema.as_mut()
             && schema.key(&name, edit, key.shift)
         {

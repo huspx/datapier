@@ -75,3 +75,31 @@ fn existing_support_index_does_not_allow_an_extra_index() {
     actual.indexes.push(implicit_index());
     assert!(!equal(expected, actual));
 }
+
+#[test]
+fn readback_normalizes_mysql_type_aliases_without_erasing_differences() {
+    for (requested, returned) in [
+        ("BOOLEAN", "tinyint(1)"),
+        ("BOOL", "tinyint(1)"),
+        ("NUMERIC(12, 2)", "decimal(12,2)"),
+        ("DEC(12)", "decimal(12,0)"),
+        ("FIXED", "decimal(10,0)"),
+        ("INT4 SIGNED", "int"),
+        ("INT1 UNSIGNED", "tinyint(3) unsigned"),
+        ("DOUBLE PRECISION", "double"),
+        ("FLOAT8", "double"),
+        ("CHARACTER VARYING (20)", "varchar(20)"),
+    ] {
+        let mut expected = expected_table();
+        let mut actual = expected.clone();
+        expected.columns[0].native_type = requested.into();
+        actual.columns[0].native_type = returned.into();
+        assert!(equal(expected, actual), "{requested} vs {returned}");
+    }
+    assert_ne!(
+        normalized_type("numeric(12,2)"),
+        normalized_type("decimal(12,3)")
+    );
+    assert_ne!(normalized_type("enum('A')"), normalized_type("enum('a')"));
+    assert_ne!(normalized_type("int unsigned"), normalized_type("int"));
+}

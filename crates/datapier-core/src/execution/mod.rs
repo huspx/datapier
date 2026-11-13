@@ -5,6 +5,7 @@ pub mod transfer;
 use crate::{Result, Store, model::*};
 use serde_json::Value as Json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -17,6 +18,8 @@ pub struct ExecutionSink {
     pub execution_id: Uuid,
     dispatch: Option<Arc<Mutex<()>>>,
     cancel: CancellationToken,
+    profile: Option<(Uuid, u64, Arc<Mutex<()>>)>,
+    profile_dispatched: Arc<AtomicBool>,
 }
 impl ExecutionSink {
     pub fn new(store: Store, execution_id: Uuid) -> Self {
@@ -25,6 +28,8 @@ impl ExecutionSink {
             execution_id,
             dispatch: None,
             cancel: CancellationToken::new(),
+            profile: None,
+            profile_dispatched: Arc::new(AtomicBool::new(false)),
         }
     }
     /// 设置与取消方共享的状态转换锁和取消信号。
@@ -35,6 +40,11 @@ impl ExecutionSink {
     ) -> Self {
         self.dispatch = Some(transition);
         self.cancel = cancel;
+        self
+    }
+    /// 发送首个请求时与配置更新串行化并验证会话快照。
+    pub fn with_profile_revision(mut self, id: Uuid, revision: u64, lock: Arc<Mutex<()>>) -> Self {
+        self.profile = Some((id, revision, lock));
         self
     }
     /// 创建尚未完成的结果并返回其 ID。
@@ -70,7 +80,22 @@ impl ExecutionSink {
             None => None,
         };
         ensure_not_cancelled(&self.cancel)?;
-        self.store.mark_sent(self.execution_id, may_write).await
+        let _profile_guard = match &self.profile {
+            Some((id, revision, lock)) if !self.profile_dispatched.load(Ordering::Acquire) => {
+                let guard = lock.lock().await;
+                if !self.profile_dispatched.load(Ordering::Acquire)
+                    && self.store.profile(*id).await?.revision != *revision
+                {
+                    return Err(AppError::new("invalidated", "连接设置已变化，请重新连接"));
+                }
+                Some(guard)
+            }
+            _ => None,
+        };
+        ensure_not_cancelled(&self.cancel)?;
+        self.store.mark_sent(self.execution_id, may_write).await?;
+        self.profile_dispatched.store(true, Ordering::Release);
+        Ok(())
     }
     /// 记录已校验的完整响应；即使取消已触发，也保留已知远端完成事实。
     pub async fn mark_remote_completed(&self) -> Result<()> {

@@ -1,8 +1,10 @@
 -- 窗口只证明 pane 仍持有 TSP 发出的 nonce；数据库内容不经过这里。
+local bootstrap = require("./bootstrap")
 local M = {}
 local busy = false
 local seen = {}
 local editor_attempts = {}
+local preparation_failed = false
 
 local function find_marker(value)
   if type(value) == "string" then
@@ -68,11 +70,11 @@ local function bridge_node(cx, pane)
 end
 
 local function executable()
-  local binary = tern.getenv("DATAPIER_BINARY") or tern.kv.get("binary")
+  local binary = tern.kv.get("binary")
   if type(binary) == "string" and binary ~= "" then
     return binary
   end
-  return "datapier"
+  return nil
 end
 -- 路径通过内部 Base64 参数传递，避免依赖用户默认 shell 的引用规则。
 local function base64(text)
@@ -106,13 +108,14 @@ local function launch_editor(cx, pane, node)
   if not previous or previous.handoff ~= handoff then
     local ok, problem = pcall(function()
       local binary = executable()
-      local directory, name = binary:match("^(.*)[/\\]([^/\\]+)$")
-      name = name or binary
-      local windows = tern.runtime.os == "windows"
-      if name:lower() ~= (if windows then "datapier.exe" else "datapier") then
-        error("编辑器 helper 需要 Datapier 原生程序")
+      if not binary then
+        error("请先通过 New Datapier block 启动 Datapier")
       end
-      local program = if directory then (if windows then ".\\datapier.exe" else "./datapier") else "datapier"
+      local directory = binary:match("^(.*)[/\\][^/\\]+$")
+      if not directory then
+        error("Datapier 缓存路径无效")
+      end
+      local program = if tern.runtime.os == "windows" then ".\\datapier.exe" else "./datapier"
       cx.hosts:terminal("local", {
         cwd = directory,
         command = program .. " value-editor --handoff " .. handoff .. " --data-dir-b64 " .. base64(node.data_dir),
@@ -170,6 +173,24 @@ local function sync_panes(cx, panes, index)
     sync_panes(cx, panes, index + 1)
     return
   end
+  -- 只有 bootstrap 校验并缓存的程序可用于窗口桥接和编辑器 helper。
+  local binary = executable()
+  if not binary then
+    if preparation_failed then
+      sync_panes(cx, panes, index + 1)
+      return
+    end
+    bootstrap.prepare(cx, function(fresh, directory)
+      if directory then
+        sync_panes(fresh, panes, index)
+      else
+        preparation_failed = true
+        sync_panes(fresh, panes, index + 1)
+      end
+    end)
+    return
+  end
+  preparation_failed = false
   -- 只有对应 pane 的 action 处理器确认绑定后，Engine 才能续租。
   local sent = pcall(function()
     cx.session:event(pane, { ev = "action", id = node.id, act = "datapier-window-bind" })
@@ -185,7 +206,7 @@ local function sync_panes(cx, panes, index)
   })
   local started = pcall(function()
     tern.process.run(
-      { executable(), "--data-dir", node.data_dir, "tsp", "--window-bridge", "--bridge-payload", payload },
+      { binary, "--data-dir", node.data_dir, "tsp", "--window-bridge", "--bridge-payload", payload },
       { timeout_ms = 4000 },
       function(result, fresh)
         local current = bridge_node(fresh, pane)

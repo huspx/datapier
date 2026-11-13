@@ -69,6 +69,7 @@ impl App {
         match self.workbench.overlay.as_deref() {
             Some("settings") => self.settings_form_dirty(),
             Some("profile") if !self.archery.open => self.connection_draft_dirty(),
+            Some("database-create") => false,
             _ => self.workbench.modal_draft.as_ref().is_some_and(|draft| {
                 draft
                     .fields
@@ -102,6 +103,10 @@ impl App {
             }
             Some("import" | "export" | "transfer") => self.operation_pending,
             Some("file") => self.file_open_pending.is_some(),
+            Some("database-create") => self
+                .navigation_database_create()
+                .is_some_and(|form| form.busy || form.task.is_some()),
+            Some("replace") => self.advanced_replace.busy(),
             _ => false,
         }
     }
@@ -180,7 +185,12 @@ impl App {
         let closing = closing
             || (self.workbench.overlay.is_some()
                 && (matches!(action, "app-settings" | "history")
-                    || action.starts_with("overlay:")));
+                    || action.starts_with("overlay:")
+                    || (self.workbench.overlay.as_deref() == Some("database-create")
+                        && (action.starts_with("profile-settings:")
+                            || action.starts_with("profile-delete-request:")
+                            || action.starts_with("profile-create-database:")
+                            || action.starts_with("navigation-drop-")))));
         if !closing
             || self.archery.open
             || self.workbench.overlay.as_deref() == Some("advanced-value")
@@ -194,6 +204,12 @@ impl App {
         if self.modal_has_unsaved() {
             self.confirm_modal_action(action.to_owned());
             return true;
+        }
+        if self.workbench.overlay.as_deref() == Some("database-create") {
+            return self.create_database_close_then(
+                (action != "overlay-close").then(|| action.to_owned()),
+                backend,
+            );
         }
         false
     }

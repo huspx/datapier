@@ -16,6 +16,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod forms;
+#[cfg(test)]
+#[path = "../tests/unit/regression.rs"]
+mod regression;
 use forms::Form;
 
 struct TerminalGuard;
@@ -81,6 +84,15 @@ enum Screen {
     Rules,
     Cache,
     Confirm,
+}
+fn reset_page_feedback(
+    status: &mut String,
+    done: &mut bool,
+    field_error: &mut Option<(String, String)>,
+) {
+    status.clear();
+    *done = false;
+    *field_error = None;
 }
 
 struct App {
@@ -187,10 +199,19 @@ impl App {
             let _ = tx.send((tag, result));
         });
     }
+    fn clear_status(&mut self) {
+        self.status.clear();
+        self.status_done = false;
+    }
     fn navigate(&mut self, screen: Screen) {
         self.screen = screen;
         self.cursor = 0;
         self.scroll = 0;
+        reset_page_feedback(
+            &mut self.status,
+            &mut self.status_done,
+            &mut self.field_error,
+        );
     }
     fn editing_settings(&self) -> bool {
         self.screen == Screen::Settings
@@ -216,7 +237,10 @@ impl App {
                 return;
             }
         };
-        self.status_done = true;
+        if !matches!(tag, "profiles" | "settings_load" | "auth_closed") {
+            self.status.clear();
+            self.status_done = true;
+        }
         match tag {
             "profiles" => {
                 self.profiles = value["profiles"].as_array().cloned().unwrap_or_default();
@@ -394,7 +418,7 @@ impl App {
         let areas = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(3),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(f.area());
         let title = match self.screen {
@@ -478,7 +502,8 @@ impl App {
             | Screen::Settings
             | Screen::Rules
             | Screen::ProfileName => {
-                for field in &self.form.fields {
+                for (index, field) in self.form.fields.iter().enumerate() {
+                    let width = areas[1].width.saturating_sub(2) as usize;
                     let mut display = field.display(self.english);
                     if self.screen == Screen::Settings {
                         display = format!(
@@ -487,9 +512,12 @@ impl App {
                             display
                         );
                         let hint = forms::settings_hint(&field.key, self.english);
-                        if !hint.is_empty() {
+                        if !hint.is_empty() && (index != self.cursor || !field.choices.is_empty()) {
                             display.push_str(&format!("  ({hint})"));
                         }
+                    }
+                    if index == self.cursor && field.choices.is_empty() {
+                        display = forms::visible_tail(&display, width);
                     }
                     if let Some((key, error)) = &self.field_error
                         && key == &field.key
@@ -713,17 +741,27 @@ impl App {
             Screen::Preview => self.text("F2 确认批量保存  Esc 返回", "F2 apply batch  Esc back"),
             Screen::Cache => self.text("d 清理  Esc 返回", "d clear  Esc back"), Screen::Confirm => self.text("↑↓ 查看明细  y 确认  n/Esc 取消", "↑↓ details  y confirm  n/Esc cancel"),
         };
+        let footer = Block::default().borders(Borders::ALL);
+        let inner = footer.inner(areas[2]);
+        f.render_widget(footer, areas[2]);
+        let footer_areas =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(inner);
         f.render_widget(
-            Paragraph::new(format!(
-                "{help}\n{}",
-                if self.status_done {
-                    self.text("操作完成", "Done")
-                } else {
-                    &self.status
-                }
-            ))
-            .block(Block::default().borders(Borders::ALL)),
-            areas[2],
+            Paragraph::new(help).wrap(ratatui::widgets::Wrap { trim: false }),
+            footer_areas[0],
+        );
+        f.render_widget(
+            Paragraph::new(if self.status_done {
+                self.text("操作完成", "Done")
+            } else if self.status.is_empty() && self.screen == Screen::Settings {
+                self.form
+                    .fields
+                    .get(self.cursor)
+                    .map_or("", |field| forms::settings_hint(&field.key, self.english))
+            } else {
+                &self.status
+            }),
+            footer_areas[1],
         );
     }
     fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -741,7 +779,7 @@ impl App {
             }
             return true;
         }
-        self.status_done = false;
+        self.clear_status();
         let count = match self.screen {
             Screen::Home => self.profiles.len(),
             Screen::Servers => self.servers.len(),
@@ -915,6 +953,7 @@ impl App {
                     self.initial_form = self.form.clone();
                     self.server_initial = self.form.clone();
                     self.baseline.clear();
+                    self.staged_credentials = None;
                     self.desired.clear();
                     self.navigate(Screen::Server);
                     self.cursor = 2;
@@ -1176,32 +1215,47 @@ impl App {
         let server = forms::server_value(&self.form);
         let password = self.form.get("password").to_owned();
         let totp = self.form.get("totp").to_owned();
-        let password_action = self.form.get("password_action");
-        let totp_action = self.form.get("totp_action");
-        let update = |action: &str, value: &str| match action {
-            "clear" => json!({"kind":"clear"}),
-            "keyring" | "session" if !value.is_empty() => {
-                json!({"kind":"replace","value":value,"persist":action=="keyring"})
+        let updates = match forms::server_credential_updates(&self.form) {
+            Ok(updates) => updates,
+            Err(message) => {
+                self.status = self
+                    .text("选择保存密码或 TOTP 时必须填写对应内容", message)
+                    .into();
+                return;
             }
-            _ => json!({"kind":"keep"}),
         };
-        let password_update = update(password_action, &password);
-        let totp_update = update(totp_action, &totp);
+        let password_update = &updates["password_update"];
+        let totp_update = &updates["totp_update"];
         let candidate = server["revision"] == 0
             || password_update["kind"] != "keep"
             || totp_update["kind"] != "keep"
             || server["http_tls"] != self.server["http_tls"]
             || server["totp_mode"] != self.server["totp_mode"];
-        self.staged_credentials =
-            Some(json!({"password_update":password_update,"totp_update":totp_update}));
+        self.staged_credentials = Some(updates);
+        self.auth = Value::Null;
         self.server = server.clone();
         self.request("auth", "archery.auth.begin", json!({"operation_id":Uuid::new_v4(),"expected_revision":server["revision"],"server":server,"password":if password.is_empty(){None}else{Some(password)},"totp_uri":if totp.is_empty(){None}else{Some(totp)},"candidate":candidate}));
     }
     fn save_server(&mut self) {
         let server = forms::server_value(&self.form);
-        let updates = self.staged_credentials.clone().unwrap_or_else(
-            || json!({"password_update":{"kind":"keep"},"totp_update":{"kind":"keep"}}),
-        );
+        let updates = match forms::server_credential_updates(&self.form) {
+            Ok(updates) => updates,
+            Err(message) => {
+                self.status = self
+                    .text("选择保存密码或 TOTP 时必须填写对应内容", message)
+                    .into();
+                return;
+            }
+        };
+        if !forms::credentials_match_login(&updates, self.staged_credentials.as_ref()) {
+            self.status = self
+                .text(
+                    "凭据操作已变更，请按 F5 重新登录验证",
+                    "Credential actions changed; press F5 to authenticate again",
+                )
+                .into();
+            return;
+        }
         self.request("server_saved", "archery.server.save", json!({"server":server,"expected_revision":server["revision"],"auth_id":self.auth["auth_id"],"password_update":updates["password_update"],"totp_update":updates["totp_update"]}));
     }
     fn select_databases(&mut self) {

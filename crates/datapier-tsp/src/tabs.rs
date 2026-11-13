@@ -8,6 +8,40 @@ pub(super) struct CloseOperation {
 }
 
 impl App {
+    pub(crate) fn tab_has_advanced_work(&self, index: usize) -> bool {
+        let tab = &self.tabs[index];
+        let (schema, replace, value, files, restore_rows) = if index == self.active {
+            (
+                &self.advanced_schema,
+                &self.advanced_replace,
+                &self.advanced_value,
+                &self.advanced_files,
+                &self.restore_rows,
+            )
+        } else {
+            let state = &tab.runtime;
+            (
+                &state.advanced_schema,
+                &state.advanced_replace,
+                &state.advanced_value,
+                &state.advanced_files,
+                &state.restore_rows,
+            )
+        };
+        schema
+            .as_ref()
+            .is_some_and(|state| state.dirty || state.summary.is_some() || state.busy())
+            || replace.target.is_some()
+            || replace.has_live_plan()
+            || value.session.is_some()
+            || value.pending
+            || files.file_session.is_some()
+            || restore_rows.is_some()
+            || tab.schema_draft.is_some()
+            || self.navigation_database_create_for_tab(tab.id)
+            || tab.replace_draft.is_some()
+    }
+
     /// 仅创建并切换标签；由调用方决定是否先结束原位编辑。
     pub(super) fn create_query_tab(&mut self) {
         self.archery.open_continuation = None;
@@ -78,35 +112,7 @@ impl App {
                 return false;
             };
             let tab = &self.tabs[index];
-            let (schema, replace, value, files) = if index == self.active {
-                (
-                    &self.advanced_schema,
-                    &self.advanced_replace,
-                    &self.advanced_value,
-                    &self.advanced_files,
-                )
-            } else {
-                (
-                    &tab.runtime.advanced_schema,
-                    &tab.runtime.advanced_replace,
-                    &tab.runtime.advanced_value,
-                    &tab.runtime.advanced_files,
-                )
-            };
-            if schema
-                .as_ref()
-                .is_some_and(|state| state.dirty || state.summary.is_some() || state.busy())
-                || replace.has_live_plan()
-                || value.session.is_some()
-                || files.file_session.is_some()
-                || (if index == self.active {
-                    self.restore_rows.is_some()
-                } else {
-                    tab.runtime.restore_rows.is_some()
-                })
-                || tab.schema_draft.is_some()
-                || tab.replace_draft.is_some()
-            {
+            if self.tab_has_advanced_work(index) {
                 self.status = i18n::UiMessage::key("请先处理该标签的高级编辑草稿或会话");
                 return false;
             }
@@ -195,7 +201,21 @@ impl App {
                     }
                 }
                 if let Some(action) = operation.after_action {
-                    self.action(&action, backend);
+                    if let Some(id) = action
+                        .strip_prefix("profile-close-finished:")
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                    {
+                        // 关闭收尾不能经过活动标签的草稿或弹窗拦截，否则旧目录会残留。
+                        self.navigation_invalidate_profile(id);
+                        self.status = i18n::UiMessage::key("连接已关闭");
+                    } else if let Some(token) = action
+                        .strip_prefix("profile-delete-tabs-closed:")
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                    {
+                        self.navigation_profile_delete_after_tabs(token, backend);
+                    } else {
+                        self.action(&action, backend);
+                    }
                 }
                 return;
             };
@@ -215,10 +235,18 @@ impl App {
                     "connection.close",
                     json!({"session_id":session}),
                 ) {
+                    let delete_token = operation
+                        .after_action
+                        .as_deref()
+                        .and_then(|action| action.strip_prefix("profile-delete-tabs-closed:"))
+                        .and_then(|value| Uuid::parse_str(value).ok());
                     if operation.after_action.is_some() {
                         self.archery.error = Some(error.to_string());
                     }
                     self.tab_close = None;
+                    if let Some(token) = delete_token {
+                        self.navigation_profile_delete_abort(token, error.to_string());
+                    }
                     self.status = i18n::UiMessage::raw(error.to_string());
                 }
                 return;
@@ -244,6 +272,12 @@ impl App {
         if let Err(error) = &response.result
             && error.code != "not_found"
         {
+            let delete_token = self
+                .tab_close
+                .as_ref()
+                .and_then(|operation| operation.after_action.as_deref())
+                .and_then(|action| action.strip_prefix("profile-delete-tabs-closed:"))
+                .and_then(|value| Uuid::parse_str(value).ok());
             if self
                 .tab_close
                 .as_ref()
@@ -252,8 +286,57 @@ impl App {
                 self.archery.error = Some(error.to_string());
             }
             self.tab_close = None;
+            if let Some(token) = delete_token {
+                self.navigation_profile_delete_abort(token, error.to_string());
+            }
             self.status = i18n::UiMessage::raw(error.to_string());
             return true;
+        }
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+            let profile_id = self.tabs[index].profile_id;
+            let protected_close = self
+                .tab_close
+                .as_ref()
+                .and_then(|operation| operation.after_action.as_deref())
+                .is_some_and(|action| {
+                    action.starts_with("profile-delete-tabs-closed:")
+                        || action.starts_with("profile-close-finished:")
+                });
+            if protected_close
+                && profile_id
+                    .is_some_and(|profile| self.navigation_profile_has_pending_work(profile))
+            {
+                // 服务端已关闭该会话；保留新草稿但禁止按旧基线提交。
+                if index == self.active {
+                    self.session = None;
+                    self.generation = self.generation.wrapping_add(1);
+                    if let Some(grid) = &mut self.grid {
+                        grid.editable = false;
+                    }
+                } else {
+                    let runtime = &mut self.tabs[index].runtime;
+                    runtime.session = None;
+                    runtime.generation = runtime.generation.wrapping_add(1);
+                    if let Some(grid) = &mut runtime.grid {
+                        grid.editable = false;
+                    }
+                }
+                let delete_token = self
+                    .tab_close
+                    .as_ref()
+                    .and_then(|operation| operation.after_action.as_deref())
+                    .and_then(|action| action.strip_prefix("profile-delete-tabs-closed:"))
+                    .and_then(|value| Uuid::parse_str(value).ok());
+                self.tab_close = None;
+                if let Some(token) = delete_token {
+                    self.navigation_profile_delete_abort(
+                        token,
+                        "该连接存在草稿或任务，请先处理".into(),
+                    );
+                }
+                self.status = i18n::UiMessage::key("该连接存在草稿或任务，请先处理");
+                return true;
+            }
         }
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             self.remove_closed_tab(index);

@@ -32,12 +32,13 @@ async fn create_table_with_inherited_defaults_is_verified() {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let secret = std::env::var("DATAPIER_TEST_MYSQL_SECRET").unwrap();
     let mut session = MysqlSession::connect(profile, Some(secret)).await.unwrap();
     let cancel = CancellationToken::new();
-    let (server_version, sql_mode) = session.schema_context(&cancel).await.unwrap();
+    let (server_version, sql_mode, _, _) = session.schema_context(&cancel).await.unwrap();
     let name = format!("dp_schema_{}", Uuid::new_v4().simple());
     let target = ResourceTarget {
         database: Some("datapier_fixture".into()),
@@ -46,10 +47,16 @@ async fn create_table_with_inherited_defaults_is_verified() {
         kind: "table".into(),
     };
     let definition = TableDefinition {
-        columns: vec![ColumnDefinition {
-            id: "draft-id".into(),
-            name: "id".into(),
-            native_type: "int".into(),
+        columns: [
+            ("id", "int"),
+            ("enabled", "BOOLEAN"),
+            ("amount", "NUMERIC(12,2)"),
+        ]
+        .into_iter()
+        .map(|(name, native_type)| ColumnDefinition {
+            id: name.into(),
+            name: name.into(),
+            native_type: native_type.into(),
             nullable: false,
             default: ColumnDefault::Unspecified,
             on_update: None,
@@ -60,7 +67,8 @@ async fn create_table_with_inherited_defaults_is_verified() {
             visible: true,
             comment: String::new(),
             extra: vec![],
-        }],
+        })
+        .collect(),
         indexes: vec![],
         constraints: vec![],
         engine: "InnoDB".into(),
@@ -148,6 +156,7 @@ async fn detached_ddl_allows_transaction_end_and_close_to_release_metadata_locks
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     let secret = std::env::var("DATAPIER_TEST_MYSQL_SECRET").unwrap();
@@ -213,7 +222,7 @@ async fn detached_ddl_allows_transaction_end_and_close_to_release_metadata_locks
             comment: String::new(),
             extra: vec![],
         });
-        let (server_version, sql_mode) = session.schema_context(&cancel).await.unwrap();
+        let (server_version, sql_mode, _, _) = session.schema_context(&cancel).await.unwrap();
         let plan = build_plan(&SchemaEditIntent {
             target: target.clone(),
             baseline: Some(snapshot),
