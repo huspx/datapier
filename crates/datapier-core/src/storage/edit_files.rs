@@ -770,6 +770,11 @@ impl Store {
                         return Err(AppError::conflict("编辑目录已被替换"));
                     }
                 }
+                // Windows 目录句柄禁止共享删除，须由消费句柄的接口完成关闭和删除。
+                // Unix 继续相对固定父目录删除，保留原有的路径边界。
+                #[cfg(windows)]
+                dir.remove_open_dir()?;
+                #[cfg(not(windows))]
                 base.remove_dir(&name)?;
             }
         }
