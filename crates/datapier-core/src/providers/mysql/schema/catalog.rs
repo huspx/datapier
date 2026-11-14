@@ -184,6 +184,66 @@ pub(super) async fn creation_defaults(
     Ok((database_charset, database_collation))
 }
 
+// sqlparser 按普通 MySQL 模式解码字符串；将无反斜线转义模式转换为等值输入。
+pub(super) fn parser_input(ddl: &str, mode: &str) -> String {
+    if !mode
+        .split(',')
+        .any(|m| m.trim().eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES"))
+    {
+        return ddl.to_owned();
+    }
+    let ansi_quotes = mode
+        .split(',')
+        .any(|m| m.trim().eq_ignore_ascii_case("ANSI_QUOTES"));
+    let mut out = String::with_capacity(ddl.len());
+    let mut quote = None;
+    let mut chars = ddl.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if let Some(delimiter) = quote {
+            if c == delimiter {
+                if chars.peek() == Some(&delimiter) {
+                    out.push(chars.next().unwrap());
+                } else {
+                    quote = None;
+                }
+            } else if c == '\\' && delimiter != '`' && !(delimiter == '"' && ansi_quotes) {
+                out.push('\\');
+            }
+        } else if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+        }
+    }
+    out
+}
+
+pub(super) fn parsed_native_type(ty: &sqlparser::ast::DataType, mode: &str) -> Result<String> {
+    use sqlparser::ast::{DataType, EnumMember};
+    let (name, members): (&str, Vec<&str>) = match ty {
+        DataType::Enum(values, None) => (
+            "ENUM",
+            values
+                .iter()
+                .map(|v| match v {
+                    EnumMember::Name(s) => Ok(s.as_str()),
+                    _ => Err(AppError::invalid("ENUM 成员含不受支持的值")),
+                })
+                .collect::<Result<_>>()?,
+        ),
+        DataType::Set(values) => ("SET", values.iter().map(String::as_str).collect()),
+        _ => return Ok(ty.to_string()),
+    };
+    Ok(format!(
+        "{}({})",
+        name,
+        members
+            .iter()
+            .map(|v| super::plan::literal(v, mode))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 pub(super) async fn read_table(
     conn: &mut MySqlConnection,
     db: &str,
@@ -193,7 +253,8 @@ pub(super) async fn read_table(
     mode: &str,
 ) -> Result<(TableDefinition, Completeness)> {
     let expanded = expand_version_comments(ddl, version, mode)?;
-    let mut statements = Parser::parse_sql(&MySqlDialect {}, &expanded)
+    let parser_ddl = parser_input(&expanded, mode);
+    let mut statements = Parser::parse_sql(&MySqlDialect {}, &parser_ddl)
         .map_err(|e| AppError::invalid(format!("SHOW CREATE 无法完整解析: {e}")))?;
     if statements.len() != 1 {
         return Err(AppError::invalid("SHOW CREATE 不是单条语句"));
@@ -208,7 +269,7 @@ pub(super) async fn read_table(
         let mut out = ColumnDefinition {
             id: c.name.value.clone(),
             name: c.name.value,
-            native_type: c.data_type.to_string(),
+            native_type: parsed_native_type(&c.data_type, mode)?,
             nullable: true,
             default: ColumnDefault::Unspecified,
             on_update: None,

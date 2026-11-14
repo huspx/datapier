@@ -80,6 +80,14 @@ pub(super) fn page_button(icon: &str, label: &str, action: &str, enabled: bool) 
 }
 
 pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
+    field_control(app, name, label, None)
+}
+
+pub(super) fn field_with_hint(app: &App, name: &str, label: &str, hint: &str) -> Node<Msg> {
+    field_control(app, name, label, Some(hint))
+}
+
+fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node<Msg> {
     let ed = if name == "cli_text" {
         &app.tabs[app.active].cli_query
     } else if name == "cell" {
@@ -143,7 +151,12 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
         .required(required)
         .key(name.to_string())
         .role("datapier.form-field");
-    if app.workbench.overlay.as_deref() == Some("settings") {
+    if let Some(hint) = hint {
+        control = control.hint(crate::i18n::tr(hint).into_owned());
+    }
+    if app.workbench.overlay.as_deref() == Some("settings")
+        && !matches!(name, "external_program" | "external_args")
+    {
         control = control.variant(ui::FieldVariant::Row);
     }
     if let Some(error) = app

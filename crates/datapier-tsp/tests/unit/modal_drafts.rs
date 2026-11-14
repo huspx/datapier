@@ -20,6 +20,66 @@ fn transfer_close_keeps_input_until_explicit_discard() {
 }
 
 #[test]
+fn quit_requires_discarding_or_closing_dirty_modal() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("modal-quit".into());
+    app.workspace_loaded = true;
+    app.action("overlay:export", &backend);
+    app.field_set("path", "/tmp/report.csv");
+    assert!(!app.request_quit(&backend));
+    assert!(app.workbench.overlay_close_confirm);
+    assert!(!app.request_quit(&backend));
+    assert!(app.workbench.overlay_close_confirm);
+    assert_eq!(app.field("path"), "/tmp/report.csv");
+    app.action("overlay-close-continue", &backend);
+    assert_eq!(app.field("path"), "/tmp/report.csv");
+    assert!(!app.request_quit(&backend));
+    app.action("overlay-close-discard", &backend);
+    assert!(app.request_quit(&backend));
+}
+
+#[test]
+fn quit_selects_background_tab_with_dirty_modal() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("background-modal-quit".into());
+    app.workspace_loaded = true;
+    let mut other = app.tabs[0].clone();
+    other.id = Uuid::new_v4();
+    app.tabs.push(other);
+    app.action("overlay:export", &backend);
+    app.field_set("path", "/tmp/report.csv");
+    app.switch_tab(1);
+    assert!(!app.request_quit(&backend));
+    assert_eq!(app.active, 0);
+    assert!(app.workbench.overlay_close_confirm);
+    assert_eq!(app.field("path"), "/tmp/report.csv");
+}
+
+#[test]
+fn quit_protects_unsaved_settings() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("settings-quit".into());
+    app.workspace_loaded = true;
+    let settings = app.settings.clone();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(settings).unwrap()),
+        },
+        &backend,
+    );
+    app.action("app-settings", &backend);
+    app.field_set("settings-paging-sql_rows", "123");
+    assert!(app.settings_form_dirty());
+    assert!(!app.request_quit(&backend));
+    assert!(app.workbench.overlay_close_confirm);
+    assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    app.action("overlay-close-discard", &backend);
+    assert!(!app.settings_form_dirty());
+    assert!(app.request_quit(&backend));
+}
+
+#[test]
 fn closing_unchanged_form_needs_no_confirmation() {
     let (backend, _, _) = Backend::scripted();
     let mut app = App::new("modal-clean".into());

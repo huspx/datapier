@@ -1188,6 +1188,7 @@ document.addEventListener('click', event => {
       break;
     }
     case 'refresh-keys':
+      redisScanPreview.signature = '';
       state.selectedKeys.clear();
       state.keyAnchor = null;
       render();

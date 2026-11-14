@@ -260,7 +260,7 @@ async fn redis_auth_is_rejected_before_any_task_is_persisted() {
     assert!(records.is_empty());
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM executions WHERE params LIKE '%secret-marker%'")
-            .fetch_one(&engine.store.pool)
+            .fetch_one(&mut *engine.store.pool.acquire().await.unwrap())
             .await
             .unwrap();
     assert_eq!(count, 0);

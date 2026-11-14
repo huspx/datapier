@@ -12,6 +12,7 @@ pub struct QueryUiState {
     pub pagination: std::collections::HashMap<String, ResultPaginationState>,
     pub redis_scan_complete: bool,
     pub redis_scan_limited: bool,
+    pub redis_scan_failed: bool,
 }
 
 #[derive(Clone)]
@@ -58,7 +59,7 @@ impl App {
     pub(super) fn remember_result_start(&mut self, page: &ResultPage) {
         let id = page.result.id.to_string();
         let cli = self.workbench.cli_result_id.as_deref() == Some(id.as_str());
-        let size = self.result_page_size_for(&id, cli);
+        let size = self.result_page_size_for(&id, !cli && self.browse_result);
         let state = self
             .workbench
             .query_ui
@@ -80,7 +81,7 @@ impl App {
         }
     }
 
-    pub(super) fn result_page_size_for(&self, id: &str, cli: bool) -> u64 {
+    pub(super) fn result_page_size_for(&self, id: &str, browse: bool) -> u64 {
         self.workbench.query_ui.pagination.get(id).map_or_else(
             || {
                 let paging = &self.settings.paging;
@@ -92,7 +93,7 @@ impl App {
                     paging.archery_grid_rows as u64
                 } else if self.is_redis() {
                     paging.redis_value_rows as u64
-                } else if !cli && self.browse_result {
+                } else if browse {
                     paging.mysql_table_rows as u64
                 } else {
                     paging.sql_rows as u64
@@ -103,7 +104,7 @@ impl App {
     }
 
     pub(super) fn result_page_size(&self, id: &str) -> u64 {
-        self.result_page_size_for(id, false)
+        self.result_page_size_for(id, self.browse_result)
     }
 }
 

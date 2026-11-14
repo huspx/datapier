@@ -529,6 +529,7 @@ impl Engine {
             "connection.close" => {
                 let db = self.database(owner, &params)?;
                 let id: Uuid = model::param(&params, "session_id")?;
+                let send_guard = self.send_gate.lock().await;
                 let tasks = {
                     let state = self.state.lock().unwrap();
                     if db.closing.swap(true, Ordering::AcqRel) {
@@ -541,23 +542,28 @@ impl Engine {
                         .map(|(id, t)| (*id, t.cancel.clone(), t.transition.clone()))
                         .collect::<Vec<_>>()
                 };
+                drop(send_guard);
                 for (task_id, cancel, transition) in tasks {
-                    self.cancel_if_safe(task_id, cancel, transition).await;
+                    self.cancel_if_safe(task_id, cancel.clone(), transition.clone())
+                        .await;
+                    if db.profile.provider == model::ProviderKind::Mysql && !db.profile.is_archery()
+                    {
+                        // 写入已发送时仅停止展示；MySQL provider 会继续消费协议终态。
+                        let _guard = transition.lock().await;
+                        cancel.cancel();
+                    }
                 }
-                let result = db.session.lock().await.close().await;
                 let executions = {
-                    let mut state = self.state.lock().unwrap();
-                    state.databases.remove(&id);
+                    let state = self.state.lock().unwrap();
                     let executions: Vec<_> = state
                         .result_sessions
                         .iter()
                         .filter_map(|(execution, session)| (*session == id).then_some(*execution))
                         .collect();
-                    state.result_sessions.retain(|_, session| *session != id);
                     executions
                 };
                 let mut results = HashSet::new();
-                for execution in executions {
+                for &execution in &executions {
                     let task = match self.store.task(execution).await {
                         Ok(task) => task,
                         Err(error) if error.code == "not_found" => continue,
@@ -570,12 +576,54 @@ impl Engine {
                         }
                     }
                 }
+                let result = db.session.lock().await.close().await;
+                for execution in executions {
+                    let task = match self.store.task(execution).await {
+                        Ok(task) => task,
+                        Err(error) if error.code == "not_found" => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if task.owner == owner {
+                        for result_id in task.results {
+                            if results.insert(result_id) {
+                                self.store.release_result(result_id).await?;
+                            }
+                        }
+                    }
+                }
+                self.state
+                    .lock()
+                    .unwrap()
+                    .mcp
+                    .release_session_handles(owner, id, &results);
                 {
                     let mut state = self.state.lock().unwrap();
-                    state.mcp.release_session_handles(owner, id, &results);
+                    state.databases.remove(&id);
+                    state.result_sessions.retain(|_, session| *session != id);
                 }
                 result?;
                 Ok(json!({"closed":true}))
+            }
+            "resource.scan.discard" => {
+                let db = self.database(owner, &params)?;
+                let mut session = db.session.lock().await;
+                self.database(owner, &params)?;
+                let cancel = {
+                    let state = self.state.lock().unwrap();
+                    state
+                        .client_cancels
+                        .get(&owner)
+                        .cloned()
+                        .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?
+                };
+                session
+                    .call(
+                        method,
+                        params,
+                        &ExecutionSink::new(self.store.clone(), Uuid::nil()),
+                        &cancel,
+                    )
+                    .await
             }
             "connection.info" | "resource.list" | "resource.describe" | "change.open"
             | "change.discard" | "transfer.preview" => {

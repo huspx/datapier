@@ -117,9 +117,9 @@ function detail(kind) {
     }</button><button class="button row" data-action="copy-detail">${icon('copy')} ${t('copyDetails')}</button>`,
   );
 }
-function modal(title, body, foot = '') {
+function modal(title, body, foot = '', className = '') {
   requestAnimationFrame(syncConditionalRequirements);
-  return `<div class="overlay"><section class="modal" role="dialog" aria-modal="true" aria-label="${
+  return `<div class="overlay"><section class="modal ${h(className)}" role="dialog" aria-modal="true" aria-label="${
     h(title)
   }"><header class="modal-head"><h2>${h(title)}</h2><span class="spacer"></span>${
     ib('x', t('closeDialog'), 'close-modal')
@@ -325,6 +325,7 @@ function overlay() {
       t('settings'),
       settingsPreview(),
       settingsPreviewFooter(),
+      'settings-modal',
     );
   }
   if (state.overlay === 'cell-details') return cellInspector(false);

@@ -139,13 +139,14 @@ impl Engine {
             self.editing_plan_current(id)?;
         }
         let mut session = tokio::select! { _ = cancel.cancelled() => return Err(AppError::cancelled()), lock = db.session.lock() => lock };
-        let is_mcp = self
-            .state
-            .lock()
-            .unwrap()
-            .contexts
-            .get(&db.owner)
-            .is_some_and(|context| matches!(context.kind, model::ClientKind::Mcp));
+        let is_mcp = {
+            let state = self.state.lock().unwrap();
+            let context = state
+                .contexts
+                .get(&db.owner)
+                .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
+            matches!(context.kind, model::ClientKind::Mcp)
+        };
         if !is_mcp && self.store.profile(db.profile.id).await?.revision != db.profile.revision {
             return Err(AppError::new("invalidated", "连接设置已变化，请重新连接"));
         }
@@ -234,6 +235,19 @@ impl Engine {
             };
             (result, Some(session))
         };
+        if is_mcp
+            && result.is_ok()
+            && matches!(
+                control,
+                Some(
+                    datapier_core::providers::mysql::TransactionControl::Commit
+                        | datapier_core::providers::mysql::TransactionControl::Rollback
+                        | datapier_core::providers::mysql::TransactionControl::AutocommitOn
+                )
+            )
+        {
+            self.mcp_transaction_finished(session_id);
+        }
         if schema_write || raw_write || data_write {
             // sent 持久化失败也不能证明未发送；保守失效并保留查询事务。
             let may_have_sent = self
@@ -305,6 +319,14 @@ impl Engine {
     }
     pub(super) async fn task(&self, id: Uuid) -> Result<model::TaskRecord> {
         let mut task = self.store.task(id).await?;
+        if let Some(completion) = self.state.lock().unwrap().unpersisted.get(&id) {
+            completion.apply(&mut task);
+        }
+        self.apply_live_elapsed(&mut task);
+        Ok(task)
+    }
+    pub(super) async fn task_details(&self, id: Uuid) -> Result<model::TaskRecord> {
+        let mut task = self.store.task_details(id).await?;
         if let Some(completion) = self.state.lock().unwrap().unpersisted.get(&id) {
             completion.apply(&mut task);
         }
@@ -715,8 +737,30 @@ impl Engine {
         let engine = self.clone();
         let method = method.to_owned();
         let future = async move {
+            let send_engine = Arc::downgrade(&engine);
+            let send_db = db.clone();
             let sink = ExecutionSink::new(engine.store.clone(), id)
                 .with_dispatch_control(transition.clone(), cancel.clone())
+                .with_send_gate(
+                    engine.send_gate.clone(),
+                    Arc::new(move || {
+                        let engine = send_engine
+                            .upgrade()
+                            .ok_or_else(|| AppError::new("disconnected", "引擎已关闭"))?;
+                        let state = engine.state.lock().unwrap();
+                        if !state.clients.contains(&owner)
+                            || !state.contexts.contains_key(&owner)
+                            || send_db.closing.load(Ordering::Acquire)
+                            || state
+                                .databases
+                                .get(&session_id)
+                                .is_none_or(|current| !Arc::ptr_eq(current, &send_db))
+                        {
+                            return Err(AppError::new("disconnected", "客户端或数据库会话已关闭"));
+                        }
+                        Ok(())
+                    }),
+                )
                 .with_profile_revision(
                     db.profile.id,
                     dispatch_revision,

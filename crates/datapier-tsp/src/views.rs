@@ -322,6 +322,18 @@ fn writable(app: &App) -> bool {
         && (app.is_redis() || app.grid.as_ref().is_some_and(|g| g.editable))
 }
 
+fn import_writable(app: &App) -> bool {
+    if app.is_redis() {
+        app.session_id().is_some()
+            && app.profile.as_ref().is_some_and(|profile| {
+                !profile.is_archery()
+                    && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
+            })
+    } else {
+        writable(app)
+    }
+}
+
 fn timestamp_text(value: Option<&Value>) -> String {
     let seconds = value.and_then(|value| {
         value
@@ -499,10 +511,10 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                 ));
             empty = empty.child(
                 ui::button(crate::i18n::tr("导入数据库").into_owned())
-                    .disabled(!writable(app))
+                    .disabled(!import_writable(app))
                     .on_click(Msg::Action("overlay:import".into())),
             );
-            if !writable(app) {
+            if !import_writable(app) {
                 empty = empty.child(
                     html::span(crate::i18n::tr("只读连接不能修改数据").into_owned()).class("muted"),
                 );

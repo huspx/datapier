@@ -2,6 +2,21 @@
 use super::*;
 
 impl App {
+    pub(super) fn discard_resource_scan(
+        &mut self,
+        backend: &Backend,
+        session: Value,
+        cursor: String,
+    ) {
+        if let Err(error) = backend.request(
+            format!("resource.scan.discard/{}", Uuid::new_v4()),
+            "resource.scan.discard",
+            json!({"session_id":session,"cursor":cursor}),
+        ) {
+            self.status = i18n::UiMessage::raw(format!("释放扫描游标失败: {error}"));
+        }
+    }
+
     pub(super) fn request_diagnostic_task(&mut self, backend: &Backend) {
         self.workbench.diagnostic_task_request = None;
         if self.detail_context.kind != "任务详情" {
@@ -59,6 +74,47 @@ impl App {
     // 异步响应先按 tab 和 generation 路由，任务、分页等再核对各自的 ID，
     // 避免迟到响应覆盖切换后的上下文；处理后台 tab 后恢复原活动 tab。
     pub(super) fn routed_response(&mut self, mut response: Response, backend: &Backend) {
+        if response.tag.starts_with("resource.scan.discard/") {
+            match response.result {
+                Ok(value) if value.get("discarded").and_then(Value::as_bool) == Some(true) => {}
+                Ok(_) => self.status = "释放扫描游标失败: 响应无效".into(),
+                Err(error) => {
+                    self.status = i18n::UiMessage::raw(format!("释放扫描游标失败: {error}"))
+                }
+            }
+            return;
+        }
+        if let Some((route, scan)) = response.tag.rsplit_once(":resource.list/")
+            && let Some((token, session)) = scan.split_once('/')
+            && let Some((tab, generation)) = route.split_once(':')
+        {
+            let current = Uuid::parse_str(tab)
+                .ok()
+                .and_then(|id| self.tabs.iter().position(|item| item.id == id))
+                .is_some_and(|index| {
+                    let (current_generation, current_token) = if index == self.active {
+                        (self.generation, self.scan_token)
+                    } else {
+                        (
+                            self.tabs[index].runtime.generation,
+                            self.tabs[index].runtime.scan_token,
+                        )
+                    };
+                    generation.parse::<u64>().ok() == Some(current_generation)
+                        && Uuid::parse_str(token)
+                            .ok()
+                            .is_some_and(|token| Some(token) == current_token)
+                        && !self.tab_is_closing(self.tabs[index].id)
+                });
+            if !current {
+                if let Ok(value) = &response.result
+                    && let Some(cursor) = value.get("cursor").and_then(Value::as_str)
+                {
+                    self.discard_resource_scan(backend, json!(session), cursor.to_owned());
+                }
+                return;
+            }
+        }
         if let Some((tab, token)) = response
             .tag
             .strip_prefix("draft-scope-release/")
@@ -238,13 +294,21 @@ impl App {
                     if !self.advanced_schema_task_response(task, &response.result, backend)
                         && self.task.as_deref() == Some(task)
                     {
-                        response.tag = "execution.get".into();
-                        self.response(response, backend);
+                        if response.result.as_ref().is_ok_and(|value| {
+                            value.get("id").and_then(Value::as_str) != Some(task)
+                        }) {
+                            self.status = "任务响应与请求不匹配".into();
+                        } else {
+                            response.tag = "execution.get".into();
+                            self.response(response, backend);
+                        }
                     }
                 } else if let Some(token) = tag.strip_prefix("trigger-list/") {
                     self.trigger_list_response(token, &response.result);
                 } else if let Some(token) = tag.strip_prefix("resource.list/") {
-                    if Uuid::parse_str(token).ok() == self.scan_token {
+                    if Uuid::parse_str(token.split('/').next().unwrap_or_default()).ok()
+                        == self.scan_token
+                    {
                         self.scan_token = None;
                         response.tag = "resource.list".into();
                         self.response(response, backend);
@@ -444,6 +508,11 @@ impl App {
             }
             Err(e) => {
                 let error = e.to_string();
+                if method == "resource.list" {
+                    self.scan_token = None;
+                    self.tabs[self.active].runtime.scan_restart = None;
+                    self.workbench.query_ui.redis_scan_failed = true;
+                }
                 if method == "connection.open" {
                     self.workbench.connecting = false;
                     self.workbench.connection_error = Some(error.clone());

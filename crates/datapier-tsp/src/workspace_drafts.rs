@@ -142,7 +142,14 @@ fn merge_redis(current: &mut [Value], old: &[Value], new: &[Value]) {
         if change.get("operation") != before.get("operation") {
             continue;
         }
-        for name in ["field", "member", "new_member", "value"] {
+        for name in [
+            "field",
+            "new_field",
+            "member",
+            "new_member",
+            "new_key_b64",
+            "value",
+        ] {
             let (Some(previous), Some(next)) = (before.get(name), after.get(name)) else {
                 continue;
             };
@@ -163,10 +170,11 @@ fn merge_redis(current: &mut [Value], old: &[Value], new: &[Value]) {
                                 | "zset_replace_member"
                         )
                     ));
-            let descriptor_name = if identity {
-                Some("identity_edit_file")
-            } else {
-                None
+            let descriptor_name = match name {
+                "new_field" => Some("new_field_edit_file"),
+                "new_key_b64" => Some("new_key_edit_file"),
+                _ if identity => Some("identity_edit_file"),
+                _ => None,
             };
             if let Some(key) = descriptor_name {
                 if let Some(file) = after.get(key) {

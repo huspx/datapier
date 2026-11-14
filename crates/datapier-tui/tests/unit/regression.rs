@@ -93,3 +93,62 @@ fn long_field_tail_fits_terminal_cells() {
     assert!(ratatui::text::Span::raw(visible.as_str()).width() <= 20);
     assert_eq!(forms::visible_tail("abc", 0), "");
 }
+
+#[test]
+fn archery_reselection_preserves_saved_identity_and_pending_edits() {
+    let saved = json!({
+        "id":"00000000-0000-0000-0000-000000000042", "revision":7,
+        "name":"自定义连接名", "provider":"mysql", "access_mode":"read_only",
+        "approval_policy":"off", "connection":{
+            "kind":"archery", "server_id":"server-1", "instance_id":42,
+            "instance_name":"remote", "databases":["a","b"], "default_database":"b"
+        }
+    });
+    let instance = json!({"id":42,"name":"remote","provider":"mysql"});
+    let baseline = vec![saved.clone()];
+    let selected = vec!["b".to_owned()];
+    // 从待选集合移除后重新确认，保留保存身份，只更新本次数据库选择。
+    let reselected = forms::archery_selected_profile(
+        &[],
+        &baseline,
+        &instance,
+        &json!("server-1"),
+        &json!("dangerous"),
+        &selected,
+        "b",
+    );
+    let mut expected = saved.clone();
+    expected["connection"]["databases"] = json!(["b"]);
+    assert_eq!(reselected, expected);
+
+    let mut pending = saved;
+    pending["name"] = json!("本轮修改的名称");
+    pending["approval_policy"] = json!("dangerous");
+    let mut expected = pending.clone();
+    expected["connection"]["databases"] = json!(["b"]);
+    assert_eq!(
+        forms::archery_selected_profile(
+            &[pending],
+            &baseline,
+            &instance,
+            &json!("server-1"),
+            &json!("off"),
+            &selected,
+            "b",
+        ),
+        expected
+    );
+
+    let fresh = forms::archery_selected_profile(
+        &[],
+        &baseline,
+        &json!({"id":43,"name":"new","provider":"mysql"}),
+        &json!("server-1"),
+        &json!("dangerous"),
+        &selected,
+        "b",
+    );
+    assert_ne!(fresh["id"], baseline[0]["id"]);
+    assert_eq!(fresh["revision"], 1);
+    assert_eq!(fresh["approval_policy"], "dangerous");
+}

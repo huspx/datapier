@@ -1,9 +1,9 @@
 use super::*;
 // 逐字节向 CSV parser 供给数据，避免带引号记录在返回完整行前突破分配预算。
-struct BoundedRecordReader {
-    file: BufReader<File>,
-    used: usize,
-    limit: usize,
+pub(super) struct BoundedRecordReader {
+    pub(super) file: BufReader<File>,
+    pub(super) used: usize,
+    pub(super) limit: usize,
 }
 impl Read for BoundedRecordReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -18,7 +18,7 @@ impl Read for BoundedRecordReader {
         Ok(n)
     }
 }
-fn import_limit_error() -> AppError {
+pub(super) fn import_limit_error() -> AppError {
     AppError::new("resource_limit", "导入行超过内存预算")
 }
 

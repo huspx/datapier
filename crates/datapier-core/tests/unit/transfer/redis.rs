@@ -26,6 +26,7 @@ fn hash_csv_preserves_absolute_field_expiry_and_rejects_missing_expiry() {
         key: "aw==".into(),
         kind: "hash".into(),
         batch: Vec::new(),
+        batch_bytes: 0,
         rows: 0,
         next_index: 0,
     };

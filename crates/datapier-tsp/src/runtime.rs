@@ -620,6 +620,11 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         }
                     }
                 } else {
+                    let scan = if matches!(app.focus.as_str(), "pattern" | "type") {
+                        app.session_id().zip(app.cursor.clone())
+                    } else {
+                        None
+                    };
                     let editing = app.draft_input_field(&app.focus)
                         && (key.typed().is_some()
                             || matches!(
@@ -633,6 +638,12 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             &backend,
                             workbench::DraftScopeAction::Key(app.focus.clone(), key.clone()),
                         );
+                    }
+                    if app.workbench.scan_dirty
+                        && app.cursor.is_none()
+                        && let Some((session, cursor)) = scan
+                    {
+                        app.discard_resource_scan(&backend, session, cursor);
                     }
                 }
                 changed = true;

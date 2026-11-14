@@ -405,7 +405,7 @@ async fn oversized_deleted_response_preserves_server_profiles_and_credentials() 
     let template = profile(fixture.server.id, 1, "one");
     let count = 107_600_u64;
     sqlx::query("WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < ?) INSERT INTO profiles(id,name,payload,credential_saved,archery_server_id,archery_instance_id) SELECT printf('00000000-0000-4000-8000-%012x', n), 'one', json_set(?, '$.id', printf('00000000-0000-4000-8000-%012x', n), '$.connection.instance_id', n), 0, ?, n FROM numbers")
-        .bind(count as i64).bind(serde_json::to_string(&template).unwrap()).bind(fixture.server.id.to_string()).execute(&engine.store.pool).await.unwrap();
+        .bind(count as i64).bind(serde_json::to_string(&template).unwrap()).bind(fixture.server.id.to_string()).execute(&mut *engine.store.pool.acquire().await.unwrap()).await.unwrap();
     let ids: Vec<Uuid> = (1..=count)
         .map(|n| Uuid::parse_str(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap())
         .collect();
@@ -431,7 +431,7 @@ async fn oversized_deleted_response_preserves_server_profiles_and_credentials() 
     let remaining: i64 =
         sqlx::query_scalar("SELECT count(*) FROM profiles WHERE archery_server_id = ?")
             .bind(fixture.server.id.to_string())
-            .fetch_one(&engine.store.pool)
+            .fetch_one(&mut *engine.store.pool.acquire().await.unwrap())
             .await
             .unwrap();
     assert_eq!(remaining, count as i64);

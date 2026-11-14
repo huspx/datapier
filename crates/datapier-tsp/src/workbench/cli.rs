@@ -158,7 +158,7 @@ impl App {
                 backend,
                 &format!("cli.record/{selected}/{index}"),
                 "result.read",
-                json!({"result_id":result_id,"start":0,"max_rows":self.result_page_size_for(&result_id, true),"max_bytes":1048576}),
+                json!({"result_id":result_id,"start":0,"max_rows":self.result_page_size_for(&result_id, false),"max_bytes":1048576}),
             );
         }
     }
@@ -170,7 +170,7 @@ impl App {
         if self.workbench.cli_page_token.is_some() {
             return false;
         }
-        let size = self.result_page_size_for(&id, true);
+        let size = self.result_page_size_for(&id, false);
         self.workbench_clear_cli_value();
         self.workbench.cli_page_transition = None;
         let token = Uuid::new_v4();
@@ -371,7 +371,7 @@ impl App {
                         backend,
                         &format!("cli.record/{record_id}/{index}"),
                         "result.read",
-                        json!({"result_id":id,"start":0,"max_rows":self.result_page_size_for(id, true),"max_bytes":1048576}),
+                        json!({"result_id":id,"start":0,"max_rows":self.result_page_size_for(id, false),"max_bytes":1048576}),
                     );
                 }
             }

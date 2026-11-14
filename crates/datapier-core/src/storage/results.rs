@@ -82,6 +82,7 @@ impl ResultStore {
         if let Some(entry) = self.entries.remove(&id) {
             entry.notify.notify_waiters();
         }
+        self.auxiliary.remove(&id);
         self.values.retain(|_, (result, _)| *result != id);
     }
 }
@@ -112,7 +113,7 @@ impl Store {
         state.expire(Duration::from_secs(settings.limits.result_idle_seconds));
         let owner: Option<String> = sqlx::query_scalar("SELECT owner FROM executions WHERE id=?")
             .bind(execution_id.to_string())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.pool.acquire().await?)
             .await?;
         let owner = parse_id(&owner.ok_or_else(|| AppError::new("not_found", "任务不存在"))?)?;
         let used: usize = state
@@ -543,9 +544,36 @@ impl Store {
         handle: Uuid,
         bytes: usize,
     ) -> Result<()> {
+        self.reserve_auxiliary_inner(execution_id, handle, bytes, false)
+            .await
+    }
+    pub async fn reserve_result_auxiliary(
+        &self,
+        execution_id: Uuid,
+        handle: Uuid,
+        bytes: usize,
+    ) -> Result<()> {
+        self.reserve_auxiliary_inner(execution_id, handle, bytes, true)
+            .await
+    }
+    async fn reserve_auxiliary_inner(
+        &self,
+        execution_id: Uuid,
+        handle: Uuid,
+        bytes: usize,
+        result_required: bool,
+    ) -> Result<()> {
         let owner = self.task(execution_id).await?.owner;
         let budget = self.settings().await?.limits.result_memory_bytes_per_client;
         let mut state = self.results.lock().await;
+        if result_required
+            && !state
+                .entries
+                .get(&handle)
+                .is_some_and(|result| result.meta.execution_id == execution_id)
+        {
+            return Err(missing());
+        }
         if state
             .auxiliary
             .get(&handle)
@@ -574,6 +602,18 @@ impl Store {
     pub async fn release_auxiliary(&self, handle: Uuid) -> Result<()> {
         self.results.lock().await.auxiliary.remove(&handle);
         Ok(())
+    }
+    pub async fn release_execution_result_auxiliary(&self, execution_id: Uuid) {
+        let mut state = self.results.lock().await;
+        let ids: Vec<_> = state
+            .entries
+            .iter()
+            .filter(|(_, result)| result.meta.execution_id == execution_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            state.auxiliary.remove(&id);
+        }
     }
     /// 计算缓存字段解码及编码的空间上界，不分配完整 JSON 树。
     pub async fn cached_value_memory_bound(&self, id: Uuid) -> Result<usize> {

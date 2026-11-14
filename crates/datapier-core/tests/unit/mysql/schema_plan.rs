@@ -273,6 +273,35 @@ fn no_backslash_mode_keeps_literal_backslashes_for_parser() {
 }
 
 #[test]
+fn enum_and_set_members_round_trip_in_both_sql_modes() {
+    use sqlparser::{ast::Statement, dialect::MySqlDialect, parser::Parser};
+    for (mode, ddl, expected) in [
+        (
+            "",
+            r"CREATE TABLE t (e ENUM('a\\b', 'x''y'), s SET('z\\', 'x''y'))",
+            (r"ENUM('a\\b', 'x''y')", r"SET('z\\', 'x''y')"),
+        ),
+        (
+            "NO_BACKSLASH_ESCAPES",
+            r"CREATE TABLE t (e ENUM('a\b', 'x''y'), s SET('z\', 'x''y'))",
+            (r"ENUM('a\b', 'x''y')", r"SET('z\', 'x''y')"),
+        ),
+    ] {
+        let input = super::super::catalog::parser_input(ddl, mode);
+        let mut statements = Parser::parse_sql(&MySqlDialect {}, &input).unwrap();
+        let Statement::CreateTable(table) = statements.remove(0) else {
+            panic!("expected table")
+        };
+        for (column, expected) in table.columns.iter().zip([expected.0, expected.1]) {
+            let encoded =
+                super::super::catalog::parsed_native_type(&column.data_type, mode).unwrap();
+            assert_eq!(encoded, expected);
+            assert!(super::native_type(&encoded, mode).is_ok());
+        }
+    }
+}
+
+#[test]
 fn view_readback_normalizes_server_qualification_but_not_semantics() {
     let mut expected = view();
     expected.select = "SELECT t.id FROM t WHERE t.id > 1".into();

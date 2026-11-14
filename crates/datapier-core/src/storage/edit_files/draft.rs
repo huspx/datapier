@@ -128,10 +128,23 @@ fn rewrite_copied_references(value: &mut Json, copies: &FileMap) {
                 if let Some(changes) = pending.get_mut("redis").and_then(Json::as_array_mut) {
                     for change in changes {
                         rewrite_descriptor(change, copies);
-                        if let Some(identity) = change.get_mut("identity_edit_file") {
-                            rewrite_descriptor(identity, copies);
+                        for key in [
+                            "identity_edit_file",
+                            "new_field_edit_file",
+                            "new_key_edit_file",
+                        ] {
+                            if let Some(descriptor) = change.get_mut(key) {
+                                rewrite_descriptor(descriptor, copies);
+                            }
                         }
-                        for field in ["value", "field", "member", "new_member"] {
+                        for field in [
+                            "value",
+                            "field",
+                            "member",
+                            "new_member",
+                            "new_field",
+                            "new_key_b64",
+                        ] {
                             if let Some(value) = change.get_mut(field) {
                                 rewrite_values(value, copies);
                             }
@@ -163,7 +176,14 @@ fn inline_values(pending: &Json) -> Vec<(String, bool)> {
     }
     if let Some(changes) = pending.get("redis").and_then(Json::as_array) {
         for (index, change) in changes.iter().enumerate() {
-            for field in ["field", "member", "new_member", "value"] {
+            for field in [
+                "field",
+                "member",
+                "new_member",
+                "new_field",
+                "new_key_b64",
+                "value",
+            ] {
                 if change.get(field).is_some() {
                     let operation = change.get("operation").and_then(Json::as_str).unwrap_or("");
                     let identity = field == "field"
@@ -281,10 +301,11 @@ impl Store {
                 if let Some(pending) = tab.get("pending") {
                     for (path, _) in inline_values(pending) {
                         if let Some(value) = pending.pointer(&path)
-                            && value
-                                .get("type")
-                                .and_then(Json::as_str)
-                                .is_some_and(|kind| kind != "large")
+                            && (path.ends_with("/new_key_b64") && value.is_string()
+                                || value
+                                    .get("type")
+                                    .and_then(Json::as_str)
+                                    .is_some_and(|kind| kind != "large"))
                         {
                             total = total.saturating_add(save_estimate(value)?.bytes);
                         }
@@ -310,12 +331,12 @@ impl Store {
                         .transpose()?
                         .unwrap_or(0);
                     for (path, _) in inline_values(pending) {
-                        if pending
-                            .pointer(&path)
-                            .and_then(|v| v.get("type"))
-                            .and_then(Json::as_str)
-                            .is_some_and(|kind| kind != "large" && kind != "missing")
-                        {
+                        if pending.pointer(&path).is_some_and(|v| {
+                            (path.ends_with("/new_key_b64") && v.is_string())
+                                || v.get("type")
+                                    .and_then(Json::as_str)
+                                    .is_some_and(|kind| kind != "large" && kind != "missing")
+                        }) {
                             growth = growth
                                 .saturating_add(4096)
                                 .saturating_add(target.saturating_mul(2));
@@ -349,14 +370,27 @@ impl Store {
                         let Some(value) = pending.pointer(&path) else {
                             continue;
                         };
-                        let Some(kind) = value.get("type").and_then(Json::as_str) else {
-                            continue;
+                        let is_key = path.ends_with("/new_key_b64") && value.is_string();
+                        let kind = if is_key {
+                            "text".to_owned()
+                        } else {
+                            let Some(kind) = value.get("type").and_then(Json::as_str) else {
+                                continue;
+                            };
+                            if kind == "large" || kind == "missing" {
+                                continue;
+                            }
+                            kind.to_owned()
                         };
-                        if kind == "large" || kind == "missing" {
-                            continue;
-                        }
-                        let kind = kind.to_owned();
-                        let bytes = serde_json::to_vec(value)?;
+                        let bytes = if is_key {
+                            let mut bytes = Vec::new();
+                            bytes.extend_from_slice(b"{\"type\":\"text\",\"value\":");
+                            serde_json::to_writer(&mut bytes, value)?;
+                            bytes.push(b'}');
+                            bytes
+                        } else {
+                            serde_json::to_vec(value)?
+                        };
                         let record = self
                             .register_edit_file(EditFileRegistration {
                                 workspace_id: id,
@@ -387,7 +421,11 @@ impl Store {
                                 .pointer_mut(change_path)
                                 .and_then(Json::as_object_mut)
                                 .ok_or_else(|| AppError::invalid("Redis 草稿无效"))?;
-                            if identity {
+                            if path.ends_with("/new_field") {
+                                change.insert("new_field_edit_file".into(), descriptor);
+                            } else if path.ends_with("/new_key_b64") {
+                                change.insert("new_key_edit_file".into(), descriptor);
+                            } else if identity {
                                 change.insert("identity_edit_file".into(), descriptor);
                             } else {
                                 change.insert("edit_file_id".into(), serde_json::json!(record.id));
@@ -504,12 +542,12 @@ impl Store {
         let limit = i64::try_from(memory_budget).unwrap_or(i64::MAX);
         // 条件在 SQLite 取得 payload 前执行，避免先分配超出预算的字符串。
         let row = sqlx::query("SELECT revision,payload FROM workspaces WHERE id=? AND length(CAST(payload AS BLOB))<=?")
-            .bind(id).bind(limit).fetch_optional(&self.pool).await?;
+            .bind(id).bind(limit).fetch_optional(&mut *self.pool.acquire().await?).await?;
         let Some(row) = row else {
             let exists: i64 =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=?)")
                     .bind(id)
-                    .fetch_one(&self.pool)
+                    .fetch_one(&mut *self.pool.acquire().await?)
                     .await?;
             return if exists == 0 {
                 Ok(serde_json::json!({"revision":0,"state":{}}))

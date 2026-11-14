@@ -49,23 +49,14 @@ impl App {
                 &self.workbench.redis_expansion,
                 self.redis_selection_scope(),
             );
-            let pages = rows.len().div_ceil(crate::workbench::KEY_PAGE_SIZE).max(1);
-            let start = self.workbench.key_page.min(pages - 1) * crate::workbench::KEY_PAGE_SIZE;
-            rows[start..(start + crate::workbench::KEY_PAGE_SIZE).min(rows.len())]
-                .iter()
+            rows.iter()
                 .filter_map(|row| match &row.kind {
                     crate::redis_tree::Kind::Key { index } => Some(*index),
                     _ => None,
                 })
                 .collect()
         } else {
-            let pages = self
-                .resources
-                .len()
-                .div_ceil(crate::workbench::KEY_PAGE_SIZE)
-                .max(1);
-            let start = self.workbench.key_page.min(pages - 1) * crate::workbench::KEY_PAGE_SIZE;
-            (start..(start + crate::workbench::KEY_PAGE_SIZE).min(self.resources.len())).collect()
+            (0..self.resources.len()).collect()
         }
     }
     pub(super) fn redis_prune_key_selection(&mut self) {
@@ -77,9 +68,9 @@ impl App {
             };
         }
         let visible: BTreeSet<_> = self
-            .redis_visible_key_indices()
-            .into_iter()
-            .filter_map(|i| self.resources.get(i)?.key_b64.clone())
+            .resources
+            .iter()
+            .filter_map(|resource| resource.key_b64.clone())
             .collect();
         self.redis_keys.keys.retain(|key| visible.contains(key));
         if self
@@ -105,10 +96,9 @@ impl App {
         if self.redis_keys.scope != self.redis_selection_scope() {
             return Vec::new();
         }
-        self.redis_visible_key_indices()
-            .into_iter()
-            .filter_map(|i| {
-                let r = self.resources.get(i)?;
+        self.resources
+            .iter()
+            .filter_map(|r| {
                 let key = r.key_b64.as_ref()?;
                 self.redis_keys.keys.contains(key).then(|| ResourceTarget {
                     database: r

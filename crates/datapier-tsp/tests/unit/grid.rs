@@ -23,6 +23,40 @@ fn grid(columns: Vec<Column>, rows: Vec<Vec<Value>>) -> GridState {
 }
 
 #[test]
+fn replacing_page_clears_stale_row_caches_but_keeps_draft_baselines() {
+    let large = |id| Value::Large {
+        id,
+        original_type: "text".into(),
+        bytes: 99,
+        preview: "partial".into(),
+    };
+    let mut g = grid(
+        vec![Column::new("value", "text")],
+        vec![vec![Value::Text("old".into())], vec![large(Uuid::new_v4())]],
+    );
+    let first = Cell { row: 10, column: 0 };
+    let second = Cell { row: 11, column: 0 };
+    g.edit(first, Value::Text("draft".into())).unwrap();
+    assert!(g.undo());
+    g.resolve_large(second, Value::Text("old full".into()))
+        .unwrap();
+    let mut page = g.page.clone();
+    page.rows[0][0] = Value::Text("new".into());
+    let new_large = large(Uuid::new_v4());
+    page.rows[1][0] = new_large.clone();
+    g.set_page(page).unwrap();
+    assert_eq!(g.original(first), Some(&Value::Text("new".into())));
+    assert_eq!(g.value(second), Some(&new_large));
+
+    g.edit(first, Value::Text("new draft".into())).unwrap();
+    let mut page = g.page.clone();
+    page.rows[0][0] = Value::Text("refreshed".into());
+    g.set_page(page).unwrap();
+    assert_eq!(g.original(first), Some(&Value::Text("new".into())));
+    assert_eq!(g.value(first), Some(&Value::Text("new draft".into())));
+}
+
+#[test]
 fn mysql_fit_tracks_page_limits_and_hidden_frozen_columns() {
     let mut g = grid(
         vec![

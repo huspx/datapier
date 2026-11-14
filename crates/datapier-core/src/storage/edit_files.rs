@@ -329,8 +329,14 @@ fn refs(value: &Json) -> Result<std::collections::BTreeMap<Uuid, u64>> {
                         {
                             references(change, &mut result)?;
                         }
-                        if let Some(identity) = change.get("identity_edit_file") {
-                            references(identity, &mut result)?;
+                        for key in [
+                            "identity_edit_file",
+                            "new_field_edit_file",
+                            "new_key_edit_file",
+                        ] {
+                            if let Some(descriptor) = change.get(key) {
+                                references(descriptor, &mut result)?;
+                            }
                         }
                     }
                 }
@@ -406,14 +412,14 @@ impl Store {
         };
         validate_record(&record)?;
         sqlx::query("INSERT INTO value_edit_files(id,workspace_id,profile_id,relative_dir,purpose,target_json,state,format,baseline_digest,draft_revision,revision,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(id.to_string()).bind(workspace_id).bind(profile_id).bind(&record.relative_dir).bind(purpose_name(purpose)).bind(record.target.to_string()).bind("preparing").bind(format).bind(baseline_digest).bind(draft_revision as i64).bind(1i64).bind(record.created_at_ms).bind(record.updated_at_ms).execute(&self.pool).await?;
+            .bind(id.to_string()).bind(workspace_id).bind(profile_id).bind(&record.relative_dir).bind(purpose_name(purpose)).bind(record.target.to_string()).bind("preparing").bind(format).bind(baseline_digest).bind(draft_revision as i64).bind(1i64).bind(record.created_at_ms).bind(record.updated_at_ms).execute(&mut *self.pool.acquire().await?).await?;
         Ok(record)
     }
     /// 获取登记，配置被删除时仍可访问。
     pub async fn edit_file(&self, id: Uuid) -> Result<EditorFileRecord> {
         let row = sqlx::query("SELECT * FROM value_edit_files WHERE id=?")
             .bind(id.to_string())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.pool.acquire().await?)
             .await?
             .ok_or_else(|| AppError::new("not_found", "编辑文件不存在"))?;
         decode_record(&row)
@@ -435,7 +441,7 @@ impl Store {
         )
         .bind(limit as i64)
         .bind(offset as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.pool.acquire().await?)
         .await?;
         rows.iter().map(decode_record).collect()
     }
@@ -471,7 +477,7 @@ impl Store {
             return Err(AppError::conflict("编辑文件状态或版本已变化"));
         }
         let result = sqlx::query("UPDATE value_edit_files SET state=?,revision=revision+1,updated_at_ms=? WHERE id=? AND revision=? AND revision<?")
-            .bind(state_name(state)).bind(now_ms()).bind(id.to_string()).bind(expected_revision as i64).bind(i64::MAX).execute(&self.pool).await?;
+            .bind(state_name(state)).bind(now_ms()).bind(id.to_string()).bind(expected_revision as i64).bind(i64::MAX).execute(&mut *self.pool.acquire().await?).await?;
         if result.rows_affected() != 1 {
             return Err(AppError::conflict("编辑文件版本已变化"));
         }
@@ -480,7 +486,8 @@ impl Store {
     /// 领取遗留记录只更新版本；调用方必须先排除活跃 owner。
     pub async fn claim_edit_file(&self, id: Uuid, revision: u64) -> Result<EditorFileRecord> {
         let budget = self.settings().await?.limits.result_memory_bytes_per_client;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let workspace: Option<String> =
             sqlx::query_scalar("SELECT workspace_id FROM value_edit_files WHERE id=?")
                 .bind(id.to_string())
@@ -497,6 +504,7 @@ impl Store {
             return Err(AppError::conflict("编辑文件不可领取或版本已变化"));
         }
         tx.commit().await?;
+        drop(connection);
         self.edit_file(id).await
     }
     /// 发布已登记内容；draft 使用临时文件和原子重命名，只能发布一次。
@@ -630,7 +638,8 @@ impl Store {
             .ok_or_else(|| AppError::invalid("工作区版本溢出"))?;
         let new_refs = refs(state)?;
         // 在读取旧引用前取得写锁，避免并发保存/任务写入使 DEFERRED 快照无法升级。
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let max_payload = i64::try_from(memory_budget).unwrap_or(i64::MAX);
         let old_size: Option<i64> =
             sqlx::query_scalar("SELECT length(CAST(payload AS BLOB)) FROM workspaces WHERE id=?")
@@ -686,7 +695,8 @@ impl Store {
     /// 调用方必须同时排除所有活动 owner。
     pub async fn cleanup_edit_file(&self, id: Uuid, revision: u64) -> Result<()> {
         let budget = self.settings().await?.limits.result_memory_bytes_per_client;
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         let updated = sqlx::query("UPDATE value_edit_files SET state='cleanup_pending',revision=revision+1,updated_at_ms=? WHERE id=? AND revision=? AND revision<?")
             .bind(now_ms()).bind(id.to_string()).bind(i64::try_from(revision).map_err(|_| AppError::invalid("版本无效"))?).bind(i64::MAX).execute(&mut *tx).await?;
         if updated.rows_affected() != 1 {
@@ -703,6 +713,7 @@ impl Store {
             return Err(AppError::conflict("草稿文件仍被保存的工作区引用"));
         }
         tx.commit().await?;
+        drop(connection);
         let base = match open_directory(&self.retired_cache_root, "edit-files", false) {
             Ok(base) => Some(base),
             Err(error)
@@ -767,7 +778,7 @@ impl Store {
         )
         .bind(id.to_string())
         .bind(record.revision as i64)
-        .execute(&self.pool)
+        .execute(&mut *self.pool.acquire().await?)
         .await?;
         if deleted.rows_affected() != 1 {
             return Err(AppError::conflict("文件清理时登记已变化"));
@@ -778,7 +789,8 @@ impl Store {
     /// 启动时回收失去活动 owner 的文件；已保存的草稿引用始终保留。
     pub async fn recover_edit_files(&self) -> Result<()> {
         let budget = self.settings().await?.limits.result_memory_bytes_per_client;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE value_edit_files SET state='orphaned',revision=revision+1,updated_at_ms=? WHERE purpose='external' AND state IN ('preparing','ready','opened','returned') AND revision<?")
             .bind(now_ms()).bind(i64::MAX).execute(&mut *tx).await?;
         // 登记、写入 pending、发布和工作区引用之间都可能崩溃。

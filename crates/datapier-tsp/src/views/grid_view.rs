@@ -186,7 +186,9 @@ pub(super) fn result_info(
 pub(super) fn result_pagination(app: &App, grid: &GridState, cli: bool) -> Node<Msg> {
     let id = grid.page.result.id.to_string();
     let state = app.workbench.query_ui.pagination.get(&id);
-    let size = app.result_page_size_for(&id, cli).max(1);
+    let size = app
+        .result_page_size_for(&id, !cli && app.browse_result)
+        .max(1);
     let summary = &grid.page.result.summary;
     let mode = summary["retrieval_mode"].as_str();
     let total = summary["total_rows"].as_u64().or_else(|| {
@@ -482,6 +484,13 @@ pub(super) fn grid(app: &App) -> Option<Node<Msg>> {
                     .child(
                         ui::input()
                             .variant(ui::InputVariant::Field)
+                            .aria(crate::i18n::format_message(
+                                "编辑第 {row} 行，列 {column}",
+                                &[
+                                    ("row", &(row_id + 1).to_string()),
+                                    ("column", &grid.page.result.columns[col].name),
+                                ],
+                            ))
                             .key("cell-editor")
                             .text(ed.text.clone())
                             .cursor(ed.cursor)

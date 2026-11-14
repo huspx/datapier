@@ -1,3 +1,46 @@
+.settings-modal {
+  width: min(1040px, 100%);
+}
+.config-caption, .config-status {
+  margin: 4px 0 8px;
+}
+.config-language {
+  max-width: 400px;
+  margin: 8px 0 12px;
+}
+.config-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px 24px;
+}
+.config-section {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.config-section-wide {
+  grid-column: 1 / -1;
+}
+.config-section h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.config-section p {
+  margin: 4px 0 8px;
+}
+.config-demo-controls {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+@media (max-width: 760px) {
+  .config-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+}
 .config-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -23,8 +66,13 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
-  margin: 8px 0;
+  gap: 8px;
+  margin: 6px 0;
+}
+.config-number-label small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
 }
 .config-row > span {
   overflow-wrap: anywhere;

@@ -293,6 +293,39 @@ fn canonical_externalization_preserves_changes_made_during_save() {
 }
 
 #[test]
+fn canonical_redis_new_identities_keep_file_descriptors() {
+    let mut app = App::new("source".into());
+    app.redis_changes = vec![
+        json!({"operation":"hash_replace_field", "new_field":{"type":"text","value":"new"}}),
+        json!({"operation":"rename", "new_key_b64":"bmV3"}),
+    ];
+    let sent = serde_json::to_value(app.workspace_snapshot()).unwrap();
+    let mut canonical = sent.clone();
+    let field_id = Uuid::new_v4();
+    let key_id = Uuid::new_v4();
+    let pending = &mut canonical["tabs"][0]["pending"]["redis"];
+    pending[0]["new_field"] = json!({"type":"large","value":{"id":field_id,"original_type":"text","bytes":3,"preview":"new"}});
+    pending[0]["new_field_edit_file"] = json!({"edit_file_id":field_id,"edit_file_revision":1});
+    pending[1]["new_key_b64"] = json!({"type":"large","value":{"id":key_id,"original_type":"bytes","bytes":3,"preview":"new"}});
+    pending[1]["new_key_edit_file"] = json!({"edit_file_id":key_id,"edit_file_revision":1});
+    let expected = pending.clone();
+    app.rebind_workspace_drafts(&sent, &canonical, false);
+    assert_eq!(app.redis_changes[0]["new_field"], expected[0]["new_field"]);
+    assert_eq!(
+        app.redis_changes[0]["new_field_edit_file"],
+        expected[0]["new_field_edit_file"]
+    );
+    assert_eq!(
+        app.redis_changes[1]["new_key_b64"],
+        expected[1]["new_key_b64"]
+    );
+    assert_eq!(
+        app.redis_changes[1]["new_key_edit_file"],
+        expected[1]["new_key_edit_file"]
+    );
+}
+
+#[test]
 fn restored_pending_survives_an_unrelated_snapshot() {
     let mut original = App::new("test".into());
     original

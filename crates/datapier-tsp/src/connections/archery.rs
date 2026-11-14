@@ -511,11 +511,28 @@ impl App {
 
     pub(crate) fn archery_desired_profiles(&self, server: &Value) -> Vec<Value> {
         self.archery.selected.values().map(|s| {
-            let databases = self.archery.baseline.iter().find(|old| old.id == s.profile_id).and_then(Profile::archery)
+            let baseline = self.archery.baseline.iter().find(|old| old.id == s.profile_id);
+            let databases = baseline.and_then(Profile::archery)
                 .filter(|old| old.databases.iter().cloned().collect::<BTreeSet<_>>() == s.selected)
                 .map(|old| old.databases.clone()).unwrap_or_else(|| s.selected.iter().cloned().collect());
-            json!({"id":s.profile_id,"name":self.field(&format!("archery_profile_name_{}", s.profile_id)),"provider":s.instance["provider"],"access_mode":"read_only","connection":{"kind":"archery","server_id":server["id"],"instance_id":s.instance["id"],"instance_name":s.instance["name"],"databases":databases,"default_database":s.default}})
+            json!({"id":s.profile_id,"revision":baseline.map_or(1, |old| old.revision),"approval_policy":baseline.map_or(self.settings.approval.default_policy, |old| old.approval_policy),"name":self.field(&format!("archery_profile_name_{}", s.profile_id)),"provider":s.instance["provider"],"access_mode":"read_only","connection":{"kind":"archery","server_id":server["id"],"instance_id":s.instance["id"],"instance_name":s.instance["name"],"databases":databases,"default_database":s.default}})
         }).collect()
+    }
+
+    fn archery_committed_profiles(&self, server: &Value) -> Option<Vec<Value>> {
+        let mut profiles = self.archery_desired_profiles(server);
+        for profile in &mut profiles {
+            if let Some(old) = self
+                .archery
+                .baseline
+                .iter()
+                .find(|old| profile["id"] == json!(old.id))
+                && *profile != json!(old)
+            {
+                profile["revision"] = json!(old.revision.checked_add(1)?);
+            }
+        }
+        Some(profiles)
     }
 
     fn archery_save_batch(&mut self, backend: &Backend) {

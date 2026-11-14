@@ -345,6 +345,37 @@ async fn cancellation_before_dispatch_never_records_a_sent_write() {
 }
 
 #[tokio::test]
+async fn revoked_send_gate_rejects_waiting_write() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let store = fixture().await;
+    let task = store
+        .create_task(Uuid::new_v4(), "w", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let active = Arc::new(AtomicBool::new(true));
+    let check_active = active.clone();
+    let sink = ExecutionSink::new(store.clone(), task.id).with_send_gate(
+        gate.clone(),
+        Arc::new(move || {
+            if check_active.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(AppError::new("disconnected", "客户端会话已关闭"))
+            }
+        }),
+    );
+    let guard = gate.lock().await;
+    let operation = tokio::spawn(async move { sink.mark_sent(true).await });
+    active.store(false, Ordering::Release);
+    drop(guard);
+    assert_eq!(operation.await.unwrap().unwrap_err().code, "disconnected");
+    assert!(!store.task(task.id).await.unwrap().sent);
+    cleanup(store).await;
+}
+
+#[tokio::test]
 async fn history_searches_all_records_and_pages_stably() {
     let store = fixture().await;
     for n in 0..510 {
@@ -408,7 +439,7 @@ async fn history_filters_effective_state_before_count_and_pagination() {
             .bind(1_700_000_000_i64 + n)
             .bind(if n == 3 { "failed" } else { "queued" })
             .bind(task.id.to_string())
-            .execute(&store.pool)
+            .execute(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
         ids.push(task.id);
@@ -477,7 +508,7 @@ async fn history_searches_displayed_local_time_and_execution_text() {
     sqlx::query("UPDATE executions SET created_at=? WHERE id=?")
         .bind(seconds as f64 + 0.25)
         .bind(task.id.to_string())
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     let displayed = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)
@@ -557,7 +588,7 @@ async fn history_retention_keeps_live_results_and_pending_execution() {
     for task in &tasks {
         sqlx::query("UPDATE executions SET created_at=1 WHERE id=?")
             .bind(task.id.to_string())
-            .execute(&store.pool)
+            .execute(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
     }
@@ -569,7 +600,7 @@ async fn history_retention_keeps_live_results_and_pending_execution() {
     }
     sqlx::query("UPDATE executions SET state='approval_required' WHERE id=?")
         .bind(tasks[2].id.to_string())
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     let result = store
@@ -609,7 +640,7 @@ async fn history_max_entries_uses_original_order_across_deletions() {
         sqlx::query("UPDATE executions SET created_at=? WHERE id=?")
             .bind(index as i64)
             .bind(task.id.to_string())
-            .execute(&store.pool)
+            .execute(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
         ids.push(task.id);

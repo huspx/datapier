@@ -758,3 +758,30 @@ pub fn profile_name(value: &str) -> Form {
         fields: vec![Field::new("name", "连接名称", "Connection name", value)],
     }
 }
+
+pub fn archery_selected_profile(
+    desired: &[Value],
+    baseline: &[Value],
+    instance: &Value,
+    server_id: &Value,
+    default_policy: &Value,
+    databases: &[String],
+    default_database: &str,
+) -> Value {
+    let old = desired
+        .iter()
+        .chain(baseline)
+        .find(|profile| profile["connection"]["instance_id"] == instance["id"]);
+    let mut profile = old.cloned().unwrap_or_else(|| {
+        json!({
+            "id": Uuid::new_v4(), "revision": 1, "name": instance["name"],
+            "provider": instance["provider"], "access_mode": "read_only",
+            "approval_policy": default_policy,
+            "connection": {"kind":"archery", "server_id":server_id,
+                "instance_id":instance["id"], "instance_name":instance["name"]}
+        })
+    });
+    profile["connection"]["databases"] = json!(databases);
+    profile["connection"]["default_database"] = json!(default_database);
+    profile
+}

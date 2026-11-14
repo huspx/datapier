@@ -190,6 +190,19 @@ impl GridState {
         {
             return Err(AppError::invalid("结果页与当前 grid 不匹配"));
         }
+        // 草稿基线跨页保留；已撤销的行和已读取的大字段不能沿用旧页的行身份。
+        self.originals.retain(|row, _| {
+            self.edits
+                .range(
+                    Cell {
+                        row: *row,
+                        column: 0,
+                    }..,
+                )
+                .next()
+                .is_some_and(|(cell, _)| cell.row == *row)
+        });
+        self.resolved.clear();
         self.page = page;
         self.refresh_natural_widths();
         // 行身份只在当前页有效，翻页不能把相同偏移误认为原来的行。

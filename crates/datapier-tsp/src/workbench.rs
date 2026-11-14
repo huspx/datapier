@@ -56,8 +56,6 @@ pub(super) fn grid_cell_error(error: AppError, grid: &GridState, cell: Cell) -> 
     grid_error(error)
 }
 
-pub(super) const KEY_PAGE_SIZE: usize = 200;
-
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum RedisTtlPolicy {
     #[default]
@@ -180,7 +178,6 @@ pub(super) struct Workbench {
     pub cli_cell: Option<Cell>,
     pub cli_large: Option<LargeLoad>,
     pub(super) cli_value_token: Option<Uuid>,
-    pub key_page: usize,
     pub key_type_menu: bool,
     pub generic_select: Option<String>,
     pub cli_results: Vec<String>,
@@ -257,7 +254,6 @@ impl Default for Workbench {
             cli_cell: None,
             cli_large: None,
             cli_value_token: None,
-            key_page: 0,
             key_type_menu: false,
             generic_select: None,
             cli_results: Vec::new(),
@@ -334,36 +330,6 @@ fn redis_bytes(value: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 impl App {
-    fn visible_key_count(&self) -> usize {
-        if self.workbench.tree {
-            if !self.redis_tree_matches_resources() {
-                return 0;
-            }
-            self.workbench
-                .redis_tree
-                .rows(
-                    &self.workbench.redis_expansion,
-                    self.profile.as_ref().map(|profile| {
-                        (
-                            profile.id,
-                            self.tabs[self.active]
-                                .browse
-                                .redis_db
-                                .unwrap_or_else(|| profile.redis_db()),
-                        )
-                    }),
-                )
-                .len()
-        } else {
-            self.resources.len()
-        }
-    }
-
-    pub(super) fn normalize_key_page(&mut self) {
-        let last = self.visible_key_count().saturating_sub(1) / KEY_PAGE_SIZE;
-        self.workbench.key_page = self.workbench.key_page.min(last);
-    }
-
     pub(super) fn clear_cli_session(&mut self) {
         self.workbench_cli_store_grid();
         self.workbench_clear_cli_value();

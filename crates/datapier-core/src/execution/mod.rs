@@ -10,6 +10,9 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+// 同步归属检查在共享发送门内执行，关闭方不能与实际发送交错。
+type SendGate = (Arc<Mutex<()>>, Arc<dyn Fn() -> Result<()> + Send + Sync>);
+
 /// 将一次执行的结果增量写入缓存，并在发送前记录可能的写入。
 /// 克隆共享同一 Store；如需与取消操作同步，须配置相同的控制门和取消信号。
 #[derive(Clone)]
@@ -20,6 +23,7 @@ pub struct ExecutionSink {
     cancel: CancellationToken,
     profile: Option<(Uuid, u64, Arc<Mutex<()>>)>,
     profile_dispatched: Arc<AtomicBool>,
+    send_gate: Option<SendGate>,
 }
 impl ExecutionSink {
     pub fn new(store: Store, execution_id: Uuid) -> Self {
@@ -30,6 +34,7 @@ impl ExecutionSink {
             cancel: CancellationToken::new(),
             profile: None,
             profile_dispatched: Arc::new(AtomicBool::new(false)),
+            send_gate: None,
         }
     }
     /// 设置与取消方共享的状态转换锁和取消信号。
@@ -45,6 +50,15 @@ impl ExecutionSink {
     /// 发送首个请求时与配置更新串行化并验证会话快照。
     pub fn with_profile_revision(mut self, id: Uuid, revision: u64, lock: Arc<Mutex<()>>) -> Self {
         self.profile = Some((id, revision, lock));
+        self
+    }
+    /// 与会话关闭共享发送门，并在门内校验会话归属。
+    pub fn with_send_gate(
+        mut self,
+        gate: Arc<Mutex<()>>,
+        check: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    ) -> Self {
+        self.send_gate = Some((gate, check));
         self
     }
     /// 创建尚未完成的结果并返回其 ID。
@@ -91,6 +105,14 @@ impl ExecutionSink {
                 Some(guard)
             }
             _ => None,
+        };
+        let _send_guard = match &self.send_gate {
+            Some((gate, check)) => {
+                let guard = gate.lock().await;
+                check()?;
+                Some(guard)
+            }
+            None => None,
         };
         ensure_not_cancelled(&self.cancel)?;
         self.store.mark_sent(self.execution_id, may_write).await?;

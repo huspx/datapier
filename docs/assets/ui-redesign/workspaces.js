@@ -288,7 +288,17 @@ function redis() {
             })
           }`
       }${draftBar()}`
-      : `<div class="empty">${t('chooseKey', { db: state.redisDb })}</div>`
+      : `<div class="empty"><p>${
+        t('chooseKey', { db: state.redisDb })
+      }</p><button type="button" class="button" data-action="import" ${state.connectionModes.redis ? 'disabled' : ''}>${
+        h(t('importData'))
+      }</button>${
+        state.connectionModes.redis
+          ? `<p class="muted small">${
+            h(az('只读连接：不能修改或导入数据', 'Read-only connection: modifying and importing data are unavailable'))
+          }</p>`
+          : ''
+      }</div>`
   }</section></div>${state.cli ? cli() : ''}`;
 }
 

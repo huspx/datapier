@@ -1035,7 +1035,12 @@ impl App {
                         let old = self
                             .desired
                             .iter()
-                            .find(|p| p["connection"]["instance_id"] == i["id"]);
+                            .find(|p| p["connection"]["instance_id"] == i["id"])
+                            .or_else(|| {
+                                self.baseline
+                                    .iter()
+                                    .find(|p| p["connection"]["instance_id"] == i["id"])
+                            });
                         self.selected_databases = old
                             .and_then(|p| p["connection"]["databases"].as_array())
                             .map(|v| {
@@ -1269,14 +1274,15 @@ impl App {
             .default_database
             .clone()
             .unwrap_or_else(|| self.selected_databases[0].clone());
-        let old = self
-            .desired
-            .iter()
-            .find(|p| p["connection"]["instance_id"] == self.instance["id"])
-            .cloned();
-        let mut p = old.unwrap_or_else(|| json!({"id":Uuid::new_v4(),"revision":1,"name":self.instance["name"],"provider":self.instance["provider"],"access_mode":"read_only","approval_policy":self.settings["approval"]["default_policy"],"connection":{"kind":"archery","server_id":self.server["id"],"instance_id":self.instance["id"],"instance_name":self.instance["name"]}}));
-        p["connection"]["databases"] = json!(self.selected_databases);
-        p["connection"]["default_database"] = json!(default);
+        let p = forms::archery_selected_profile(
+            &self.desired,
+            &self.baseline,
+            &self.instance,
+            &self.server["id"],
+            &self.settings["approval"]["default_policy"],
+            &self.selected_databases,
+            &default,
+        );
         self.desired
             .retain(|p| p["connection"]["instance_id"] != self.instance["id"]);
         self.desired.push(p);

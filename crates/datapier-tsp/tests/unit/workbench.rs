@@ -827,7 +827,7 @@ fn ttl_keep_set_and_persist_do_not_confuse_empty_input_with_removal() {
 }
 
 #[test]
-fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
+fn tree_navigation_expands_and_collapses_loaded_keys() {
     let (backend, _, _) = Backend::scripted();
     let mut app = app_for("redis", "string", page(&["value"], vec![]));
     app.workbench.tree = true;
@@ -842,24 +842,18 @@ fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
         .collect();
     app.workbench.redis_tree.reset(&app.resources);
     app.workbench.redis_tree_owner = app.redis_selection_scope();
-    app.workbench.key_page = 4;
-    app.normalize_key_page();
-    assert_eq!(app.workbench.key_page, 0);
+    assert_eq!(app.workspace_tree_items().len(), 2);
     app.workbench_action("redis-tree:YTo=", &backend);
-    app.workbench_action("keys-next", &backend);
-    assert_eq!(app.workbench.key_page, 1);
-    app.workbench.key_page = 4;
-    app.workbench_action("keys-previous", &backend);
-    assert_eq!(app.workbench.key_page, 0);
-    app.workbench_action("keys-next", &backend);
+    assert_eq!(app.workspace_tree_items().len(), 302);
     app.workbench_action("redis-tree:YTo=", &backend);
-    assert_eq!(app.workbench.key_page, 0);
+    assert_eq!(app.workspace_tree_items().len(), 2);
 }
 
 #[test]
 fn redis_tree_keeps_selection_on_append_and_resets_for_another_db() {
-    let (backend, _, _) = Backend::scripted();
+    let (backend, _requests, _) = Backend::scripted();
     let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
     app.workbench.tree = true;
     let resource = |key: &str| {
         json!({
@@ -925,6 +919,139 @@ fn redis_tree_keeps_selection_on_append_and_resets_for_another_db() {
         .rows(&app.workbench.redis_expansion, app.redis_selection_scope());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, b"c");
+}
+
+#[test]
+fn redis_scan_empty_duplicates_failure_and_stale_cursor() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    let resource = json!({"name":"a", "kind":"string", "database":null, "key_b64":STANDARD.encode("a"), "data":null});
+    app.action("list", &backend);
+    let first = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: first.tag,
+            result: Ok(json!({"resources":[],"cursor":"one","complete":false})),
+        },
+        &backend,
+    );
+    assert!(app.resources.is_empty());
+    assert_eq!(app.cursor.as_deref(), Some("one"));
+    app.action("more", &backend);
+    let next = requests.try_recv().unwrap();
+    app.routed_response(Response { tag: next.tag, result: Ok(json!({"resources":[resource.clone(),resource.clone()],"cursor":"two","complete":false})) }, &backend);
+    assert_eq!(app.resources.len(), 1);
+    app.action("more", &backend);
+    let failed = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: failed.tag,
+            result: Err(AppError::new("test", "scan failed")),
+        },
+        &backend,
+    );
+    assert!(app.workbench.query_ui.redis_scan_failed);
+    assert_eq!(app.resources.len(), 1);
+    app.action("more", &backend);
+    let stale = requests.try_recv().unwrap();
+    assert!(!app.workbench.query_ui.redis_scan_failed);
+    app.action("list", &backend);
+    let discard = requests.try_recv().unwrap();
+    assert_eq!(discard.method, "resource.scan.discard");
+    let fresh = requests.try_recv().unwrap();
+    assert_eq!(fresh.method, "resource.list");
+    app.routed_response(
+        Response {
+            tag: stale.tag,
+            result: Ok(json!({"resources":[],"cursor":"stale","complete":false})),
+        },
+        &backend,
+    );
+    let discard = requests.try_recv().unwrap();
+    assert_eq!(discard.method, "resource.scan.discard");
+    assert_eq!(discard.params["cursor"], "stale");
+    assert_eq!(app.resources.len(), 1);
+}
+
+#[test]
+fn browse_replaces_old_result_only_after_new_page_succeeds() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let old_page = page(&["value"], vec![]);
+    let old_id = old_page.result.id.to_string();
+    let mut app = app_for("mysql", "table", old_page);
+    app.browse_result = false;
+    app.settings.paging.mysql_table_rows = 3;
+    app.settings.paging.sql_rows = 100;
+    app.result_id = Some(old_id.clone());
+    app.results = vec![old_id.clone()];
+    let task = Uuid::new_v4().to_string();
+    let new_id = Uuid::new_v4();
+    app.response(
+        Response {
+            tag: "resource.browse".into(),
+            result: Ok(json!({"task_id":task})),
+        },
+        &backend,
+    );
+    let tag = format!("{}:{}:execution.get/{task}", app.tabs[0].id, app.generation);
+    app.routed_response(
+        Response {
+            tag: tag.clone(),
+            result: Ok(
+                json!({"id":task,"state":"running","method":"resource.browse","results":[new_id]}),
+            ),
+        },
+        &backend,
+    );
+    assert_eq!(app.result_id.as_deref(), Some(old_id.as_str()));
+    assert!(requests.try_recv().is_err());
+    app.routed_response(Response { tag, result:Ok(json!({"id":task,"state":"succeeded","method":"resource.browse","results":[new_id]})) }, &backend);
+    let read = requests.try_recv().unwrap();
+    assert_eq!(read.method, "result.read");
+    assert_eq!(read.params["max_rows"], 3);
+    assert_eq!(app.result_id.as_deref(), Some(old_id.as_str()));
+    let mut new_page = page(&["value"], vec![]);
+    new_page.result.id = new_id;
+    app.routed_response(
+        Response {
+            tag: read.tag,
+            result: Ok(serde_json::to_value(new_page).unwrap()),
+        },
+        &backend,
+    );
+    assert_eq!(app.result_id.as_deref(), Some(new_id.to_string().as_str()));
+    assert_eq!(app.grid.as_ref().unwrap().page.result.id, new_id);
+}
+
+#[test]
+fn failed_browse_page_preserves_existing_result() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let old_page = page(&["value"], vec![]);
+    let old_id = old_page.result.id.to_string();
+    let mut app = app_for("mysql", "table", old_page);
+    app.result_id = Some(old_id.clone());
+    app.results = vec![old_id.clone()];
+    let task = Uuid::new_v4().to_string();
+    app.response(
+        Response {
+            tag: "resource.browse".into(),
+            result: Ok(json!({"task_id":task})),
+        },
+        &backend,
+    );
+    let tag = format!("{}:{}:execution.get/{task}", app.tabs[0].id, app.generation);
+    app.routed_response(Response { tag, result:Ok(json!({"id":task,"state":"succeeded","method":"resource.browse","results":[Uuid::new_v4()]})) }, &backend);
+    let read = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: read.tag,
+            result: Err(AppError::new("test", "read failed")),
+        },
+        &backend,
+    );
+    assert_eq!(app.result_id.as_deref(), Some(old_id.as_str()));
+    assert_eq!(app.results, vec![old_id]);
+    assert!(app.status.render().contains("read failed"));
 }
 
 #[test]

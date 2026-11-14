@@ -214,15 +214,51 @@ impl Engine {
             .session
             .try_lock()
             .map_err(|_| AppError::new("busy", "原会话有未完成执行或读取"))?;
-        session
-            .call(
-                "connection.info",
-                json!({}),
-                &ExecutionSink::new(self.store.clone(), Uuid::nil()),
-                &CancellationToken::new(),
-            )
-            .await
+        let cancel = self.mcp_preflight_cancel(db.owner)?;
+        let timeout = self.mcp_preflight_timeout(db).await?;
+        let result = {
+            let sink = ExecutionSink::new(self.store.clone(), Uuid::nil());
+            let call = session.call("connection.info", json!({}), &sink, &cancel);
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => result,
+                _ = cancel.cancelled() => Err(AppError::cancelled()),
+                _ = tokio::time::sleep(timeout) => Err(AppError::new("timeout", "查询超时")),
+            }
+        };
+        if result
+            .as_ref()
+            .is_err_and(|e| e.code == "timeout" || e.code == "cancelled")
+            && let ProviderSession::Mysql(mysql) = &mut *session
+        {
+            mysql.invalidate_connection();
+        }
+        result
     }
+    fn mcp_preflight_cancel(&self, owner: Uuid) -> Result<CancellationToken> {
+        self.state
+            .lock()
+            .unwrap()
+            .client_cancels
+            .get(&owner)
+            .cloned()
+            .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))
+    }
+
+    async fn mcp_preflight_timeout(&self, db: &Database) -> Result<Duration> {
+        let fallback = self.store.settings().await?.limits.query_timeout_seconds;
+        Ok(Duration::from_secs(mysql_query_timeout(
+            &db.profile,
+            fallback,
+        )))
+    }
+
+    pub(in crate::server) fn mcp_transaction_finished(&self, session_id: Uuid) {
+        if let Some(session) = self.state.lock().unwrap().mcp.sessions.get_mut(&session_id) {
+            session.queued = None;
+        }
+    }
+
     pub(super) async fn mcp_refresh_session(&self, owner: Uuid, session_id: Uuid) -> Result<()> {
         let pending = self
             .state
@@ -298,8 +334,25 @@ impl Engine {
             .session
             .try_lock()
             .map_err(|_| AppError::new("busy", "原会话正忙"))?;
-        self.mcp_prove(owner, db, session_id, method, params, &mut session)
-            .await
+        let cancel = self.mcp_preflight_cancel(owner)?;
+        let timeout = self.mcp_preflight_timeout(db).await?;
+        let result = {
+            let call = self.mcp_prove(owner, db, session_id, method, params, &mut session);
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => result,
+                _ = cancel.cancelled() => Err(AppError::cancelled()),
+                _ = tokio::time::sleep(timeout) => Err(AppError::new("timeout", "查询超时")),
+            }
+        };
+        if result
+            .as_ref()
+            .is_err_and(|e| e.code == "timeout" || e.code == "cancelled")
+            && let ProviderSession::Mysql(mysql) = &mut *session
+        {
+            mysql.invalidate_connection();
+        }
+        result
     }
     async fn mcp_prove(
         &self,
@@ -434,7 +487,7 @@ impl Engine {
                 proof.transaction_actions = access.transaction_actions;
                 if proof.transaction_actions.iter().any(|action| {
                     matches!(action.as_str(), "commit" | "implicit_commit")
-                        || (action == "begin" && info["transaction"] == true)
+                        || (action == "begin" && info["transaction"] != false)
                 }) && let Some(queued) = self
                     .state
                     .lock()
@@ -706,8 +759,28 @@ impl Engine {
         let mut fresh = frozen.clone();
         fresh.definitions.clear();
         let context = sql_context(&frozen.context, None);
-        self.mcp_dependencies(owner, &profile, session, &context, &mut fresh)
-            .await
+        let cancel = self.mcp_preflight_cancel(owner)?;
+        let timeout = self.mcp_preflight_timeout(db).await?;
+        let checked = {
+            let call =
+                Box::pin(self.mcp_dependencies(owner, &profile, session, &context, &mut fresh));
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => result,
+                _ = cancel.cancelled() => Err(AppError::cancelled()),
+                _ = tokio::time::sleep(timeout) => Err(AppError::new("timeout", "查询超时")),
+            }
+        };
+        if checked
+            .as_ref()
+            .is_err_and(|e| e.code == "timeout" || e.code == "cancelled")
+        {
+            if let ProviderSession::Mysql(mysql) = session {
+                mysql.invalidate_connection();
+            }
+            return checked;
+        }
+        checked
             .map_err(|_| AppError::new("invalidated", "结果对象依赖不可再证明，请重新执行查询"))?;
         if fresh.definitions != frozen.definitions
             || fresh.read_databases != frozen.read_databases
@@ -740,9 +813,26 @@ impl Engine {
         };
         let frozen: AccessProof = serde_json::from_value(frozen.clone())?;
         self.mcp_validate_proof(owner, &frozen, true).await?;
-        let fresh = self
-            .mcp_prove(owner, db, frozen.session_id, method, params, session)
-            .await?;
+        let cancel = self.mcp_preflight_cancel(owner)?;
+        let timeout = self.mcp_preflight_timeout(db).await?;
+        let checked = {
+            let call =
+                Box::pin(self.mcp_prove(owner, db, frozen.session_id, method, params, session));
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => result,
+                _ = cancel.cancelled() => Err(AppError::cancelled()),
+                _ = tokio::time::sleep(timeout) => Err(AppError::new("timeout", "查询超时")),
+            }
+        };
+        if checked
+            .as_ref()
+            .is_err_and(|e| e.code == "timeout" || e.code == "cancelled")
+            && let ProviderSession::Mysql(mysql) = session
+        {
+            mysql.invalidate_connection();
+        }
+        let fresh = checked?;
         if fresh.context != frozen.context
             || fresh.generation != frozen.generation
             || fresh.read_databases != frozen.read_databases
@@ -792,9 +882,7 @@ impl Engine {
             } else if db.profile.provider == ProviderKind::Mysql
                 && matches!(method, "execution.start" | "execution.run")
             {
-                if fresh.context["transaction"] == true
-                    && let Some(queued) = &mut entry.queued
-                {
+                if let Some(queued) = &mut entry.queued {
                     queued
                         .read_databases
                         .extend(fresh.read_databases.iter().cloned());
@@ -802,6 +890,8 @@ impl Engine {
                         .write_databases
                         .extend(fresh.write_databases.iter().cloned());
                     queued.dangerous |= fresh.dangerous;
+                } else {
+                    entry.queued = Some(fresh.clone());
                 }
                 for action in &fresh.transaction_actions {
                     match action.as_str() {

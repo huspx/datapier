@@ -344,6 +344,7 @@ fn preview_redis_csv(
                     key: record[2].to_owned(),
                     kind: record[3].to_owned(),
                     batch: Vec::new(),
+                    batch_bytes: 0,
                     rows: 0,
                     next_index: 0,
                 });

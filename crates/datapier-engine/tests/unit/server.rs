@@ -31,6 +31,7 @@ pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
             id: Uuid::new_v4(),
             store,
             state: Mutex::new(state),
+            send_gate: Arc::new(AsyncMutex::new(())),
         }),
         root,
     )

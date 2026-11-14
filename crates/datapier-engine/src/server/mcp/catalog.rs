@@ -598,7 +598,7 @@ impl Engine {
                         continue;
                     }
                     if count >= first && items.len() < size {
-                        let detail = self.store.task_details(task.id).await?;
+                        let detail = self.task_details(task.id).await?;
                         items.push(json!({"id":detail.id,"connection_id":id,"text":detail.text,"text_truncated":detail.execution_text_truncated,"state":detail.state,"created_at":detail.created_at,"started_at":detail.started_at,"elapsed_ms":detail.elapsed_ms,"may_write":detail.may_write,"affected_rows":detail.summary.get("affected_rows")}));
                     }
                     count += 1;

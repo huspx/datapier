@@ -79,6 +79,16 @@ fn xml_rejects_unsafe_formatting_and_invalid_documents() {
 }
 
 #[test]
+fn xml_deep_indentation_obeys_output_limit() {
+    let input = format!("{}<leaf/>{}", "<a>".repeat(2000), "</a>".repeat(2000));
+    let error = format_xml(&input, 64 * 1024).unwrap_err();
+    assert_eq!(error.code, "resource_limit");
+    let input = "<a>       <b/>       </a>";
+    let formatted = format_xml(input, 20).unwrap();
+    assert_eq!(formatted, "<a>\n  <b/>\n</a>");
+}
+
+#[test]
 fn invalid_and_unsafe_media_are_rejected() {
     assert!(preview_image(b"\x89PNG\r\n\x1a\ninvalid", 1024 * 1024).is_err());
     assert!(

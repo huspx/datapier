@@ -519,7 +519,7 @@ pub(super) fn resource_controls(app: &App) -> (Node<Msg>, Node<Msg>) {
         "arrow-up",
         "导入",
         "overlay:import",
-        writable(app),
+        import_writable(app),
     ));
     if !writable(app) {
         tools = tools

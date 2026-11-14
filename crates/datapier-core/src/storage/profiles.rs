@@ -3,7 +3,7 @@ use super::*;
 impl Store {
     /// 按名称和 ID 返回保存的连接配置，不包含凭据。
     pub async fn profiles(&self) -> Result<Vec<Profile>> {
-        let rows = sqlx::query("SELECT payload,archery_server_id,archery_instance_id,credential_saved,id,name,revision FROM profiles ORDER BY name,id").fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT payload,archery_server_id,archery_instance_id,credential_saved,id,name,revision FROM profiles ORDER BY name,id").fetch_all(&mut *self.pool.acquire().await?).await?;
         rows.iter()
             .map(|r| {
                 let mut profile: Profile = serde_json::from_str(r.get::<&str, _>(0))?;
@@ -66,7 +66,7 @@ impl Store {
         let existing: Option<(String, i64)> =
             sqlx::query_as("SELECT payload,revision FROM profiles WHERE id=?")
                 .bind(profile.id.to_string())
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.pool.acquire().await?)
                 .await?;
         if let Some((payload, revision)) = &existing {
             let old: Profile = serde_json::from_str(payload)?;
@@ -91,7 +91,7 @@ impl Store {
         let old: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(profile.id.to_string())
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.pool.acquire().await?)
                 .await?;
         let mut saved = old == Some(1);
         let mut tracked = saved;
@@ -100,7 +100,7 @@ impl Store {
                 // 在写 keyring 之前登记可能存在的条目，避免后续 SQLite 错误丢失清理依据。
                 sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved) VALUES(?,?,?,1) ON CONFLICT(id) DO UPDATE SET credential_saved=1")
                     .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(profile)?)
-                    .execute(&self.pool).await?;
+                    .execute(&mut *self.pool.acquire().await?).await?;
                 tracked = true;
                 let account = self.credential_account(profile.id);
                 let to_save = secret.clone();
@@ -124,7 +124,7 @@ impl Store {
         saved_profile.revision = next;
         sqlx::query("INSERT INTO profiles(id,name,payload,credential_saved,revision) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,payload=excluded.payload,credential_saved=excluded.credential_saved,revision=excluded.revision")
             .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(&saved_profile)?)
-            .bind(i64::from(tracked || saved)).bind(next as i64).execute(&self.pool).await?;
+            .bind(i64::from(tracked || saved)).bind(next as i64).execute(&mut *self.pool.acquire().await?).await?;
         Ok(saved)
     }
 
@@ -139,7 +139,7 @@ impl Store {
         let saved: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(id.to_string())
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.pool.acquire().await?)
                 .await?;
         if saved != Some(1) {
             return Ok(None);
@@ -158,7 +158,7 @@ impl Store {
         let saved: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(id.to_string())
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.pool.acquire().await?)
                 .await?;
         let saved = saved.ok_or_else(|| AppError::new("not_found", "连接不存在"))?;
         if saved == 1 {
@@ -166,7 +166,7 @@ impl Store {
         }
         sqlx::query("UPDATE profiles SET credential_saved=0 WHERE id=?")
             .bind(id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *self.pool.acquire().await?)
             .await?;
         self.secrets.write().await.remove(&id);
         Ok(())
@@ -184,14 +184,14 @@ impl Store {
         let saved: Option<i64> =
             sqlx::query_scalar("SELECT credential_saved FROM profiles WHERE id=?")
                 .bind(id.to_string())
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.pool.acquire().await?)
                 .await?;
         if saved == Some(1) {
             self.delete_credential(id).await?;
         }
         sqlx::query("DELETE FROM profiles WHERE id=?")
             .bind(id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *self.pool.acquire().await?)
             .await?;
         self.secrets.write().await.remove(&id);
         Ok(())

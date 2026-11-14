@@ -1,6 +1,11 @@
 // 界面文案目录；顺序保留以维持重复词条的既有查找语义。
 pub(super) static CATALOG: &[(&str, &str)] = &[
     (
+        "编辑第 {row} 行，列 {column}",
+        "Edit row {row}, column {column}",
+    ),
+    ("扫描失败", "Scan failed"),
+    (
         "服务端字符集或排序规则元数据不完整",
         "Server character set or collation metadata is incomplete",
     ),
@@ -2678,6 +2683,7 @@ pub(super) static CATALOG: &[(&str, &str)] = &[
     ("另存工作区副本", "Save a workspace copy"),
     ("只读", "Read-only"),
     ("可加载更多", "More available"),
+    ("加载更多", "Load more"),
     ("可空", "Nullable"),
     ("启用", "Enable"),
     ("命令", "Command"),

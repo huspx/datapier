@@ -173,15 +173,16 @@ impl App {
                 let Some(server) = self.archery.server.as_ref() else {
                     return;
                 };
-                let expected = self.archery_desired_profiles(server);
+                let expected = self.archery_committed_profiles(server);
                 let actual: Vec<_> = profiles
                     .iter()
                     .filter(|p| p["connection"]["server_id"] == server["id"])
                     .cloned()
                     .collect();
-                if actual.len() == expected.len()
-                    && expected.iter().all(|profile| actual.contains(profile))
-                {
+                if expected.as_ref().is_some_and(|expected| {
+                    actual.len() == expected.len()
+                        && expected.iter().all(|profile| actual.contains(profile))
+                }) {
                     self.archery.recovery = None;
                     self.archery_release(backend);
                     self.archery.open = false;

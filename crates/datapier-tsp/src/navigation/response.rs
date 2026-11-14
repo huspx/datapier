@@ -518,6 +518,11 @@ impl App {
                                     == Some(u64::from(db))
                                 && value.get("session_id").is_some()
                             {
+                                if let Some((session, cursor)) =
+                                    self.session_id().zip(self.cursor.take())
+                                {
+                                    self.discard_resource_scan(backend, session, cursor);
+                                }
                                 if let Some(session) = self.session_id() {
                                     let _ = backend.request(
                                         "navigation.close",

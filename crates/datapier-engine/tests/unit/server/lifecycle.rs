@@ -234,13 +234,10 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
 
     let (mut engine, root) = engine().await;
     engine.store.pool.close().await;
-    Arc::get_mut(&mut engine).unwrap().store.pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new().filename(root.join("datapier.sqlite3")),
-        )
-        .await
-        .unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new().filename(root.join("datapier.sqlite3"));
+    let connection = sqlx::ConnectOptions::connect(&options).await.unwrap();
+    Arc::get_mut(&mut engine).unwrap().store.pool =
+        datapier_core::storage::FixedPool::new(vec![connection]);
     let owner = Uuid::new_v4();
     assert!(engine.register(owner));
     let mut events = engine.state.lock().unwrap().event_senders[&owner].subscribe();
@@ -277,9 +274,7 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
             },
         ));
     }
-    engine
-        .store
-        .pool
+    (&mut *engine.store.pool.acquire().await.unwrap())
         .execute("PRAGMA max_page_count=1")
         .await
         .unwrap();
@@ -311,6 +306,11 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
             "13"
         );
         assert_eq!(task["error"]["details"]["observed_state"], "succeeded");
+        let details = engine.task_details(*id).await.unwrap();
+        assert_eq!(details.state, *expected);
+        assert_eq!(details.text.as_deref(), Some("SELECT 1"));
+        assert_eq!(details.error.unwrap().code, "storage");
+        assert!(details.elapsed_ms.unwrap() >= 20);
         let cancelled = engine
             .dispatch(owner, "execution.cancel", json!({"task_id":id}))
             .await

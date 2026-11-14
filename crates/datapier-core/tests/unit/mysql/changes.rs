@@ -177,3 +177,21 @@ fn import_validation_exposes_localizable_details() {
     let error = validate_import_value(&Value::Text("ok".into()), &generated).unwrap_err();
     assert_eq!(error.details["validation"], "generated_column");
 }
+
+#[test]
+fn temporal_precision_is_lossless_for_import_and_write() {
+    for (ty, text, accepted) in [
+        ("time", "12:34:56.1", false),
+        ("time", "12:34:56.0000", true),
+        ("time(2)", "12:34:56.777", false),
+        ("time(2)", "12:34:56.7700", true),
+        ("time(6)", "12:34:56.1234560", true),
+        ("time(6)", "12:34:56.1234567", false),
+    ] {
+        assert_consumers(ty, Value::Time(text.into()), accepted);
+    }
+    for ty in ["datetime(2)", "timestamp(2)"] {
+        assert_consumers(ty, Value::DateTime("2024-01-01 12:34:56.777".into()), false);
+        assert_consumers(ty, Value::DateTime("2024-01-01 12:34:56.7700".into()), true);
+    }
+}

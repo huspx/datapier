@@ -214,8 +214,12 @@ impl App {
         }
         if let Some(kind) = name.strip_prefix("key-type:") {
             if self.is_redis() && matches!(kind, "" | "string" | "hash" | "list" | "set" | "zset") {
+                let scan = self.session_id().zip(self.cursor.clone());
                 self.field_set("type", kind);
                 self.changed_field("type");
+                if let Some((session, cursor)) = scan {
+                    self.discard_resource_scan(backend, session, cursor);
+                }
                 self.workbench.key_type_menu = false;
                 if self.session.is_some() {
                     self.action("list", backend);
@@ -474,8 +478,6 @@ impl App {
                     prefix,
                 );
             }
-            self.normalize_key_page();
-            self.redis_prune_key_selection();
             return true;
         }
         match name {
@@ -495,16 +497,6 @@ impl App {
             }
             "transfer-advanced-toggle" => {
                 self.workbench.transfer_advanced = !self.workbench.transfer_advanced;
-            }
-            "keys-previous" | "keys-next" => {
-                let last = self.visible_key_count().saturating_sub(1) / KEY_PAGE_SIZE;
-                let current = self.workbench.key_page.min(last);
-                self.workbench.key_page = if name == "keys-previous" {
-                    current.saturating_sub(1)
-                } else {
-                    current.saturating_add(1).min(last)
-                };
-                self.redis_prune_key_selection();
             }
             "cli-toggle" => {
                 self.workbench.cli = !self.workbench.cli;
@@ -633,8 +625,6 @@ impl App {
             }
             "tree-toggle" => {
                 self.workbench.tree = !self.workbench.tree;
-                self.workbench.key_page = 0;
-                self.redis_prune_key_selection();
             }
             "overlay-close" => {
                 if self.workbench.overlay.as_deref() == Some("replace")

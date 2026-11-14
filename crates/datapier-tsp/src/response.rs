@@ -1,5 +1,38 @@
 use super::*;
 
+fn scan_json_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(s) => s.capacity(),
+        Value::Array(items) => items.iter().fold(
+            items
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Value>()),
+            |size, item| size.saturating_add(scan_json_bytes(item)),
+        ),
+        Value::Object(items) => items.iter().fold(0usize, |size, (key, item)| {
+            size.saturating_add(key.capacity())
+                .saturating_add(128)
+                .saturating_add(scan_json_bytes(item))
+        }),
+        _ => 0,
+    }
+}
+
+fn scan_resource_bytes(resource: &Resource) -> usize {
+    let key = resource
+        .key_b64
+        .as_ref()
+        .map_or(resource.name.len(), String::len);
+    std::mem::size_of::<Resource>()
+        .saturating_add(resource.name.capacity())
+        .saturating_add(resource.kind.capacity())
+        .saturating_add(resource.database.as_ref().map_or(0, String::capacity))
+        .saturating_add(resource.key_b64.as_ref().map_or(0, String::capacity))
+        .saturating_add(scan_json_bytes(&resource.data))
+        .saturating_add(key.saturating_mul(256))
+        .saturating_add(512)
+}
+
 impl App {
     /// 事件是失效提示；只按作用域处理本窗口的标签，不从事件载荷恢复数据。
     fn editing_event(&mut self, kind: &str, payload: &Value, backend: &Backend) {
@@ -127,6 +160,7 @@ impl App {
     }
 
     pub(super) fn page(&mut self, backend: &Backend, start: u64) {
+        self.tabs[self.active].runtime.pending_result = None;
         if let Some(id) = self.result_id.clone() {
             let size = self.result_page_size(&id);
             let token = Uuid::new_v4();
@@ -260,6 +294,13 @@ impl App {
                     self.large = None;
                     self.workbench.inline = None;
                     self.workbench.redis_loading = None;
+                }
+                if response.tag == "resource.list" {
+                    self.tabs[self.active].runtime.scan_restart = None;
+                    self.workbench.query_ui.redis_scan_failed = true;
+                }
+                if response.tag == "result.page" {
+                    self.tabs[self.active].runtime.pending_result = None;
                 }
                 if response.tag == "resource.describe" {
                     self.workbench.load_resource = false;
@@ -466,37 +507,91 @@ impl App {
                     }
                 }
             }
-            "resource.list" => match serde_json::from_value::<ResourcePage>(value) {
-                Ok(page) => {
-                    if self.is_redis() {
-                        self.workbench.query_ui.redis_scan_complete = page.complete;
-                        self.workbench.query_ui.redis_scan_limited = page.resource_limited;
-                        let owner = self.redis_selection_scope();
-                        if self.workbench.redis_tree_owner != owner {
-                            self.resources.clear();
-                            self.workbench.redis_tree.reset(&[]);
-                            self.workbench.redis_tree_owner = owner;
-                        } else if self.workbench.redis_tree.len() != self.resources.len() {
-                            self.workbench.redis_tree.reset(&self.resources);
-                        }
-                        self.workbench.redis_tree.append(&page.resources);
-                        // Core 的扫描缓存按原始 key 去重，各页只发出尚未交付的项。
-                        self.resources.extend(page.resources);
-                        if self.workbench.tree {
-                            self.normalize_key_page();
+            "resource.list" => {
+                let returned_cursor = value
+                    .get("cursor")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                match serde_json::from_value::<ResourcePage>(value) {
+                    Ok(mut page) => {
+                        let restart = self.tabs[self.active].runtime.scan_restart.take().is_some();
+                        self.workbench.query_ui.redis_scan_failed = false;
+                        if self.is_redis() {
+                            self.workbench.query_ui.redis_scan_complete = page.complete;
+                            self.workbench.query_ui.redis_scan_limited = page.resource_limited;
+                            let owner = self.redis_selection_scope();
+                            if restart || self.workbench.redis_tree_owner != owner {
+                                self.resources.clear();
+                                self.workbench.redis_tree.reset(&[]);
+                                self.workbench.redis_tree_owner = owner;
+                            } else if self.workbench.redis_tree.len() != self.resources.len() {
+                                self.workbench.redis_tree.reset(&self.resources);
+                            }
+                            let (accepted, limited) = {
+                                let seen: std::collections::HashSet<_> = self
+                                    .resources
+                                    .iter()
+                                    .map(|resource| {
+                                        (resource.key_b64.as_deref(), resource.name.as_str())
+                                    })
+                                    .collect();
+                                let mut used =
+                                    self.resources.iter().fold(0usize, |size, resource| {
+                                        size.saturating_add(scan_resource_bytes(resource))
+                                    });
+                                let budget = self.settings.limits.result_memory_bytes_per_client;
+                                let mut accepted: Vec<Resource> = Vec::new();
+                                let mut limited = false;
+                                for resource in page.resources.drain(..) {
+                                    let identity =
+                                        (resource.key_b64.as_deref(), resource.name.as_str());
+                                    if seen.contains(&identity)
+                                        || accepted.iter().any(|item| {
+                                            (item.key_b64.as_deref(), item.name.as_str())
+                                                == identity
+                                        })
+                                    {
+                                        continue;
+                                    }
+                                    let next = used.saturating_add(scan_resource_bytes(&resource));
+                                    if next > budget {
+                                        limited = true;
+                                        break;
+                                    }
+                                    used = next;
+                                    accepted.push(resource);
+                                }
+                                (accepted, limited)
+                            };
+                            self.workbench.redis_tree.append(&accepted);
+                            self.resources.extend(accepted);
+                            if limited {
+                                self.workbench.query_ui.redis_scan_limited = true;
+                                self.workbench.query_ui.redis_scan_complete = false;
+                                if let (Some(session), Some(cursor)) =
+                                    (self.session_id(), page.cursor.take())
+                                {
+                                    self.discard_resource_scan(backend, session, cursor);
+                                }
+                            }
                         } else {
-                            self.workbench.key_page =
-                                self.resources.len().saturating_sub(1) / workbench::KEY_PAGE_SIZE;
+                            self.workbench.redis_tree.reset(&[]);
+                            self.workbench.redis_tree_owner = None;
+                            self.resources = page.resources;
                         }
-                    } else {
-                        self.workbench.redis_tree.reset(&[]);
-                        self.workbench.redis_tree_owner = None;
-                        self.resources = page.resources;
+                        self.cursor = page.cursor;
                     }
-                    self.cursor = page.cursor;
+                    Err(e) => {
+                        self.tabs[self.active].runtime.scan_restart = None;
+                        if let (Some(session), Some(cursor)) = (self.session_id(), returned_cursor)
+                        {
+                            self.discard_resource_scan(backend, session, cursor);
+                        }
+                        self.workbench.query_ui.redis_scan_failed = true;
+                        self.status = i18n::UiMessage::raw(e.to_string());
+                    }
                 }
-                Err(e) => self.status = i18n::UiMessage::raw(e.to_string()),
-            },
+            }
             "transfer.preview" => {
                 let valid = value
                     .get("errors")
@@ -641,10 +736,19 @@ impl App {
             | "transfer.import" | "transfer.export" => {
                 self.operation_pending = false;
                 self.large = None;
-                self.task = value
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                let Some(task) = value.get("task_id").and_then(Value::as_str) else {
+                    self.status = "任务提交响应缺少任务 ID".into();
+                    return;
+                };
+                if self.tabs[self.active]
+                    .runtime
+                    .pending_result
+                    .take()
+                    .is_some()
+                {
+                    self.page_token = None;
+                }
+                self.task = Some(task.to_owned());
                 self.status = i18n::UiMessage::template(
                     "任务已提交: {task}",
                     vec![("task", i18n::UiArg::Raw(value.to_string()))],
@@ -677,8 +781,34 @@ impl App {
                 }
                 self.detail = details.to_string();
                 self.set_detail_context("任务详情");
-                // 查询仍在运行时首批结果也可用；同一结果不能因轮询而跳回第一页。
+                if matches!(
+                    state,
+                    "failed" | "cancelled" | "wait_stopped" | "outcome_unknown"
+                ) && self.tabs[self.active]
+                    .runtime
+                    .pending_result
+                    .as_ref()
+                    .is_some_and(|pending| Some(pending.task.as_str()) == self.task.as_deref())
+                {
+                    self.tabs[self.active].runtime.pending_result = None;
+                    self.page_token = None;
+                }
+                if state == "succeeded"
+                    && value["method"].as_str() == Some("resource.browse")
+                    && value
+                        .get("results")
+                        .and_then(Value::as_array)
+                        .is_none_or(|items| !items.iter().any(|item| item.as_str().is_some()))
+                    && !self.workbench.schema_invalidated_task
+                {
+                    self.status = "浏览任务完成但未返回结果".into();
+                }
                 if !self.workbench.schema_invalidated_task
+                    && !matches!(
+                        state,
+                        "failed" | "cancelled" | "wait_stopped" | "outcome_unknown"
+                    )
+                    && (value["method"].as_str() != Some("resource.browse") || state == "succeeded")
                     && let Some(items) = value.get("results").and_then(Value::as_array)
                 {
                     let results: Vec<String> = items
@@ -686,14 +816,36 @@ impl App {
                         .filter_map(Value::as_str)
                         .map(str::to_owned)
                         .collect();
-                    if self.result_id.is_none()
-                        && let Some(id) = results.first().cloned()
-                    {
-                        self.browse_result = value["method"].as_str() == Some("resource.browse");
-                        self.result_id = Some(id);
-                        self.page(backend, 0);
+                    if let (Some(task), Some(id)) = (self.task.clone(), results.first().cloned()) {
+                        let owner = (task.clone(), self.generation);
+                        let runtime = &self.tabs[self.active].runtime;
+                        if runtime.result_task.as_ref() == Some(&owner) {
+                            self.results = results;
+                        } else if !runtime.pending_result.as_ref().is_some_and(|pending| {
+                            pending.task == task && pending.generation == self.generation
+                        }) {
+                            let token = Uuid::new_v4();
+                            let tag = format!(
+                                "{}:{}:result.page/{token}",
+                                self.tabs[self.active].id, self.generation
+                            );
+                            // 首屏尚未替换旧展示，按新任务类型选择默认分页。
+                            let size = self.result_page_size_for(
+                                &id,
+                                value["method"].as_str() == Some("resource.browse"),
+                            );
+                            match backend.request(tag, "result.read", json!({"result_id":id,"start":0,"max_rows":size,"max_bytes":1048576})) {
+                                Ok(()) => {
+                                    self.page_token = Some(token);
+                                    self.tabs[self.active].runtime.pending_result = Some(PendingResult {
+                                        task, generation: self.generation, id, results,
+                                        browse: value["method"].as_str() == Some("resource.browse"),
+                                    });
+                                }
+                                Err(error) => self.status = i18n::UiMessage::raw(error.to_string()),
+                            }
+                        }
                     }
-                    self.results = results;
                 }
                 if !matches!(state, "queued" | "running" | "cancelling") {
                     self.workbench.schema_invalidated_task = false;
@@ -771,6 +923,24 @@ impl App {
             }
             "result.page" => match serde_json::from_value::<ResultPage>(value) {
                 Ok(mut page) => {
+                    if let Some(pending) = self.tabs[self.active].runtime.pending_result.take() {
+                        if pending.generation != self.generation
+                            || page.result.id.to_string() != pending.id
+                        {
+                            self.status = "返回的结果与请求不匹配".into();
+                            return;
+                        }
+                        if self.has_live_drafts() {
+                            self.status = "结果已就绪；请先提交或丢弃当前草稿".into();
+                            return;
+                        }
+                        self.tabs[self.active].runtime.result_task =
+                            Some((pending.task, pending.generation));
+                        self.results = pending.results;
+                        self.result_id = Some(pending.id);
+                        self.browse_result = pending.browse;
+                        self.page_history.clear();
+                    }
                     self.remember_result_start(&page);
                     if let Some(g) = &mut self.grid
                         && g.page.result.id == page.result.id
@@ -853,7 +1023,10 @@ impl App {
                     }
                     self.grid = Some(g);
                 }
-                Err(e) => self.status = i18n::UiMessage::raw(e.to_string()),
+                Err(e) => {
+                    self.tabs[self.active].runtime.pending_result = None;
+                    self.status = i18n::UiMessage::raw(e.to_string());
+                }
             },
             "file.open" => {
                 let Some((_, original, epoch)) = self.file_open_pending.take() else {

@@ -5,6 +5,7 @@ local busy = false
 local seen = {}
 local editor_attempts = {}
 local preparation_failed = false
+local round_verified = false
 
 local function find_marker(value)
   if type(value) == "string" then
@@ -69,13 +70,6 @@ local function bridge_node(cx, pane)
   return find_node(surface.main) or find_node(surface.dock) or find_node(surface.layer)
 end
 
-local function executable()
-  local binary = tern.kv.get("binary")
-  if type(binary) == "string" and binary ~= "" then
-    return binary
-  end
-  return nil
-end
 -- 路径通过内部 Base64 参数传递，避免依赖用户默认 shell 的引用规则。
 local function base64(text)
   local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -105,35 +99,55 @@ local function launch_editor(cx, pane, node)
   end
   local key = tostring(pane) .. ":" .. node.nonce
   local previous = editor_attempts[key]
-  if not previous or previous.handoff ~= handoff then
-    local ok, problem = pcall(function()
-      local binary = executable()
-      if not binary then
-        error("请先通过 New Datapier block 启动 Datapier")
-      end
-      local directory = binary:match("^(.*)[/\\][^/\\]+$")
-      if not directory then
-        error("Datapier 缓存路径无效")
-      end
-      local program = if tern.runtime.os == "windows" then ".\\datapier.exe" else "./datapier"
-      cx.hosts:terminal("local", {
-        cwd = directory,
-        command = program .. " value-editor --handoff " .. handoff .. " --data-dir-b64 " .. base64(node.data_dir),
+  if previous and previous.handoff == handoff then
+    if previous.pending then
+      return
+    end
+    pcall(function()
+      cx.session:event(pane, {
+        ev = "action",
+        id = node.id,
+        act = (if previous.ok then "datapier-editor-launched:" else "datapier-editor-failed:") .. handoff,
       })
     end)
-    previous = { handoff = handoff, ok = ok }
-    editor_attempts[key] = previous
-    if not ok then
-      cx:toast("error", "Datapier 编辑器启动失败", tostring(problem))
-    end
+    return
   end
-  pcall(function()
-    cx.session:event(pane, {
-      ev = "action",
-      id = node.id,
-      act = (if previous.ok then "datapier-editor-launched:" else "datapier-editor-failed:") .. handoff,
-    })
-  end)
+  local attempt = { handoff = handoff, pending = true, ok = false }
+  editor_attempts[key] = attempt
+  bootstrap.prepare(cx, function(fresh, directory)
+    local current = bridge_node(fresh, pane)
+    if
+      editor_attempts[key] ~= attempt
+      or not current
+      or current.nonce ~= node.nonce
+      or current.editor_handoff ~= handoff
+    then
+      return
+    end
+    local ok, problem = false, "Datapier 准备失败"
+    if directory then
+      ok, problem = pcall(function()
+        local program = if tern.runtime.os == "windows" then ".\\datapier.exe" else "./datapier"
+        fresh.hosts:terminal("local", {
+          cwd = directory,
+          command = program .. " value-editor --handoff " .. handoff .. " --data-dir-b64 " .. base64(node.data_dir),
+        })
+      end)
+    end
+    attempt.pending = false
+    attempt.ok = ok
+    if not ok then
+      bootstrap.invalidate()
+      fresh:toast("error", "Datapier 编辑器启动失败", tostring(problem))
+    end
+    pcall(function()
+      fresh.session:event(pane, {
+        ev = "action",
+        id = current.id,
+        act = (if ok then "datapier-editor-launched:" else "datapier-editor-failed:") .. handoff,
+      })
+    end)
+  end, true)
 end
 
 local function notify(cx, pane, node, notifications)
@@ -173,24 +187,25 @@ local function sync_panes(cx, panes, index)
     sync_panes(cx, panes, index + 1)
     return
   end
-  -- 只有 bootstrap 校验并缓存的程序可用于窗口桥接和编辑器 helper。
-  local binary = executable()
-  if not binary then
-    if preparation_failed then
-      sync_panes(cx, panes, index + 1)
-      return
-    end
-    bootstrap.prepare(cx, function(fresh, directory)
-      if directory then
-        sync_panes(fresh, panes, index)
-      else
-        preparation_failed = true
-        sync_panes(fresh, panes, index + 1)
-      end
-    end)
+  -- 每轮仅在第一个有效 pane 前校验一次，所有桥接进程共用结果。
+  if preparation_failed then
+    sync_panes(cx, panes, index + 1)
     return
   end
-  preparation_failed = false
+  if not round_verified then
+    bootstrap.prepare(cx, function(fresh, directory)
+      round_verified = directory ~= nil
+      preparation_failed = directory == nil
+      sync_panes(fresh, panes, if directory then index else index + 1)
+    end, true)
+    return
+  end
+  local binary = bootstrap.executable()
+  if not binary then
+    preparation_failed = true
+    sync_panes(cx, panes, index + 1)
+    return
+  end
   -- 只有对应 pane 的 action 处理器确认绑定后，Engine 才能续租。
   local sent = pcall(function()
     cx.session:event(pane, { ev = "action", id = node.id, act = "datapier-window-bind" })
@@ -210,6 +225,10 @@ local function sync_panes(cx, panes, index)
       { timeout_ms = 4000 },
       function(result, fresh)
         local current = bridge_node(fresh, pane)
+        if result.status ~= 0 then
+          bootstrap.invalidate()
+          preparation_failed = true
+        end
         if current and current.nonce == node.nonce and result.status == 0 then
           local ok, response = pcall(tern.json.decode, result.stdout)
           if ok and type(response) == "table" and response.bound == true and response.pane_id == tostring(pane) then
@@ -222,12 +241,16 @@ local function sync_panes(cx, panes, index)
     )
   end)
   if not started then
+    bootstrap.invalidate()
+    preparation_failed = true
     sync_panes(cx, panes, index + 1)
   end
 end
 
 local function tick(cx)
   if not busy then
+    preparation_failed = false
+    round_verified = false
     busy = true
     local panes = {}
     for _, pane in ipairs(cx.session:panes()) do

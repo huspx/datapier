@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Connection;
 
 impl Store {
     /// 创建排队中的任务记录并返回其状态，调用方提供的参数会持久化。
@@ -14,7 +15,7 @@ impl Store {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO executions(id,owner,workspace_id,method,params,state,sent,may_write,summary) VALUES(?,?,?,?,?,'queued',0,?,'null')")
             .bind(id.to_string()).bind(owner.to_string()).bind(workspace).bind(method).bind(params.to_string())
-            .bind(i64::from(may_write)).execute(&self.pool).await?;
+            .bind(i64::from(may_write)).execute(&mut *self.pool.acquire().await?).await?;
         self.task(id).await
     }
 
@@ -37,7 +38,8 @@ impl Store {
         let mut results = self.results.lock().await;
         let live =
             results.live_execution_ids(Duration::from_secs(settings.limits.result_idle_seconds));
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         sqlx::query("CREATE TEMP TABLE IF NOT EXISTS history_cleanup_candidates(seq INTEGER PRIMARY KEY,id TEXT NOT NULL)").execute(&mut *tx).await?;
         sqlx::query("DELETE FROM history_cleanup_candidates")
             .execute(&mut *tx)
@@ -77,20 +79,20 @@ impl Store {
     /// 查询开始时记录物理连接的当前数据库，不能以初始连接配置代替 USE 后的状态。
     pub async fn record_task_database(&self, id: Uuid, database: Option<&str>) -> Result<()> {
         sqlx::query("UPDATE executions SET params=json_set(params,'$._task_context.database',?) WHERE id=? AND json_type(params,'$._task_context')='object'")
-            .bind(database).bind(id.to_string()).execute(&self.pool).await?;
+            .bind(database).bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
         Ok(())
     }
     /// 在持有会话锁的执行路径记录当前 Redis DB，保留缺失任务上下文的历史记录。
     pub async fn record_task_redis_db(&self, id: Uuid, db: u32) -> Result<()> {
         sqlx::query("UPDATE executions SET params=json_set(params,'$._task_context.redis_db',?) WHERE id=? AND json_type(params,'$._task_context')='object'")
-            .bind(i64::from(db)).bind(id.to_string()).execute(&self.pool).await?;
+            .bind(i64::from(db)).bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
         Ok(())
     }
 
     /// 读取任务及关联结果的轻量状态；任务不存在时返回 `not_found`。
     pub async fn task(&self, id: Uuid) -> Result<TaskRecord> {
         let row = sqlx::query("SELECT owner,workspace_id,method,state,sent,may_write,summary,error,CAST(created_at AS REAL),json_extract(params,'$._task_context'),CASE WHEN json_type(params,'$.target')='object' THEN json_extract(params,'$.target') END,CASE WHEN json_type(params,'$.targets')='array' THEN json_extract(params,'$.targets') END,COALESCE(json_extract(params,'$._execution_text_truncated'),0) FROM executions WHERE id=?")
-            .bind(id.to_string()).fetch_optional(&self.pool).await?.ok_or_else(|| AppError::new("not_found", "任务不存在"))?;
+            .bind(id.to_string()).fetch_optional(&mut *self.pool.acquire().await?).await?.ok_or_else(|| AppError::new("not_found", "任务不存在"))?;
         let owner = Uuid::parse_str(row.get::<&str, _>(0))
             .map_err(|e| AppError::new("storage", e.to_string()))?;
         let error: Option<String> = row.get(7);
@@ -137,7 +139,7 @@ impl Store {
         let mut task = self.task(id).await?;
         task.text = sqlx::query_scalar("SELECT COALESCE(CASE WHEN json_type(params,'$.text')='text' THEN json_extract(params,'$.text') END, CASE WHEN json_type(params,'$._execution_text')='text' THEN json_extract(params,'$._execution_text') END) FROM executions WHERE id=?")
             .bind(id.to_string())
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *self.pool.acquire().await?)
             .await?;
         Ok(task)
     }
@@ -145,7 +147,7 @@ impl Store {
     /// 返回工作区最近的最多 500 条任务。
     pub async fn tasks(&self, workspace: &str) -> Result<Vec<TaskRecord>> {
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM executions WHERE workspace_id=? ORDER BY created_at DESC,rowid DESC LIMIT 500")
-            .bind(workspace).fetch_all(&self.pool).await?;
+            .bind(workspace).fetch_all(&mut *self.pool.acquire().await?).await?;
         let mut tasks = Vec::with_capacity(ids.len());
         for id in ids {
             tasks.push(self.task(parse_id(&id)?).await?);
@@ -157,7 +159,7 @@ impl Store {
     pub async fn append_execution_text(&self, id: Uuid, text: &str, truncated: bool) -> Result<()> {
         const LIMIT: i64 = 65536;
         sqlx::query("UPDATE executions SET params=json_set(params,'$._execution_text',substr(COALESCE(json_extract(params,'$._execution_text'),'') || ?,1,?),'$._execution_text_truncated',json(CASE WHEN ? OR COALESCE(json_extract(params,'$._execution_text_truncated'),0) OR length(COALESCE(json_extract(params,'$._execution_text'),'') || ?) > ? THEN 'true' ELSE 'false' END)) WHERE id=?")
-            .bind(text).bind(LIMIT).bind(truncated).bind(text).bind(LIMIT).bind(id.to_string()).execute(&self.pool).await?;
+            .bind(text).bind(LIMIT).bind(truncated).bind(text).bind(LIMIT).bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
         Ok(())
     }
 
@@ -171,19 +173,19 @@ impl Store {
     ) -> Result<()> {
         sqlx::query("UPDATE executions SET state=?,summary=?,error=?,updated_at=unixepoch('subsec') WHERE id=?")
             .bind(state).bind(summary.to_string()).bind(error.map(|e| serde_json::to_string(&e)).transpose()?)
-            .bind(id.to_string()).execute(&self.pool).await?;
+            .bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
         Ok(())
     }
     /// 持久化发送阶段；`may_write` 只会从假变真。
     pub async fn mark_sent(&self, id: Uuid, may_write: bool) -> Result<()> {
         sqlx::query("UPDATE executions SET sent=1,may_write=MAX(may_write,?),summary=CASE WHEN json_extract(params,'$._task_context.source')='archery' OR json_type(summary,'$.remote_completion') IS NOT NULL THEN json_set(CASE WHEN json_type(summary)='object' THEN summary ELSE '{}' END,'$.remote_completion','unknown') ELSE summary END,updated_at=unixepoch('subsec') WHERE id=?")
-            .bind(i64::from(may_write)).bind(id.to_string()).execute(&self.pool).await?;
+            .bind(i64::from(may_write)).bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
         Ok(())
     }
     /// 已验证完整平台响应；后续取消或本地落盘失败不能丢失该事实。
     pub async fn mark_remote_completed(&self, id: Uuid) -> Result<()> {
         let updated = sqlx::query("UPDATE executions SET summary=json_set(CASE WHEN json_type(summary)='object' THEN summary ELSE '{}' END,'$.remote_completion','completed'),updated_at=unixepoch('subsec') WHERE id=? AND sent=1")
-            .bind(id.to_string()).execute(&self.pool).await?;
+            .bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
         if updated.rows_affected() != 1 {
             return Err(AppError::invalid("任务尚未发送或已不存在"));
         }
@@ -198,7 +200,8 @@ impl Store {
             "interrupted",
             "Engine 已中断，原会话不可恢复",
         ))?;
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         sqlx::query("UPDATE approvals SET state=CASE WHEN state='dispatching' AND EXISTS (SELECT 1 FROM executions WHERE id=approvals.execution_id AND sent=1) THEN 'dispatched' ELSE 'invalidated' END,decided_at=COALESCE(decided_at,unixepoch()),decision_source=COALESCE(decision_source,'engine_restart') WHERE state IN ('pending','dispatching')")
             .execute(&mut *tx).await?;
         sqlx::query("UPDATE executions SET state=CASE WHEN sent=1 AND may_write=1 THEN 'outcome_unknown' WHEN json_extract(params,'$._task_context.source')='archery' THEN 'failed' ELSE 'cancelled' END,error=CASE WHEN sent=1 AND may_write=1 THEN ? WHEN json_extract(params,'$._task_context.source')='archery' THEN ? ELSE ? END,updated_at=unixepoch('subsec') WHERE state IN ('queued','running','cancelling','approval_required')")
@@ -218,7 +221,7 @@ impl Store {
             return Err(AppError::invalid("历史分页参数无效"));
         }
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM executions WHERE workspace_id=? AND method IN ('execution.start','execution.run') AND (instr(lower(COALESCE(json_extract(params,'$.text'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(params,'$._execution_text'),'')),lower(?))>0 OR instr(lower(COALESCE(json_extract(params,'$._task_context'),'')),lower(?))>0) ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?")
-            .bind(workspace).bind(search).bind(search).bind(search).bind(limit as i64).bind(offset as i64).fetch_all(&self.pool).await?;
+            .bind(workspace).bind(search).bind(search).bind(search).bind(limit as i64).bind(offset as i64).fetch_all(&mut *self.pool.acquire().await?).await?;
         let mut tasks = Vec::with_capacity(ids.len());
         for id in ids {
             tasks.push(self.task_details(parse_id(&id)?).await?);
@@ -230,7 +233,7 @@ impl Store {
             "SELECT json_extract(params,'$._access_proof') FROM executions WHERE id=?",
         )
         .bind(id.to_string())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *self.pool.acquire().await?)
         .await?;
         value
             .ok_or_else(|| AppError::new("not_found", "任务不存在"))?
@@ -272,7 +275,8 @@ impl Store {
                 )
             };
         }
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         let total: i64 = sqlx::query_scalar(history_query!("SELECT count(*) FROM filtered"))
             .bind(workspace)
             .bind(search)

@@ -28,16 +28,16 @@ async fn server_preflight_rejects_invalid_rows_without_changing_them() {
     ];
     for (name, url, username, tls) in cases {
         sqlx::query("DELETE FROM archery_servers")
-            .execute(&store.pool)
+            .execute(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
         sqlx::query("INSERT INTO archery_servers(id,name,base_url,username,http_tls,revision) VALUES(?,?,?,?,?,1)")
             .bind(Uuid::new_v4().to_string()).bind(name).bind(url).bind(username).bind(tls)
-            .execute(&store.pool).await.unwrap();
+            .execute(&mut *store.pool.acquire().await.unwrap()).await.unwrap();
         let before: Vec<(String, String, String, String, String, i64)> = sqlx::query_as(
             "SELECT id,name,base_url,username,http_tls,revision FROM archery_servers ORDER BY id",
         )
-        .fetch_all(&store.pool)
+        .fetch_all(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
         let error = match Store::open(&root).await {
@@ -48,7 +48,7 @@ async fn server_preflight_rejects_invalid_rows_without_changing_them() {
         let after: Vec<(String, String, String, String, String, i64)> = sqlx::query_as(
             "SELECT id,name,base_url,username,http_tls,revision FROM archery_servers ORDER BY id",
         )
-        .fetch_all(&store.pool)
+        .fetch_all(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
         assert_eq!(before, after);
@@ -69,7 +69,7 @@ async fn server_preflight_checks_normalized_identity_and_accepts_valid_rows() {
         .bind("alice")
         .bind(r#"{"ca_path":"/tmp/ca.pem"}"#)
         .bind("automatic")
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     let reopened = Store::open(&root).await.unwrap();
@@ -82,12 +82,12 @@ async fn server_preflight_checks_normalized_identity_and_accepts_valid_rows() {
         .bind("alice")
         .bind("{}")
         .bind("manual")
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     let before: Vec<(String, String, String)> =
         sqlx::query_as("SELECT id,base_url,username FROM archery_servers ORDER BY id")
-            .fetch_all(&store.pool)
+            .fetch_all(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
     let error = match Store::open(&root).await {
@@ -97,7 +97,7 @@ async fn server_preflight_checks_normalized_identity_and_accepts_valid_rows() {
     assert_eq!(error.code, "storage_version");
     let after: Vec<(String, String, String)> =
         sqlx::query_as("SELECT id,base_url,username FROM archery_servers ORDER BY id")
-            .fetch_all(&store.pool)
+            .fetch_all(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
     assert_eq!(before, after);

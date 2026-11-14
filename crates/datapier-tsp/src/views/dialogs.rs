@@ -173,6 +173,24 @@ fn change_preview_panel(preview: &Value) -> Node<Msg> {
     panel.into()
 }
 
+fn settings_section(title: &str) -> html::El<Msg> {
+    let title = crate::i18n::tr(title).into_owned();
+    html::div()
+        .class("settings-section")
+        .attr("role", "group")
+        .attr("aria-label", title.clone())
+        .child(html::strong(title).class("settings-section-title"))
+}
+
+// 存储分组保持不变；显示时把超时独立成组、平台请求并入读取批量。
+fn settings_display_group<'a>(group: &'a str, key: &str) -> &'a str {
+    match group {
+        "archery" => "paging",
+        "limits" if key.ends_with("seconds") => "timeouts",
+        _ => group,
+    }
+}
+
 pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
     let title = crate::i18n::tr(match kind {
         "profile" => {
@@ -705,16 +723,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             if kind != "import" && !archery && !archery_result {
                 panel = panel.child(html::p(crate::i18n::tr("安全只读源会重新查询，结果可能与屏幕不同；其他结果仅导出仍保留的数据。").into_owned()).class("muted"));
             }
-            if !archery
-                && kind != "export"
-                && ((writable(app)
-                    && (app.is_redis() || app.target.as_ref().is_some_and(|t| t.kind == "table")))
-                    || (app.is_redis()
-                        && app.target.is_none()
-                        && app.profile.as_ref().is_some_and(|p| {
-                            p.access_mode == datapier_core::model::AccessMode::ReadWrite
-                        })))
-            {
+            if kind != "export" && import_writable(app) {
                 footer = footer
                     .child(button("预览导入", "preview-import"))
                     .child(button("确认导入", "import"));
@@ -1035,7 +1044,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             let current_tab = app.field("settings-tab");
             let mcp = current_tab == "mcp";
             let mut tabs = html::div()
-                .class("mcp-tabs")
+                .class("mcp-tabs settings-tabs")
                 .attr("role", "tablist")
                 .attr("aria-label", crate::i18n::tr("设置").into_owned());
             for (tab, label) in [
@@ -1063,6 +1072,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             }
             panel = panel.child(tabs);
             let settings_ready = app.settings_loaded && app.field("settings-reload") != "true";
+            let mut settings_layout = html::div().class("settings-grid");
             if settings_ready && current_tab != "archery" {
                 let status = if app.settings_save_token.is_some() {
                     "全局设置保存中…"
@@ -1105,16 +1115,15 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         ))
                     });
                 panel = panel.child(
-                    ui::field(crate::i18n::tr("语言").into_owned())
-                        .variant(ui::FieldVariant::Row)
-                        .child(language),
+                    html::div().class("settings-language").child(
+                        ui::field(crate::i18n::tr("语言").into_owned())
+                            .variant(ui::FieldVariant::Row)
+                            .child(language),
+                    ),
                 );
             }
             if settings_ready && current_tab == "editing" {
-                panel = panel.child(
-                    html::strong(crate::i18n::tr("编辑限制").into_owned())
-                        .class("settings-section-title"),
-                );
+                let mut panel = settings_section("编辑限制");
                 for (name, label) in [
                     ("editing_plan_items", "计划条目上限"),
                     ("editing_plan_bytes", "计划字节上限"),
@@ -1133,10 +1142,8 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     )
                     .class("muted"),
                 );
-                panel = panel.child(
-                    html::strong(crate::i18n::tr("外部编辑器").into_owned())
-                        .class("settings-section-title"),
-                );
+                settings_layout = settings_layout.child(panel);
+                let mut panel = settings_section("外部编辑器");
                 panel = panel.child(choices(
                     app,
                     "external_mode",
@@ -1160,10 +1167,9 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .class("empty-note"),
                     );
                 }
-                panel = panel.child(
-                    html::strong(crate::i18n::tr("遗留编辑文件").into_owned())
-                        .class("settings-section-title"),
-                );
+                settings_layout = settings_layout.child(panel);
+                let mut panel = settings_section("遗留编辑文件")
+                    .class("settings-section settings-section-wide");
                 panel = panel.child(
                     html::span(
                         crate::i18n::tr("领取文件只用于管理本地文件，不恢复数据库编辑权限。")
@@ -1435,32 +1441,32 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         );
                     }
                 }
+                settings_layout = settings_layout.child(panel);
             }
             if settings_ready && (current_tab == "general" || mcp) {
                 for (section, title) in [
                     ("paging", "分页"),
-                    ("archery", "平台请求"),
+                    ("timeouts", "超时设置"),
                     ("limits", "资源限制"),
                     ("history", "历史"),
                     ("mcp", "MCP"),
                     ("notifications", "通知"),
-                    ("approval", "审批"),
                 ] {
                     let has_fields = application::SETTINGS_FIELDS
                         .iter()
                         .chain(application::SETTINGS_SWITCHES)
                         .any(|(group, key, _)| {
-                            *group == section && application::settings_is_mcp(group, key) == mcp
+                            settings_display_group(group, key) == section
+                                && application::settings_is_mcp(group, key) == mcp
                         });
                     if !has_fields {
                         continue;
                     }
-                    panel = panel.child(
-                        html::strong(crate::i18n::tr(title).into_owned())
-                            .class("settings-section-title"),
-                    );
+                    let mut panel = settings_section(title);
                     for &(group, key, label) in application::SETTINGS_SWITCHES {
-                        if group != section || application::settings_is_mcp(group, key) != mcp {
+                        if settings_display_group(group, key) != section
+                            || application::settings_is_mcp(group, key) != mcp
+                        {
                             continue;
                         }
                         let field_name = format!("settings-{group}-{key}");
@@ -1472,10 +1478,11 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         );
                     }
                     for &(group, key, label) in application::SETTINGS_FIELDS {
-                        if group != section || application::settings_is_mcp(group, key) != mcp {
+                        if settings_display_group(group, key) != section
+                            || application::settings_is_mcp(group, key) != mcp
+                        {
                             continue;
                         }
-                        panel = panel.child(field(app, &format!("settings-{group}-{key}"), label));
                         let note = if group == "history" {
                             "留空表示不限制；填写时为正整数。"
                         } else if key == "response_bytes" {
@@ -1493,9 +1500,14 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         } else {
                             "必须大于零。"
                         };
-                        panel =
-                            panel.child(html::p(crate::i18n::tr(note).into_owned()).class("muted"));
+                        panel = panel.child(controls::field_with_hint(
+                            app,
+                            &format!("settings-{group}-{key}"),
+                            label,
+                            note,
+                        ));
                     }
+                    settings_layout = settings_layout.child(panel);
                 }
             }
             if settings_ready && mcp {
@@ -1526,10 +1538,18 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         crate::i18n::tr(label).into_owned(),
                     ));
                 }
-                panel = panel.child(
-                    ui::field(crate::i18n::tr("新连接默认审批策略").into_owned())
-                        .variant(ui::FieldVariant::Row)
-                        .child(policies),
+                settings_layout = settings_layout.child(
+                    settings_section("审批")
+                        .child(field(
+                            app,
+                            "settings-approval-ttl_seconds",
+                            "审批有效期（秒）",
+                        ))
+                        .child(
+                            ui::field(crate::i18n::tr("新连接默认审批策略").into_owned())
+                                .variant(ui::FieldVariant::Row)
+                                .child(policies),
+                        ),
                 );
             }
             if current_tab != "archery" && !app.field("settings-error").is_empty() {
@@ -1541,8 +1561,11 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             }
             if settings_ready && mcp {
                 let mut rules = html::div()
-                    .class("archery-server-list")
-                    .child(html::strong(crate::i18n::tr("MCP 连接权限").into_owned()));
+                    .class("settings-section settings-section-wide")
+                    .child(
+                        html::strong(crate::i18n::tr("MCP 连接权限").into_owned())
+                            .class("settings-section-title"),
+                    );
                 let busy = !app.field("mcp-rule-pending").is_empty();
                 let selected_profile = Uuid::parse_str(app.field("mcp-rule-profile")).ok();
                 let mut selector = ui::select()
@@ -1756,15 +1779,17 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         );
                     }
                 }
-                panel = panel.child(rules);
+                settings_layout = settings_layout.child(rules);
             }
             if current_tab == "archery" {
-                let mut servers = html::div().class("archery-server-list").child(
-                    html::div()
-                        .class("archery-section-heading")
-                        .child(html::strong(crate::i18n::tr("Archery 服务器").into_owned()))
-                        .child(icon_button("plus", "新建服务", "server-new")),
-                );
+                let mut servers = html::div()
+                    .class("settings-section settings-section-wide archery-server-list")
+                    .child(
+                        html::div()
+                            .class("archery-section-heading")
+                            .child(html::strong(crate::i18n::tr("Archery 服务器").into_owned()))
+                            .child(icon_button("plus", "新建服务", "server-new")),
+                    );
                 for server in &app.archery.servers {
                     let Some(id) = server["id"].as_str() else {
                         continue;
@@ -1833,8 +1858,9 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                             )),
                     );
                 }
-                panel = panel.child(servers);
+                settings_layout = settings_layout.child(servers);
             }
+            panel = panel.child(settings_layout);
             footer = html::div().class("modal-footer");
             if current_tab != "archery" {
                 footer = footer.child(
@@ -1846,9 +1872,10 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .on_click(Msg::Action("settings-reload".into())),
                 );
             }
-            footer = footer
-                .child(html::span("").class("spacer"))
-                .child(button("关闭", "overlay-close"));
+            footer = footer.child(html::span("").class("spacer"));
+            if current_tab == "archery" {
+                footer = footer.child(button("关闭", "overlay-close"));
+            }
             if current_tab != "archery" {
                 footer = footer.child(
                     ui::button(crate::i18n::tr("保存全局设置").into_owned())
@@ -2059,7 +2086,11 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
     // SDK 把 slot 移到 body 之后；正文显式命名，焦点路径不依赖构建顺序。
     let overlay: Node<Msg> = ui::overlay()
         .modal(true)
-        .size(ui::OverlaySize::Lg)
+        .size(if kind == "settings" {
+            ui::OverlaySize::Full
+        } else {
+            ui::OverlaySize::Lg
+        })
         .head(title)
         .end(close)
         .foot(Node::from(footer))

@@ -138,6 +138,7 @@ struct Engine {
     id: Uuid,
     store: Store,
     state: Mutex<State>,
+    send_gate: Arc<AsyncMutex<()>>,
 }
 fn serialize<T: serde::Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
@@ -235,6 +236,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
     let engine = Arc::new(Engine {
         id: Uuid::new_v4(),
         store,
+        send_gate: Arc::new(AsyncMutex::new(())),
         state: Mutex::new(State {
             accepting: true,
             clients: HashSet::new(),
@@ -440,6 +442,7 @@ impl Engine {
     }
     async fn disconnect(self: &Arc<Self>, owner: Uuid) {
         // 先在锁内撤销归属、禁止新请求，再在锁外取消任务与关闭各自连接，避免拖住其他客户端。
+        let send_guard = self.send_gate.lock().await;
         let (databases, tasks) = {
             let mut state = self.state.lock().unwrap();
             if state.clients.remove(&owner) && state.clients.is_empty() {
@@ -466,6 +469,7 @@ impl Engine {
                 .collect::<Vec<_>>();
             (dbs, tasks)
         };
+        drop(send_guard);
         if let Err(error) = self.mcp_disconnected(owner).await {
             tracing::warn!("清理客户端审批失败: {error}");
         }

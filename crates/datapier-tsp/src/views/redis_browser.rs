@@ -153,7 +153,7 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
         ));
     }
     let pattern = &app.fields["pattern"];
-    let mut list = html::div()
+    let list = html::div()
         .class("key-browser")
         .child(
             html::div()
@@ -249,33 +249,14 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
             }),
         )
     });
-    let count = tree_rows.as_ref().map_or(app.resources.len(), Vec::len);
-    let page_count = count.div_ceil(workbench::KEY_PAGE_SIZE).max(1);
-    let page = app.workbench.key_page.min(page_count - 1);
-    if page_count > 1 {
-        list = list.child(
-            html::div()
-                .class("key-pagination")
-                .child(button("上一页", "keys-previous"))
-                .child(
-                    html::span(crate::i18n::format_message(
-                        "第 {page} / {total} 页",
-                        &[
-                            ("page", &(page + 1).to_string()),
-                            ("total", &page_count.to_string()),
-                        ],
-                    ))
-                    .class("muted"),
-                )
-                .child(button("下一页", "keys-next")),
-        );
-    }
     let mut keys = html::div().class("key-list");
     if app.resources.is_empty() {
         let message = if app.workbench.scan_dirty {
             "条件已更改，请刷新"
         } else if app.scan_token.is_some() {
             "扫描中"
+        } else if app.workbench.query_ui.redis_scan_failed {
+            "扫描失败"
         } else if app.workbench.query_ui.redis_scan_limited {
             "扫描受内存限制，结果不完整"
         } else if app.cursor.is_some() {
@@ -293,13 +274,9 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
         );
     }
     if let Some(rows) = tree_rows.as_ref() {
-        let start = page * workbench::KEY_PAGE_SIZE;
-        let end = (start + workbench::KEY_PAGE_SIZE).min(rows.len());
-        keys = keys.child(redis_tree_nodes(app, &rows[start..end]));
+        keys = keys.child(redis_tree_nodes(app, rows));
     } else {
-        let start = page * workbench::KEY_PAGE_SIZE;
-        let end = (start + workbench::KEY_PAGE_SIZE).min(app.resources.len());
-        for i in start..end {
+        for i in 0..app.resources.len() {
             let r = &app.resources[i];
             keys = keys.child(redis_key_row(
                 app,
@@ -322,6 +299,8 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
                                 "条件已更改，请刷新"
                             } else if app.scan_token.is_some() {
                                 "扫描中"
+                            } else if app.workbench.query_ui.redis_scan_failed {
+                                "扫描失败"
                             } else if app.workbench.query_ui.redis_scan_limited {
                                 "扫描受内存限制，结果不完整"
                             } else if app.cursor.is_some() {
@@ -342,7 +321,7 @@ pub(super) fn redis_browser(app: &App) -> Node<Msg> {
                 )
                 .child(page_button(
                     "arrow-right",
-                    "继续扫描",
+                    "加载更多",
                     "more",
                     app.cursor.is_some() && app.scan_token.is_none() && !app.workbench.scan_dirty,
                 )),

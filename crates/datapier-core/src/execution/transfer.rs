@@ -63,11 +63,12 @@ struct Progress {
     keys: u64,
     failed: u64,
     skipped: u64,
+    unknown: u64,
     partial: Option<PathBuf>,
 }
 impl Progress {
     fn details(&self) -> Json {
-        json!({"completed_rows":self.rows,"completed_keys":self.keys,"failed":self.failed,"skipped":self.skipped,"partial_path":self.partial,"remaining":"not_executed"})
+        json!({"completed_rows":self.rows,"completed_keys":self.keys,"failed":self.failed,"skipped":self.skipped,"unknown":self.unknown,"partial_path":self.partial,"remaining":if self.unknown > 0 { "after_current_batch_not_executed" } else { "not_executed" }})
     }
 }
 
@@ -269,20 +270,16 @@ async fn import(
     let source = path(params)?;
     let file = File::open(&source)?;
     let target: ResourceTarget = param(params, "target")?;
-    let reservation = if session.profile().provider == ProviderKind::Mysql {
-        let id = Uuid::new_v4();
-        let owner = sink.store.task(sink.execution_id).await?.owner;
-        let budget = sink.store.available_memory_for_owner(owner).await?;
-        if budget == 0 {
-            return Err(AppError::new("resource_limit", "客户端内存预算已用尽"));
-        }
-        sink.store
-            .reserve_auxiliary(sink.execution_id, id, budget)
-            .await?;
-        Some((id, budget))
-    } else {
-        None
-    };
+    let id = Uuid::new_v4();
+    let owner = sink.store.task(sink.execution_id).await?.owner;
+    let budget = sink.store.available_memory_for_owner(owner).await?;
+    if budget == 0 {
+        return Err(AppError::new("resource_limit", "客户端内存预算已用尽"));
+    }
+    sink.store
+        .reserve_auxiliary(sink.execution_id, id, budget)
+        .await?;
+    let reservation = Some((id, budget));
     let budget = reservation.map(|(_, bytes)| bytes).unwrap_or(0);
     let result = match (session.profile().provider, fmt) {
         (ProviderKind::Mysql, "csv") => {
@@ -310,10 +307,10 @@ async fn import(
             .await
         }
         (ProviderKind::Redis, "csv") => {
-            import_redis_csv(session, &target, sink, cancel, p, file).await
+            import_redis_csv(session, &target, sink, cancel, p, file, budget).await
         }
         (ProviderKind::Redis, _) => {
-            import_redis_json(session, &target, sink, cancel, p, file).await
+            import_redis_json(session, &target, sink, cancel, p, file, budget).await
         }
     };
     if let Some((id, _)) = reservation {
@@ -473,6 +470,10 @@ async fn insert_batch(
                     .iter()
                     .filter(|i| i.get("status").and_then(Json::as_str) == Some("failed"))
                     .count() as u64;
+                p.unknown += items
+                    .iter()
+                    .filter(|i| i.get("status").and_then(Json::as_str) == Some("unknown"))
+                    .count() as u64;
                 if success != count {
                     return Err(
                         AppError::new("import_failed", "导入批次包含失败或未确认的记录")
@@ -482,6 +483,7 @@ async fn insert_batch(
             } else if v.get("affected_rows").and_then(Json::as_u64) == Some(count as u64) {
                 p.rows += count as u64;
             } else {
+                p.unknown += count as u64;
                 return Err(AppError::unknown("数据库未返回可确认的导入批次结果").with_details(v));
             }
             Ok(())
@@ -501,6 +503,12 @@ async fn insert_batch(
                     .iter()
                     .filter(|i| i.get("status").and_then(Json::as_str) == Some("failed"))
                     .count() as u64;
+                p.unknown += items
+                    .iter()
+                    .filter(|i| i.get("status").and_then(Json::as_str) == Some("unknown"))
+                    .count() as u64;
+            } else if e.code == "outcome_unknown" {
+                p.unknown += count as u64;
             }
             Err(e)
         }
@@ -576,6 +584,7 @@ struct KeyImport {
     key: String,
     kind: String,
     batch: Vec<Vec<Value>>,
+    batch_bytes: usize,
     rows: u64,
     next_index: u64,
 }
@@ -629,7 +638,8 @@ async fn begin_key(
         token,
         key,
         kind,
-        batch: Vec::with_capacity(PAGE),
+        batch: Vec::new(),
+        batch_bytes: 0,
         rows: 0,
         next_index: 0,
     })
@@ -645,6 +655,7 @@ async fn append_key(
     }
     ensure_not_cancelled(cancel)?;
     let rows = std::mem::take(&mut key.batch);
+    key.batch_bytes = 0;
     let count = rows.len() as u64;
     session
         .call(
@@ -661,12 +672,21 @@ async fn push_key(
     session: &mut ProviderSession,
     key: &mut KeyImport,
     row: Vec<Value>,
+    charge: usize,
+    budget: usize,
     sink: &ExecutionSink,
     cancel: &CancellationToken,
 ) -> Result<()> {
     // 写入临时 key 前校验与 provider 浏览相同的行布局和 List 索引。
     validate_key_row(key, &row)?;
+    if charge > budget / 2 {
+        return Err(AppError::new("resource_limit", "Redis 导入行超过内存预算"));
+    }
+    if !key.batch.is_empty() && key.batch_bytes.saturating_add(charge) > budget / 2 {
+        append_key(session, key, sink, cancel).await?;
+    }
     key.batch.push(row);
+    key.batch_bytes = key.batch_bytes.saturating_add(charge);
     if key.batch.len() == PAGE {
         append_key(session, key, sink, cancel).await?;
     }

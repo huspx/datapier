@@ -151,17 +151,12 @@ function configNumber(key, zh, en, optional = false) {
   const hint = `${min}${max ? `–${max}` : '+'}${
     optional ? configText('；可留空', '; optional') : configText('；必填', '; required')
   }`;
-  return configRow(
-    label,
-    `<div class="config-field"><input type="number" min="${min}" ${
-      max ? `max="${max}"` : ''
-    } step="1" data-config-field="${key}" aria-label="${h(label)}" aria-describedby="config-hint-${key}" ${
-      error ? 'aria-invalid="true"' : ''
-    } value="${h(configPreview.draft[key])}" ${optional ? '' : 'required'}><small id="config-hint-${key}" class="${
-      error ? 'config-error' : 'muted'
-    }">${h(error || hint)}</small></div>`,
-    !optional,
-  );
+  return `<div class="config-row"><label class="config-number-label" for="config-input-${key}">${h(label)}${
+    optional ? '' : ' <span class="required-mark" aria-hidden="true">*</span>'
+  }<small id="config-hint-${key}" class="${error ? 'config-error' : 'muted'}">${h(error || hint)}</small></label>
+    <input id="config-input-${key}" type="number" min="${min}" ${max ? `max="${max}"` : ''}
+    step="1" data-config-field="${key}" aria-label="${h(label)}" aria-describedby="config-hint-${key}"
+    ${error ? 'aria-invalid="true"' : ''} value="${h(configPreview.draft[key])}" ${optional ? '' : 'required'}></div>`;
 }
 function configSwitch(key, zh, en) {
   const label = configText(zh, en);
@@ -336,7 +331,7 @@ function configFilesPreview() {
     : c.fileState === 'empty'
     ? configText('示例列表为空。', 'Example list is empty.')
     : '';
-  return `<section class="detail-section"><h3>${
+  return `<section class="config-section config-section-wide"><h3>${
     h(configText('遗留编辑文件', 'Leftover editing files'))
   }</h3><p class="muted small">${
     h(configText(
@@ -443,40 +438,39 @@ function settingsPreview() {
       }</option>`
     ).join('')
   }</select>`;
-  const general = `<section class="detail-section">${configRow(t('language'), languageSelect)}</section>
-    <section class="detail-section"><h3>${h(configText('分页', 'Paging'))}</h3>${
+  const general = `<div class="config-language">${configRow(t('language'), languageSelect)}</div>
+    <div class="config-grid"><section class="config-section"><h3>${h(configText('分页', 'Paging'))}</h3>${
     configNumber('mysqlRows', 'MySQL 表页行数', 'MySQL table rows per page')
   }${configNumber('sqlRows', 'SQL 页行数', 'SQL rows per page')}${
     configNumber('redisRows', 'Redis 值页行数', 'Redis value rows per page')
   }${configNumber('historyRows', '历史页行数', 'History rows per page')}${
-    configNumber('archeryRows', 'Archery 表格页行数', 'Archery grid rows per page')
-  }${configNumber('redisKeys', 'Redis 键批量', 'Redis key batch')}${
-    configNumber('requestRows', 'Archery 请求行数', 'Archery request rows')
-  }</section>
-    <section class="detail-section"><h3>${h(configText('限制', 'Limits'))}</h3>${
-    configNumber('responseBytes', '响应字节上限', 'Response byte limit')
-  }${configNumber('previewBytes', '值预览字节数', 'Value preview bytes')}${
+    configNumber('archeryRows', '平台结果页行数', 'Platform result rows per page')
+  }${configNumber('redisKeys', 'Redis key 批量', 'Redis key batch')}${
+    configNumber('requestRows', '平台请求行数', 'Platform request rows')
+  }</section><section class="config-section"><h3>${h(configText('超时设置', 'Timeouts'))}</h3>${
     configNumber('connectTimeout', '连接超时（秒）', 'Connect timeout (seconds)')
   }${configNumber('queryTimeout', '执行超时（秒）', 'Execution timeout (seconds)')}${
     configNumber('countTimeout', '计数超时（秒）', 'Count timeout (seconds)')
-  }${configNumber('resultIdle', '结果空闲时间（秒）', 'Result idle time (seconds)')}${
+  }${configNumber('resultIdle', '结果空闲回收（秒）', 'Result idle time (seconds)')}
+    </section><section class="config-section"><h3>${h(configText('资源限制', 'Resource limits'))}</h3>${
+    configNumber('responseBytes', '响应字节上限', 'Response byte limit')
+  }${configNumber('previewBytes', '值预览字节数', 'Value preview bytes')}${
     configNumber('resultMemory', '客户端结果内存字节数', 'Result memory bytes per client')
-  }</section>
-    <section class="detail-section"><h3>${h(configText('历史', 'History'))}</h3>${
+  }</section><section class="config-section"><h3>${h(configText('历史', 'History'))}</h3>${
     configSwitch('cleanup', '自动清理历史', 'Automatically clean up history')
   }${configNumber('retentionDays', '保留天数（可留空）', 'Retention days (optional)', true)}${
     configNumber('maxEntries', '最大条数（可留空）', 'Maximum entries (optional)', true)
-  }</section>`;
-  const editing = `<section class="detail-section"><h3>${h(configText('编辑限制', 'Editing limits'))}</h3>${
-    configNumber('planItems', '计划条目上限（条）', 'Maximum plan items')
-  }${configNumber('planBytes', '计划字节上限（字节）', 'Maximum plan bytes')}${
-    configNumber('valueBytes', '单值字节上限（字节）', 'Maximum value bytes')
-  }${configNumber('textBytes', '文本编辑字节上限（字节）', 'Maximum text editor bytes')}${
-    configNumber('previewRows', '预览每页条目数', 'Preview items per page')
-  }<p class="muted small">${
+  }</section></div>`;
+  const editing = `<div class="config-grid"><section class="config-section"><h3>${
+    h(configText('编辑限制', 'Editing limits'))
+  }</h3>${configNumber('planItems', '计划条目上限（条）', 'Maximum plan items')}${
+    configNumber('planBytes', '计划字节上限（字节）', 'Maximum plan bytes')
+  }${configNumber('valueBytes', '单值字节上限（字节）', 'Maximum value bytes')}${
+    configNumber('textBytes', '文本编辑字节上限（字节）', 'Maximum text editor bytes')
+  }${configNumber('previewRows', '预览每页条目数', 'Preview items per page')}<p class="muted small">${
     h(configText('文本编辑上限不能超过单值上限。', 'Text editor limit cannot exceed the value limit.'))
   }</p></section>
-    <section class="detail-section"><h3>${h(configText('外部编辑器', 'External editor'))}</h3>${
+    <section class="config-section"><h3>${h(configText('外部编辑器', 'External editor'))}</h3>${
     configRow(
       configText('编辑器模式', 'Editor mode'),
       `<select data-config-field="editorMode" aria-label="${h(configText('编辑器模式', 'Editor mode'))}">${
@@ -491,25 +485,29 @@ function settingsPreview() {
       ? ''
       : configEditorField('editorProgram', '编辑器程序', 'Editor program')
         + configEditorField('editorArgs', '编辑器参数', 'Editor arguments', true)
+  }</section>${configFilesPreview()}</div>`;
+  const archery =
+    `<div class="config-grid"><section class="config-section config-section-wide config-servers">${serverList()}</section></div>`;
+  const mcp = `<div class="config-grid"><section class="config-section"><h3>${
+    h(configText('资源限制', 'Resource limits'))
+  }</h3>${configNumber('maxRows', 'MCP 最大行数', 'Maximum MCP rows')}${
+    configNumber('mcpTasks', 'MCP 并行任务数', 'Running tasks per MCP client')
   }</section>
-    ${configFilesPreview()}`;
-  const archery = `<section class="detail-section config-servers">${serverList()}</section>`;
-  const mcp = `<section class="detail-section"><h3>${h(configText('MCP 限制与审批', 'MCP limits and approval'))}</h3>${
-    configNumber('maxRows', 'MCP 最大行数', 'Maximum MCP rows')
-  }${configNumber('mcpTasks', 'MCP 并行任务数', 'Running tasks per MCP client')}${
+    <section class="config-section"><h3>MCP</h3>${
+    configSwitch('fineGrained', '启用 MCP 细粒度权限', 'Enable fine-grained MCP permissions')
+  }</section><section class="config-section"><h3>${h(configText('通知', 'Notifications'))}</h3>${
+    configSwitch('approvalNotice', '审批通知', 'Approval notifications')
+  }${configSwitch('authNotice', '认证通知', 'Authentication notifications')}</section>
+    <section class="config-section"><h3>${h(configText('审批', 'Approval'))}</h3>${
     configNumber('approvalTtl', '审批有效期（秒）', 'Approval TTL (seconds)')
   }${
     configRow(
       configText('新连接默认审批策略', 'Default approval policy for new connections'),
       configPolicySelect(d.defaultPolicy, 'default', ['dangerous', 'all_writes']),
     )
-  }</section>
-    <section class="detail-section"><h3>${h(configText('通知', 'Notifications'))}</h3>${
-    configSwitch('approvalNotice', '审批通知', 'Approval notifications')
-  }${configSwitch('authNotice', '认证通知', 'Authentication notifications')}</section>
-    <section class="detail-section"><h3>${h(configText('MCP 连接权限', 'MCP connection permissions'))}</h3>${
-    configSwitch('fineGrained', '启用 MCP 细粒度权限', 'Enable fine-grained MCP permissions')
-  }${
+  }</section><section class="config-section config-section-wide"><h3>${
+    h(configText('MCP 连接权限', 'MCP connection permissions'))
+  }</h3>${
     configRow(
       configText('连接', 'Connection'),
       `<select data-config-profile aria-label="${h(configText('连接', 'Connection'))}" ${
@@ -533,17 +531,11 @@ function settingsPreview() {
       configMessage(c.ruleMessage)
         || configText('选择连接以加载示例权限。', 'Select a connection to load example permissions.'),
     )
-  }</p>${c.profile ? configRulesPreview() : ''}</section>`;
-  return `<div class="config-preview"><p class="notice small">${
+  }</p>${c.profile ? configRulesPreview() : ''}</section></div>`;
+  return `<div class="config-preview"><p class="config-caption muted small">${
     h(configText(
-      '配置与权限均为本页示例，不连接数据库，也不会发送或保存真实配置。语言偏好仍保存在浏览器中。',
-      'Settings and permissions are examples on this page. No database is contacted and no real configuration is sent or saved. Language preference remains stored in your browser.',
-    ))
-  }</p>
-    <p role="status" data-config-status>${h(configStatus())}</p><p class="muted small">${
-    h(configText(
-      '全局保存仅保存全局设置；连接策略和权限须在所选连接中单独保存。',
-      'Global save covers global settings only; save each connection policy and permissions separately.',
+      '本页仅为示例，不连接数据库或保存真实配置。',
+      'Page example only; no database connection or real settings are saved.',
     ))
   }</p>
     <div class="config-tabs" role="tablist" aria-label="${h(t('settings'))}">${
@@ -555,7 +547,7 @@ function settingsPreview() {
         c.tab === tab ? '0' : '-1'
       }" aria-controls="config-panel" data-config-action="tab" data-config-tab="${tab}">${h(label)}</button>`
     ).join('')
-  }</div>
+  }</div><p role="status" class="config-status" data-config-status>${h(configStatus())}</p>
     <div id="config-panel" role="tabpanel" aria-label="${
     h(
       ({
@@ -566,7 +558,23 @@ function settingsPreview() {
       })[c.tab],
     )
   }">${({ general, editing, archery, mcp })[c.tab]}</div>
-    <p role="status" class="muted small">${h(configMessage(c.message))}</p></div>`;
+    <p role="status" class="muted small">${h(configMessage(c.message))}</p>
+    <details class="config-demo-controls"><summary>${
+    h(configText('示例说明与状态', 'Example notes and states'))
+  }</summary>
+    <p class="muted small">${
+    h(configText(
+      '全局保存仅保存全局设置；连接策略和权限单独保存。语言偏好保存在浏览器中。',
+      'Global save covers global settings; save connection policy and permissions separately. Language preference is stored in this browser.',
+    ))
+  }</p>${
+    c.tab === 'archery'
+      ? ''
+      : `<button type="button" class="button" data-config-action="save-settings-error" ${
+        c.settingsBusy ? 'disabled' : ''
+      }>${h(configText('模拟全局保存失败', 'Simulate global save failure'))}</button>`
+  }
+    </details></div>`;
 }
 function settingsPreviewFooter() {
   if (configPreview.confirm) {
@@ -590,14 +598,10 @@ function settingsPreviewFooter() {
   return `<button type="button" class="button" data-config-action="reload-settings" ${
     configPreview.settingsBusy ? 'disabled' : ''
   }>${
-    h(configText('重新加载示例设置', 'Reload example settings'))
-  }</button><button type="button" class="button" data-config-action="save-settings-error" ${
-    configPreview.settingsBusy ? 'disabled' : ''
-  }>${
-    h(configText('模拟全局保存失败', 'Simulate global save failure'))
+    h(configText('重新加载设置', 'Reload settings'))
   }</button><span class="spacer"></span><button type="button" class="button primary" data-config-action="save-settings" ${
     configPreview.settingsBusy ? 'disabled' : ''
-  }>${h(configText('保存示例设置', 'Save example settings'))}</button>`;
+  }>${h(configText('保存全局设置', 'Save global settings'))}</button>`;
 }
 function configRulesPreview() {
   const c = configPreview, redis = c.profile.endsWith('redis');

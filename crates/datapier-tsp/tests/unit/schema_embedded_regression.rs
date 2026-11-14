@@ -236,6 +236,12 @@ fn completed_schema_task_allows_new_browse_result_and_keeps_structure_readback()
         tag: format!("{}:{}:execution.get/{}", app.tabs[0].id, app.generation, browse_task),
         result: Ok(json!({"id":browse_task,"state":"succeeded","method":"resource.browse","results":[result_id]})),
     }, &backend);
+    let read = requests.try_recv().unwrap();
+    assert_eq!(read.method, "result.read");
+    app.routed_response(Response {
+        tag: read.tag,
+        result: Ok(json!({"result":{"id":result_id,"execution_id":browse_task,"columns":[],"kind":"rows","row_count":0,"complete":true,"summary":{}},"rows":[],"start":0,"next":null})),
+    }, &backend);
     assert!(app.browse_result);
     assert_eq!(app.result_id.as_deref(), Some(result_id.as_str()));
     assert_eq!(app.workbench.section, "structure");

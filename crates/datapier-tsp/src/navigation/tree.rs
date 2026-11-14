@@ -19,13 +19,7 @@ impl App {
                 .workbench
                 .redis_tree
                 .rows(&self.workbench.redis_expansion, Some((profile.id, db)));
-            let count = rows.len().div_ceil(crate::workbench::KEY_PAGE_SIZE).max(1);
-            let start = self.workbench.key_page.min(count - 1) * crate::workbench::KEY_PAGE_SIZE;
-            for row in rows
-                .iter()
-                .skip(start)
-                .take(crate::workbench::KEY_PAGE_SIZE)
-            {
+            for row in &rows {
                 let (action, expanded) = match &row.kind {
                     crate::redis_tree::Kind::Directory { prefix, expanded } => (
                         format!("redis-tree:{}", crate::redis_tree::encoded(prefix)),

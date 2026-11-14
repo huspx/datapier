@@ -111,7 +111,7 @@ impl MysqlSession {
             edits: HashMap::new(),
             replace_plans: HashMap::new(),
             recipes: HashMap::new(),
-            transaction: None,
+            transaction: Some(false),
         })
     }
     pub fn profile(&self) -> &Profile {
@@ -145,11 +145,11 @@ impl MysqlSession {
         if self.connection.is_none() {
             return Err(AppError::new("connection_closed", "连接已关闭"));
         }
-        connect_initialized(
+        Box::pin(connect_initialized(
             &self.options,
             self.profile.access_mode,
             self.connect_timeout,
-        )
+        ))
         .await
     }
     pub(super) fn connection(&mut self) -> Result<&mut MySqlConnection> {
@@ -218,7 +218,7 @@ impl MysqlSession {
         Ok((self.connection()?, recipe.sql, args))
     }
     /// 结果流未消费至协议终态时禁止继续复用物理连接。
-    pub(crate) fn invalidate_connection(&mut self) {
+    pub fn invalidate_connection(&mut self) {
         self.connection = None;
         self.edits.clear();
         self.replace_plans.clear();
@@ -251,14 +251,21 @@ impl MysqlSession {
         ensure_not_cancelled(cancel)?;
         match method {
             "connection.info" => {
+                // 系统变量在不同版本可报告为有符号整数，显式转换后统一解码。
                 let row = sqlx::raw_sql(
-                    "SELECT VERSION() AS version, DATABASE() AS db, @@SESSION.sql_mode AS sql_mode, @@lower_case_table_names AS lower_case_table_names",
+                    "SELECT VERSION() AS version, DATABASE() AS db, @@SESSION.sql_mode AS sql_mode, @@lower_case_table_names AS lower_case_table_names, CAST(@@SESSION.autocommit AS UNSIGNED) AS autocommit",
                 )
                 .fetch_one(self.connection()?)
                 .await
                 .map_err(errors::mysql_error)?;
+                let autocommit = row.try_get::<u64, _>("autocommit")? != 0;
+                let transaction = if autocommit {
+                    self.transaction
+                } else {
+                    Some(true)
+                };
                 Ok(
-                    json!({"server_version": row.try_get::<String,_>("version")?, "database": row.try_get::<Option<String>,_>("db")?, "sql_mode": row.try_get::<String,_>("sql_mode")?, "lower_case_table_names": row.try_get::<u64,_>("lower_case_table_names")?, "transaction":self.transaction}),
+                    json!({"server_version": row.try_get::<String,_>("version")?, "database": row.try_get::<Option<String>,_>("db")?, "sql_mode": row.try_get::<String,_>("sql_mode")?, "lower_case_table_names": row.try_get::<u64,_>("lower_case_table_names")?, "transaction":transaction, "autocommit":autocommit}),
                 )
             }
             "database.list" => catalog::databases(self, cancel).await,

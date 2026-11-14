@@ -488,18 +488,15 @@ impl App {
                     } else {
                         let token = Uuid::new_v4();
                         self.scan_token = Some(token);
+                        self.workbench.query_ui.redis_scan_failed = false;
                         if name == "list" {
-                            self.workbench.query_ui.redis_scan_complete = false;
-                            self.workbench.query_ui.redis_scan_limited = false;
-                            self.cursor = None;
-                            self.resources.clear();
-                            self.workbench.redis_tree.reset(&[]);
-                            self.workbench.redis_tree_owner = None;
-                            self.redis_prune_key_selection();
+                            if let Some(cursor) = self.cursor.take() {
+                                self.discard_resource_scan(backend, s.clone(), cursor);
+                            }
+                            self.tabs[self.active].runtime.scan_restart = Some(token);
                             self.workbench.scan_dirty = false;
-                            self.workbench.key_page = 0;
                         }
-                        self.request(backend,&format!("resource.list/{token}"),"resource.list",json!({"session_id":s,"database":self.database,"cursor":if name == "more" {self.cursor.clone()} else {None},"pattern":self.field("pattern"),"type":if self.field("type").is_empty(){None}else{Some(self.field("type"))},"limit":self.settings.paging.redis_key_batch}));
+                        self.request(backend,&format!("resource.list/{token}/{}", s.as_str().unwrap_or_default()),"resource.list",json!({"session_id":s,"database":self.database,"cursor":if name == "more" {self.cursor.clone()} else {None},"pattern":self.field("pattern"),"type":if self.field("type").is_empty(){None}else{Some(self.field("type"))},"limit":self.settings.paging.redis_key_batch}));
                     }
                 }
             }
@@ -711,7 +708,7 @@ impl App {
                             p.provider == datapier_core::model::ProviderKind::Redis
                         })
                     {
-                        params["target"] = json!({"name":"","database":self.profile.as_ref().map(|p|p.redis_db().to_string()),"kind":"database"});
+                        params["target"] = json!({"name":"","database":self.redis_selection_scope().map(|(_, db)| db.to_string()),"kind":"database"});
                     }
                     let archery = self.profile.as_ref().is_some_and(|p| p.is_archery());
                     let result_id = if self.workbench.cli_export

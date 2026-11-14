@@ -121,10 +121,22 @@ impl App {
             }
             _ => false,
         };
+        let scan = if matches!(&message, Msg::Edit(name, ..) | Msg::Undo(name) if name == "pattern" || name == "type")
+        {
+            self.session_id().zip(self.cursor.clone())
+        } else {
+            None
+        };
         if !editing || self.draft_scope_ready() {
             self.dispatch_editor_message(message);
         } else {
             self.guard_draft_scope(backend, workbench::DraftScopeAction::Edit(message));
+        }
+        if self.workbench.scan_dirty
+            && self.cursor.is_none()
+            && let Some((session, cursor)) = scan
+        {
+            self.discard_resource_scan(backend, session, cursor);
         }
     }
 

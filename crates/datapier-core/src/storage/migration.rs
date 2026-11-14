@@ -251,17 +251,13 @@ async fn preflight_connection(conn: &mut SqliteConnection) -> Result<i64> {
     Ok(version)
 }
 
-pub(super) async fn preflight_config(pool: &SqlitePool) -> Result<()> {
-    let mut conn = pool.acquire().await?;
-    preflight_connection(&mut conn).await?;
+pub(super) async fn preflight_config(conn: &mut SqliteConnection) -> Result<()> {
+    preflight_connection(conn).await?;
     Ok(())
 }
 
-pub(super) async fn migrate_config(pool: &SqlitePool) -> Result<()> {
-    let mut conn = pool.acquire().await?;
-    // 即使中途取消或恢复失败，也不让关闭外键的连接回到连接池。
-    conn.close_on_drop();
-    let version = preflight_connection(&mut conn).await?;
+pub(super) async fn migrate_config(conn: &mut SqliteConnection) -> Result<()> {
+    let version = preflight_connection(conn).await?;
     if version == 4 {
         return Ok(());
     }

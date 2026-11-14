@@ -724,7 +724,14 @@ impl App {
                     .get("operation")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                for name in ["field", "member", "new_member", "value"] {
+                for name in [
+                    "field",
+                    "new_field",
+                    "member",
+                    "new_member",
+                    "new_key_b64",
+                    "value",
+                ] {
                     let Some(value) = change
                         .get(name)
                         .filter(|value| value.get("type").and_then(Value::as_str) == Some("large"))
@@ -745,10 +752,11 @@ impl App {
                                     | "zset_remove"
                                     | "zset_replace_member"
                             ));
-                    let descriptor = if identity {
-                        change.get("identity_edit_file")
-                    } else {
-                        Some(change)
+                    let descriptor = match name {
+                        "new_field" => change.get("new_field_edit_file"),
+                        "new_key_b64" => change.get("new_key_edit_file"),
+                        _ if identity => change.get("identity_edit_file"),
+                        _ => Some(change),
                     };
                     if !descriptor.is_some_and(|file| {
                         file.get("edit_file_id")

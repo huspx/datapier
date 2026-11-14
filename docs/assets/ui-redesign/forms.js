@@ -194,7 +194,9 @@ function formOverlay(kind) {
           ? 'importData'
           : 'transferTitle',
       ),
-      `<div class="fields"><label class="wide">${
+      `${
+        state.provider === 'redis' ? `<p class="muted small">Redis · DB ${h(state.redisDb)}</p>` : ''
+      }<div class="fields"><label class="wide">${
         h(t('filePath'))
       } <span style="color:var(--danger,red)">*</span><input id="transfer-path" value="orders.csv" required aria-required="true">${''}</label><label>${
         h(t('format'))

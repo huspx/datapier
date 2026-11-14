@@ -46,17 +46,20 @@ fn keyword(value: &str) -> Result<&str> {
     Ok(value)
 }
 // 类型文本不是 SQL 表达式；禁止在括号外追加字段属性或 ALTER 子句。
-fn native_type(value: &str) -> Result<&str> {
+fn native_type<'a>(value: &'a str, mode: &str) -> Result<&'a str> {
     let value = value.trim();
     let mut depth = 0usize;
     let mut quoted = false;
     let mut escaped = false;
     let mut outside = String::new();
+    let backslash_escapes = !mode
+        .split(',')
+        .any(|m| m.trim().eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES"));
     for c in value.chars() {
         if quoted {
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if c == '\\' && backslash_escapes {
                 escaped = true;
             } else if c == '\'' {
                 quoted = false;
@@ -98,7 +101,7 @@ fn native_type(value: &str) -> Result<&str> {
     Ok(value)
 }
 fn column(c: &ColumnDefinition, mode: &str) -> Result<String> {
-    let mut s = format!("{} {}", ident(&c.name)?, native_type(&c.native_type)?);
+    let mut s = format!("{} {}", ident(&c.name)?, native_type(&c.native_type, mode)?);
     if let Some(v) = &c.charset {
         s += &format!(" CHARACTER SET {}", ident(v)?);
     }

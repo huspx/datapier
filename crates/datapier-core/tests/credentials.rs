@@ -80,7 +80,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         );
         let payload: String = sqlx::query_scalar("SELECT payload FROM profiles WHERE id=?")
             .bind(profile.id.to_string())
-            .fetch_one(&store.pool)
+            .fetch_one(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap();
         assert!(!payload.contains(&secret));

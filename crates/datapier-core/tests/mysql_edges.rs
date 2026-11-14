@@ -85,7 +85,7 @@ async fn mysql_session_uses_configured_timezone_and_preserves_server_mode() {
     f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
         .await
         .unwrap();
-    let result = f.sql("SELECT @@session.time_zone, @@character_set_connection, @@session.sql_mode = @@global.sql_mode").await.unwrap();
+    let result = f.sql("SELECT @@session.time_zone, @@character_set_connection, REPLACE(CONCAT(',', @@session.sql_mode, ','), ',IGNORE_SPACE,', ',') = REPLACE(CONCAT(',', @@global.sql_mode, ','), ',IGNORE_SPACE,', ',')").await.unwrap();
     let rows = f.rows(&result).await;
     assert_eq!(rows[0][0].text(), "+03:00");
     assert_eq!(rows[0][1].text(), "utf8mb4");
@@ -676,6 +676,193 @@ async fn myisam_cas_detects_case_and_trailing_spaces_and_accepts_same_value() {
         .unwrap();
     assert_eq!(f.rows(&actual).await[0][0], Value::Text("ALPHA ".into()));
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn enum_and_set_survive_comment_only_structure_edit() {
+    use datapier_core::{
+        model::schema::{SchemaDefinition, SchemaEditIntent, SchemaSnapshot},
+        providers::mysql::schema::build_plan,
+    };
+    let mut f = Fixture::open().await;
+    let table = name("dp_enum_type");
+    let result = f.sql("SELECT @@session.sql_mode").await.unwrap();
+    let mode = f.rows(&result).await[0][0].text();
+    let member = if mode
+        .split(',')
+        .any(|m| m.eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES"))
+    {
+        r"a\b"
+    } else {
+        r"a\\b"
+    };
+    f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, e ENUM('{member}'), s SET('{member}')) ENGINE=InnoDB")).await.unwrap();
+    f.sql(&format!("INSERT INTO `{table}` VALUES (1, 1, 1)"))
+        .await
+        .unwrap();
+    let target = target(&table);
+    let snapshot: SchemaSnapshot = serde_json::from_value(
+        f.call("schema.describe", json!({"target":target}))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let mut definition = snapshot.definition.clone();
+    let SchemaDefinition::Table(table_definition) = &mut definition else {
+        panic!("expected table")
+    };
+    table_definition
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "e")
+        .unwrap()
+        .comment = "changed".into();
+    let plan = build_plan(&SchemaEditIntent {
+        target: target.clone(),
+        server_version: snapshot.server_version.clone(),
+        sql_mode: snapshot.sql_mode.clone(),
+        baseline: Some(snapshot),
+        definition: Some(definition),
+        profile_revision: "1".into(),
+        algorithm: None,
+        lock: None,
+    })
+    .unwrap();
+    let outcome = f
+        .call("schema.execute", json!({"plan":plan}))
+        .await
+        .unwrap();
+    assert_eq!(outcome["state"], "applied", "{outcome}");
+    let result = f
+        .sql(&format!("SELECT HEX(e), HEX(s), e+0, s+0 FROM `{table}`"))
+        .await
+        .unwrap();
+    let rows = f.rows(&result).await;
+    assert_eq!(rows[0][0].text(), "615C62");
+    assert_eq!(rows[0][1].text(), "615C62");
+    assert_eq!(rows[0][2].text(), "1");
+    assert_eq!(rows[0][3].text(), "1");
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 且启用 MyISAM"]
+async fn latin1_cas_uses_utf8_baselines_for_both_engines() {
+    let mut f = Fixture::open().await;
+    for engine in ["InnoDB", "MyISAM"] {
+        let table = name("dp_latin1");
+        f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, label VARCHAR(40), n INT) ENGINE={engine} DEFAULT CHARSET=latin1")).await.unwrap();
+        f.sql(&format!(
+            "INSERT INTO `{table}` VALUES (1, CONVERT(X'E9' USING latin1), 1)"
+        ))
+        .await
+        .unwrap();
+        let target = target(&table);
+        let schema = describe(&mut f, &target).await;
+        let baseline = before(&mut f, &table, &schema).await;
+        let same = update(baseline.clone(), "label", Value::Text("é".into()));
+        assert_eq!(
+            submit(&mut f, &target, &same).await.unwrap()["affected_rows"],
+            0
+        );
+        let change = update(baseline, "n", Value::Integer("2".into()));
+        assert_eq!(
+            submit(&mut f, &target, &change).await.unwrap()["affected_rows"],
+            1
+        );
+        f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL、MyISAM 和 TRIGGER 权限"]
+async fn myisam_trigger_error_preserves_unknown_current_write() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_myisam_error");
+    let trigger = name("dp_trigger");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=MyISAM"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("CREATE TRIGGER `{trigger}` AFTER INSERT ON `{table}` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='trigger failure'")).await.unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target(&table)}))
+        .await
+        .unwrap();
+    let change = RowChange {
+        operation: "insert".into(),
+        key: BTreeMap::new(),
+        before: BTreeMap::new(),
+        values: [("id".into(), Value::Integer("1".into()))]
+            .into_iter()
+            .collect(),
+    };
+    let error = f
+        .call(
+            "change.submit",
+            json!({"token":opened["token"],"rows":[change]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "outcome_unknown");
+    assert_eq!(error.details["items"][0]["status"], "unknown");
+    assert_eq!(error.details["original_error"]["code"], "database");
+    let result = f
+        .sql(&format!("SELECT COUNT(*) FROM `{table}`"))
+        .await
+        .unwrap();
+    assert_eq!(f.rows(&result).await[0][0].text(), "1");
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 且启用 MyISAM"]
+async fn table_edit_token_rejects_engine_change_before_writing() {
+    let mut f = Fixture::open().await;
+    let mut other = Fixture::open().await;
+    let table = name("dp_changed_engine");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target(&table)}))
+        .await
+        .unwrap();
+    other
+        .sql(&format!("ALTER TABLE `{table}` ENGINE=MyISAM"))
+        .await
+        .unwrap();
+    let change = RowChange {
+        operation: "insert".into(),
+        key: BTreeMap::new(),
+        before: BTreeMap::new(),
+        values: [("id".into(), Value::Integer("1".into()))]
+            .into_iter()
+            .collect(),
+    };
+    let error = f
+        .call(
+            "change.submit",
+            json!({"token":opened["token"],"rows":[change]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "conflict");
+    let result = other
+        .sql(&format!("SELECT COUNT(*) FROM `{table}`"))
+        .await
+        .unwrap();
+    assert_eq!(other.rows(&result).await[0][0].text(), "0");
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    other.close().await;
     f.close().await;
 }
 

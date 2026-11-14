@@ -106,8 +106,14 @@ impl Engine {
         if let Some(changes) = params.get("changes").and_then(Value::as_array) {
             for change in changes {
                 declaration(change, &mut declarations)?;
-                if let Some(identity) = change.get("identity_edit_file") {
-                    declaration(identity, &mut declarations)?;
+                for key in [
+                    "identity_edit_file",
+                    "new_field_edit_file",
+                    "new_key_edit_file",
+                ] {
+                    if let Some(descriptor) = change.get(key) {
+                        declaration(descriptor, &mut declarations)?;
+                    }
                 }
             }
         }
@@ -123,7 +129,14 @@ impl Engine {
         }
         if let Some(changes) = params.get("changes").and_then(Value::as_array) {
             for change in changes {
-                for key in ["value", "field", "member", "new_member"] {
+                for key in [
+                    "value",
+                    "field",
+                    "member",
+                    "new_member",
+                    "new_field",
+                    "new_key_b64",
+                ] {
                     if let Some(value) = change.get(key) {
                         value_references(value, &mut ids)?;
                     }
@@ -237,11 +250,30 @@ impl Engine {
                 && let Some(changes) = params.get_mut("changes").and_then(Value::as_array_mut)
             {
                 for change in changes {
-                    for key in ["value", "field", "member", "new_member"] {
+                    for key in [
+                        "value",
+                        "field",
+                        "member",
+                        "new_member",
+                        "new_field",
+                        "new_key_b64",
+                    ] {
                         let Some(value) = change.get_mut(key) else {
                             continue;
                         };
+                        let was_large = value.get("type").and_then(Value::as_str) == Some("large");
                         self.resolve_change_file_value(value, &reads).await?;
+                        if key == "new_key_b64" && was_large {
+                            if value.get("type").and_then(Value::as_str) != Some("text") {
+                                return Err(AppError::invalid("新 key 草稿必须是文本"));
+                            }
+                            let text = value
+                                .get_mut("value")
+                                .map(Value::take)
+                                .filter(Value::is_string)
+                                .ok_or_else(|| AppError::invalid("新 key 草稿必须是文本"))?;
+                            *value = text;
+                        }
                     }
                 }
             }

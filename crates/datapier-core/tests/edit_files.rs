@@ -267,6 +267,20 @@ async fn replaced_data_root_never_redirects_edit_files() {
     let sentinel = outside_dir.join(format!("{}.txt", file.id));
     std::fs::write(&sentinel, b"sentinel").unwrap();
     symlink(&outside, &root).unwrap();
+    let mut connections = Vec::new();
+    for _ in 0..4 {
+        connections.push(store.pool.acquire().await.unwrap());
+    }
+    for connection in &mut connections {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM value_edit_files WHERE id=?")
+            .bind(file.id.to_string())
+            .fetch_one(&mut **connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+    drop(connections);
+    assert!(!outside.join("datapier.sqlite3").exists());
     assert_eq!(
         store
             .read_edit_file(file.id, file.revision, 64)
@@ -422,7 +436,7 @@ async fn workspace_intent_rejects_tampered_markers_and_file_records() {
     state["tabs"][0]["schema_draft"]["$datapier_intent"]["version"] = json!(2);
     sqlx::query("UPDATE workspaces SET payload=? WHERE id='workspace'")
         .bind(state.to_string())
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     assert!(
@@ -434,12 +448,12 @@ async fn workspace_intent_rejects_tampered_markers_and_file_records() {
     state["tabs"][0]["schema_draft"]["$datapier_intent"]["version"] = json!(1);
     sqlx::query("UPDATE workspaces SET payload=? WHERE id='workspace'")
         .bind(state.to_string())
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     sqlx::query("UPDATE value_edit_files SET format='json' WHERE id=?")
         .bind(&id)
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     assert!(
@@ -450,7 +464,7 @@ async fn workspace_intent_rejects_tampered_markers_and_file_records() {
     );
     sqlx::query("UPDATE value_edit_files SET format='intent' WHERE id=?")
         .bind(&id)
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     std::fs::remove_file(
@@ -479,7 +493,7 @@ async fn workspace_intent_rejects_tampered_markers_and_file_records() {
     );
     sqlx::query("DELETE FROM value_edit_files WHERE id=?")
         .bind(&id)
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     assert!(
@@ -631,6 +645,61 @@ async fn column_names_survive_copy_and_reference_lifecycle() {
         .unwrap();
     cleanup(store).await;
 }
+#[tokio::test]
+async fn redis_new_identities_survive_save_load_and_copy() {
+    let store = store().await;
+    let state = json!({"tabs":[{"profile_id":"profile","pending":{
+        "target":{},"redis":[
+            {"operation":"hash_replace_field","field":{"type":"text","value":"old"},
+             "new_field":{"type":"text","value":"n".repeat(300_000)},
+             "value":{"type":"text","value":"new value"}},
+            {"operation":"rename","new_key_b64":"Y".repeat(300_000)}
+        ]
+    }}]});
+    let (_, saved) = store
+        .workspace_save_prepared("source", 0, state, None, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let changes = &saved["tabs"][0]["pending"]["redis"];
+    for (index, field, descriptor) in [
+        (0, "new_field", "new_field_edit_file"),
+        (1, "new_key_b64", "new_key_edit_file"),
+    ] {
+        assert_eq!(changes[index][field]["type"], "large");
+        assert_eq!(
+            changes[index][field]["value"]["id"],
+            changes[index][descriptor]["edit_file_id"]
+        );
+    }
+    let loaded = store
+        .workspace_load_prepared("source", 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(loaded["state"], saved);
+    let (_, copied) = store
+        .workspace_save_prepared("copy", 0, saved.clone(), Some("source"), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let changes = &copied["tabs"][0]["pending"]["redis"];
+    for (index, field, descriptor) in [
+        (0, "new_field", "new_field_edit_file"),
+        (1, "new_key_b64", "new_key_edit_file"),
+    ] {
+        assert_eq!(
+            changes[index][field]["value"]["id"],
+            changes[index][descriptor]["edit_file_id"]
+        );
+        assert_ne!(
+            changes[index][field]["value"]["id"],
+            saved["tabs"][0]["pending"]["redis"][index][field]["value"]["id"]
+        );
+    }
+    store
+        .workspace_save_prepared("copy", 1, copied, None, 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    cleanup(store).await;
+}
 
 #[tokio::test]
 async fn unrelated_workspace_does_not_prevent_recovery_or_dereference() {
@@ -638,7 +707,7 @@ async fn unrelated_workspace_does_not_prevent_recovery_or_dereference() {
     sqlx::query("INSERT INTO workspaces(id,revision,payload) VALUES(?,1,?)")
         .bind("unrelated")
         .bind(json!({"data":"x".repeat(2_000_000)}).to_string())
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     store.recover_edit_files().await.unwrap();

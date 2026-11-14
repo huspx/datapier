@@ -220,6 +220,11 @@ impl JsonSpool {
     pub(super) fn reader(&self) -> Result<JsonReader> {
         Ok(JsonReader::new(File::open(&self.path)?))
     }
+    pub(super) fn reader_bounded(&self, limit: usize) -> Result<JsonReader> {
+        let mut reader = self.reader()?;
+        reader.value_limit = limit;
+        Ok(reader)
+    }
 }
 impl Drop for JsonSpool {
     fn drop(&mut self) {

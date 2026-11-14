@@ -176,6 +176,9 @@ struct TabRuntime {
     database: Option<String>,
     target: Option<ResourceTarget>,
     task: Option<String>,
+    result_task: Option<(String, u64)>,
+    pending_result: Option<PendingResult>,
+    scan_restart: Option<Uuid>,
     operation_pending: bool,
     results: Vec<String>,
     result_id: Option<String>,
@@ -208,6 +211,15 @@ struct TabRuntime {
     workbench: Workbench,
     view: String,
 }
+#[derive(Clone)]
+struct PendingResult {
+    task: String,
+    generation: u64,
+    id: String,
+    results: Vec<String>,
+    browse: bool,
+}
+
 // 零标签只保留连接身份与目标，不保留已关闭的物理会话、结果或编辑基线。
 #[derive(Clone, Serialize, Deserialize)]
 struct EmptyConnectionContext {

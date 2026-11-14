@@ -74,7 +74,14 @@ fn workspace_redis_check(changes: &[Value]) -> Result<()> {
             .get("operation")
             .and_then(Value::as_str)
             .unwrap_or("");
-        for name in ["field", "member", "new_member", "value"] {
+        for name in [
+            "field",
+            "new_field",
+            "member",
+            "new_member",
+            "new_key_b64",
+            "value",
+        ] {
             let Some(value) = change
                 .get(name)
                 .filter(|value| value.get("type").and_then(Value::as_str) == Some("large"))
@@ -92,10 +99,11 @@ fn workspace_redis_check(changes: &[Value]) -> Result<()> {
                         operation,
                         "set_remove" | "set_replace_member" | "zset_remove" | "zset_replace_member"
                     ));
-            let descriptor = if identity {
-                change.get("identity_edit_file")
-            } else {
-                Some(change)
+            let descriptor = match name {
+                "new_field" => change.get("new_field_edit_file"),
+                "new_key_b64" => change.get("new_key_edit_file"),
+                _ if identity => change.get("identity_edit_file"),
+                _ => Some(change),
             };
             let declared = descriptor.is_some_and(|file| {
                 file.get("edit_file_id")
@@ -705,6 +713,25 @@ impl App {
 
 impl App {
     pub(super) fn request_quit(&mut self, backend: &Backend) -> bool {
+        // 按正常关闭流程检查每个标签，遇到待确认或异步操作时停留在该标签。
+        let active = self.active;
+        for index in std::iter::once(active).chain((0..self.tabs.len()).filter(|&i| i != active)) {
+            self.switch_tab(index);
+            if self.workbench.overlay.is_some() {
+                if !self.workbench.overlay_close_confirm
+                    && !self.advanced_value.confirm_close
+                    && self.archery.discard_action.is_none()
+                    && self.field("settings-reload-confirm") != "true"
+                    && self.advanced_files.confirm_clean.is_none()
+                {
+                    self.action("overlay-close", backend);
+                }
+                if self.workbench.overlay.is_some() {
+                    return false;
+                }
+            }
+        }
+        self.switch_tab(active);
         if let Err(error) = self.workspace_draft_scopes_check() {
             self.status = i18n::UiMessage::raw(error.to_string());
             return false;

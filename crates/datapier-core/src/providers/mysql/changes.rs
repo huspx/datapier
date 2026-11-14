@@ -15,11 +15,12 @@ use crate::{
     model::{AppError, Column, ResourceTarget, Result, RowChange, TableSchema, Value, param},
 };
 
-/// 令牌绑定打开时的视图映射，提交前重新证明。
+/// 令牌绑定打开时的表结构或视图映射，提交前重新证明。
 #[derive(Clone)]
 pub(super) struct EditToken {
     pub target: ResourceTarget,
     pub view_fingerprint: Option<String>,
+    pub schema_fingerprint: Option<String>,
 }
 
 enum Bind {
@@ -118,6 +119,27 @@ fn decimal_fits(value: &str, ty: &str, unsigned: bool) -> bool {
     effective_scale <= i128::from(scale) && integer_digits <= i128::from(precision - scale)
 }
 
+fn temporal_fits(value: &str, ty: &str) -> bool {
+    let precision = match ty.split_once('(') {
+        Some((_, rest)) => match rest
+            .split_once(')')
+            .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+        {
+            Some(n) if n <= 6 => n,
+            _ => return false,
+        },
+        None => 0,
+    };
+    match value.split_once('.') {
+        None => true,
+        Some((_, fraction)) => {
+            !fraction.is_empty()
+                && fraction.bytes().all(|c| c.is_ascii_digit())
+                && fraction.bytes().skip(precision).all(|c| c == b'0')
+        }
+    }
+}
+
 // 精确数值按文本绑定以避免经浮点转换；浮点则按目标列精度绑定原生类型。
 fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
     let ty = column.type_name.to_ascii_lowercase();
@@ -195,8 +217,8 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
             "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob" | "bit"
         ),
         Value::Date(_) => base == "date",
-        Value::Time(_) => base == "time",
-        Value::DateTime(_) => matches!(base, "datetime" | "timestamp"),
+        Value::Time(v) => base == "time" && temporal_fits(v, &ty),
+        Value::DateTime(v) => matches!(base, "datetime" | "timestamp") && temporal_fits(v, &ty),
         Value::Json(_) => base == "json",
         _ => false,
     };
@@ -239,13 +261,24 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
                 .map_err(|_| validation_error("无效的年份".into(), "numeric_range"))?,
         ),
         Value::Bool(v) => Bind::Text(if *v { "1" } else { "0" }.into()),
+        Value::Time(v) | Value::DateTime(v) => {
+            let value = if let Some((whole, fraction)) = v.split_once('.') {
+                let fraction = fraction.trim_end_matches('0');
+                if fraction.is_empty() {
+                    whole.to_owned()
+                } else {
+                    format!("{whole}.{fraction}")
+                }
+            } else {
+                v.clone()
+            };
+            Bind::Text(value)
+        }
         Value::Integer(v)
         | Value::Unsigned(v)
         | Value::Decimal(v)
         | Value::Text(v)
-        | Value::Date(v)
-        | Value::Time(v)
-        | Value::DateTime(v) => Bind::Text(v.clone()),
+        | Value::Date(v) => Bind::Text(v.clone()),
         Value::Float(v) if base == "float" => {
             let n = v
                 .parse::<f32>()
@@ -513,6 +546,11 @@ fn predicate(
             q.push(ident).push(" <=> CAST(");
             push_bind(q, bind_value(value, c)?);
             q.push(" AS ").push(ty).push(")");
+        } else if matches!(value, Value::Text(_)) {
+            q.push("BINARY CONVERT(")
+                .push(ident)
+                .push(" USING utf8mb4) <=> BINARY ");
+            push_bind(q, bind_value(value, c)?);
         } else {
             q.push("BINARY ").push(ident).push(" <=> BINARY ");
             if matches!(value, Value::Json(_)) {
@@ -625,7 +663,11 @@ fn plan_change(
     })
 }
 
-async fn run_change(conn: &mut MySqlConnection, plan: &ChangePlan) -> Result<()> {
+async fn run_change(
+    conn: &mut MySqlConnection,
+    plan: &ChangePlan,
+    transactional: bool,
+) -> Result<()> {
     if let Some(check) = &plan.check
         && check
             .query()
@@ -641,7 +683,17 @@ async fn run_change(conn: &mut MySqlConnection, plan: &ChangePlan) -> Result<()>
     };
     let result = write.query().execute(&mut *conn).await.map_err(|e| {
         if matches!(e, sqlx::Error::Database(_)) {
-            super::errors::mysql_error(e)
+            let original = super::errors::mysql_error(e);
+            if transactional {
+                original
+            } else {
+                let mut unknown =
+                    AppError::unknown(format!("非事务写入可能部分生效: {}", original.message));
+                unknown.database_code = original.database_code.clone();
+                let mut details = original.details.as_object().cloned().unwrap_or_default();
+                details.insert("original_error".into(), json!(original));
+                unknown.with_details(Json::Object(details))
+            }
         } else {
             AppError::unknown(format!("写入结果无法确认: {e}"))
         }
@@ -669,6 +721,10 @@ pub(super) async fn edit_schema(
         if token.view_fingerprint.is_some() {
             return Err(AppError::conflict("视图类型已变化"));
         }
+        if token.schema_fingerprint.as_deref() != Some(catalog::schema_fingerprint(&raw)?.as_str())
+        {
+            return Err(AppError::conflict("表结构已变化"));
+        }
         return Ok(raw);
     }
     let mapping = super::view::resolve(s, raw, cancel).await?;
@@ -693,6 +749,11 @@ pub(super) async fn open(
         (raw, None)
     };
     editable(&schema)?;
+    let schema_fingerprint = if view_fingerprint.is_none() {
+        Some(catalog::schema_fingerprint(&schema)?)
+    } else {
+        None
+    };
     if schema.keys.is_empty() {
         return Err(AppError::invalid("表没有可靠键，不能编辑行"));
     }
@@ -702,6 +763,7 @@ pub(super) async fn open(
         EditToken {
             target: schema.target.clone(),
             view_fingerprint,
+            schema_fingerprint,
         },
     );
     Ok(json!({"token":token,"schema":schema}))
@@ -804,7 +866,7 @@ pub(super) async fn execute_batch(
             failure = Some((index, e));
             break;
         }
-        match run_change(&mut conn, &plan).await {
+        match run_change(&mut conn, &plan, transactional).await {
             Ok(()) => {
                 if plan.write.is_some() {
                     items[index] = json!({"index":index,"status":"applied"});

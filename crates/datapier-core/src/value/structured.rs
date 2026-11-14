@@ -129,8 +129,18 @@ pub fn format_xml(input: &str, max_bytes: usize) -> Result<String> {
             "含 CDATA 的 XML 不安全格式化",
         ));
     }
-    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut edits: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    let mut ancestors = Vec::new();
+    let mut added = 0usize;
+    let mut removed = 0usize;
     for node in doc.descendants().filter(|n| n.is_element()) {
+        while ancestors
+            .last()
+            .is_some_and(|end| *end <= node.range().start)
+        {
+            ancestors.pop();
+        }
+        ancestors.push(node.range().end);
         if node.attribute(("http://www.w3.org/XML/1998/namespace", "space")) == Some("preserve") {
             return Err(AppError::new(
                 "unsupported_format",
@@ -147,7 +157,7 @@ pub fn format_xml(input: &str, max_bytes: usize) -> Result<String> {
         {
             return Err(AppError::new("unsupported_format", "混合内容不安全格式化"));
         }
-        let depth = node.ancestors().filter(|n| n.is_element()).count();
+        let depth = ancestors.len();
         let range = node.range();
         let raw = &input[range.clone()];
         let close = raw
@@ -173,28 +183,49 @@ pub fn format_xml(input: &str, max_bytes: usize) -> Result<String> {
             if !input[start..end].chars().all(char::is_whitespace) {
                 return Err(AppError::new("unsupported_format", "XML 内容不能安全缩进"));
             }
-            edits.push((start..end, format!("\n{}", "  ".repeat(depth))));
+            let spaces = depth.checked_mul(2).ok_or_else(limit)?;
+            added = added
+                .checked_add(spaces.checked_add(1).ok_or_else(limit)?)
+                .ok_or_else(limit)?;
+            removed = removed.checked_add(end - start).ok_or_else(limit)?;
+            if added > max_bytes.saturating_add(input.len()) {
+                return Err(limit());
+            }
+            edits.push((start..end, spaces));
         }
         let start = items.last().unwrap().range().end;
         if !input[start..close].chars().all(char::is_whitespace) {
             return Err(AppError::new("unsupported_format", "XML 内容不能安全缩进"));
         }
-        edits.push((start..close, format!("\n{}", "  ".repeat(depth - 1))));
-    }
-    let mut size = input.len();
-    for (range, replacement) in &edits {
-        size = size
-            .checked_sub(range.len())
-            .and_then(|n| n.checked_add(replacement.len()))
+        let spaces = (depth - 1).checked_mul(2).ok_or_else(limit)?;
+        added = added
+            .checked_add(spaces.checked_add(1).ok_or_else(limit)?)
             .ok_or_else(limit)?;
+        removed = removed.checked_add(close - start).ok_or_else(limit)?;
+        if added > max_bytes.saturating_add(input.len()) {
+            return Err(limit());
+        }
+        edits.push((start..close, spaces));
     }
+    let size = input
+        .len()
+        .checked_sub(removed)
+        .and_then(|n| n.checked_add(added))
+        .ok_or_else(limit)?;
     if size > max_bytes {
         return Err(limit());
     }
-    edits.sort_unstable_by_key(|(r, _)| std::cmp::Reverse(r.start));
-    let mut out = input.to_owned();
-    for (range, replacement) in edits {
-        out.replace_range(range, &replacement);
+    edits.sort_unstable_by_key(|(range, _)| range.start);
+    let mut out = String::with_capacity(size);
+    let mut cursor = 0;
+    for (range, spaces) in edits {
+        out.push_str(&input[cursor..range.start]);
+        out.push('\n');
+        for _ in 0..spaces {
+            out.push(' ');
+        }
+        cursor = range.end;
     }
+    out.push_str(&input[cursor..]);
     Ok(out)
 }

@@ -137,6 +137,41 @@ fn applied_value_requires_discard_until_successful_stage() {
 }
 
 #[test]
+fn quit_protects_applied_value_until_staged_or_discarded() {
+    let (backend, _requests, _responses) = crate::Backend::scripted();
+    let mut app = value_app(&backend);
+    app.workspace_loaded = true;
+    apply_value(&mut app, &backend);
+    assert!(!app.request_quit(&backend));
+    assert!(app.advanced_value.confirm_close);
+    assert!(!app.request_quit(&backend));
+    assert!(app.advanced_value.confirm_close);
+    assert!(app.advanced_value.applied);
+    assert!(!app.advanced_value.staged);
+    app.advanced_value_action("advanced-value-continue", &backend);
+    assert!(!app.request_quit(&backend));
+    app.advanced_value_action("advanced-value-discard", &backend);
+    assert!(app.request_quit(&backend));
+}
+
+#[test]
+fn quit_selects_background_tab_with_unstaged_value() {
+    let (backend, _requests, _responses) = crate::Backend::scripted();
+    let mut app = value_app(&backend);
+    app.workspace_loaded = true;
+    let mut other = app.tabs[0].clone();
+    other.id = uuid::Uuid::new_v4();
+    app.tabs.push(other);
+    apply_value(&mut app, &backend);
+    app.switch_tab(1);
+    assert!(!app.request_quit(&backend));
+    assert_eq!(app.active, 0);
+    assert!(app.advanced_value.confirm_close);
+    assert!(app.advanced_value.applied);
+    assert!(!app.advanced_value.staged);
+}
+
+#[test]
 fn failed_external_cleanup_keeps_frozen_confirmation_and_error() {
     let (backend, _requests, _responses) = crate::Backend::scripted();
     let mut app = value_app(&backend);
