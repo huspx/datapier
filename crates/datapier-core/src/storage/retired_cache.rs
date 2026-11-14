@@ -82,7 +82,8 @@ impl Snapshot {
                 "旧缓存内容已变化，请重新预览并确认清理范围",
             ));
         }
-        for entry in self.entries.iter().rev() {
+        // 消费已处理项，释放其父目录句柄，避免 Windows 删除空目录时仍被子项占用。
+        for entry in self.entries.into_iter().rev() {
             let metadata = entry.parent.symlink_metadata(&entry.name)?;
             let directory = metadata.is_dir() && !metadata.is_symlink();
             // 删除子项会改变目录 mtime；目录只删除空目录，类型变化必须重新确认。
