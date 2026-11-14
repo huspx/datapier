@@ -208,6 +208,8 @@ HTML 设计稿保留 `docs/ui-redesign.html` 为唯一入口，静态资源维�
 
 Rust 测试文件统一放在各 crate 的 `tests/`：集成测试放在该目录根部，需访问私有实现的单元测试放在 `tests/unit/`，可按源码职责建立子目录。源码以 `#[cfg(test)]` 和相对路径 `#[path = "..."]` 引入对应测试模块；不在 `src/` 内存放测试文件或内联测试模块，也不为测试扩大公开 API。
 
+测试清理临时数据目录前，先关闭数据库连接和后台任务，再释放 `Store`、`ExecutionSink` 等持有存储副本的对象，最后删除目录。`store.pool.close().await` 只关闭 SQLite 连接，不释放 `Store` 持有的根目录句柄；cap-std 在 Windows 上会禁止删除仍打开的目录，不能通过忽略清理错误、重试或放宽目录共享权限规避。
+
 Rust 改动按影响范围运行 `cargo check --locked`／`cargo test --locked`；格式检查按[代码格式化](#代码格式化)执行。静态检查与 workspace 默认测试命令为：
 
 ```sh

@@ -91,6 +91,7 @@ async fn result_rows(store: &Store, result: &Json) -> Vec<Vec<Value>> {
 async fn clean(store: Store) {
     let root = (*store.root).clone();
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

@@ -67,6 +67,7 @@ async fn schema_conflict_and_cancelled_results_keep_their_task_terminal_state() 
         assert_eq!(recorded.error.unwrap().code, business);
     }
     engine.store.pool.close().await;
+    drop(engine);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

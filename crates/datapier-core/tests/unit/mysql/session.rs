@@ -323,6 +323,8 @@ async fn failed_script_preserves_completed_work_and_remaining_sql() {
         .unwrap();
     assert_eq!(count, 1);
     session.close().await.unwrap();
+    drop(sink);
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

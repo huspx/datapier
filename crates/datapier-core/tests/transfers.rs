@@ -123,6 +123,7 @@ fn mysql_target(name: &str) -> ResourceTarget {
 async fn clean(store: Store) {
     let root = (*store.root).clone();
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

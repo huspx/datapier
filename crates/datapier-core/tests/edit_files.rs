@@ -16,6 +16,7 @@ async fn store() -> Store {
 async fn cleanup(store: Store) {
     let root = (*store.root).clone();
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

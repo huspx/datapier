@@ -41,6 +41,7 @@ async fn changed_cache_rejects_old_confirmation_and_preserves_all_files() {
     assert!(!root.join("values").exists());
     assert!(root.join("datapier.sqlite3").exists());
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -64,5 +65,6 @@ async fn clearing_retired_symlinks_never_follows_their_targets() {
         b"keep"
     );
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

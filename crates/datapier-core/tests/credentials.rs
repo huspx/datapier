@@ -120,6 +120,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
     let cleanup = store.delete_profile(profile.id).await;
     let native_cleanup = entry.delete_credential();
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);

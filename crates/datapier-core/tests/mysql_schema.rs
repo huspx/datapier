@@ -125,7 +125,9 @@ async fn create_table_with_inherited_defaults_is_verified() {
         .await
         .unwrap();
     session.close().await.unwrap();
+    drop(sink);
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
     assert_eq!(result["state"], "applied", "{result}");
     assert_eq!(result["snapshot"]["completeness"]["state"], "complete");
@@ -321,6 +323,8 @@ async fn detached_ddl_allows_transaction_end_and_close_to_release_metadata_locks
         .await
         .unwrap();
     cleanup.close().await.unwrap();
+    drop(sink);
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

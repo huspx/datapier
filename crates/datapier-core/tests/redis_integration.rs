@@ -143,6 +143,7 @@ impl Fixture {
         drop(self.client);
         let root = (*self.store.root).clone();
         self.store.pool.close().await;
+        drop(self.store);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
