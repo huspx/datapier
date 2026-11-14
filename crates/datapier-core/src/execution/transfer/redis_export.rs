@@ -21,7 +21,7 @@ pub(super) async fn export_redis(
         c.write_record(REDIS_HEADER).map_err(csv_error)?;
         Some(c)
     } else {
-        out.write_all(b"{\"format\":\"datapier\",\"version\":1,\"records\":[")?;
+        out.write_all(b"{\"format\":\"datapier\",\"version\":2,\"records\":[")?;
         None
     };
     let mut writer = RedisExportWriter {
@@ -110,7 +110,7 @@ async fn export_key(
     let expiry = meta.get("expires_at_ms").cloned().unwrap_or(Json::Null);
     let exp = expiry.as_str().unwrap_or("permanent");
     if let Some(c) = csv.as_mut() {
-        c.write_record(["1", "key", key, ty, exp, "", "", "", "", ""])
+        c.write_record(["2", "key", key, ty, exp, "", "", "", "", "", ""])
             .map_err(csv_error)?;
         flush_csv(c, out, false)?;
     } else {
@@ -135,10 +135,10 @@ async fn export_key(
                 .map_err(csv_error)?;
             prefix.flush()?;
             let encoded = prefix.get_ref();
-            if !encoded.ends_with(b"AAAA\n") {
+            if !encoded.ends_with(b"AAAA,\n") {
                 return Err(AppError::new("csv", "Redis CSV 前缀无效"));
             }
-            out.write_all(&encoded[..encoded.len() - 5])?;
+            out.write_all(&encoded[..encoded.len() - 6])?;
         } else {
             out.write_all(b"[{\"type\":\"bytes\",\"value\":\"")?;
         }
@@ -173,7 +173,7 @@ async fn export_key(
             }
         }
         if csv.is_some() {
-            out.write_all(b"\n")?;
+            out.write_all(b",\n")?;
         } else {
             out.write_all(b"\"}]]}")?;
         }

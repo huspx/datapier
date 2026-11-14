@@ -205,13 +205,19 @@ impl Engine {
         params: &Value,
     ) -> Result<Value> {
         let result_id: Uuid = model::param(params, "result_id")?;
-        let (_, task, proof) = self.mcp_result(owner, result_id).await?;
-        self.dispatch_internal(
-            owner,
-            "result.release",
-            json!({"result_id":result_id,"session_id":proof.session_id}),
-        )
-        .await?;
+        let meta = self.store.result_meta(result_id).await?;
+        let task = self.store.task(meta.execution_id).await?;
+        if task.owner != owner {
+            return Err(denied("结果不属于当前客户端"));
+        }
+        let raw = self
+            .store
+            .execution_proof(task.id)
+            .await?
+            .ok_or_else(|| denied("结果缺少访问证明"))?;
+        let proof: AccessProof =
+            serde_json::from_value(raw).map_err(|_| denied("结果访问证明无效"))?;
+        self.store.release_result(result_id).await?;
         let mut state = self.state.lock().unwrap();
         state.mcp.cursors.retain(|_, cursor| {
             !(cursor.owner == owner

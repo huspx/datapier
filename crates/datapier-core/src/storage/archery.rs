@@ -1,5 +1,6 @@
 //! Archery 服务配置、独立凭据归属与实例批量事务。
 use super::*;
+use sqlx::Connection;
 use std::collections::{HashMap, HashSet};
 
 fn server_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ArcheryServer> {
@@ -27,7 +28,7 @@ impl Store {
     }
 
     pub async fn archery_servers(&self) -> Result<Vec<ArcheryServerInfo>> {
-        let rows = sqlx::query("SELECT s.id,s.name,s.base_url,s.username,s.http_tls,s.revision,s.totp_mode,s.credential_saved,s.totp_credential_saved,(SELECT count(*) FROM profiles p WHERE p.archery_server_id=s.id) FROM archery_servers s ORDER BY s.name,s.id").fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT s.id,s.name,s.base_url,s.username,s.http_tls,s.revision,s.totp_mode,s.credential_saved,s.totp_credential_saved,(SELECT count(*) FROM profiles p WHERE p.archery_server_id=s.id) FROM archery_servers s ORDER BY s.name,s.id").fetch_all(&mut *self.pool.acquire().await?).await?;
         let passwords = self.archery_secrets.read().await;
         let totps = self.archery_totp_secrets.read().await;
         rows.iter()
@@ -61,7 +62,7 @@ impl Store {
 
     pub async fn archery_server(&self, id: Uuid) -> Result<ArcheryServer> {
         let row = sqlx::query("SELECT id,name,base_url,username,http_tls,revision,totp_mode FROM archery_servers WHERE id=?")
-            .bind(id.to_string()).fetch_optional(&self.pool).await?
+            .bind(id.to_string()).fetch_optional(&mut *self.pool.acquire().await?).await?
             .ok_or_else(|| AppError::new("not_found", "服务不存在"))?;
         server_from_row(&row)
     }
@@ -91,7 +92,7 @@ impl Store {
         };
         let saved: Option<i64> = sqlx::query_scalar(query)
             .bind(id.to_string())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.pool.acquire().await?)
             .await?;
         if saved != Some(1) {
             return Ok(None);
@@ -155,7 +156,7 @@ impl Store {
         }
         let _guard = self.profile_gate.lock().await;
         let row = sqlx::query("SELECT id,name,base_url,username,http_tls,revision,totp_mode,credential_saved,totp_credential_saved FROM archery_servers WHERE id=?")
-            .bind(server.id.to_string()).fetch_optional(&self.pool).await?;
+            .bind(server.id.to_string()).fetch_optional(&mut *self.pool.acquire().await?).await?;
         let (password_tracked, totp_tracked) = if let Some(row) = row {
             let old = server_from_row(&row)?;
             if old.base_url != server.base_url || old.username != server.username {
@@ -201,7 +202,7 @@ impl Store {
                 .bind(serde_json::to_string(&server.http_tls)?).bind(server.revision as i64).bind(mode)
                 .bind(i64::from(matches!(&password, CredentialUpdate::Replace { persist: true, .. })))
                 .bind(i64::from(matches!(&totp, CredentialUpdate::Replace { persist: true, .. })))
-                .execute(&self.pool).await?;
+                .execute(&mut *self.pool.acquire().await?).await?;
         }
         self.update_archery_credential(server.id, false, password, password_tracked)
             .await?;
@@ -215,7 +216,7 @@ impl Store {
         .bind(mode)
         .bind(server.revision as i64)
         .bind(server.id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *self.pool.acquire().await?)
         .await?;
         self.archery_servers()
             .await?
@@ -251,7 +252,7 @@ impl Store {
                 sqlx::query(mark)
                     .bind(1_i64)
                     .bind(id.to_string())
-                    .execute(&self.pool)
+                    .execute(&mut *self.pool.acquire().await?)
                     .await?;
                 tracked = true;
                 let account = self.archery_account(id, totp);
@@ -278,7 +279,7 @@ impl Store {
             sqlx::query(mark)
                 .bind(i64::from(tracked))
                 .bind(id.to_string())
-                .execute(&self.pool)
+                .execute(&mut *self.pool.acquire().await?)
                 .await?;
             cache
                 .write()
@@ -291,7 +292,7 @@ impl Store {
             sqlx::query(mark)
                 .bind(0_i64)
                 .bind(id.to_string())
-                .execute(&self.pool)
+                .execute(&mut *self.pool.acquire().await?)
                 .await?;
             cache.write().await.remove(&id);
         }
@@ -323,11 +324,11 @@ impl Store {
         tokio::spawn(async move {
             let _guard = store.profile_gate.lock().await;
             let row = sqlx::query("SELECT revision,credential_saved,totp_credential_saved FROM archery_servers WHERE id=?")
-                .bind(id.to_string()).fetch_optional(&store.pool).await?
+                .bind(id.to_string()).fetch_optional(&mut *store.pool.acquire().await?).await?
                 .ok_or_else(|| AppError::new("not_found", "服务不存在"))?;
             if row.get::<i64, _>(0) as u64 != expected_revision { return Err(AppError::conflict("服务修订已变化")); }
             let actual: Vec<String> = sqlx::query_scalar("SELECT id FROM profiles WHERE archery_server_id=? ORDER BY id")
-                .bind(id.to_string()).fetch_all(&store.pool).await?;
+                .bind(id.to_string()).fetch_all(&mut *store.pool.acquire().await?).await?;
             let mut expected: Vec<String> = ids.iter().map(Uuid::to_string).collect();
             expected.sort();
             if actual != expected { return Err(AppError::conflict("服务连接集合已变化")); }
@@ -335,12 +336,13 @@ impl Store {
                 if row.get::<i64, _>(column) != 0 {
                     store.delete_archery_credential(id, totp).await?;
                     let mark = if totp { "UPDATE archery_servers SET totp_credential_saved=0 WHERE id=?" } else { "UPDATE archery_servers SET credential_saved=0 WHERE id=?" };
-                    sqlx::query(mark).bind(id.to_string()).execute(&store.pool).await?;
+                    sqlx::query(mark).bind(id.to_string()).execute(&mut *store.pool.acquire().await?).await?;
                 }
                 let cache = if totp { &store.archery_totp_secrets } else { &store.archery_secrets };
                 cache.write().await.remove(&id);
             }
-            let mut tx = store.pool.begin().await?;
+            let mut connection = store.pool.acquire().await?;
+            let mut tx = connection.begin().await?;
             sqlx::query("DELETE FROM profiles WHERE archery_server_id=?").bind(id.to_string()).execute(&mut *tx).await?;
             sqlx::query("DELETE FROM archery_servers WHERE id=?").bind(id.to_string()).execute(&mut *tx).await?;
             tx.commit().await?;
@@ -361,7 +363,8 @@ impl Store {
         let desired = desired_profiles.to_vec();
         tokio::spawn(async move {
             let _guard = store.profile_gate.lock().await;
-            let mut tx = store.pool.begin().await?;
+            let mut connection = store.pool.acquire().await?;
+            let mut tx = connection.begin().await?;
             let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM archery_servers WHERE id=?").bind(server_id.to_string()).fetch_optional(&mut *tx).await?;
             if revision != Some(expected_revision as i64) { return Err(AppError::conflict("服务修订已变化")); }
             let rows = sqlx::query("SELECT payload,revision FROM profiles WHERE archery_server_id=? ORDER BY id").bind(server_id.to_string()).fetch_all(&mut *tx).await?;

@@ -10,6 +10,14 @@ impl App {
         self.open_cell_at(cell, backend);
     }
     pub(super) fn open_cell_at(&mut self, cell: Cell, backend: &Backend) {
+        self.track_modal_draft();
+        if self.workbench.overlay.as_deref() == Some("cell")
+            && self.detail_cell() != Some(cell)
+            && self.modal_has_unsaved()
+        {
+            self.confirm_modal_action(format!("modal-open-cell:{}:{}", cell.row, cell.column));
+            return;
+        }
         let Some(g) = self.grid.as_ref() else {
             self.status = "没有结果".into();
             return;
@@ -19,10 +27,19 @@ impl App {
             return;
         }
         self.workbench.cell_target = Some((g.page.result.id, cell));
+        self.workbench.cell_context = Some((
+            self.profile.as_ref().map(|profile| profile.name.clone()),
+            self.target.as_ref().map(|target| match &target.database {
+                Some(database) => format!("{database}.{}", target.name),
+                None => target.name.clone(),
+            }),
+        ));
         self.workbench.cell_fields_open = false;
         self.large = None;
+        self.workbench.cell_open_intent = None;
         if let Some(datapier_core::model::Value::Large { id, .. }) = g.value(cell) {
             let id = *id;
+            self.workbench.cell_open_intent = Some((g.page.result.id, cell));
             // 完整值就绪前不展示旧输入，防止旧值被写入新目标。
             if self.workbench.overlay.as_deref() == Some("cell") {
                 self.workbench.overlay = None;
@@ -46,6 +63,8 @@ impl App {
                     self.field_set("cell", text);
                     self.workbench.overlay = Some("cell".into());
                     self.workbench.focus_request = Some("input-cell".into());
+                    self.workbench.modal_draft = None;
+                    self.track_modal_draft();
                 }
                 Err(e) => self.status = workbench::grid_cell_error(e, g, cell),
             }
@@ -84,6 +103,15 @@ impl App {
         };
         if let Err(e) = g.resolve_large(load.cell, full) {
             self.status = workbench::grid_cell_error(e, g, load.cell);
+            return;
+        }
+        let intended =
+            self.workbench.cell_open_intent.take() == Some((g.page.result.id, load.cell));
+        if !(intended && matches!(self.workbench.overlay.as_deref(), None | Some("cell")))
+            && self.workbench.inline != Some(load.cell)
+        {
+            self.workbench.redis_loading = None;
+            self.status = "已读取完整字段".into();
             return;
         }
         if let Some(original) = self.workbench.redis_loading.take() {
@@ -143,7 +171,7 @@ impl LargeLoad {
     pub(super) fn consume(&mut self, value: &Value) -> Result<Option<datapier_core::model::Value>> {
         use base64::Engine as _;
         let encoded = value
-            .get("bytes_b64")
+            .get("data_b64")
             .and_then(Value::as_str)
             .ok_or_else(|| AppError::invalid("缺少字段分块"))?;
         let bytes = base64::engine::general_purpose::STANDARD
@@ -164,7 +192,7 @@ impl LargeLoad {
             self.offset = next;
             return Ok(None);
         }
-        if value.get("total").and_then(Value::as_u64) != Some(end) {
+        if value.get("total_bytes").and_then(Value::as_u64) != Some(end) {
             return Err(AppError::invalid("大字段长度不一致"));
         }
         Ok(Some(serde_json::from_slice(&self.bytes)?))

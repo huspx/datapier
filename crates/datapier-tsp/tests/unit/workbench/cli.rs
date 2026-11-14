@@ -92,6 +92,28 @@ fn cli_export_uses_selected_result_instead_of_key_result() {
 }
 
 #[test]
+fn redis_key_export_uses_target_while_query_export_uses_cached_result() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.browse_result = true;
+    app.result_id = Some(Uuid::new_v4().to_string());
+    app.field_set("path", "/tmp/redis-export.json");
+    app.action("export", &backend);
+    let key = requests.try_recv().unwrap();
+    assert_eq!(key.method, "transfer.export");
+    assert!(key.params.get("target").is_some());
+    assert!(key.params.get("result_id").is_none());
+    app.operation_pending = false;
+    app.browse_result = false;
+    app.action("export", &backend);
+    let query = requests.try_recv().unwrap();
+    assert_eq!(
+        query.params["result_id"],
+        app.result_id.as_ref().unwrap().as_str()
+    );
+}
+
+#[test]
 fn cli_pages_do_not_replace_key_grid_or_baseline() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = app_for(
@@ -272,15 +294,15 @@ fn cli_failure_keeps_partial_results_and_chunked_value_separate() {
     let tag = request.tag.splitn(3, ':').nth(2).unwrap();
     app.workbench_response(
         &stale_tag,
-        json!({"bytes_b64":STANDARD.encode(&bytes),"offset":0,"next":null,"total":bytes.len()}),
+        json!({"data_b64":STANDARD.encode(&bytes),"offset":0,"next":null,"total_bytes":bytes.len()}),
         &backend,
     );
     assert_eq!(app.workbench.cli_large.as_ref().unwrap().offset, 0);
     let split = bytes.len() / 2;
-    app.workbench_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total":bytes.len()}), &backend);
+    app.workbench_response(tag, json!({"data_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total_bytes":bytes.len()}), &backend);
     let request = requests.try_recv().unwrap();
     let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-    app.workbench_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total":bytes.len()}), &backend);
+    app.workbench_response(tag, json!({"data_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total_bytes":bytes.len()}), &backend);
     assert_eq!(
         app.workbench
             .cli_grid

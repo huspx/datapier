@@ -7,21 +7,165 @@ impl Engine {
         &self,
         db: Arc<Database>,
         method: &str,
+        mut params: Value,
+        sink: &ExecutionSink,
+        cancel: &CancellationToken,
+        transition: &AsyncMutex<()>,
+    ) -> Result<Value> {
+        let budgets = if method == "change.submit" {
+            self.prepare_change_value_sources(&db, &mut params).await?
+        } else {
+            Vec::new()
+        };
+        let result = self
+            .provider_inner(db, method, params, sink, cancel, transition)
+            .await;
+        for handle in budgets {
+            self.store.release_auxiliary(handle).await?;
+        }
+        result
+    }
+    async fn provider_inner(
+        &self,
+        db: Arc<Database>,
+        method: &str,
         params: Value,
         sink: &ExecutionSink,
         cancel: &CancellationToken,
         transition: &AsyncMutex<()>,
     ) -> Result<Value> {
         db.profile.capabilities().ensure_method(method, &params)?;
-        let mut session = tokio::select! { _ = cancel.cancelled() => return Err(AppError::cancelled()), lock = db.session.lock() => lock };
-        if self
-            .state
-            .lock()
-            .unwrap()
-            .contexts
-            .get(&db.owner)
-            .is_some_and(|context| matches!(context.kind, model::ClientKind::Mcp))
+        let gate = (db.profile.provider == model::ProviderKind::Mysql && !db.profile.is_archery())
+            .then(|| self.editing_gate(db.profile.id));
+        let control = if matches!(method, "execution.start" | "execution.run") {
+            params
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(datapier_core::providers::mysql::transaction_control)
+        } else {
+            None
+        };
+        let ending = matches!(
+            method,
+            "transaction.begin" | "transaction.commit" | "transaction.rollback"
+        ) || control.is_some();
+        // 结束原查询连接上的事务可释放正在等待的 DDL 所需元数据锁。
+        let _gate_guard = match gate.as_ref().filter(|_| !ending) {
+            Some(gate) => Some(
+                tokio::select! { _ = cancel.cancelled() => return Err(AppError::cancelled()), guard = gate.lock() => guard },
+            ),
+            None => None,
+        };
+        let session_id: Uuid = model::param(&params, "session_id")?;
+        let transaction_control = control.is_some();
+        let raw_write = gate.is_some()
+            && matches!(method, "execution.start" | "execution.run")
+            && !transaction_control
+            && params
+                .get("text")
+                .and_then(Value::as_str)
+                .is_none_or(|text| {
+                    datapier_core::providers::mysql::validate_readonly(text).is_err()
+                });
+        let schema_write = method == "schema.execute";
+        let data_write = gate.is_some()
+            && (matches!(
+                method,
+                "change.submit"
+                    | "replace.submit"
+                    | "import.rows"
+                    | "transfer.import"
+                    | "transaction.begin"
+                    | "transaction.commit"
+            ) || matches!(
+                control,
+                Some(
+                    datapier_core::providers::mysql::TransactionControl::Begin
+                        | datapier_core::providers::mysql::TransactionControl::Commit
+                        | datapier_core::providers::mysql::TransactionControl::AutocommitOn
+                )
+            ));
+        if data_write
+            && !matches!(
+                method,
+                "transaction.begin" | "transaction.commit" | "change.submit"
+            )
+            && !transaction_control
         {
+            self.editing_check_dirty_except(db.profile.id, params.get("target"), None)?;
+        }
+        if schema_write || raw_write {
+            self.editing_check_dirty(
+                db.profile.id,
+                if schema_write {
+                    params.get("target")
+                } else {
+                    None
+                },
+            )?;
+            if schema_write {
+                for path in [
+                    "/plan/intent/definition",
+                    "/plan/intent/baseline/definition",
+                ] {
+                    if let Some(trigger) = params
+                        .pointer(path)
+                        .filter(|v| v.get("kind").and_then(Value::as_str) == Some("trigger"))
+                    {
+                        let target =
+                            json!({"database":trigger.get("database"),"name":trigger.get("table")});
+                        self.editing_check_dirty(db.profile.id, Some(&target))?;
+                    }
+                }
+                for path in [
+                    "/plan/intent/definition/constraints",
+                    "/plan/intent/baseline/definition/constraints",
+                ] {
+                    if let Some(constraints) = params.pointer(path).and_then(Value::as_array) {
+                        for constraint in constraints {
+                            if constraint.get("kind").and_then(Value::as_str) == Some("foreign_key")
+                            {
+                                let target = json!({"database":constraint.get("referenced_database"),"name":constraint.get("referenced_table")});
+                                self.editing_check_dirty(db.profile.id, Some(&target))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if matches!(method, "schema.execute" | "replace.submit")
+            && let Some(id) = optional::<Uuid>(&params, "plan_id")?
+        {
+            self.editing_plan_current(id)?;
+        }
+        let mut session = tokio::select! { _ = cancel.cancelled() => return Err(AppError::cancelled()), lock = db.session.lock() => lock };
+        let is_mcp = {
+            let state = self.state.lock().unwrap();
+            let context = state
+                .contexts
+                .get(&db.owner)
+                .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
+            matches!(context.kind, model::ClientKind::Mcp)
+        };
+        if !is_mcp && self.store.profile(db.profile.id).await?.revision != db.profile.revision {
+            return Err(AppError::new("invalidated", "连接设置已变化，请重新连接"));
+        }
+        self.editing_apply_invalidation(session_id, &mut session);
+        let mut params = params;
+        if method == "change.submit" && gate.is_some() {
+            let token: Uuid = model::param(&params, "token")?;
+            let target = match &*session {
+                ProviderSession::Mysql(mysql) => mysql.draft_target(token)?,
+                _ => return Err(AppError::invalid("编辑会话不是 MySQL")),
+            };
+            Self::validate_submit_target(target, params.get("target"))?;
+            let target = serialize(target)?;
+            self.editing_check_dirty_except(db.profile.id, Some(&target), Some(session_id))?;
+            params["target"] = target;
+        }
+        let invalidation_scope = params.get("target").cloned();
+        let executing_plan = optional::<Uuid>(&params, "plan_id")?;
+        if is_mcp {
             self.mcp_before_send(db.owner, &db, method, &params, &mut session)
                 .await?;
         }
@@ -56,25 +200,82 @@ impl Engine {
             }
             self.emit_state(db.owner, sink.execution_id, "running");
         }
-        let result = if method == "transfer.preview" {
-            datapier_core::execution::transfer::preview(&mut session, params, sink, cancel).await
-        } else if method.starts_with("transfer.") {
-            datapier_core::execution::transfer::run(&mut session, method, params, sink, cancel)
-                .await
+        let draft_budget = if matches!(method, "change.preview" | "change.submit") {
+            self.prepare_change_files(&db, &mut params).await?
         } else {
-            session
-                .call(
-                    if method == "execution.start" {
-                        "execution.run"
-                    } else {
-                        method
-                    },
-                    params,
-                    sink,
-                    cancel,
-                )
-                .await
+            None
         };
+        let (result, mut session) = if schema_write {
+            let executor = match &*session {
+                ProviderSession::Mysql(mysql) => mysql.schema_executor()?,
+                _ => return Err(AppError::invalid("结构执行仅支持 MySQL")),
+            };
+            drop(session);
+            (executor.execute(params, sink, cancel).await, None)
+        } else {
+            let result = if method == "transfer.preview" {
+                datapier_core::execution::transfer::preview(&mut session, params, sink, cancel)
+                    .await
+            } else if method.starts_with("transfer.") {
+                datapier_core::execution::transfer::run(&mut session, method, params, sink, cancel)
+                    .await
+            } else {
+                session
+                    .call(
+                        if method == "execution.start" {
+                            "execution.run"
+                        } else {
+                            method
+                        },
+                        params,
+                        sink,
+                        cancel,
+                    )
+                    .await
+            };
+            (result, Some(session))
+        };
+        if is_mcp
+            && result.is_ok()
+            && matches!(
+                control,
+                Some(
+                    datapier_core::providers::mysql::TransactionControl::Commit
+                        | datapier_core::providers::mysql::TransactionControl::Rollback
+                        | datapier_core::providers::mysql::TransactionControl::AutocommitOn
+                )
+            )
+        {
+            self.mcp_transaction_finished(session_id);
+        }
+        if schema_write || raw_write || data_write {
+            // sent 持久化失败也不能证明未发送；保守失效并保留查询事务。
+            let may_have_sent = self
+                .store
+                .task(sink.execution_id)
+                .await
+                .map(|task| task.sent)
+                .unwrap_or(true);
+            if result.is_ok() || may_have_sent {
+                if schema_write || raw_write {
+                    self.editing_invalidate_schema(
+                        db.profile.id,
+                        executing_plan,
+                        invalidation_scope.as_ref(),
+                    )
+                    .await;
+                } else {
+                    self.editing_invalidate_data(db.profile.id).await;
+                }
+                if let Some(session) = session.as_mut() {
+                    self.editing_apply_invalidation(session_id, session);
+                }
+            }
+        }
+        drop(session);
+        if let Some(handle) = draft_budget {
+            self.store.release_auxiliary(handle).await?;
+        }
         if db.profile.is_archery() {
             db.capabilities.lock().unwrap().observe(method, &result);
         }
@@ -124,6 +325,14 @@ impl Engine {
         self.apply_live_elapsed(&mut task);
         Ok(task)
     }
+    pub(super) async fn task_details(&self, id: Uuid) -> Result<model::TaskRecord> {
+        let mut task = self.store.task_details(id).await?;
+        if let Some(completion) = self.state.lock().unwrap().unpersisted.get(&id) {
+            completion.apply(&mut task);
+        }
+        self.apply_live_elapsed(&mut task);
+        Ok(task)
+    }
     pub(super) async fn finish_task(
         &self,
         owner: Uuid,
@@ -145,7 +354,29 @@ impl Engine {
         // 错误本身不能证明写入未发生；结合已持久化的 sent/may_write 判定是否需要人工核对。
         let record = self.store.task(id).await.ok();
         let (state, summary, error) = match result {
-            Ok(value) => ("succeeded", value.clone(), None),
+            Ok(value) => {
+                let business = value
+                    .get("state")
+                    .or_else(|| value.get("status"))
+                    .and_then(Value::as_str);
+                match business {
+                    Some("cancelled") => ("cancelled", value.clone(), Some(AppError::cancelled())),
+                    Some("outcome_unknown") => (
+                        "outcome_unknown",
+                        value.clone(),
+                        Some(AppError::unknown("执行结果需人工核对")),
+                    ),
+                    Some("failed" | "partial" | "verification_mismatch" | "conflict") => (
+                        "failed",
+                        value.clone(),
+                        Some(AppError::new(
+                            business.unwrap(),
+                            "执行未全部完成，请查看逐项结果",
+                        )),
+                    ),
+                    _ => ("succeeded", value.clone(), None),
+                }
+            }
             Err(error) => {
                 // change.submit 的 rolled_back 仅在事务 ROLLBACK 得到确认后产生。
                 let rolled_back = error.code == "cancelled"
@@ -293,6 +524,46 @@ impl Engine {
     ) -> Result<Value> {
         let db = self.database(owner, &params)?;
         let session_id: Uuid = model::param(&params, "session_id")?;
+        let (initial_workspace, is_mcp) = self
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&owner)
+            .map(|context| {
+                (
+                    context.workspace.clone(),
+                    matches!(context.kind, model::ClientKind::Mcp),
+                )
+            })
+            .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
+        let dispatch_revision = if is_mcp {
+            match params
+                .pointer("/_access_proof/profile_revision")
+                .and_then(Value::as_u64)
+            {
+                Some(revision) => revision,
+                None => self.store.profile(db.profile.id).await?.revision,
+            }
+        } else {
+            db.profile.revision
+        };
+        let prepare_budget = if method == "replace.prepare" {
+            optional::<Uuid>(&params, "_editing_plan_budget")?
+        } else {
+            None
+        };
+        let work_budget = if matches!(method, "replace.submit" | "schema.execute") {
+            optional::<Uuid>(&params, "_editing_work_budget")?
+        } else {
+            None
+        };
+        let submitted_plan = if method == "replace.submit" {
+            Some(model::param::<Uuid>(&params, "plan_id")?)
+        } else {
+            None
+        };
+        let replacement_target = params.get("target").cloned().unwrap_or(Value::Null);
         if db.profile.provider == model::ProviderKind::Redis
             && matches!(method, "execution.start" | "execution.run")
         {
@@ -319,7 +590,20 @@ impl Engine {
                 ));
             }
         }
-        let mut persisted_params = params.clone();
+        let mut persisted_params = if matches!(
+            method,
+            "schema.execute" | "replace.prepare" | "replace.submit" | "change.submit"
+        ) {
+            let mut metadata = serde_json::Map::new();
+            for key in ["target", "targets", "plan_id", "revision", "digest"] {
+                if let Some(value) = params.get(key) {
+                    metadata.insert(key.into(), value.clone());
+                }
+            }
+            Value::Object(metadata)
+        } else {
+            params.clone()
+        };
         redact(&mut persisted_params);
         let context = json!({"connection":db.profile.name,"provider":db.profile.provider,
             "source":if db.profile.is_archery() { "archery" } else { "direct" },
@@ -371,6 +655,10 @@ impl Engine {
             } else {
                 if !state.clients.contains(&owner)
                     || state
+                        .contexts
+                        .get(&owner)
+                        .is_none_or(|context| context.workspace != initial_workspace)
+                    || state
                         .databases
                         .get(&session_id)
                         .is_none_or(|db| db.closing.load(Ordering::Acquire))
@@ -402,7 +690,10 @@ impl Engine {
         drop(service_guard);
         self.emit_state(owner, id, "queued");
         let timeout_engine = Arc::downgrade(self);
-        let timeout_duration = Duration::from_secs(limits.query_timeout_seconds);
+        let timeout_duration = Duration::from_secs(mysql_query_timeout(
+            &db.profile,
+            limits.query_timeout_seconds,
+        ));
         tokio::spawn(async move {
             if let Some(engine) = timeout_engine.upgrade() {
                 let mut activity = engine.store.subscribe_result_activity().await;
@@ -446,15 +737,100 @@ impl Engine {
         let engine = self.clone();
         let method = method.to_owned();
         let future = async move {
+            let send_engine = Arc::downgrade(&engine);
+            let send_db = db.clone();
             let sink = ExecutionSink::new(engine.store.clone(), id)
-                .with_dispatch_control(transition.clone(), cancel.clone());
-            let result = if cancel.is_cancelled() {
+                .with_dispatch_control(transition.clone(), cancel.clone())
+                .with_send_gate(
+                    engine.send_gate.clone(),
+                    Arc::new(move || {
+                        let engine = send_engine
+                            .upgrade()
+                            .ok_or_else(|| AppError::new("disconnected", "引擎已关闭"))?;
+                        let state = engine.state.lock().unwrap();
+                        if !state.clients.contains(&owner)
+                            || !state.contexts.contains_key(&owner)
+                            || send_db.closing.load(Ordering::Acquire)
+                            || state
+                                .databases
+                                .get(&session_id)
+                                .is_none_or(|current| !Arc::ptr_eq(current, &send_db))
+                        {
+                            return Err(AppError::new("disconnected", "客户端或数据库会话已关闭"));
+                        }
+                        Ok(())
+                    }),
+                )
+                .with_profile_revision(
+                    db.profile.id,
+                    dispatch_revision,
+                    engine.profile_lock(db.profile.id),
+                );
+            let mut result = if cancel.is_cancelled() {
                 Err(AppError::cancelled())
             } else {
                 engine
-                    .provider(db, &method, params, &sink, &cancel, &transition)
+                    .provider(db.clone(), &method, params, &sink, &cancel, &transition)
                     .await
             };
+            if let Some(handle) = prepare_budget {
+                let prepared_id = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| optional::<Uuid>(value, "plan_id").ok().flatten());
+                if let Ok(value) = &result
+                    && let Err(error) = engine
+                        .bind_prepared_replacement(
+                            &db,
+                            session_id,
+                            handle,
+                            replacement_target,
+                            value,
+                        )
+                        .await
+                {
+                    result = Err(error);
+                }
+                if result.is_err() {
+                    if let Some(plan_id) = prepared_id {
+                        let mut provider = db.session.lock().await;
+                        let cleanup = provider
+                            .call(
+                                "replace.discard",
+                                json!({"plan_id":plan_id}),
+                                &sink,
+                                &CancellationToken::new(),
+                            )
+                            .await;
+                        if let Err(error) = cleanup {
+                            tracing::warn!(%plan_id, "释放未发布替换计划失败: {error}");
+                        }
+                    }
+                    if let Err(error) = engine.store.release_auxiliary(handle).await {
+                        tracing::warn!("释放替换准备预算失败: {error}");
+                    }
+                }
+            }
+            if let Some(plan_id) = submitted_plan {
+                let cleanup = {
+                    let mut provider = db.session.lock().await;
+                    provider
+                        .call(
+                            "replace.discard",
+                            json!({"plan_id":plan_id}),
+                            &sink,
+                            &CancellationToken::new(),
+                        )
+                        .await
+                };
+                if let Err(error) = cleanup {
+                    tracing::warn!(%plan_id, "释放已提交替换计划失败: {error}");
+                } else if let Err(error) =
+                    engine.release_submitted_replacement(owner, plan_id).await
+                {
+                    tracing::warn!(%plan_id, "释放替换计划预算失败: {error}");
+                }
+            }
             let started = engine
                 .state
                 .lock()
@@ -463,6 +839,11 @@ impl Engine {
                 .get(&id)
                 .and_then(|task| task.started);
             engine.finish_task(owner, id, &result, started).await;
+            if let Some(handle) = work_budget
+                && let Err(error) = engine.store.release_auxiliary(handle).await
+            {
+                tracing::warn!("释放编辑执行预算失败: {error}");
+            }
             result
         };
         let task = tokio::spawn(future);

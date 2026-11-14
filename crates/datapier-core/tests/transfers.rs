@@ -47,6 +47,7 @@ async fn context(kind: ProviderKind) -> (Store, Profile, Option<String>) {
             redis_databases_override: None,
             tls: TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
     (store, profile, secret)
@@ -122,6 +123,7 @@ fn mysql_target(name: &str) -> ResourceTarget {
 async fn clean(store: Store) {
     let root = (*store.root).clone();
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -181,6 +183,70 @@ async fn mysql_hundred_thousand_rows_csv_and_json_round_trip() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[tokio::test]
+#[ignore = "需要显式配置的隔离 MySQL"]
+async fn mysql_large_rows_stop_at_budget_after_committed_batch() {
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let mut settings = store.settings().await.unwrap();
+    settings.limits.result_memory_bytes_per_client = 16 * 1024 * 1024;
+    store.set_settings(&settings).await.unwrap();
+    let mut session = ProviderSession::connect(profile, secret).await.unwrap();
+    let table = format!("dp_budget_{}", Uuid::new_v4().simple());
+    sql(
+        &mut session,
+        &store,
+        &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, payload LONGTEXT NOT NULL)"),
+    )
+    .await;
+    for format in ["csv", "json"] {
+        let path = store.root.join(format!("budget.{format}"));
+        if format == "csv" {
+            let mut data = String::from("id,payload\n");
+            for i in 0..500 {
+                data.push_str(&format!("{i},ok\n"));
+            }
+            data.push_str(&format!("500,{}\n", "x".repeat(300_000)));
+            std::fs::write(&path, data).unwrap();
+        } else {
+            let mut data = Vec::new();
+            for i in 0..500 {
+                data.push(vec![
+                    Value::Integer(i.to_string()),
+                    Value::Text("ok".into()),
+                ]);
+            }
+            data.push(vec![
+                Value::Integer("500".into()),
+                Value::Text("x".repeat(300_000)),
+            ]);
+            std::fs::write(&path, serde_json::to_vec(&json!({"format":"datapier","version":1,"columns":[Column::new("id", "int"),Column::new("payload", "longtext")],"rows":data})).unwrap()).unwrap();
+        }
+        let sink = sink(&store, "transfer.import", session.profile()).await;
+        let error = transfer::run(
+            &mut session,
+            "transfer.import",
+            json!({"format":format,"path":path,"target":mysql_target(&table)}),
+            &sink,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "resource_limit");
+        assert_eq!(error.details["progress"]["completed_rows"], 500);
+        let result = sql(
+            &mut session,
+            &store,
+            &format!("SELECT COUNT(*) FROM `{table}`"),
+        )
+        .await;
+        assert_eq!(rows(&store, &result).await[0][0].text(), "500");
+        sql(&mut session, &store, &format!("TRUNCATE TABLE `{table}`")).await;
+    }
+    sql(&mut session, &store, &format!("DROP TABLE `{table}`")).await;
+    let _ = session.close().await;
+    clean(store).await;
 }
 
 #[tokio::test]
@@ -302,6 +368,13 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
         .query_async(&mut conn)
         .await
         .unwrap();
+    let command_info: Vec<Option<redis::Value>> = redis::cmd("COMMAND")
+        .arg("INFO")
+        .arg("HPEXPIRETIME")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let supports_field_expiry = command_info.first().is_some_and(Option::is_some);
     let prefix = format!("datapier-transfer-{}:", Uuid::new_v4().simple());
     let kinds = ["string", "hash", "list", "set", "zset"];
     let keys: Vec<Vec<u8>> = kinds
@@ -335,6 +408,32 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
             .query_async(&mut conn)
             .await
             .unwrap();
+        let original_field_expiry = if supports_field_expiry {
+            let applied: Vec<i64> = redis::cmd("HPEXPIRE")
+                .arg(&keys[1])
+                .arg(1_800_000)
+                .arg("FIELDS")
+                .arg(1)
+                .arg("field")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(applied, vec![1]);
+            let expiry: Vec<i64> = redis::cmd("HPEXPIRETIME")
+                .arg(&keys[1])
+                .arg("FIELDS")
+                .arg(2)
+                .arg("field")
+                .arg(&[0u8, 255][..])
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(expiry[0] > 0);
+            assert_eq!(expiry[1], -1);
+            Some(expiry)
+        } else {
+            None
+        };
         let _: i64 = redis::cmd("RPUSH")
             .arg(&keys[2])
             .arg("same")
@@ -400,6 +499,18 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
             .await;
             assert_eq!(imported["progress"]["completed_keys"], 5);
             assert_eq!(imported["progress"]["skipped"], 0);
+            if let Some(original_field_expiry) = &original_field_expiry {
+                let restored: Vec<i64> = redis::cmd("HPEXPIRETIME")
+                    .arg(&keys[1])
+                    .arg("FIELDS")
+                    .arg(2)
+                    .arg("field")
+                    .arg(&[0u8, 255][..])
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+                assert_eq!(&restored, original_field_expiry);
+            }
             for (index, target) in targets.iter().enumerate() {
                 assert_eq!(
                     redis_rows(&mut session, &store, target).await,

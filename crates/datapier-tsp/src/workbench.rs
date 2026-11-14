@@ -6,6 +6,7 @@ use datapier_core::model::{AccessMode, ProviderKind, Value as DataValue};
 mod actions;
 mod cli;
 mod input;
+mod modal_drafts;
 mod redis_edit;
 mod sql_edit;
 
@@ -55,8 +56,6 @@ pub(super) fn grid_cell_error(error: AppError, grid: &GridState, cell: Cell) -> 
     grid_error(error)
 }
 
-pub(super) const KEY_PAGE_SIZE: usize = 200;
-
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum RedisTtlPolicy {
     #[default]
@@ -96,6 +95,47 @@ pub(super) struct CliRecord {
     pub result_page_histories: Vec<Vec<u64>>,
 }
 
+#[derive(Clone)]
+pub(super) enum DraftScopeAction {
+    Action(String),
+    Edit(Msg),
+    EditBatch {
+        field: String,
+        original: String,
+        text: String,
+        cursor: usize,
+        anchor: usize,
+    },
+    Key(String, tern_sdk::Key),
+    Protect,
+}
+
+#[derive(Clone)]
+pub(super) struct DraftScopePending {
+    pub profile: Uuid,
+    pub session: Value,
+    pub target: Value,
+    pub generation: u64,
+    pub edit_token: Option<Value>,
+    pub result_id: Option<String>,
+    pub overlay: Option<String>,
+    pub grid_focus: Option<Cell>,
+    pub revision: u64,
+    pub request: Option<Uuid>,
+    pub error: Option<AppError>,
+    pub actions: Vec<DraftScopeAction>,
+}
+
+#[derive(Clone)]
+pub(super) struct DraftScopeRelease {
+    pub profile: Uuid,
+    pub session: Value,
+    pub target: Value,
+    pub revision: u64,
+    pub request: Option<Uuid>,
+    pub retry_at: Instant,
+}
+
 /// 工作台的临时界面状态；数据库基线和草稿仍由 App 管理。
 #[derive(Clone)]
 pub(super) struct Workbench {
@@ -103,7 +143,20 @@ pub(super) struct Workbench {
     pub(super) archery_history: crate::application::ArcheryHistory,
     pub sql_mode: Option<editor::MysqlMode>,
     pub section: String,
+    pub schema_section: String,
     pub overlay: Option<String>,
+    pub overlay_close_confirm: bool,
+    pub(super) modal_draft: Option<modal_drafts::ModalDraft>,
+    pub(super) modal_after_close: Option<String>,
+    pub(super) modal_return_focus: Option<String>,
+    pub trigger_list: Option<crate::advanced::schema_controller::TriggerList>,
+    pub draft_scope: Option<(Uuid, Value, Value, u64, Option<Value>)>,
+    pub(super) draft_scope_pending: Option<DraftScopePending>,
+    pub(super) draft_scope_recovery: Vec<DraftScopePending>,
+    pub(super) draft_scope_releases: Vec<DraftScopeRelease>,
+    pub draft_scope_serial: u64,
+    pub value_schema_generations: Option<(u64, u64)>,
+    pub schema_invalidated_task: bool,
     pub(super) diagnostic_task_request: Option<(Uuid, String)>,
     delete_rows: Option<DeleteRowsConfirmation>,
     pub(super) redis_row_pending: Option<crate::redis_rows::RedisRowPending>,
@@ -113,6 +166,7 @@ pub(super) struct Workbench {
     pub profile_error: Option<String>,
     pub field_error: Option<forms::FieldError>,
     pub profile_tls_details: bool,
+    pub profile_timeout_details: bool,
     pub transfer_advanced: bool,
     pub cli: bool,
     pub cli_export: bool,
@@ -124,7 +178,6 @@ pub(super) struct Workbench {
     pub cli_cell: Option<Cell>,
     pub cli_large: Option<LargeLoad>,
     pub(super) cli_value_token: Option<Uuid>,
-    pub key_page: usize,
     pub key_type_menu: bool,
     pub generic_select: Option<String>,
     pub cli_results: Vec<String>,
@@ -149,6 +202,8 @@ pub(super) struct Workbench {
     pub inline: Option<Cell>,
     // 详情编辑与网格选区独立，并用结果 ID 防止刷新后写入同坐标的新结果。
     pub cell_target: Option<(Uuid, Cell)>,
+    pub cell_open_intent: Option<(Uuid, Cell)>,
+    pub cell_context: Option<(Option<String>, Option<String>)>,
     pub cell_fields_open: bool,
     pub cell_editor: Editor,
     pub load_resource: bool,
@@ -168,7 +223,20 @@ impl Default for Workbench {
             archery_history: crate::application::ArcheryHistory::default(),
             sql_mode: None,
             section: "data".into(),
+            schema_section: "columns".into(),
             overlay: None,
+            overlay_close_confirm: false,
+            modal_draft: None,
+            modal_after_close: None,
+            modal_return_focus: None,
+            trigger_list: None,
+            draft_scope: None,
+            draft_scope_pending: None,
+            draft_scope_recovery: Vec::new(),
+            draft_scope_releases: Vec::new(),
+            draft_scope_serial: 0,
+            value_schema_generations: None,
+            schema_invalidated_task: false,
             diagnostic_task_request: None,
             delete_rows: None,
             redis_row_pending: None,
@@ -178,6 +246,7 @@ impl Default for Workbench {
             profile_error: None,
             field_error: None,
             profile_tls_details: false,
+            profile_timeout_details: false,
             transfer_advanced: false,
             cli: false,
             cli_export: false,
@@ -185,7 +254,6 @@ impl Default for Workbench {
             cli_cell: None,
             cli_large: None,
             cli_value_token: None,
-            key_page: 0,
             key_type_menu: false,
             generic_select: None,
             cli_results: Vec::new(),
@@ -212,8 +280,10 @@ impl Default for Workbench {
             ttl_policy: RedisTtlPolicy::Keep,
             inline: None,
             cell_target: None,
+            cell_open_intent: None,
             cell_fields_open: false,
             cell_editor: Editor::default(),
+            cell_context: None,
             load_resource: false,
             sql_forms: forms::SqlForms::default(),
             focus_request: None,
@@ -260,36 +330,6 @@ fn redis_bytes(value: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 impl App {
-    fn visible_key_count(&self) -> usize {
-        if self.workbench.tree {
-            if !self.redis_tree_matches_resources() {
-                return 0;
-            }
-            self.workbench
-                .redis_tree
-                .rows(
-                    &self.workbench.redis_expansion,
-                    self.profile.as_ref().map(|profile| {
-                        (
-                            profile.id,
-                            self.tabs[self.active]
-                                .browse
-                                .redis_db
-                                .unwrap_or_else(|| profile.redis_db()),
-                        )
-                    }),
-                )
-                .len()
-        } else {
-            self.resources.len()
-        }
-    }
-
-    pub(super) fn normalize_key_page(&mut self) {
-        let last = self.visible_key_count().saturating_sub(1) / KEY_PAGE_SIZE;
-        self.workbench.key_page = self.workbench.key_page.min(last);
-    }
-
     pub(super) fn clear_cli_session(&mut self) {
         self.workbench_cli_store_grid();
         self.workbench_clear_cli_value();

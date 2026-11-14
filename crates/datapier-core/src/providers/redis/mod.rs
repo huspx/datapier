@@ -4,7 +4,9 @@
 mod batch_delete;
 pub(crate) mod command;
 mod edit;
+mod replace;
 mod transfer;
+mod values;
 
 use crate::{ExecutionSink, model::*};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -161,7 +163,31 @@ struct Edit {
     conn: Conn,
     key: Vec<u8>,
     kind: String,
+    result_id: Uuid,
     expires_at_ms: Option<i64>,
+    field_expiries: HashMap<Vec<u8>, Option<i64>>,
+    field_expiry_supported: Option<bool>,
+    field_budget: usize,
+    field_owner: Uuid,
+    field_store: crate::Store,
+    field_handle: Uuid,
+}
+
+impl Drop for Edit {
+    fn drop(&mut self) {
+        if self.field_budget == 0 {
+            return;
+        }
+        // 提交 future 在发送前被取消时也可能丢弃已消费的令牌；不能遗留预算。
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let store = self.field_store.clone();
+            let id = self.field_handle;
+            drop(runtime.spawn(async move {
+                // release_auxiliary 当前只删除内存登记，不涉及可能失败的外部 I/O。
+                let _ = store.release_auxiliary(id).await;
+            }));
+        }
+    }
 }
 // 导入先写入有期限的临时 key，完成后才尝试发布到目标 key。
 // 同一脚本先检查对象内的随机标记，再操作该对象；单独的标记 key 无法证明数据未被替换。
@@ -219,6 +245,24 @@ struct KeyScan {
     bytes: usize,
     store: crate::Store,
     execution_id: Uuid,
+    last_used: std::time::Instant,
+}
+
+async fn expire_key_scans(
+    scans: &mut HashMap<Uuid, KeyScan>,
+    idle: std::time::Duration,
+) -> Result<()> {
+    let expired: Vec<_> = scans
+        .iter()
+        .filter(|(_, scan)| scan.last_used.elapsed() >= idle)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in expired {
+        if let Some(scan) = scans.remove(&id) {
+            scan.store.release_auxiliary(id).await?;
+        }
+    }
+    Ok(())
 }
 /// 持有一个 Redis DB 的普通连接，以及隔离的命令、编辑和扫描状态。
 ///
@@ -236,6 +280,7 @@ pub struct RedisSession {
     command_dead: bool,
     edits: HashMap<Uuid, Edit>,
     batch_edits: HashMap<Uuid, batch_delete::BatchEdit>,
+    replace_plans: HashMap<Uuid, replace::ReplacePlan>,
     imports: HashMap<Uuid, Import>,
     scans: HashMap<Uuid, KeyScan>,
 }
@@ -367,6 +412,7 @@ impl RedisSession {
             command_dead: false,
             edits: HashMap::new(),
             batch_edits: HashMap::new(),
+            replace_plans: HashMap::new(),
             imports: HashMap::new(),
             scans: HashMap::new(),
         })
@@ -382,12 +428,22 @@ impl RedisSession {
     /// 释放编辑和命令连接，清理扫描缓存及导入临时 key，再关闭普通连接。
     /// 清理失败时仍尝试其余清理，并返回第一个错误。
     pub async fn close(&mut self) -> Result<()> {
-        self.edits.clear();
+        let mut failure = None;
+        for (_, mut edit) in std::mem::take(&mut self.edits) {
+            match edit.field_store.release_auxiliary(edit.field_handle).await {
+                Ok(()) => edit.field_budget = 0,
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
         self.batch_edits.clear();
+        self.replace_plans.clear();
         self.browser_conn = None;
         self.command_conn = None;
         self.command_dead = true;
-        let mut failure = None;
         for (id, scan) in std::mem::take(&mut self.scans) {
             if let Err(error) = scan.store.release_auxiliary(id).await
                 && failure.is_none()
@@ -438,6 +494,10 @@ impl RedisSession {
         ensure_not_cancelled(cancel)?;
         if self.conn.is_none() {
             return Err(AppError::new("connection_closed", "连接已关闭"));
+        }
+        if !self.scans.is_empty() {
+            let idle = sink.store.settings().await?.limits.result_idle_seconds;
+            expire_key_scans(&mut self.scans, std::time::Duration::from_secs(idle)).await?;
         }
         if method == "database.list" {
             let override_count = self.profile.direct()?.redis_databases_override;
@@ -500,24 +560,63 @@ impl RedisSession {
             };
             let result = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => return Err(AppError::cancelled()),
+                _ = cancel.cancelled() => {
+                    sink.store.release_execution_result_auxiliary(sink.execution_id).await;
+                    if method == "resource.list" && p.get("cursor").is_none_or(Json::is_null) {
+                        let ids: Vec<_> = self.scans.iter()
+                            .filter(|(_, scan)| scan.execution_id == sink.execution_id)
+                            .map(|(id, _)| *id).collect();
+                        for id in ids {
+                            if let Some(scan) = self.scans.remove(&id) {
+                                scan.store.release_auxiliary(id).await?;
+                            }
+                        }
+                    }
+                    return Err(AppError::cancelled());
+                },
                 result = self.read_resource(method, &p, sink, cancel, &mut conn) => result,
             };
             self.browser_conn = Some(conn);
             return result;
         }
         match method {
+            "resource.scan.discard" => {
+                let id = p
+                    .get("cursor")
+                    .and_then(Json::as_str)
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .ok_or_else(|| AppError::invalid("无效扫描令牌"))?;
+                if let Some(scan) = self.scans.remove(&id) {
+                    scan.store.release_auxiliary(id).await?;
+                }
+                Ok(json!({"discarded":true}))
+            }
+            "replace.prepare" => self.replace_prepare(&p, cancel).await,
+            "replace.read" => self.replace_read(&p, cancel),
+            "replace.update" => self.replace_update(&p, cancel),
+            "replace.submit" => self.replace_submit(&p, sink, cancel).await,
+            "replace.discard" => self.replace_discard(&p, cancel),
+            "value.snapshot" => self.value_snapshot(&p).await,
+            "value.verify" => {
+                self.value_verify(&p).await?;
+                Ok(json!({"verified":true}))
+            }
             "change.open" if p.get("targets").is_some() => self.open_batch_delete(&p, cancel).await,
             "change.open" => self.open_edit(&p, sink, cancel).await,
             "change.discard" => {
                 let id = uuid(&p)?;
-                if self.edits.remove(&id).is_none() && self.batch_edits.remove(&id).is_none() {
+                if let Some(mut edit) = self.edits.remove(&id) {
+                    edit.field_store
+                        .release_auxiliary(edit.field_handle)
+                        .await?;
+                    edit.field_budget = 0;
+                } else if self.batch_edits.remove(&id).is_none() {
                     return Err(AppError::invalid("编辑令牌已失效"));
                 }
                 Ok(json!({"discarded":true}))
             }
             "change.preview" if self.is_batch_request(&p)? => self.preview_batch_delete(&p, cancel),
-            "change.preview" => self.preview(&p, cancel),
+            "change.preview" => self.preview(&p, cancel).await,
             "change.submit" if self.is_batch_request(&p)? => {
                 self.submit_batch_delete(&p, sink, cancel).await
             }
@@ -600,6 +699,7 @@ impl RedisSession {
                     bytes: 0,
                     store: sink.store.clone(),
                     execution_id: sink.execution_id,
+                    last_used: std::time::Instant::now(),
                 },
             );
             id
@@ -620,7 +720,7 @@ impl RedisSession {
             let scan = self
                 .scans
                 .get_mut(&id)
-                .ok_or_else(|| AppError::invalid("扫描令牌已失效"))?;
+                .ok_or_else(|| AppError::new("handle_expired", "扫描令牌已失效"))?;
             if p.get("pattern")
                 .and_then(Json::as_str)
                 .is_some_and(|s| Some(s) != scan.pattern.as_deref())
@@ -630,8 +730,16 @@ impl RedisSession {
             {
                 return Err(AppError::invalid("扫描条件与令牌不匹配"));
             }
+            scan.last_used = std::time::Instant::now();
             let mut resources = Vec::with_capacity(limit);
-            let mut size = 0usize;
+            // 精确计算页封装及最长 TTL 数字，保证实际资源可填满预算。
+            let mut size = serde_json::to_vec(&ResourcePage {
+                resources: Vec::new(),
+                cursor: Some(id.to_string()),
+                complete: false,
+                resource_limited: false,
+            })?
+            .len();
             loop {
                 ensure_not_cancelled(cancel)?;
                 while let Some((key, kind)) = scan.pending.front() {
@@ -640,10 +748,11 @@ impl RedisSession {
                         kind: kind.clone(),
                         database: Some(self.profile.redis_db().to_string()),
                         key_b64: Some(STANDARD.encode(key)),
-                        data: Json::Null,
+                        data: json!({"ttl_ms":i64::MIN}),
                     };
-                    let bytes = serde_json::to_vec(&resource)?.len() + 33;
-                    if size.saturating_add(bytes) > response_budget.saturating_sub(1024) {
+                    let bytes =
+                        serde_json::to_vec(&resource)?.len() + usize::from(!resources.is_empty());
+                    if size.saturating_add(bytes) > response_budget {
                         if resources.is_empty() {
                             return Err(AppError::new(
                                 "result_too_large",
@@ -761,18 +870,16 @@ impl RedisSession {
                     Some(id.to_string())
                 },
                 complete,
+                resource_limited: scan.limited,
             })
         }
         .await;
-        let limited = self.scans.get(&id).is_some_and(|scan| scan.limited);
         if ((fresh && result.is_err()) || result.as_ref().is_ok_and(|page| page.cursor.is_none()))
             && let Some(scan) = self.scans.remove(&id)
         {
             scan.store.release_auxiliary(id).await?;
         }
-        let mut value = serde_json::to_value(result?)?;
-        value["resource_limited"] = json!(limited);
-        Ok(value)
+        Ok(serde_json::to_value(result?)?)
     }
     async fn describe(conn: &mut Conn, t: ResourceTarget) -> Result<Json> {
         let k = key(&t)?;
@@ -805,13 +912,21 @@ impl RedisSession {
         let (kind, ttl, expires_at_ms) = watched_metadata(&mut conn, &k).await?;
         let result = browse(&mut conn, &k, &kind, sink, cancel, false).await?;
         let id = Uuid::new_v4();
+        let field_owner = sink.store.task(sink.execution_id).await?.owner;
         self.edits.insert(
             id,
             Edit {
                 conn,
                 key: k,
                 kind: kind.clone(),
+                result_id: result,
                 expires_at_ms,
+                field_expiries: HashMap::new(),
+                field_expiry_supported: None,
+                field_budget: 0,
+                field_owner,
+                field_store: sink.store.clone(),
+                field_handle: id,
             },
         );
         Ok(
@@ -1014,7 +1129,7 @@ async fn browse(
                             return Err(AppError::new("resource_limit", "Redis 扫描超过内存预算"));
                         }
                         sink.store
-                            .reserve_auxiliary(sink.execution_id, id, seen_bytes)
+                            .reserve_result_auxiliary(sink.execution_id, id, seen_bytes)
                             .await?;
                         seen.insert(member.clone());
                         let mut row = vec![val(member)];
@@ -1078,5 +1193,126 @@ fn redis_value(v: redis::Value) -> Json {
         redis::Value::Okay => serde_json::to_value(Value::Text("OK".into())).unwrap(),
         redis::Value::Array(a) => Json::Array(a.into_iter().map(redis_value).collect()),
         other => json!(format!("{other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod scan_lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires DATAPIER_TEST_REDIS_PORT isolated Redis"]
+    async fn idle_scan_releases_budget_and_preserves_active_scan() {
+        let port: u16 = std::env::var("DATAPIER_TEST_REDIS_PORT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("datapier-scan-idle-{}", Uuid::new_v4()));
+        let store = crate::Store::open(&root).await.unwrap();
+        let owner = Uuid::new_v4();
+        let task = store
+            .create_task(owner, "redis-scan", "execution.start", json!({}), false)
+            .await
+            .unwrap();
+        let sink = ExecutionSink::new(store.clone(), task.id);
+        let profile = Profile {
+            id: Uuid::new_v4(),
+            name: "redis-scan".into(),
+            revision: 1,
+            approval_policy: ApprovalPolicy::default(),
+            provider: ProviderKind::Redis,
+            access_mode: AccessMode::ReadWrite,
+            connection: ConnectionConfig::Direct(DirectConnection {
+                host: "127.0.0.1".into(),
+                port,
+                username: String::new(),
+                database: None,
+                redis_db: 15,
+                redis_databases_override: None,
+                tls: TlsConfig::default(),
+                visible_databases: None,
+                mysql: Default::default(),
+            }),
+        };
+        let mut session = RedisSession::connect(profile, None).await.unwrap();
+        let mut conn = Client::open(format!("redis://127.0.0.1:{port}/15"))
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let prefix = format!("datapier-idle-{}-", Uuid::new_v4());
+        let keys: Vec<_> = (0..300).map(|i| format!("{prefix}{i}")).collect();
+        let mut pipe = redis::pipe();
+        for key in &keys {
+            pipe.cmd("SET").arg(key).arg("v").ignore();
+        }
+        let _: () = pipe.query_async(&mut conn).await.unwrap();
+        let cancel = CancellationToken::new();
+        let params = json!({"pattern":format!("{prefix}*"),"limit":1});
+        let first = session
+            .call("resource.list", params.clone(), &sink, &cancel)
+            .await
+            .unwrap();
+        let second = session
+            .call("resource.list", params, &sink, &cancel)
+            .await
+            .unwrap();
+        let old = Uuid::parse_str(first["cursor"].as_str().unwrap()).unwrap();
+        let active = Uuid::parse_str(second["cursor"].as_str().unwrap()).unwrap();
+        let idle = std::time::Duration::from_secs(
+            store.settings().await.unwrap().limits.result_idle_seconds,
+        );
+        let old_bytes = session.scans[&old].bytes;
+        assert!(old_bytes > 0);
+        session.scans.get_mut(&old).unwrap().last_used = std::time::Instant::now() - idle;
+        let available = store.available_memory_for_owner(owner).await.unwrap();
+        session
+            .call("connection.info", json!({}), &sink, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.available_memory_for_owner(owner).await.unwrap(),
+            available + old_bytes
+        );
+        assert!(!session.scans.contains_key(&old));
+        assert!(session.scans.contains_key(&active));
+        let error = session
+            .call(
+                "resource.list",
+                json!({"cursor":old.to_string()}),
+                &sink,
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "handle_expired");
+        let previous = session.scans[&active].last_used;
+        session
+            .call(
+                "resource.list",
+                json!({"cursor":active.to_string(),"limit":1}),
+                &sink,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(session.scans[&active].last_used >= previous);
+        session
+            .call(
+                "resource.scan.discard",
+                json!({"cursor":active.to_string()}),
+                &sink,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("DEL")
+            .arg(&keys)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        session.close().await.unwrap();
+        store.pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

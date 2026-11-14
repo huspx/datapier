@@ -15,6 +15,14 @@ use crate::{
     model::{AppError, Column, ResourceTarget, Result, RowChange, TableSchema, Value, param},
 };
 
+/// 令牌绑定打开时的表结构或视图映射，提交前重新证明。
+#[derive(Clone)]
+pub(super) struct EditToken {
+    pub target: ResourceTarget,
+    pub view_fingerprint: Option<String>,
+    pub schema_fingerprint: Option<String>,
+}
+
 enum Bind {
     Null,
     Text(String),
@@ -111,6 +119,27 @@ fn decimal_fits(value: &str, ty: &str, unsigned: bool) -> bool {
     effective_scale <= i128::from(scale) && integer_digits <= i128::from(precision - scale)
 }
 
+fn temporal_fits(value: &str, ty: &str) -> bool {
+    let precision = match ty.split_once('(') {
+        Some((_, rest)) => match rest
+            .split_once(')')
+            .and_then(|(n, _)| n.trim().parse::<usize>().ok())
+        {
+            Some(n) if n <= 6 => n,
+            _ => return false,
+        },
+        None => 0,
+    };
+    match value.split_once('.') {
+        None => true,
+        Some((_, fraction)) => {
+            !fraction.is_empty()
+                && fraction.bytes().all(|c| c.is_ascii_digit())
+                && fraction.bytes().skip(precision).all(|c| c == b'0')
+        }
+    }
+}
+
 // 精确数值按文本绑定以避免经浮点转换；浮点则按目标列精度绑定原生类型。
 fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
     let ty = column.type_name.to_ascii_lowercase();
@@ -188,8 +217,8 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
             "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob" | "bit"
         ),
         Value::Date(_) => base == "date",
-        Value::Time(_) => base == "time",
-        Value::DateTime(_) => matches!(base, "datetime" | "timestamp"),
+        Value::Time(v) => base == "time" && temporal_fits(v, &ty),
+        Value::DateTime(v) => matches!(base, "datetime" | "timestamp") && temporal_fits(v, &ty),
         Value::Json(_) => base == "json",
         _ => false,
     };
@@ -232,13 +261,24 @@ fn bind_value(value: &Value, column: &Column) -> Result<Bind> {
                 .map_err(|_| validation_error("无效的年份".into(), "numeric_range"))?,
         ),
         Value::Bool(v) => Bind::Text(if *v { "1" } else { "0" }.into()),
+        Value::Time(v) | Value::DateTime(v) => {
+            let value = if let Some((whole, fraction)) = v.split_once('.') {
+                let fraction = fraction.trim_end_matches('0');
+                if fraction.is_empty() {
+                    whole.to_owned()
+                } else {
+                    format!("{whole}.{fraction}")
+                }
+            } else {
+                v.clone()
+            };
+            Bind::Text(value)
+        }
         Value::Integer(v)
         | Value::Unsigned(v)
         | Value::Decimal(v)
         | Value::Text(v)
-        | Value::Date(v)
-        | Value::Time(v)
-        | Value::DateTime(v) => Bind::Text(v.clone()),
+        | Value::Date(v) => Bind::Text(v.clone()),
         Value::Float(v) if base == "float" => {
             let n = v
                 .parse::<f32>()
@@ -370,6 +410,20 @@ fn validate(schema: &TableSchema, change: &RowChange) -> Result<()> {
     if !matches!(change.operation.as_str(), "insert" | "update" | "delete") {
         return Err(AppError::invalid("未知行变更操作"));
     }
+    if schema.target.kind == "view" {
+        let allowed = schema
+            .details
+            .get("view_mapping")
+            .and_then(|v| v.get(&change.operation))
+            .and_then(Json::as_bool)
+            .unwrap_or(false);
+        if !allowed {
+            return Err(AppError::invalid(format!(
+                "视图不支持{}操作",
+                change.operation
+            )));
+        }
+    }
     for (name, value) in &change.values {
         let c = column(schema, name)?;
         if c.generated {
@@ -378,6 +432,19 @@ fn validate(schema: &TableSchema, change: &RowChange) -> Result<()> {
         bind_value(value, c)?;
     }
     if change.operation == "insert" {
+        if schema.target.kind == "view" {
+            let required = schema.details["view_mapping"]["required_insert_columns"]
+                .as_array()
+                .ok_or_else(|| AppError::invalid("视图必填列信息不可用"))?;
+            for name in required {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| AppError::invalid("视图必填列信息无效"))?;
+                if !change.values.contains_key(name) {
+                    return Err(AppError::invalid(format!("缺少视图必填列: {name}")));
+                }
+            }
+        }
         return Ok(());
     }
     if change.operation == "update" && change.values.is_empty() {
@@ -428,6 +495,37 @@ fn predicate(
             q.push(ident).push(" IS NULL");
             continue;
         }
+        if let Value::Decimal(text) = value {
+            // 校验后以目标标度转成普通十进制文本，避免科学计数法经浮点解析。
+            bind_value(value, c)?;
+            let args = c
+                .type_name
+                .split_once('(')
+                .and_then(|(_, s)| s.split_once(')'))
+                .map(|(args, _)| args)
+                .ok_or_else(|| AppError::invalid("无效 DECIMAL 类型"))?;
+            let (precision, scale) = args
+                .split_once(',')
+                .ok_or_else(|| AppError::invalid("无效 DECIMAL 类型"))?;
+            let precision: u32 = precision
+                .trim()
+                .parse()
+                .map_err(|_| AppError::invalid("无效 DECIMAL 精度"))?;
+            let scale: u32 = scale
+                .trim()
+                .parse()
+                .map_err(|_| AppError::invalid("无效 DECIMAL 标度"))?;
+            let decimal = text
+                .parse::<bigdecimal::BigDecimal>()
+                .map_err(|_| AppError::invalid("无效 DECIMAL 值"))?;
+            q.push(ident).push(" <=> CAST(");
+            push_bind(
+                q,
+                Bind::Text(decimal.with_scale(i64::from(scale)).to_plain_string()),
+            );
+            q.push(format!(" AS DECIMAL({precision},{scale}))"));
+            continue;
+        }
         if matches!(value, Value::Float(_))
             || c.type_name
                 .split(|c: char| c == '(' || c.is_ascii_whitespace())
@@ -448,6 +546,11 @@ fn predicate(
             q.push(ident).push(" <=> CAST(");
             push_bind(q, bind_value(value, c)?);
             q.push(" AS ").push(ty).push(")");
+        } else if matches!(value, Value::Text(_)) {
+            q.push("BINARY CONVERT(")
+                .push(ident)
+                .push(" USING utf8mb4) <=> BINARY ");
+            push_bind(q, bind_value(value, c)?);
         } else {
             q.push("BINARY ").push(ident).push(" <=> BINARY ");
             if matches!(value, Value::Json(_)) {
@@ -464,7 +567,7 @@ fn predicate(
 
 struct ChangePlan {
     check: Option<StatementPlan>,
-    write: StatementPlan,
+    write: Option<StatementPlan>,
     insert: bool,
 }
 
@@ -474,17 +577,32 @@ fn plan_change(
     transactional: bool,
 ) -> Result<ChangePlan> {
     let table = table(schema)?;
-    // InnoDB 先锁住与完整原值匹配的行，再按可靠键写入；其他引擎直接在
-    // 写语句中比较完整原值，避免独立检查与写入之间的竞态。
-    let check = if transactional && change.operation != "insert" {
+    let unchanged = change.operation == "update"
+        && change
+            .values
+            .iter()
+            .all(|(name, value)| change.before.get(name) == Some(value));
+    let locking = transactional && schema.target.kind != "view";
+    // 实际写入仍用锁或完整 WHERE 保护；同值项不写入，但必须确认当前完整基线仍存在。
+    // 视图只查询视图自身，不扩大为对基表的直接读取或锁权限。
+    let check = if change.operation != "insert" && (locking || unchanged) {
         let mut check = StatementPlan::new("SELECT 1 FROM ");
         check.push(&table).push(" WHERE ");
         predicate(&mut check, schema, &change.before)?;
-        check.push(" FOR UPDATE");
+        if locking {
+            check.push(" FOR UPDATE");
+        }
         Some(check)
     } else {
         None
     };
+    if unchanged {
+        return Ok(ChangePlan {
+            check,
+            write: None,
+            insert: false,
+        });
+    }
     let mut q = StatementPlan::new("");
     match change.operation.as_str() {
         "insert" => {
@@ -517,7 +635,7 @@ fn plan_change(
             predicate(
                 &mut q,
                 schema,
-                if transactional {
+                if transactional && schema.target.kind != "view" {
                     &change.key
                 } else {
                     &change.before
@@ -529,7 +647,7 @@ fn plan_change(
             predicate(
                 &mut q,
                 schema,
-                if transactional {
+                if transactional && schema.target.kind != "view" {
                     &change.key
                 } else {
                     &change.before
@@ -540,12 +658,16 @@ fn plan_change(
     }
     Ok(ChangePlan {
         check,
-        write: q,
+        write: Some(q),
         insert: change.operation == "insert",
     })
 }
 
-async fn run_change(conn: &mut MySqlConnection, plan: &ChangePlan) -> Result<()> {
+async fn run_change(
+    conn: &mut MySqlConnection,
+    plan: &ChangePlan,
+    transactional: bool,
+) -> Result<()> {
     if let Some(check) = &plan.check
         && check
             .query()
@@ -556,9 +678,22 @@ async fn run_change(conn: &mut MySqlConnection, plan: &ChangePlan) -> Result<()>
     {
         return Err(AppError::conflict("行已变更或不存在"));
     }
-    let result = plan.write.query().execute(&mut *conn).await.map_err(|e| {
+    let Some(write) = &plan.write else {
+        return Ok(());
+    };
+    let result = write.query().execute(&mut *conn).await.map_err(|e| {
         if matches!(e, sqlx::Error::Database(_)) {
-            super::errors::mysql_error(e)
+            let original = super::errors::mysql_error(e);
+            if transactional {
+                original
+            } else {
+                let mut unknown =
+                    AppError::unknown(format!("非事务写入可能部分生效: {}", original.message));
+                unknown.database_code = original.database_code.clone();
+                let mut details = original.details.as_object().cloned().unwrap_or_default();
+                details.insert("original_error".into(), json!(original));
+                unknown.with_details(Json::Object(details))
+            }
         } else {
             AppError::unknown(format!("写入结果无法确认: {e}"))
         }
@@ -570,10 +705,33 @@ async fn run_change(conn: &mut MySqlConnection, plan: &ChangePlan) -> Result<()>
 }
 
 fn editable(schema: &TableSchema) -> Result<()> {
-    if schema.engine.is_empty() {
-        return Err(AppError::invalid("视图不可编辑"));
+    if schema.target.kind == "view" && schema.details.get("view_mapping").is_none() {
+        return Err(AppError::invalid("视图映射无法证明，不能编辑"));
     }
     Ok(())
+}
+
+pub(super) async fn edit_schema(
+    s: &mut MysqlSession,
+    token: &EditToken,
+    cancel: &CancellationToken,
+) -> Result<TableSchema> {
+    let raw = catalog::schema_raw(s, token.target.clone(), cancel).await?;
+    if raw.target.kind != "view" {
+        if token.view_fingerprint.is_some() {
+            return Err(AppError::conflict("视图类型已变化"));
+        }
+        if token.schema_fingerprint.as_deref() != Some(catalog::schema_fingerprint(&raw)?.as_str())
+        {
+            return Err(AppError::conflict("表结构已变化"));
+        }
+        return Ok(raw);
+    }
+    let mapping = super::view::resolve(s, raw, cancel).await?;
+    if token.view_fingerprint.as_deref() != Some(mapping.fingerprint.as_str()) {
+        return Err(AppError::conflict("视图映射或依赖结构已变化"));
+    }
+    Ok(mapping.schema)
 }
 
 pub(super) async fn open(
@@ -583,13 +741,31 @@ pub(super) async fn open(
 ) -> Result<Json> {
     s.profile.ensure_write()?;
     let target: ResourceTarget = param(&params, "target")?;
-    let schema = catalog::schema(s, target, cancel).await?;
+    let raw = catalog::schema_raw(s, target, cancel).await?;
+    let (schema, view_fingerprint) = if raw.target.kind == "view" {
+        let mapping = super::view::resolve(s, raw, cancel).await?;
+        (mapping.schema, Some(mapping.fingerprint))
+    } else {
+        (raw, None)
+    };
     editable(&schema)?;
+    let schema_fingerprint = if view_fingerprint.is_none() {
+        Some(catalog::schema_fingerprint(&schema)?)
+    } else {
+        None
+    };
     if schema.keys.is_empty() {
         return Err(AppError::invalid("表没有可靠键，不能编辑行"));
     }
     let token = Uuid::new_v4();
-    s.edits.insert(token, schema.target.clone());
+    s.edits.insert(
+        token,
+        EditToken {
+            target: schema.target.clone(),
+            view_fingerprint,
+            schema_fingerprint,
+        },
+    );
     Ok(json!({"token":token,"schema":schema}))
 }
 
@@ -627,7 +803,7 @@ async fn resolve_and_validate(
     validate(schema, change)
 }
 
-async fn execute_batch(
+pub(super) async fn execute_batch(
     s: &mut MysqlSession,
     schema: &TableSchema,
     mut changes: Vec<RowChange>,
@@ -658,27 +834,47 @@ async fn execute_batch(
         .await
         .map_err(super::errors::mysql_error)?;
     if transactional {
+        if schema.target.kind == "view" {
+            // 无锁的视图同值校验须读取本次语句的新快照，不能复用批次前项的旧读视图。
+            sqlx::raw_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                .execute(&mut conn)
+                .await
+                .map_err(super::errors::mysql_error)?;
+        }
         sqlx::raw_sql("START TRANSACTION")
             .execute(&mut conn)
             .await
             .map_err(super::errors::mysql_error)?;
     }
     let mut failure: Option<(usize, AppError)> = None;
+    let mut affected = 0usize;
     for (index, change) in changes.iter().enumerate() {
         if cancel.is_cancelled() {
             failure = Some((index, AppError::cancelled()));
             break;
         }
-        if let Err(e) = sink.mark_sent(true).await {
+        let plan = match plan_change(schema, change, transactional) {
+            Ok(plan) => plan,
+            Err(error) => {
+                failure = Some((index, error));
+                break;
+            }
+        };
+        if plan.write.is_some()
+            && let Err(e) = sink.mark_sent(true).await
+        {
             failure = Some((index, e));
             break;
         }
-        let result = match plan_change(schema, change, transactional) {
-            Ok(plan) => run_change(&mut conn, &plan).await,
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(()) => items[index] = json!({"index":index,"status":"applied"}),
+        match run_change(&mut conn, &plan, transactional).await {
+            Ok(()) => {
+                if plan.write.is_some() {
+                    items[index] = json!({"index":index,"status":"applied"});
+                    affected += 1;
+                } else {
+                    items[index] = json!({"index":index,"status":"unchanged"});
+                }
+            }
             Err(e) => {
                 failure = Some((index, e));
                 break;
@@ -711,6 +907,9 @@ async fn execute_batch(
                 false
             };
             for item in &mut items[..index] {
+                if item["status"] == "unchanged" {
+                    continue;
+                }
                 item["status"] = json!(if rolled_back {
                     "rolled_back"
                 } else {
@@ -739,7 +938,7 @@ async fn execute_batch(
         return Err(AppError::unknown(format!("事务提交结果无法确认: {e}"))
             .with_details(json!({"items":items})));
     }
-    Ok(json!({"items":items,"affected_rows":changes.len()}))
+    Ok(json!({"items":items,"affected_rows":affected}))
 }
 
 pub(super) async fn preview(
@@ -751,12 +950,12 @@ pub(super) async fn preview(
     s.profile.ensure_write()?;
     let token: Uuid = param(&params, "token")?;
     let mut changes: Vec<RowChange> = param(&params, "rows")?;
-    let target = s
+    let edit = s
         .edits
         .get(&token)
         .cloned()
         .ok_or_else(|| AppError::invalid("编辑令牌已失效"))?;
-    let schema = catalog::schema(s, target, cancel).await?;
+    let schema = edit_schema(s, &edit, cancel).await?;
     editable(&schema)?;
     for change in &mut changes {
         resolve_and_validate(&schema, change, sink, cancel).await?;
@@ -778,12 +977,14 @@ pub(super) async fn preview(
         if cancel.is_cancelled() {
             return Err(AppError::cancelled());
         }
-        let plan = plan_change(&schema, change, transactional)?;
         let mut statements = Vec::new();
+        let plan = plan_change(&schema, change, transactional)?;
         if let Some(check) = &plan.check {
             statements.push(check.preview("check", &mut budget));
         }
-        statements.push(plan.write.preview("write", &mut budget));
+        if let Some(write) = &plan.write {
+            statements.push(write.preview("write", &mut budget));
+        }
         items.push(PreviewItem {
             index: Some(index),
             operation: change.operation.clone(),
@@ -811,11 +1012,11 @@ pub(super) async fn submit(
     let token: Uuid = param(&params, "token")?;
     let changes: Vec<RowChange> = param(&params, "rows")?;
     // 提交时消费令牌并重新读取 schema，失败后也不能复用旧编辑基线。
-    let target = s
+    let edit = s
         .edits
         .remove(&token)
         .ok_or_else(|| AppError::invalid("编辑令牌已失效"))?;
-    let schema = catalog::schema(s, target, cancel).await?;
+    let schema = edit_schema(s, &edit, cancel).await?;
     editable(&schema)?;
     execute_batch(s, &schema, changes, sink, cancel).await
 }
@@ -857,3 +1058,7 @@ pub(super) async fn import(
 #[cfg(test)]
 #[path = "../../../tests/unit/mysql/changes.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/mysql/changes_view.rs"]
+mod view_tests;

@@ -299,6 +299,7 @@ pub fn stylesheet(app: &App) -> String {
         include_str!("styles/navigation-editor.css"),
         include_str!("styles/native-surfaces.css"),
         include_str!("styles/archery-forms.css"),
+        include_str!("styles/advanced-editing.css"),
     )
     .to_string();
     if let Some(g) = &app.grid {
@@ -319,6 +320,18 @@ fn writable(app: &App) -> bool {
         && app.edit_token.is_some()
         && app.browse_result
         && (app.is_redis() || app.grid.as_ref().is_some_and(|g| g.editable))
+}
+
+fn import_writable(app: &App) -> bool {
+    if app.is_redis() {
+        app.session_id().is_some()
+            && app.profile.as_ref().is_some_and(|profile| {
+                !profile.is_archery()
+                    && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
+            })
+    } else {
+        writable(app)
+    }
 }
 
 fn timestamp_text(value: Option<&Value>) -> String {
@@ -357,7 +370,7 @@ pub(super) fn task_state_text(state: &str) -> String {
         "cancelled" => "已取消",
         "wait_stopped" => "已结束等待",
         "outcome_unknown" => "结果待确认",
-        _ => state,
+        _ => "未知",
     })
     .into_owned()
 }
@@ -405,6 +418,56 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         );
     }
     content = content.child(context::tabs(app));
+    if app
+        .tabs
+        .get(app.active)
+        .is_some_and(|tab| tab.replace_draft.is_some())
+    {
+        content = content.child(button("恢复替换草稿", "replace-restore"));
+    }
+    if !app.tabs.is_empty()
+        && app.session_id().is_some()
+        && !app.is_redis()
+        && app.database.is_some()
+    {
+        let mut tools = html::div()
+            .class("toolbar")
+            .child(button("新建表", "schema-create-table"))
+            .child(button("新建视图", "schema-create-view"));
+        if app
+            .target
+            .as_ref()
+            .is_some_and(|target| target.kind == "table")
+        {
+            tools = tools.child(button("触发器", "trigger-list"));
+            tools = tools.child(button("新建触发器", "schema-create-trigger"));
+        }
+        content = content.child(tools);
+    }
+    if let Some(list) = &app.workbench.trigger_list {
+        let mut triggers = html::div().class("toolbar").child(html::strong(format!(
+            "{} · {}",
+            crate::i18n::tr("触发器"),
+            list.target.name
+        )));
+        if let Some(error) = &list.error {
+            triggers = triggers.child(html::span(error.clone()).class("field-error"));
+        }
+        if list.token.is_some() {
+            triggers = triggers
+                .child(html::span(crate::i18n::tr("正在加载触发器…").into_owned()).class("muted"));
+        }
+        for (index, resource) in list.resources.iter().enumerate() {
+            triggers = triggers.child(button(&resource.name, &format!("trigger-open:{index}")));
+        }
+        if list.cursor.is_some() {
+            triggers = triggers.child(button("下一页", "trigger-list-next"));
+        }
+        if list.token.is_none() && list.resources.is_empty() && list.error.is_none() {
+            triggers = triggers.child(html::span(crate::i18n::tr("没有触发器").into_owned()));
+        }
+        content = content.child(triggers);
+    }
     if app.save_blocked {
         content = content.child(
             html::div()
@@ -431,7 +494,11 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         } else {
             "body detail-panel"
         });
-        if !redis && (app.target.is_none() || (app.view == "query" && !app.browse_result)) {
+        if app.view == "advanced-schema" {
+            if let Some(schema) = &app.advanced_schema {
+                body = body.child(schema.view());
+            }
+        } else if !redis && (app.target.is_none() || (app.view == "query" && !app.browse_result)) {
             body = body
                 .child(crate::query_ui::toolbar(app))
                 .child(crate::query_ui::panel(app));
@@ -442,12 +509,15 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                 .child(html::span(
                     crate::i18n::tr("从左侧已加载的 key 中选择，查看类型和值。").into_owned(),
                 ));
-            if app
-                .profile
-                .as_ref()
-                .is_some_and(|p| p.access_mode == datapier_core::model::AccessMode::ReadWrite)
-            {
-                empty = empty.child(button("导入数据库", "overlay:import"));
+            empty = empty.child(
+                ui::button(crate::i18n::tr("导入数据库").into_owned())
+                    .disabled(!import_writable(app))
+                    .on_click(Msg::Action("overlay:import".into())),
+            );
+            if !import_writable(app) {
+                empty = empty.child(
+                    html::span(crate::i18n::tr("只读连接不能修改数据").into_owned()).class("muted"),
+                );
             }
             body = body.child(empty);
         } else if redis {
@@ -482,9 +552,15 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                     ),
             );
         }
-        if !redis
+        if app.view == "advanced-schema" {
+        } else if !redis
             && let Some(target) = &app.target
-            && app.browse_result
+            && (app.browse_result
+                || (app.workbench.section == "structure"
+                    && app
+                        .advanced_schema
+                        .as_ref()
+                        .is_some_and(|state| state.embedded)))
             && app.workbench.section != "data"
         {
             if app.workbench.section == "ddl" {
@@ -515,7 +591,15 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                         .child(ui::code(ddl).lang("sql").numbers(true)),
                 );
             } else {
-                body = body.child(schema_panel(app));
+                if matches!(target.kind.as_str(), "table" | "view") {
+                    if let Some(schema) = &app.advanced_schema {
+                        body = body.child(schema.view());
+                    } else {
+                        body = body.child(schema_panel(app));
+                    }
+                } else {
+                    body = body.child(schema_panel(app));
+                }
             }
         } else if (redis && app.target.is_none())
             || (!redis && !app.browse_result && app.workbench.query_ui.results_hidden)
@@ -559,22 +643,52 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                         );
                     }
                 }
+                if target.kind == "view" {
+                    tools = tools.child(
+                        html::span(
+                            crate::i18n::tr("视图编辑的并发检查覆盖视图可见的完整原值。")
+                                .into_owned(),
+                        )
+                        .class("muted"),
+                    );
+                    if let Some(reasons) = app
+                        .schema
+                        .as_ref()
+                        .and_then(|schema| schema.pointer("/details/view_mapping/reasons"))
+                        .and_then(Value::as_array)
+                    {
+                        for reason in reasons.iter().filter_map(Value::as_str) {
+                            tools = tools.child(html::span(reason.to_owned()).class("muted"));
+                        }
+                    }
+                }
                 tools = tools
                     .child(row_search(app))
                     .child(icon_button("funnel", "过滤与排序", "overlay:filters"))
                     .child(icon_button("columns", "列配置", "overlay:columns"))
                     .child(html::span("").class("spacer"));
-                if writable(app) && app.grid.as_ref().is_some_and(|g| g.editable) {
-                    tools = tools.child(icon_button("plus", "新增行", "overlay:row"));
-                }
+                let can_replace = writable(app) && app.workbench_can_operate("update");
+                let can_insert = writable(app) && app.workbench_can_operate("insert");
+                tools = tools.child(
+                    ui::button(crate::i18n::tr("批量替换").into_owned())
+                        .disabled(!can_replace)
+                        .on_click(Msg::Action("replace-open".into())),
+                );
+                tools = tools.child(page_button("plus", "新增行", "overlay:row", can_insert));
                 tools = tools.child(icon_button("download", "导出", "overlay:export"));
-                if writable(app)
-                    && app
-                        .target
-                        .as_ref()
-                        .is_some_and(|target| target.kind == "table")
-                {
-                    tools = tools.child(icon_button("arrow-up", "导入", "overlay:import"));
+                if target.kind == "table" {
+                    tools = tools.child(page_button(
+                        "arrow-up",
+                        "导入",
+                        "overlay:import",
+                        writable(app),
+                    ));
+                }
+                if !can_replace || !can_insert {
+                    tools = tools.child(
+                        html::span(crate::i18n::tr("只读或当前对象权限不允许修改").into_owned())
+                            .class("muted"),
+                    );
                 }
                 tools = tools.child(icon_button("repeat", "刷新", "browse"));
                 content = content.child(tools);
@@ -756,6 +870,19 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     let mut status = html::div()
         .class("status")
         .child(html::span(app.status.render().into_owned()));
+    if let Some(pending) = &app.workbench.draft_scope_pending {
+        status = status
+            .child(button("查看未确认输入", "draft-scope-recovery-view"))
+            .child(button("放弃未确认输入", "draft-scope-pending-cancel"));
+        if pending.request.is_none() {
+            status = status.child(button("重试草稿保护", "draft-scope-pending-retry"));
+        }
+    }
+    if !app.workbench.draft_scope_recovery.is_empty() {
+        status = status
+            .child(button("查看未确认输入", "draft-scope-recovery-view"))
+            .child(button("清除未确认输入", "draft-scope-recovery-discard"));
+    }
     if app.navigation_drop_running() {
         status = status.child(button("停止等待", "cancel"));
     }
@@ -791,12 +918,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         .attr(
             "data-window-bridge",
             nonce
-                .map(|id| {
-                    format!(
-                        "datapier-window-bridge:{}",
-                        json!({"nonce":id,"data_dir":app.window_data_dir})
-                    )
-                })
+                .map(|id| format!("datapier-window-bridge:{}", json!({"nonce":id,"data_dir":app.window_data_dir,"editor_handoff":app.advanced_files.terminal_handoff})))
                 .unwrap_or_default(),
         )
         .on_click(Msg::Action("result-info-dismiss".into()))

@@ -4,13 +4,18 @@ use super::*;
 async fn schema_one_migrates_without_creating_result_cache() {
     let root = std::env::temp_dir().join(format!("datapier-migration-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&root).await.unwrap();
-    let pool = open_database(&root.join("datapier.sqlite3")).await.unwrap();
+    let mut connection = SqliteConnectOptions::new()
+        .filename(root.join("datapier.sqlite3"))
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!("../../../migrations/0001_config.sql"))
-        .execute(&pool)
+        .execute(&mut connection)
         .await
         .unwrap();
     sqlx::query("PRAGMA user_version=1")
-        .execute(&pool)
+        .execute(&mut connection)
         .await
         .unwrap();
     let id = Uuid::new_v4();
@@ -19,10 +24,10 @@ async fn schema_one_migrates_without_creating_result_cache() {
         .bind(id.to_string())
         .bind("旧连接")
         .bind(profile.to_string())
-        .execute(&pool)
+        .execute(&mut connection)
         .await
         .unwrap();
-    pool.close().await;
+    connection.close().await.unwrap();
     let store = Store::open(&root).await.unwrap();
     let profile = store.profile(id).await.unwrap();
     assert_eq!(profile.direct().unwrap().database.as_deref(), Some("sales"));
@@ -30,17 +35,17 @@ async fn schema_one_migrates_without_creating_result_cache() {
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT credential_saved FROM profiles WHERE id=?")
             .bind(id.to_string())
-            .fetch_one(&store.pool)
+            .fetch_one(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap(),
         1
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("PRAGMA user_version")
-            .fetch_one(&store.pool)
+            .fetch_one(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap(),
-        3
+        4
     );
     assert!(!root.join("cache.sqlite3").exists());
     assert!(!root.join("values").exists());

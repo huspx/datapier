@@ -1,0 +1,223 @@
+.advanced-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  font: 13px/1.5 var(--sans);
+}
+.modal-body > .advanced-panel {
+  padding: 0;
+}
+.advanced-fields,
+.advanced-field,
+.advanced-section {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+.advanced-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--l2);
+}
+.advanced-actions,
+.advanced-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.advanced-tabs {
+  gap: 16px;
+  border-bottom: 1px solid var(--l2);
+}
+.advanced-tab {
+  padding: 8px 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--t3);
+  cursor: pointer;
+}
+.advanced-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--t1);
+}
+.advanced-tab:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.advanced-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+  min-width: 0;
+}
+.bp-small .advanced-facts {
+  grid-template-columns: 1fr;
+}
+.advanced-fact {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--l2);
+}
+.advanced-fact-label {
+  flex: none;
+  color: var(--t3);
+}
+.advanced-fact-value {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.advanced-code {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.6 var(--mono);
+}
+
+.schema-design-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--l2);
+}
+.schema-design-columns {
+  overflow-x: auto;
+}
+.schema-design-column-row {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 1.3fr) minmax(130px, 1fr) minmax(100px, 0.7fr) 70px
+    minmax(160px, 1.2fr) 80px minmax(180px, 1.5fr) 140px;
+  align-items: center;
+  gap: 8px;
+  min-width: 1250px;
+  padding: 8px;
+  border-bottom: 1px solid var(--l2);
+}
+.schema-design-column-row.selected {
+  background: var(--tv-sel);
+}
+.schema-design-column-row > span {
+  overflow-wrap: anywhere;
+}
+.schema-design-column-header {
+  color: var(--t3);
+}
+.schema-design-column-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 12px;
+}
+.schema-design-column-details > .advanced-fields > .advanced-field {
+  display: grid;
+  grid-template-columns: minmax(100px, 160px) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.schema-design-nullable {
+  justify-self: start;
+  align-self: center;
+}
+.schema-design-default,
+.schema-design-column-constraints {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.schema-design-default > .advanced-fields {
+  flex: 1;
+}
+
+.replace-comparison {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.schema-design-tabs {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+}
+.schema-design-tabs .advanced-tab {
+  flex: none;
+}
+.schema-design-boolean {
+  min-width: 0;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--l2);
+}
+
+.schema-design-object-grid {
+  overflow-x: auto;
+}
+.schema-design-object-row {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  min-width: 700px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--l2);
+}
+.schema-design-object-indexes {
+  min-width: 1080px;
+  grid-template-columns:
+    minmax(150px, 1fr) 130px minmax(130px, 1fr) minmax(260px, 2fr) 100px 120px;
+}
+.schema-design-object-foreign_keys {
+  min-width: 1700px;
+  grid-template-columns:
+    minmax(150px, 1fr) minmax(260px, 2fr) minmax(140px, 1fr) minmax(
+      180px,
+      1fr
+    ) minmax(260px, 2fr) 140px 140px 120px;
+}
+.schema-design-object-checks {
+  grid-template-columns:
+    minmax(200px, 1fr) minmax(300px, 2fr) minmax(130px, 0.6fr) 120px;
+}
+.schema-design-row-actions,
+.schema-design-ordered-column,
+.schema-design-column-constraints {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.schema-design-ordered-columns {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.schema-design-ordered-column > :first-child {
+  min-width: 0;
+  flex: 1;
+}
+.schema-design-object-row.selected {
+  background: var(--tv-sel);
+}
+.schema-design-object-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.schema-design-table-options > .advanced-fields > .advanced-field {
+  display: grid;
+  grid-template-columns: minmax(100px, 160px) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}

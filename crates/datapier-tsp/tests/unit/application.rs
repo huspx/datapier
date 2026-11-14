@@ -33,6 +33,92 @@ fn language_saves_are_serialized_and_coalesce_to_latest_selection() {
 }
 
 #[test]
+fn clean_settings_refresh_updates_form_and_revision_together() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("window-a".into());
+    let original = app.settings.clone();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&original).unwrap()),
+        },
+        &backend,
+    );
+
+    let mut other_window = original.clone();
+    other_window.revision += 1;
+    other_window.paging.mysql_table_rows = 137;
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&other_window).unwrap()),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("settings-paging-mysql_table_rows"), "137");
+    assert!(!app.settings_form_dirty());
+    app.field_set("settings-paging-sql_rows", "123");
+    app.application_action("settings-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(
+        request.params["settings"]["revision"],
+        json!(other_window.revision)
+    );
+    assert_eq!(
+        request.params["settings"]["paging"]["mysql_table_rows"],
+        json!(137)
+    );
+    assert_eq!(request.params["settings"]["paging"]["sql_rows"], json!(123));
+}
+
+#[test]
+fn dirty_closed_settings_keep_revision_and_conflict_after_remote_refresh() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("window-a".into());
+    let original = app.settings.clone();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&original).unwrap()),
+        },
+        &backend,
+    );
+    app.field_set("settings-paging-sql_rows", "123");
+    app.workbench.overlay = None;
+
+    let mut other_window = original.clone();
+    other_window.revision += 1;
+    other_window.paging.mysql_table_rows = 137;
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(serde_json::to_value(&other_window).unwrap()),
+        },
+        &backend,
+    );
+    assert_eq!(app.settings.revision, original.revision);
+    assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    assert!(app.settings_form_dirty());
+
+    app.application_action("settings-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(
+        request.params["settings"]["revision"],
+        json!(original.revision)
+    );
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("revision_conflict", "conflict")),
+        },
+        &backend,
+    );
+    assert!(app.field("settings-error").contains("conflict"));
+    assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    assert!(app.settings_form_dirty());
+}
+
+#[test]
 fn failed_settings_write_keeps_selection_until_explicit_reload() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("test".into());
@@ -71,6 +157,157 @@ fn failed_settings_write_keeps_selection_until_explicit_reload() {
     let latest = requests.try_recv().unwrap();
     assert_eq!(latest.params["settings"]["revision"], json!(saved.revision));
     assert_eq!(latest.params["settings"]["language"], "zh-CN");
+}
+
+#[test]
+fn settings_tabs_keep_drafts_and_footer_saves_all_fields() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("settings".into());
+    let saved = serde_json::to_value(&app.settings).unwrap();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(saved),
+        },
+        &backend,
+    );
+    app.field_set("editing_plan_items", "234");
+    app.field_set("external_mode", "gui");
+    app.field_set("external_program", "editor");
+    app.field_set("external_args", "--wait\n{file}");
+    app.application_action("settings-language:en", &backend);
+    app.application_action("settings-tab:mcp", &backend);
+    app.application_action("settings-toggle:notifications:approval", &backend);
+    app.field_set("mcp-rule-profile", "selected");
+    app.field_set("mcp-rule-error", "permission failed");
+    app.application_action("settings-tab:general", &backend);
+    assert!(requests.try_recv().is_err());
+    assert_eq!(app.field("mcp-rule-profile"), "selected");
+    assert_eq!(app.field("mcp-rule-error"), "permission failed");
+    app.application_action("settings-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "settings.set");
+    assert_eq!(request.params["settings"]["editing"]["max_plan_items"], 234);
+    assert_eq!(request.params["settings"]["language"], "en");
+    assert_eq!(
+        request.params["settings"]["external_editor"]["args"],
+        json!(["--wait", "{file}"])
+    );
+    assert_eq!(
+        request.params["settings"]["notifications"]["approval"],
+        json!(app.field("settings-notifications-approval") == "true")
+    );
+    app.application_action("settings-reload", &backend);
+    app.application_action("settings-save", &backend);
+    assert!(requests.try_recv().is_err());
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("revision_conflict", "conflict")),
+        },
+        &backend,
+    );
+    app.application_action("settings-tab:mcp", &backend);
+    assert_eq!(app.field("editing_plan_items"), "234");
+    assert!(app.field("settings-error").contains("conflict"));
+}
+
+#[test]
+fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("settings".into());
+    let saved = serde_json::to_value(&app.settings).unwrap();
+    app.settings_response(
+        Response {
+            tag: "settings.get/0".into(),
+            result: Ok(saved),
+        },
+        &backend,
+    );
+    app.field_set("external_mode", "gui");
+    app.field_set("external_program", "editor");
+    app.field_set("external_args", "--wait\n{file}\n{file}");
+    app.application_action("settings-save", &backend);
+    assert!(requests.try_recv().is_err());
+    assert_eq!(
+        app.workbench
+            .field_error
+            .as_ref()
+            .map(|error| error.field.as_str()),
+        Some("external_args")
+    );
+    assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
+    app.application_action("settings-reload", &backend);
+    assert_eq!(app.field("settings-reload-confirm"), "true");
+    assert!(requests.try_recv().is_err());
+    app.application_action("settings-reload-confirm", &backend);
+    let request = requests.try_recv().unwrap();
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("unavailable", "reload failed")),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
+    assert!(app.field("settings-error").contains("reload failed"));
+    app.application_action("settings-reload", &backend);
+    assert!(requests.try_recv().is_err());
+    app.application_action("settings-reload-confirm", &backend);
+    let request = requests.try_recv().unwrap();
+    let persisted = serde_json::to_value(&app.settings).unwrap();
+    app.settings_response(
+        Response {
+            tag: request.tag,
+            result: Ok(persisted),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("external_mode"), "disabled");
+    assert_eq!(app.field("external_args"), "");
+    assert!(app.field("settings-error").is_empty());
+}
+
+#[test]
+fn history_sizes_use_saved_default_and_all_pager_options() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("history-sizes".into());
+    app.settings.paging.history_rows = 200;
+    app.open_history(&backend);
+    assert_eq!(requests.try_recv().unwrap().params["limit"], 200);
+    for size in [20, 50, 100, 137, 200, 500, 1000] {
+        app.application_action(&format!("history-size:{size}"), &backend);
+        let request = requests.try_recv().unwrap();
+        assert_eq!(request.params["limit"], size);
+    }
+    app.workbench.overlay = None;
+    app.settings.paging.history_rows = 50;
+    app.open_history(&backend);
+    assert_eq!(app.workbench.archery_history.limit, 1000);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn closed_history_response_is_cached_for_its_own_tab() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("history-late".into());
+    app.open_history(&backend);
+    let request = requests.try_recv().unwrap();
+    app.action("overlay-close", &backend);
+    app.create_query_tab();
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"items":[{"text":"saved"}],"total":1,"offset":0,"limit":20})),
+        },
+        &backend,
+    );
+    assert_eq!(app.active, 1);
+    app.switch_tab(0);
+    assert!(app.workbench.archery_history.pending.is_none());
+    app.open_history(&backend);
+    assert_eq!(app.history_selected_text(), Some("saved"));
+    assert!(requests.try_recv().is_err());
 }
 
 #[test]

@@ -212,7 +212,12 @@ impl GridState {
                     self.page.rows[(row - self.page.start) as usize].clone(),
                 );
             }
-            undo.push((edit.cell, self.edits.get(&edit.cell).cloned()));
+            undo.push((
+                edit.cell,
+                self.edits.get(&edit.cell).cloned(),
+                self.edit_files.remove(&edit.cell),
+                self.value_sources.remove(&edit.cell),
+            ));
             if self.original_type_value(edit.cell) == Some(&edit.after) {
                 self.edits.remove(&edit.cell);
             } else {

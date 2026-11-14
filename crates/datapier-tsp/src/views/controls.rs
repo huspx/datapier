@@ -14,7 +14,7 @@ pub(super) fn flat_action(icon: &str, label: &str, action: &str) -> html::El<Msg
 pub(super) fn button(label: &str, action: &str) -> Node<Msg> {
     let variant = match action {
         "run" | "save-profile" | "submit" | "redis-submit" | "redis-stage" | "import"
-        | "set-cell" => ui::ButtonVariant::Primary,
+        | "set-cell" | "file-save" | "column-width" | "paste-confirm" => ui::ButtonVariant::Primary,
         "discard"
         | "redis-op:delete_key"
         | "redis-op:hash_delete"
@@ -27,7 +27,7 @@ pub(super) fn button(label: &str, action: &str) -> Node<Msg> {
         {
             ui::ButtonVariant::Danger
         }
-        "navigation-toggle" | "cli-toggle" | "overlay-close" => ui::ButtonVariant::Quiet,
+        "navigation-toggle" | "cli-toggle" => ui::ButtonVariant::Quiet,
         _ => ui::ButtonVariant::Default,
     };
     let deletion = action != "discard" && matches!(variant, ui::ButtonVariant::Danger);
@@ -80,6 +80,14 @@ pub(super) fn page_button(icon: &str, label: &str, action: &str, enabled: bool) 
 }
 
 pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
+    field_control(app, name, label, None)
+}
+
+pub(super) fn field_with_hint(app: &App, name: &str, label: &str, hint: &str) -> Node<Msg> {
+    field_control(app, name, label, Some(hint))
+}
+
+fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node<Msg> {
     let ed = if name == "cli_text" {
         &app.tabs[app.active].cli_query
     } else if name == "cell" {
@@ -95,6 +103,16 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
         name,
         "name" | "host" | "port" | "path" | "column" | "mcp-rule-scope"
     ) || (name.starts_with("settings-") && !name.starts_with("settings-history-"))
+        || matches!(
+            name,
+            "editing_plan_items"
+                | "editing_plan_bytes"
+                | "editing_value_bytes"
+                | "editing_text_bytes"
+                | "editing_preview_rows"
+        )
+        || (matches!(name, "external_program" | "external_args")
+            && app.field("external_mode") != "disabled")
         || matches!(name, "archery_name" | "archery_url" | "archery_user")
         || name.starts_with("archery_profile_name_")
         || (name == "password"
@@ -133,7 +151,12 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
         .required(required)
         .key(name.to_string())
         .role("datapier.form-field");
-    if app.workbench.overlay.as_deref() == Some("settings") {
+    if let Some(hint) = hint {
+        control = control.hint(crate::i18n::tr(hint).into_owned());
+    }
+    if app.workbench.overlay.as_deref() == Some("settings")
+        && !matches!(name, "external_program" | "external_args")
+    {
         control = control.variant(ui::FieldVariant::Row);
     }
     if let Some(error) = app
@@ -144,12 +167,25 @@ pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
     {
         control = control.error(error.message.render().into_owned());
     }
-    if matches!(name, "cell" | "redis_value" | "redis_member" | "cli_text") {
+    if matches!(
+        name,
+        "cell"
+            | "redis_value"
+            | "redis_member"
+            | "cli_text"
+            | "external_args"
+            | "mapping"
+            | "binary_columns"
+    ) {
         control
             .child(
                 ui::editor()
                     .aria(accessible_label)
-                    .readonly(app.connection_form_busy())
+                    .readonly(
+                        app.connection_form_busy()
+                            || (name == "cli_text"
+                                && (app.workbench.cli_running || app.operation_pending)),
+                    )
                     .key(format!("input-{name}"))
                     .text(display)
                     .cursor(ed.cursor)
@@ -196,12 +232,14 @@ pub(super) fn choices(
     label: &str,
     options: &[(&str, &str)],
 ) -> Node<Msg> {
+    let label = crate::i18n::tr(label).into_owned();
     let field_name = field_name.to_owned();
     let error_field = field_name.clone();
     let select_key = format!("field-{field_name}");
     let open = app.workbench.generic_select.as_deref() == Some(select_key.as_str());
     let mut select = ui::select()
         .key(format!("input-{field_name}"))
+        .aria(label.clone())
         .value(app.field(&field_name).to_owned())
         .disabled(app.connection_form_busy())
         .open(open)
@@ -214,9 +252,11 @@ pub(super) fn choices(
             crate::i18n::tr(title).into_owned(),
         ));
     }
-    let label = crate::i18n::tr(label).into_owned();
-    let control: Node<Msg> = ui::field(label)
-        .required(field_name == "format")
+    let mut field = ui::field(label).required(field_name == "format");
+    if app.workbench.overlay.as_deref() == Some("settings") {
+        field = field.variant(ui::FieldVariant::Row);
+    }
+    let control: Node<Msg> = field
         .child(select.on_change(move |change| {
             Msg::Action(format!(
                 "field:{}:{}",

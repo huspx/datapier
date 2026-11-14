@@ -1,4 +1,31 @@
 use super::*;
+// 逐字节向 CSV parser 供给数据，避免带引号记录在返回完整行前突破分配预算。
+pub(super) struct BoundedRecordReader {
+    pub(super) file: BufReader<File>,
+    pub(super) used: usize,
+    pub(super) limit: usize,
+}
+impl Read for BoundedRecordReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.used >= self.limit {
+            return Err(std::io::Error::other("record exceeds memory budget"));
+        }
+        let n = self.file.read(&mut buf[..1])?;
+        self.used += n;
+        Ok(n)
+    }
+}
+pub(super) fn import_limit_error() -> AppError {
+    AppError::new("resource_limit", "导入行超过内存预算")
+}
+
+pub(super) struct MysqlImportInput {
+    pub(super) file: File,
+    pub(super) budget: usize,
+}
 
 pub(super) async fn import_mysql_csv(
     session: &mut ProviderSession,
@@ -7,15 +34,27 @@ pub(super) async fn import_mysql_csv(
     sink: &ExecutionSink,
     cancel: &CancellationToken,
     p: &mut Progress,
-    file: File,
+    input: MysqlImportInput,
 ) -> Result<()> {
-    let mut reader = csv::Reader::from_reader(BufReader::new(file));
-    let names: Vec<String> = reader
+    let MysqlImportInput { file, budget } = input;
+    let limit = (budget / 64).max(1);
+    let input = BoundedRecordReader {
+        file: BufReader::new(file),
+        used: 0,
+        limit,
+    };
+    let mut reader = csv::ReaderBuilder::new()
+        .buffer_capacity(1)
+        .from_reader(input);
+    let names: Vec<String> = match reader
         .headers()
-        .map_err(csv_error)?
-        .iter()
-        .map(str::to_owned)
-        .collect();
+        .map(|header| header.iter().map(str::to_owned).collect())
+    {
+        Ok(names) => names,
+        Err(_error) if reader.get_ref().used >= limit => return Err(import_limit_error()),
+        Err(error) => return Err(csv_error(error)),
+    };
+    reader.get_mut().used = 0;
     let projection = mapped_columns(
         &names,
         params,
@@ -35,11 +74,40 @@ pub(super) async fn import_mysql_csv(
         .map(|a| a.iter().filter_map(Json::as_str).collect())
         .unwrap_or_default();
     let mut batch = Vec::with_capacity(PAGE);
-    for record in reader.records() {
+    let mut batch_bytes = 0usize;
+    let mut record = csv::StringRecord::new();
+    loop {
         ensure_not_cancelled(cancel)?;
-        let record = record.map_err(csv_error)?;
+        let has_record = reader.read_record(&mut record).map_err(|e| {
+            if reader.get_ref().used >= limit {
+                import_limit_error()
+            } else {
+                csv_error(e)
+            }
+        })?;
+        if !has_record {
+            break;
+        }
+        let record_bytes = reader.get_ref().used;
+        reader.get_mut().used = 0;
+        if !batch.is_empty()
+            && batch_bytes.saturating_add(record_bytes.saturating_mul(32)) > budget / 2
+        {
+            insert_batch(
+                session,
+                target,
+                &projection.columns,
+                &mut batch,
+                sink,
+                cancel,
+                p,
+            )
+            .await?;
+            batch_bytes = 0;
+        }
         let row = projection.csv_row(&record,&names,null,escaped,&binary).map_err(|e| { p.failed += 1; e.with_details(json!({"record":p.rows + batch.len() as u64 + 1,"buffered_not_executed":batch.len()})) })?;
         batch.push(row);
+        batch_bytes = batch_bytes.saturating_add(record_bytes.saturating_mul(32));
         if batch.len() == PAGE {
             insert_batch(
                 session,
@@ -51,6 +119,7 @@ pub(super) async fn import_mysql_csv(
                 p,
             )
             .await?;
+            batch_bytes = 0;
         }
     }
     insert_batch(
@@ -72,9 +141,16 @@ pub(super) async fn import_mysql_json(
     sink: &ExecutionSink,
     cancel: &CancellationToken,
     p: &mut Progress,
-    file: File,
+    input: MysqlImportInput,
 ) -> Result<()> {
-    let doc = json_document(file, &sink.store.root, "rows", cancel)?;
+    let MysqlImportInput { file, budget } = input;
+    let doc = super::json::json_document_bounded(
+        file,
+        &sink.store.root,
+        "rows",
+        cancel,
+        (budget / 64).max(1),
+    )?;
     let source = doc
         .columns
         .ok_or_else(|| AppError::invalid("JSON 缺少列定义"))?;
@@ -87,11 +163,28 @@ pub(super) async fn import_mysql_json(
         &schema(session, target, sink, cancel).await?,
     )?;
     let mut first = true;
+    let limit = (budget / 64).max(1);
+    let mut batch_bytes = 0usize;
     let mut batch = Vec::with_capacity(PAGE);
     while r.array_next(&mut first)? {
         ensure_not_cancelled(cancel)?;
-        let row: Vec<Value> = r.value()?;
+        let (row, bytes): (Vec<Value>, usize) = r.value_bounded(limit)?;
+        let charge = bytes.saturating_mul(32);
+        if !batch.is_empty() && batch_bytes.saturating_add(charge) > budget / 2 {
+            insert_batch(
+                session,
+                target,
+                &projection.columns,
+                &mut batch,
+                sink,
+                cancel,
+                p,
+            )
+            .await?;
+            batch_bytes = 0;
+        }
         batch.push(projection.project(row)?);
+        batch_bytes = batch_bytes.saturating_add(charge);
         if batch.len() == PAGE {
             insert_batch(
                 session,
@@ -103,6 +196,7 @@ pub(super) async fn import_mysql_json(
                 p,
             )
             .await?;
+            batch_bytes = 0;
         }
     }
     r.end_document()?;

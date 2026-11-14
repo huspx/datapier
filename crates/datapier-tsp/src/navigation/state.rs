@@ -51,7 +51,7 @@ pub(crate) struct ProfileDeleteConfirmation {
     pub name: String,
     pub busy: bool,
     pub error: Option<String>,
-    pub(super) tab: Uuid,
+    pub(super) tab: Option<Uuid>,
     pub(super) profile: Value,
 }
 
@@ -59,7 +59,33 @@ pub(crate) struct ProfileDeleteConfirmation {
 pub(super) struct ProfileDeleteOperation {
     pub(super) id: Uuid,
     pub(super) token: Uuid,
-    pub(super) sessions: Vec<(Uuid, Value)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DatabaseCreate {
+    pub token: Uuid,
+    pub tab: Uuid,
+    pub profile_id: Uuid,
+    pub profile: Value,
+    pub session: Option<Value>,
+    pub options: Option<Value>,
+    pub charset: String,
+    pub collation: String,
+    pub open_select: Option<String>,
+    pub plan: Option<Value>,
+    pub observed: (String, String, String),
+    pub attempted: Option<(String, String, String)>,
+    pub preview_input: Option<(String, String, String)>,
+    pub plan_input: Option<(String, String, String)>,
+    pub changed_at: Instant,
+    pub sql: Option<String>,
+    pub error: Option<String>,
+    pub busy: bool,
+    pub task: Option<String>,
+    pub polling: bool,
+    pub last_poll: Instant,
+    pub unknown: bool,
+    pub after_close: Option<String>,
 }
 
 #[derive(Clone)]
@@ -103,6 +129,10 @@ pub(super) struct QueuedSection {
 
 #[derive(Clone)]
 pub(super) enum Pending {
+    CreateDatabase {
+        token: Uuid,
+        stage: &'static str,
+    },
     Tree {
         profile: Uuid,
         database: Option<String>,
@@ -126,11 +156,6 @@ pub(super) enum Pending {
     DeleteProfile {
         id: Uuid,
         token: Uuid,
-    },
-    CloseProfileSession {
-        token: Uuid,
-        tab: Uuid,
-        session: Value,
     },
     DropOpen {
         token: Uuid,
@@ -163,6 +188,7 @@ pub(crate) struct NavigationState {
     pub form_redis_discovery: RedisDiscovery,
     pub(super) delete_confirmation: Option<ProfileDeleteConfirmation>,
     pub(super) delete_operation: Option<ProfileDeleteOperation>,
+    pub(super) create_database: Option<DatabaseCreate>,
     pub(super) drop_confirmation: Option<ResourceDropConfirmation>,
     pub(super) drop_operation: Option<DropOperation>,
     pub(super) queued_sections: BTreeMap<Uuid, QueuedSection>,
@@ -182,6 +208,7 @@ impl Default for NavigationState {
             form_redis_discovery: RedisDiscovery::default(),
             delete_confirmation: None,
             delete_operation: None,
+            create_database: None,
             drop_confirmation: None,
             drop_operation: None,
             queued_sections: BTreeMap::new(),

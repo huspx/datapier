@@ -260,7 +260,7 @@ async fn reopened_server_preserves_independent_credential_locations() {
         .bind(password_saved)
         .bind(totp_saved)
         .bind(server.id.to_string())
-        .execute(&store.pool)
+        .execute(&mut *store.pool.acquire().await.unwrap())
         .await
         .unwrap();
     }

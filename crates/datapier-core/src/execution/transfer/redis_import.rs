@@ -1,3 +1,4 @@
+use super::mysql_import::{BoundedRecordReader, import_limit_error};
 use super::*;
 
 pub(super) async fn import_redis_csv(
@@ -7,22 +8,54 @@ pub(super) async fn import_redis_csv(
     cancel: &CancellationToken,
     p: &mut Progress,
     file: File,
+    budget: usize,
 ) -> Result<()> {
-    let mut reader = csv::Reader::from_reader(BufReader::new(file));
-    if reader.headers().map_err(csv_error)?.iter().ne(REDIS_HEADER) {
+    let limit = (budget / 64).max(1);
+    let input = BoundedRecordReader {
+        file: BufReader::new(file),
+        used: 0,
+        limit,
+    };
+    let mut reader = csv::ReaderBuilder::new()
+        .buffer_capacity(1)
+        .from_reader(input);
+    let header_matches = match reader.headers() {
+        Ok(header) => header.iter().eq(REDIS_HEADER),
+        Err(error) => {
+            return Err(if reader.get_ref().used >= limit {
+                import_limit_error()
+            } else {
+                csv_error(error)
+            });
+        }
+    };
+    reader.get_mut().used = 0;
+    if !header_matches {
         return Err(AppError::invalid("Redis CSV 表头不匹配"));
     }
     let mut active: Option<KeyImport> = None;
     let result: Result<()> = async {
-        for record in reader.records() {
+        let mut record = csv::StringRecord::new();
+        loop {
             ensure_not_cancelled(cancel)?;
-            let record = record.map_err(csv_error)?;
+            let has_record = reader.read_record(&mut record).map_err(|e| {
+                if reader.get_ref().used >= limit {
+                    import_limit_error()
+                } else {
+                    csv_error(e)
+                }
+            })?;
+            if !has_record {
+                break;
+            }
+            let charge = reader.get_ref().used.saturating_mul(32).saturating_add(512);
+            reader.get_mut().used = 0;
             if record.len() != REDIS_HEADER.len() {
                 return Err(AppError::invalid("Redis CSV 列数不匹配"));
             }
             match &record[1] {
                 "key" => {
-                    if &record[0] != "1" {
+                    if &record[0] != "2" {
                         return Err(AppError::invalid("不支持的 Redis CSV 版本"));
                     }
                     if let Some(key) = active.as_mut() {
@@ -55,7 +88,7 @@ pub(super) async fn import_redis_csv(
                         .as_mut()
                         .ok_or_else(|| AppError::invalid("Redis CSV 元素缺少 key 记录"))?;
                     let row = csv_item(&record, key)?;
-                    push_key(session, key, row, sink, cancel).await?;
+                    push_key(session, key, row, charge, budget, sink, cancel).await?;
                 }
                 _ => return Err(AppError::invalid("未知 Redis CSV 记录类型")),
             }
@@ -82,9 +115,11 @@ pub(super) async fn import_redis_json(
     cancel: &CancellationToken,
     p: &mut Progress,
     file: File,
+    budget: usize,
 ) -> Result<()> {
-    let doc = json_document(file, &sink.store.root, "records", cancel)?;
-    let mut r = doc.data.reader()?;
+    let limit = (budget / 64).max(1);
+    let doc = super::json::json_document_bounded(file, &sink.store.root, "records", cancel, limit)?;
+    let mut r = doc.data.reader_bounded(limit)?;
     r.expect(b'[')?;
     let mut active: Option<KeyImport> = None;
     let result: Result<()> = async {
@@ -117,7 +152,7 @@ pub(super) async fn import_redis_json(
             let expiry =
                 expiry.ok_or_else(|| AppError::invalid("Redis JSON 缺少 expires_at_ms"))?;
             let rows = rows.ok_or_else(|| AppError::invalid("Redis JSON 缺少 rows"))?;
-            let mut row_reader = rows.reader()?;
+            let mut row_reader = rows.reader_bounded(limit)?;
             row_reader.expect(b'[')?;
             active = Some(
                 begin_key(
@@ -133,8 +168,18 @@ pub(super) async fn import_redis_json(
             let mut row_first = true;
             while row_reader.array_next(&mut row_first)? {
                 ensure_not_cancelled(cancel)?;
-                let row: Vec<Value> = row_reader.value()?;
-                push_key(session, active.as_mut().unwrap(), row, sink, cancel).await?;
+                let (row, bytes): (Vec<Value>, usize) = row_reader.value_bounded(limit)?;
+                let charge = bytes.saturating_mul(32).saturating_add(512);
+                push_key(
+                    session,
+                    active.as_mut().unwrap(),
+                    row,
+                    charge,
+                    budget,
+                    sink,
+                    cancel,
+                )
+                .await?;
             }
             row_reader.end_document()?;
             finish_key(session, active.as_mut().unwrap(), sink, cancel, p).await?;

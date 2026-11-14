@@ -17,33 +17,68 @@ function renderArchery() {
       az('查询历史', 'Query history'),
       `<div class="history-layout">${historyPanel(true)}</div>`,
       `<span class="spacer"></span>${b('关闭', 'Close', 'query')} ${
+        !ahistory()[ap.page * ap.pageSize + ap.selectedHistory] || ap.task === 'running'
+          ? `<span class="muted small">${
+            ap.task === 'running'
+              ? az('任务运行中，暂不能打开草稿。', 'A task is running; the draft cannot be opened yet.')
+              : az('没有可打开的历史记录。', 'No history record is available to open.')
+          }</span>`
+          : ''
+      }${
         b(
           '打开为未执行草稿',
           'Open as unexecuted draft',
           'open',
-          ahistory()[ap.page * ap.pageSize + ap.selectedHistory]
-            && ap.task !== 'running'
+          ahistory()[ap.page * ap.pageSize + ap.selectedHistory] && ap.task !== 'running'
             ? 'class="primary"'
             : 'disabled',
         )
       }`,
     );
   } else if (ap.view === 'schema' || ap.view === 'ddl') {
-    content = `<div class="subnav"><button data-archery="schema" class="${ap.view === 'schema' ? 'active' : ''}">${
+    content = `<div class="subnav" role="tablist" aria-label="${
+      h(az('表分区', 'Table sections'))
+    }"><button data-archery="schema" role="tab" aria-selected="${ap.view === 'schema'}" tabindex="${
+      ap.view === 'schema' ? '0' : '-1'
+    }" class="${ap.view === 'schema' ? 'active' : ''}">${
       t('structure')
-    }</button><button data-archery="ddl" class="${
-      ap.view === 'ddl' ? 'active' : ''
-    }">DDL</button><span class="spacer"></span><span class="muted small">${
+    }</button><button data-archery="ddl" role="tab" aria-selected="${ap.view === 'ddl'}" tabindex="${
+      ap.view === 'ddl' ? '0' : '-1'
+    }" class="${ap.view === 'ddl' ? 'active' : ''}">DDL</button><span class="spacer"></span><span class="muted small">${
       h(ap.db)
     }.orders</span></div><div class="archery-body">${
       ap.view === 'ddl'
-        ? '<pre class="archery-output">CREATE TABLE orders (\n  id BIGINT PRIMARY KEY,\n  status VARCHAR(32),\n  total DECIMAL(10,2)\n);</pre>'
-        : `<div class="table-wrap">${
-          simpleTable([t('field'), t('type')], [['id', 'BIGINT'], [
-            'status',
-            'VARCHAR(32)',
-          ], ['total', 'DECIMAL(10,2)']])
-        }</div>`
+        ? `<div class="archery-actions"><strong>DDL</strong><span class="spacer"></span><button data-archery="copy-schema-ddl">${
+          az('复制 DDL', 'Copy DDL')
+        }</button></div><pre class="archery-output archery-ddl"><code><span>1  <b>CREATE TABLE</b> orders (</span>\n<span>2    id BIGINT <b>PRIMARY KEY</b>,</span>\n<span>3    status VARCHAR(32),</span>\n<span>4    total DECIMAL(10,2)</span>\n<span>5  );</span></code></pre>`
+        : `<h3>${az('字段', 'Columns')}</h3><div class="table-wrap">${
+          simpleTable([
+            t('field'),
+            t('type'),
+            'NULL',
+            az('默认值', 'Default'),
+            az('约束', 'Constraints'),
+            az('注释', 'Comment'),
+          ], [
+            ['id', 'BIGINT', az('否', 'No'), az('未提供', 'Not provided'), 'PRIMARY KEY', az('未提供', 'Not provided')],
+            ['status', 'VARCHAR(32)', az('是', 'Yes'), 'NULL', '—', az('未提供', 'Not provided')],
+            ['total', 'DECIMAL(10,2)', az('是', 'Yes'), 'NULL', '—', az('未提供', 'Not provided')],
+          ])
+        }</div><h3>${az('索引', 'Indexes')}</h3><div class="table-wrap">${
+          simpleTable([az('名称', 'Name'), az('字段', 'Columns'), az('类型', 'Type')], [[
+            'PRIMARY',
+            'id',
+            'PRIMARY KEY',
+          ]])
+        }</div><h3>${az('约束', 'Constraints')}</h3><div class="table-wrap">${
+          simpleTable([az('名称', 'Name'), az('类型', 'Type'), az('字段', 'Columns')], [[
+            'PRIMARY',
+            'PRIMARY KEY',
+            'id',
+          ]])
+        }</div><p class="muted small">${
+          az('其他索引和约束信息未提供。', 'Other index and constraint information was not provided.')
+        }</p>`
     }<p class="archery-note">${
       az(
         '平台返回的示例结构，只读。',
@@ -93,13 +128,19 @@ function renderArchery() {
           }</dd>`
           : `<dt>${az('执行时上限', 'Executed limit')}</dt><dd>${
             redis && selectedCli ? selectedCli.limit : ap.executedLimit
-          } ${az('行', 'rows')}</dd><dt>${az('结果范围', 'Coverage')}</dt><dd>${
+          } ${az('行', 'rows')}</dd><dt>${az('已返回行数', 'Returned rows')}</dt><dd>${
+            redis ? cliValues.length : ap.cachedRows.length
+          }</dd><dt>${az('原查询总行数', 'Original query row count')}</dt><dd>${az('未提供', 'Not provided')}</dd><dt>${
+            az('结果范围', 'Coverage')
+          }</dt><dd>${
             az(
-              '仅包含平台本次返回的数据；平台未提供原查询总行数。SQL 的 LIMIT 和平台权限、配置可能进一步限制结果。',
-              'Only the rows returned by the platform are included. The full query row count is not provided; SQL LIMIT, platform permissions and settings may further restrict results.',
+              '仅包含平台本次返回的数据；SQL 的 LIMIT 和平台权限、配置可能进一步限制结果。',
+              'Only rows returned by the platform are included; SQL LIMIT, permissions and settings may further restrict results.',
             )
           }</dd><dt>${az('脱敏状态', 'Masking')}</dt><dd>${az('平台未提供', 'Not provided by the platform')}</dd>`
-      }<dt>${az('数据说明', 'Data fidelity')}</dt><dd>${
+      }<dt>${az('原始类型', 'Original type')}</dt><dd>${az('未提供', 'Not provided')}</dd><dt>${
+        az('原始字节', 'Original bytes')
+      }</dt><dd>${az('未提供', 'Not provided')}</dd><dt>${az('数据说明', 'Data fidelity')}</dt><dd>${
         az(
           '平台返回值；原始类型与字节未提供，二进制或编码可能有损。复制和导出覆盖本次缓存。',
           'Platform values; original types and bytes are not provided. Binary or encoding may be lossy. Copy and export cover this cached response.',
@@ -173,7 +214,7 @@ function renderArchery() {
           }</p></div>`
           : ''
       }</div>`
-      : `<div class="table-wrap">${simpleTable(['id', 'status', 'total'], visibleRows)}</div>`;
+      : `<div class="table-wrap">${simpleTable(['id', 'status', 'total'], visibleRows, true)}</div>`;
     if (redis) {
       content = `<section class="cli archery-cli"><div class="cli-head"><span class="cli-title">${
         icon('terminal')

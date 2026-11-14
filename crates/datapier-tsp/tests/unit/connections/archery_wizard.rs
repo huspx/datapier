@@ -60,6 +60,7 @@ fn archery_preview_focuses_first_invalid_name_in_display_order_and_preserves_sel
 fn archery_wizard_authenticates_and_preserves_batch_after_partial_save() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("wizard".into());
+    app.settings.approval.default_policy = serde_json::from_value(json!("all_writes")).unwrap();
     app.archery_action("archery-open", &backend);
     let list = requests.try_recv().unwrap();
     app.archery_response(
@@ -173,6 +174,8 @@ fn archery_wizard_authenticates_and_preserves_batch_after_partial_save() {
     assert_eq!(batch.params["expected_server_revision"], 1);
     let items = batch.params["desired_profiles"].clone();
     assert_eq!(items[0]["id"], json!(first_id));
+    assert_eq!(items[0]["revision"], 1);
+    assert_eq!(items[0]["approval_policy"], "all_writes");
     assert_eq!(
         items[0]["connection"]["databases"],
         json!(["audit", "shop"])
@@ -387,6 +390,9 @@ fn archery_management_restores_unchecked_saved_instance_and_can_remove_all() {
     assert!(app.archery.server_only);
     app.field_set("archery_name", "another service");
     app.archery_action("overlay-close", &backend);
+    assert!(app.archery.server_only);
+    assert_eq!(app.field("archery_name"), "another service");
+    app.archery_action("archery-discard-confirm", &backend);
     assert!(!app.archery.server_only);
     assert_eq!(
         app.field(&format!("archery_profile_name_{profile_id}")),
@@ -503,6 +509,12 @@ fn escape_returns_from_server_form_and_cancels_pending_authentication() {
     assert!(app.archery.server_only);
     app.field_set("archery_name", "unsaved child");
     app.workbench_key(&tern_sdk::Key::named("escape"), &backend);
+    assert!(app.archery.server_only);
+    assert_eq!(app.field("archery_name"), "unsaved child");
+    app.archery_action("archery-discard-cancel", &backend);
+    assert_eq!(app.field("archery_name"), "unsaved child");
+    app.workbench_key(&tern_sdk::Key::named("escape"), &backend);
+    app.archery_action("archery-discard-confirm", &backend);
     assert!(app.archery.open && !app.archery.server_only);
     assert_eq!(app.workbench.overlay.as_deref(), Some("profile"));
     assert_eq!(app.field("archery_name"), "");
@@ -588,4 +600,158 @@ fn preview_type_selection_rejects_keyboard_switching() {
     assert!(app.archery.open && app.archery.preview);
     assert_eq!(app.focus, "provider-archery");
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn archery_default_keyboard_rejects_disappeared_instances() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("archery-default-focus".into());
+    app.archery.open = true;
+    app.workbench.overlay = Some("profile".into());
+    app.archery.instances = vec![json!({"id":1,"name":"one","provider":"mysql"})];
+    app.archery_action("archery-instance:0", &backend);
+    let selection = app.archery.selected.get_mut(&1).unwrap();
+    selection.databases = Some(vec!["missing".into(), "shop".into(), "audit".into()]);
+    selection.selected = ["missing".into(), "shop".into(), "audit".into()]
+        .into_iter()
+        .collect();
+    selection.available_databases = Some(["shop".into(), "audit".into()].into_iter().collect());
+    selection.default = Some("missing".into());
+
+    app.archery_action("archery-default:1:1", &backend);
+    assert_eq!(app.focus, "archery-default-1-1");
+    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+    assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
+    assert_eq!(app.archery.selected[&1].default.as_deref(), Some("audit"));
+    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+
+    app.archery.instances.clear();
+    app.archery_action("archery-db:1:1", &backend);
+    app.archery_action("archery-default:1:1", &backend);
+    assert!(app.workbench_key(&tern_sdk::Key::named("left"), &backend));
+    assert!(app.archery.selected[&1].selected.contains("shop"));
+    assert_eq!(app.archery.selected[&1].default.as_deref(), Some("audit"));
+
+    app.archery.instances = vec![json!({"id":1,"missing":true})];
+    app.archery_action("archery-default:1:1", &backend);
+    assert!(app.workbench_key(&tern_sdk::Key::named("left"), &backend));
+    assert_eq!(app.archery.selected[&1].default.as_deref(), Some("audit"));
+}
+
+#[test]
+fn archery_http_rejects_ca_expansion() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("archery-ca".into());
+    app.archery.open = true;
+    app.field_set("archery_url", "http://example.test");
+    app.archery_action("archery-server-details", &backend);
+    assert!(!app.archery.server_details);
+    app.field_set("archery_url", "https://example.test");
+    app.archery_action("archery-server-details", &backend);
+    assert!(app.archery.server_details);
+}
+
+#[test]
+fn modal_tabs_keep_host_text_focus_cleared_and_approval_can_reopen() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("modal-tab-focus".into());
+    app.workbench.overlay = Some("settings".into());
+    app.focus = "settings-tab-general".into();
+    assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
+    assert_eq!(app.focus, "settings-tab-editing");
+    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+    app.workbench.overlay = None;
+    app.action("approval-toggle", &backend);
+    app.action("approval-close", &backend);
+    assert_eq!(app.focus, "approval-open");
+    assert!(app.workbench_key(&tern_sdk::Key::named("enter"), &backend));
+    assert!(app.approvals.open);
+}
+
+#[test]
+fn archery_preserves_profile_metadata_and_reconciles_committed_revisions() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("archery-revision-recovery".into());
+    let server_id = Uuid::new_v4();
+    let profile_id = Uuid::new_v4();
+    let profile: Profile = serde_json::from_value(json!({
+        "id":profile_id,"revision":7,"approval_policy":"all_writes",
+        "name":"custom","provider":"mysql","access_mode":"read_only",
+        "connection":{"kind":"archery","server_id":server_id,"instance_id":42,
+            "instance_name":"remote","databases":["shop"],"default_database":"shop"}
+    }))
+    .unwrap();
+    app.profiles.push(profile.clone());
+    app.archery_open_server(server_id, 42, &backend);
+    let list = requests.try_recv().unwrap();
+    app.archery_response(
+        Response {
+            tag: list.tag,
+            result: Ok(json!({"servers":[{
+                "id":server_id,"name":"platform","base_url":"https://example.test/",
+                "username":"alice","http_tls":{},"totp_mode":"manual","revision":1
+            }]})),
+        },
+        &backend,
+    );
+    app.archery.selected.get_mut(&42).unwrap().databases = Some(vec!["shop".into()]);
+    app.archery_action("archery-preview", &backend);
+    assert!(!app.archery.preview);
+    assert_eq!(
+        app.archery.error.as_deref(),
+        Some(crate::i18n::tr("没有连接变更").as_ref())
+    );
+
+    app.field_set(&format!("archery_profile_name_{profile_id}"), "renamed");
+    app.archery_action("archery-preview", &backend);
+    assert!(app.archery.preview);
+    app.archery_action("archery-save", &backend);
+    let batch = requests.try_recv().unwrap();
+    assert_eq!(batch.method, "archery.profile.apply_batch");
+    let desired = batch.params["desired_profiles"][0].clone();
+    assert_eq!(desired["revision"], 7);
+    assert_eq!(desired["approval_policy"], "all_writes");
+    app.archery_response(
+        Response {
+            tag: batch.tag,
+            result: Err(AppError::new("transport", "reply lost")),
+        },
+        &backend,
+    );
+    let reconcile = requests.try_recv().unwrap();
+    app.archery_response(
+        Response {
+            tag: reconcile.tag,
+            result: Ok(json!({"profiles":[desired.clone()]})),
+        },
+        &backend,
+    );
+    assert_eq!(app.archery.recovery, Some("batch"));
+    assert!(app.archery.open);
+
+    app.archery_action("archery-reconcile", &backend);
+    let reconcile = requests.try_recv().unwrap();
+    let mut committed = desired;
+    committed["revision"] = json!(8);
+    let mut wrong_policy = committed.clone();
+    wrong_policy["approval_policy"] = json!("off");
+    app.archery_response(
+        Response {
+            tag: reconcile.tag,
+            result: Ok(json!({"profiles":[wrong_policy]})),
+        },
+        &backend,
+    );
+    assert_eq!(app.archery.recovery, Some("batch"));
+    app.archery_action("archery-reconcile", &backend);
+    let reconcile = requests.try_recv().unwrap();
+    app.archery_response(
+        Response {
+            tag: reconcile.tag,
+            result: Ok(json!({"profiles":[committed]})),
+        },
+        &backend,
+    );
+    assert!(app.archery.recovery.is_none());
+    assert!(!app.archery.open);
 }

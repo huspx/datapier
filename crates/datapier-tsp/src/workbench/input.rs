@@ -1,6 +1,144 @@
 use super::*;
 
 impl App {
+    fn modal_tab_key(&mut self, key: &tern_sdk::Key, backend: &Backend) -> bool {
+        if key.ctrl || key.meta || key.alt || self.workbench.overlay_close_confirm {
+            return false;
+        }
+        if self.archery.open
+            && self.workbench.overlay.as_deref() == Some("profile")
+            && let Some((instance, index)) = self
+                .focus
+                .strip_prefix("archery-default-")
+                .and_then(|rest| rest.rsplit_once('-'))
+                .and_then(|(instance, index)| {
+                    Some((instance.parse::<i64>().ok()?, index.parse::<usize>().ok()?))
+                })
+        {
+            if self.archery.pending.is_some() {
+                return true;
+            }
+            if !self.archery.instances.iter().any(|item| {
+                item["id"].as_i64() == Some(instance) && item["missing"].as_bool() != Some(true)
+            }) {
+                return true;
+            }
+            let candidates: Vec<usize> = self
+                .archery
+                .selected
+                .get(&instance)
+                .and_then(|selection| {
+                    selection
+                        .databases
+                        .as_ref()
+                        .map(|databases| (selection, databases))
+                })
+                .map(|(selection, databases)| {
+                    databases
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, db)| {
+                            selection.selected.contains(*db)
+                                && selection
+                                    .available_databases
+                                    .as_ref()
+                                    .is_none_or(|available| available.contains(*db))
+                        })
+                        .map(|(index, _)| index)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if candidates.is_empty() {
+                return true;
+            }
+            let current = candidates
+                .iter()
+                .position(|candidate| *candidate == index)
+                .unwrap_or(0);
+            let next = match key.name.as_str() {
+                "home" => 0,
+                "end" => candidates.len() - 1,
+                "left" | "up" => (current + candidates.len() - 1) % candidates.len(),
+                "right" | "down" => (current + 1) % candidates.len(),
+                "enter" | "space" => current,
+                _ => return false,
+            };
+            self.action(
+                &format!("archery-default:{instance}:{}", candidates[next]),
+                backend,
+            );
+            self.focus = format!("archery-default-{instance}-{}", candidates[next]);
+            self.workbench.focus_request = Some(String::new());
+            return true;
+        }
+        let (prefix, values, action_prefix): (&str, &[&str], &str) =
+            if self.approvals.open && self.focus.starts_with("approval-tab-") {
+                (
+                    "approval-tab-",
+                    &["approvals", "authentication", "tasks"],
+                    "approval-tab-",
+                )
+            } else if self.workbench.overlay.as_deref() == Some("settings")
+                && self.focus.starts_with("settings-tab-")
+            {
+                (
+                    "settings-tab-",
+                    &["general", "editing", "archery", "mcp"],
+                    "settings-tab:",
+                )
+            } else if self.workbench.overlay.as_deref() == Some("advanced-value")
+                && self.focus.starts_with("advanced-value-tab-")
+            {
+                (
+                    "advanced-value-tab-",
+                    &["text", "hex", "json", "xml", "image"],
+                    "advanced-value-mode:",
+                )
+            } else if self.workbench.overlay.is_none()
+                && !self.approvals.open
+                && self.focus.starts_with("schema-section-")
+            {
+                (
+                    "schema-section-",
+                    if self.advanced_schema.is_some() {
+                        &[
+                            "columns",
+                            "indexes",
+                            "foreign_keys",
+                            "checks",
+                            "options",
+                            "ddl_preview",
+                        ]
+                    } else {
+                        &["columns", "indexes", "foreign_keys", "checks", "options"]
+                    },
+                    if self.advanced_schema.is_some() {
+                        "schema-section:"
+                    } else {
+                        "schema-read-section:"
+                    },
+                )
+            } else {
+                return false;
+            };
+        let current = values
+            .iter()
+            .position(|value| self.focus.strip_prefix(prefix) == Some(*value))
+            .unwrap_or(0);
+        let next = match key.name.as_str() {
+            "home" => 0,
+            "end" => values.len() - 1,
+            "left" | "up" => (current + values.len() - 1) % values.len(),
+            "right" | "down" => (current + 1) % values.len(),
+            "enter" | "space" => current,
+            _ => return false,
+        };
+        self.action(&format!("{action_prefix}{}", values[next]), backend);
+        self.focus = format!("{prefix}{}", values[next]);
+        self.workbench.focus_request = Some(String::new());
+        true
+    }
+
     pub(crate) fn resize_cli(&mut self, share: f64) {
         if share.is_finite()
             && !self.tabs.is_empty()
@@ -84,6 +222,9 @@ impl App {
         {
             return true;
         }
+        if !picker_open && self.modal_tab_key(key, backend) {
+            return true;
+        }
         if self.approvals.open {
             if key.is("escape") {
                 self.action("approval-close", backend);
@@ -97,6 +238,19 @@ impl App {
                 return true;
             }
             return false;
+        }
+        if !picker_open
+            && self.focus == "approval-open"
+            && !key.ctrl
+            && !key.meta
+            && !key.alt
+            && matches!(key.name.as_str(), "enter" | "space")
+        {
+            self.action("approval-toggle", backend);
+            return true;
+        }
+        if !picker_open && self.workspace_composite_key(key, backend) {
+            return true;
         }
         if !picker_open && self.focus == "result_info" && !key.ctrl && !key.meta && !key.alt {
             if matches!(key.name.as_str(), "enter" | "space") {

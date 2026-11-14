@@ -37,7 +37,8 @@ impl Engine {
         method: &str,
         params: Value,
     ) -> Result<Value> {
-        self.dispatch_inner(owner, method, params, true).await
+        // MCP 等内部调用会重新进入大型 RPC 分派器；把递归层放到堆上，避免在工作线程栈内嵌套完整 future。
+        Box::pin(self.dispatch_inner(owner, method, params, true)).await
     }
     async fn dispatch_inner(
         self: &Arc<Self>,
@@ -57,6 +58,14 @@ impl Engine {
             .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
         if !internal {
             match context.kind {
+                model::ClientKind::ValueEditor
+                    if !matches!(method, "value.editor.claim" | "value.editor.finish") =>
+                {
+                    return Err(AppError::new(
+                        "permission_denied",
+                        "编辑器 helper 只能领取和完成自身交接",
+                    ));
+                }
                 model::ClientKind::WindowBridge if method != "ui.window.sync" => {
                     return Err(AppError::new("permission_denied", "窗口桥接不能调用此方法"));
                 }
@@ -81,6 +90,51 @@ impl Engine {
             .cloned()
             .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
         match method {
+            "workspace.activate" => {
+                self.ensure_editing_client(owner)?;
+                let gate = self.workspace_owner_gate(owner);
+                let _guard = gate.lock().await;
+                let workspace_id: String = model::param(&params, "workspace_id")?;
+                let expected: String = model::param(&params, "expected_workspace_id")?;
+                if self.store.workspace_revision(&workspace_id).await? == 0 {
+                    return Err(AppError::new("not_found", "目标工作区尚未保存"));
+                }
+                let mut state = self.state.lock().unwrap();
+                if state.tasks.values().any(|task| task.owner == owner) {
+                    return Err(AppError::new("busy", "工作区仍有运行中的任务"));
+                }
+                if state.editing.workspace_busy(owner) {
+                    return Err(AppError::new(
+                        "busy",
+                        "请先关闭当前工作区的值编辑器和外部编辑会话",
+                    ));
+                }
+                let context = state
+                    .contexts
+                    .get_mut(&owner)
+                    .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
+                if context.workspace != expected {
+                    return Err(AppError::new("stale_revision", "当前工作区已变化"));
+                }
+                context.workspace = workspace_id.clone();
+                state.editing.invalidate_owner_plans(owner);
+                Ok(json!({"workspace_id":workspace_id}))
+            }
+            "workspace.draft_scope" => self.editing_draft_scope(owner, &params).await,
+            "workspace.save.begin"
+            | "workspace.save.append"
+            | "workspace.save.commit"
+            | "workspace.save.read"
+            | "workspace.save.close"
+            | "workspace.save.abort" => self.workspace_save_rpc(owner, method, params).await,
+            "change.preview" => self.editing_rpc(owner, method, params).await,
+            method
+                if method.starts_with("schema.")
+                    || method.starts_with("replace.")
+                    || method.starts_with("value.") =>
+            {
+                self.editing_rpc(owner, method, params).await
+            }
             method if method.starts_with("mcp.") => {
                 Box::pin(self.mcp_rpc(owner, method, params)).await
             }
@@ -155,6 +209,8 @@ impl Engine {
                 let id = model::param(&params, "profile_id")?;
                 let revision = model::param(&params, "expected_revision")?;
                 let policy = model::param(&params, "approval_policy")?;
+                let lock = self.profile_lock(id);
+                let _guard = lock.lock().await;
                 let profile = self
                     .store
                     .set_profile_approval(id, revision, policy)
@@ -174,12 +230,17 @@ impl Engine {
                 let id: Uuid = model::param(&params, "profile_id")?;
                 let expected = model::param(&params, "expected_revision")?;
                 let rules: Vec<model::McpAccessRule> = model::param(&params, "rules")?;
+                let lock = self.profile_lock(id);
+                let _guard = lock.lock().await;
                 let revision = self.store.save_mcp_rules(id, expected, &rules).await?;
                 self.emit_connections_changed();
                 Ok(json!({"revision":revision}))
             }
             "cache.retired.preview" => self.store.retired_cache_preview().await,
-            "cache.retired.clear" => self.store.clear_retired_cache().await,
+            "cache.retired.clear" => {
+                let expected: Value = model::param(&params, "expected_preview")?;
+                self.store.clear_retired_cache(&expected).await
+            }
             method if method.starts_with("archery.") => {
                 self.archery_rpc(owner, method, params).await
             }
@@ -210,7 +271,16 @@ impl Engine {
                             Some(value) => Some(value),
                             None => self.store.secret(profile.id).await?,
                         };
-                        ProviderSession::connect(profile.clone(), secret).await
+                        if profile.provider == model::ProviderKind::Mysql {
+                            let fallback = self.store.settings().await?.limits.connect_timeout_seconds;
+                            let timeout = mysql_connect_timeout(&profile, fallback);
+                            tokio::time::timeout(
+                                Duration::from_secs(timeout),
+                                ProviderSession::connect(profile_with_connect_timeout(&profile, timeout), secret),
+                            ).await.map_err(|_| AppError::new("timeout", "连接超时"))?
+                        } else {
+                            ProviderSession::connect(profile.clone(), secret).await
+                        }
                     } => result?,
                 };
                 let record = self
@@ -226,13 +296,34 @@ impl Engine {
                     started = Some(instant);
                     self.emit_state(owner, record.id, "running");
                     let sink = ExecutionSink::new(self.store.clone(), record.id);
-                    tokio::select! {
-                        biased;
-                        _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
-                        result = provider.call(
+                    if profile.provider == model::ProviderKind::Mysql {
+                        let fallback = self.store.settings().await?.limits.query_timeout_seconds;
+                        let timeout = mysql_query_timeout(&profile, fallback);
+                        let cancel = owner_cancel.child_token();
+                        let call = provider.call(
                             if method == "profile.test" { "connection.info" } else { "resource.list" },
-                            json!({}), &sink, &owner_cancel,
-                        ) => result,
+                            json!({}), &sink, &cancel,
+                        );
+                        tokio::pin!(call);
+                        tokio::select! {
+                            biased;
+                            _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
+                            result = &mut call => result,
+                            _ = tokio::time::sleep(Duration::from_secs(timeout)) => {
+                                cancel.cancel();
+                                let _ = call.await;
+                                Err(AppError::new("timeout", "查询超时"))
+                            }
+                        }
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = owner_cancel.cancelled() => Err(AppError::cancelled()),
+                            result = provider.call(
+                                if method == "profile.test" { "connection.info" } else { "resource.list" },
+                                json!({}), &sink, &owner_cancel,
+                            ) => result,
+                        }
                     }
                 }.await;
                 // 已中断的只读连接直接丢弃，避免关闭握手再次阻塞断线清理。
@@ -349,23 +440,8 @@ impl Engine {
                 self.emit_connections_changed();
                 Ok(json!({"deleted":true}))
             }
-            "workspace.load" => {
-                self.store
-                    .workspace_load(&model::param::<String>(&params, "workspace_id")?)
-                    .await
-            }
-            "workspace.save" => {
-                let id: String = model::param(&params, "workspace_id")?;
-                let revision = self
-                    .store
-                    .workspace_save(
-                        &id,
-                        model::param(&params, "expected_revision")?,
-                        model::param(&params, "state")?,
-                    )
-                    .await?;
-                Ok(json!({"revision":revision}))
-            }
+            "workspace.load" => self.workspace_load(owner, params).await,
+            "workspace.save" => self.workspace_save_small(owner, params).await,
             "connection.open" => {
                 let id: Uuid = model::param(&params, "profile_id")?;
                 if self
@@ -410,8 +486,9 @@ impl Engine {
                             Some(s) => Some(s),
                             None => self.store.secret(id).await?,
                         };
-                        let timeout = self.store.settings().await?.limits.connect_timeout_seconds;
-                        let session = tokio::time::timeout(Duration::from_secs(timeout), ProviderSession::connect(profile.clone(), secret))
+                        let fallback = self.store.settings().await?.limits.connect_timeout_seconds;
+                        let timeout = mysql_connect_timeout(&profile, fallback);
+                        let session = tokio::time::timeout(Duration::from_secs(timeout), ProviderSession::connect(profile_with_connect_timeout(&profile, timeout), secret))
                             .await.map_err(|_| AppError::new("timeout", "连接超时"))??;
                         Ok::<_, AppError>((profile, session))
                     } => result?,
@@ -452,6 +529,7 @@ impl Engine {
             "connection.close" => {
                 let db = self.database(owner, &params)?;
                 let id: Uuid = model::param(&params, "session_id")?;
+                let send_guard = self.send_gate.lock().await;
                 let tasks = {
                     let state = self.state.lock().unwrap();
                     if db.closing.swap(true, Ordering::AcqRel) {
@@ -464,16 +542,91 @@ impl Engine {
                         .map(|(id, t)| (*id, t.cancel.clone(), t.transition.clone()))
                         .collect::<Vec<_>>()
                 };
+                drop(send_guard);
                 for (task_id, cancel, transition) in tasks {
-                    self.cancel_if_safe(task_id, cancel, transition).await;
+                    self.cancel_if_safe(task_id, cancel.clone(), transition.clone())
+                        .await;
+                    if db.profile.provider == model::ProviderKind::Mysql && !db.profile.is_archery()
+                    {
+                        // 写入已发送时仅停止展示；MySQL provider 会继续消费协议终态。
+                        let _guard = transition.lock().await;
+                        cancel.cancel();
+                    }
+                }
+                let executions = {
+                    let state = self.state.lock().unwrap();
+                    let executions: Vec<_> = state
+                        .result_sessions
+                        .iter()
+                        .filter_map(|(execution, session)| (*session == id).then_some(*execution))
+                        .collect();
+                    executions
+                };
+                let mut results = HashSet::new();
+                for &execution in &executions {
+                    let task = match self.store.task(execution).await {
+                        Ok(task) => task,
+                        Err(error) if error.code == "not_found" => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if task.owner == owner {
+                        for result_id in task.results {
+                            self.store.release_result(result_id).await?;
+                            results.insert(result_id);
+                        }
+                    }
                 }
                 let result = db.session.lock().await.close().await;
-                self.state.lock().unwrap().databases.remove(&id);
+                for execution in executions {
+                    let task = match self.store.task(execution).await {
+                        Ok(task) => task,
+                        Err(error) if error.code == "not_found" => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if task.owner == owner {
+                        for result_id in task.results {
+                            if results.insert(result_id) {
+                                self.store.release_result(result_id).await?;
+                            }
+                        }
+                    }
+                }
+                self.state
+                    .lock()
+                    .unwrap()
+                    .mcp
+                    .release_session_handles(owner, id, &results);
+                {
+                    let mut state = self.state.lock().unwrap();
+                    state.databases.remove(&id);
+                    state.result_sessions.retain(|_, session| *session != id);
+                }
                 result?;
                 Ok(json!({"closed":true}))
             }
+            "resource.scan.discard" => {
+                let db = self.database(owner, &params)?;
+                let mut session = db.session.lock().await;
+                self.database(owner, &params)?;
+                let cancel = {
+                    let state = self.state.lock().unwrap();
+                    state
+                        .client_cancels
+                        .get(&owner)
+                        .cloned()
+                        .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?
+                };
+                session
+                    .call(
+                        method,
+                        params,
+                        &ExecutionSink::new(self.store.clone(), Uuid::nil()),
+                        &cancel,
+                    )
+                    .await
+            }
             "connection.info" | "resource.list" | "resource.describe" | "change.open"
-            | "change.discard" | "change.preview" | "transfer.preview" => {
+            | "change.discard" | "transfer.preview" => {
                 self.start(owner, method, params, false).await
             }
             "resource.browse" | "execution.start" | "change.submit" | "transfer.import"
@@ -606,6 +759,37 @@ impl Engine {
             "result.count" => self.count_result(owner, &params).await,
             "result.value" => {
                 let value_id: Uuid = model::param(&params, "value_id")?;
+                match self.store.edit_file(value_id).await {
+                    Ok(record) => {
+                        self.ensure_editing_client(owner)?;
+                        let workspace = context.workspace.as_str();
+                        if record.workspace_id != workspace
+                            || (!self.editing_owns_file(owner, value_id)
+                                && !self
+                                    .store
+                                    .edit_file_referenced_in_workspace(value_id, workspace)
+                                    .await?)
+                        {
+                            return Err(AppError::new(
+                                "permission_denied",
+                                "草稿文件不属于当前工作区",
+                            ));
+                        }
+                        return self
+                            .store
+                            .draft_value_chunk(
+                                value_id,
+                                optional(&params, "offset")?.unwrap_or(0),
+                                optional::<usize>(&params, "max_bytes")?
+                                    .unwrap_or(262144)
+                                    .clamp(1, 262144),
+                            )
+                            .await?
+                            .ok_or_else(|| AppError::new("not_found", "用户草稿不存在"));
+                    }
+                    Err(error) if error.code == "not_found" => (),
+                    Err(error) => return Err(error),
+                }
                 let result_id = self.store.value_result_id(value_id).await?;
                 let meta = self.owned_result(owner, result_id).await?;
                 let offset = optional(&params, "offset")?.unwrap_or(0);

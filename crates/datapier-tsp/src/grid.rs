@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use datapier_core::model::{AppError, Column, Result, ResultPage, RowChange, Value};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 mod layout;
 use layout::content_width;
 mod copy;
@@ -90,6 +91,36 @@ pub struct PastePreview {
     pub edits: Vec<CellEdit>,
 }
 
+/// 受控草稿文件登记；内容保留在 Engine，不进入 UI 草稿。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EditFileRef {
+    pub edit_file_id: Uuid,
+    pub edit_file_revision: u64,
+}
+
+/// 关联单值会话，提交时由 Engine 重新校验它的完整基线。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ValueSource {
+    pub value_session: Uuid,
+    pub revision: u64,
+}
+
+/// value_sources 的 row_index 对应本次 rows 数组。
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangeValueSource {
+    pub value_session: Uuid,
+    pub revision: u64,
+    pub row_index: usize,
+    pub column: String,
+}
+
+type UndoCell = (
+    Cell,
+    Option<Value>,
+    Option<EditFileRef>,
+    Option<ValueSource>,
+);
+
 /// 分页 grid、列布局和本地编辑草稿；坐标使用绝对结果行号和原始列下标。
 /// 草稿不直接写库，生成变更时仍依赖完整键和首次编辑时保存的基线。
 #[derive(Debug, Clone)]
@@ -106,7 +137,9 @@ pub struct GridState {
     originals: BTreeMap<u64, Vec<Value>>,
     resolved: BTreeMap<Cell, Value>,
     edits: BTreeMap<Cell, Value>,
-    undo: Vec<Vec<(Cell, Option<Value>)>>,
+    edit_files: BTreeMap<Cell, EditFileRef>,
+    value_sources: BTreeMap<Cell, ValueSource>,
+    undo: Vec<Vec<UndoCell>>,
     natural_widths: Vec<u16>,
     fitted_width: Option<(u32, bool)>,
 }
@@ -143,6 +176,8 @@ impl GridState {
             originals: BTreeMap::new(),
             resolved: BTreeMap::new(),
             edits: BTreeMap::new(),
+            edit_files: BTreeMap::new(),
+            value_sources: BTreeMap::new(),
             undo: Vec::new(),
             natural_widths,
             fitted_width: None,
@@ -155,6 +190,19 @@ impl GridState {
         {
             return Err(AppError::invalid("结果页与当前 grid 不匹配"));
         }
+        // 草稿基线跨页保留；已撤销的行和已读取的大字段不能沿用旧页的行身份。
+        self.originals.retain(|row, _| {
+            self.edits
+                .range(
+                    Cell {
+                        row: *row,
+                        column: 0,
+                    }..,
+                )
+                .next()
+                .is_some_and(|(cell, _)| cell.row == *row)
+        });
+        self.resolved.clear();
         self.page = page;
         self.refresh_natural_widths();
         // 行身份只在当前页有效，翻页不能把相同偏移误认为原来的行。
@@ -314,15 +362,289 @@ impl GridState {
             }],
         })
     }
+
+    /// 合并 Engine 已校验的类型化值；原值可能是仅驻留在 Engine 的 Large 句柄。
+    pub fn edit_typed(&mut self, cell: Cell, value: Value) -> Result<()> {
+        if !matches!(self.original_type_value(cell), Some(Value::Large { .. })) {
+            return self.edit(cell, value);
+        }
+        let column = self
+            .page
+            .result
+            .columns
+            .get(cell.column)
+            .ok_or_else(|| AppError::invalid("列不存在"))?;
+        if !self.editable
+            || column.generated
+            || !self.row_in_page(cell.row)
+            || self.value(cell).is_none()
+        {
+            return Err(AppError::invalid("目标单元格不可编辑"));
+        }
+        validate_value(&value, column)?;
+        if self.value(cell) == Some(&value) {
+            return Ok(());
+        }
+        if !self.originals.contains_key(&cell.row) {
+            self.originals.insert(
+                cell.row,
+                self.page.rows[(cell.row - self.page.start) as usize].clone(),
+            );
+        }
+        self.undo.push(vec![(
+            cell,
+            self.edits.get(&cell).cloned(),
+            self.edit_files.remove(&cell),
+            self.value_sources.remove(&cell),
+        )]);
+        self.edits.insert(cell, value);
+        self.refresh_natural_widths();
+        Ok(())
+    }
+
+    /// 接受 Engine 已校验的文件草稿，仍保留原始行基线与撤销信息。
+    /// 文件 ID 必须与 Large 句柄一致，内容只由 Engine 按登记读取。
+    pub fn edit_file(&mut self, cell: Cell, value: Value, id: Uuid, revision: u64) -> Result<()> {
+        if !matches!(&value, Value::Large { id: value_id, .. } if *value_id == id) || revision == 0
+        {
+            return Err(AppError::invalid("大值草稿与文件登记不匹配"));
+        }
+        let column = self
+            .page
+            .result
+            .columns
+            .get(cell.column)
+            .ok_or_else(|| AppError::invalid("列不存在"))?;
+        if !self.editable
+            || column.generated
+            || !self.row_in_page(cell.row)
+            || self.value(cell).is_none()
+        {
+            return Err(AppError::invalid("目标单元格不可编辑"));
+        }
+        if self.edit_files.iter().any(|(other, file)| {
+            *other != cell && file.edit_file_id == id && file.edit_file_revision != revision
+        }) {
+            return Err(AppError::conflict("同一草稿文件的版本不一致"));
+        }
+        let file = EditFileRef {
+            edit_file_id: id,
+            edit_file_revision: revision,
+        };
+        if self.edits.get(&cell) == Some(&value) && self.edit_files.get(&cell) == Some(&file) {
+            return Ok(());
+        }
+        if !self.originals.contains_key(&cell.row) {
+            self.originals.insert(
+                cell.row,
+                self.page.rows[(cell.row - self.page.start) as usize].clone(),
+            );
+        }
+        self.undo.push(vec![(
+            cell,
+            self.edits.get(&cell).cloned(),
+            self.edit_files.get(&cell).copied(),
+            self.value_sources.remove(&cell),
+        )]);
+        self.edits.insert(cell, value);
+        self.edit_files.insert(cell, file);
+        self.refresh_natural_widths();
+        Ok(())
+    }
+
+    /// 当前变更引用的文件，供 preview 和 submit 传给 Engine。
+    pub fn edit_files(&self) -> Vec<EditFileRef> {
+        self.edit_files
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// 包含撤销历史引用，工作区登记需要保护这些仍可恢复的文件。
+    pub fn retained_edit_files(&self) -> Vec<EditFileRef> {
+        self.edit_files
+            .values()
+            .copied()
+            .chain(
+                self.undo
+                    .iter()
+                    .flatten()
+                    .filter_map(|(_, _, file, _)| *file),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// 仅迁移仍指向保存快照中同一登记的草稿，包含可撤销的历史。
+    pub(super) fn rebind_draft_files(&mut self, files: &BTreeMap<EditFileRef, EditFileRef>) {
+        fn rebind(
+            value: &mut Value,
+            file: &mut EditFileRef,
+            files: &BTreeMap<EditFileRef, EditFileRef>,
+        ) {
+            if let Some(new) = files.get(file).copied()
+                && let Value::Large { id, .. } = value
+                && *id == file.edit_file_id
+            {
+                *id = new.edit_file_id;
+                *file = new;
+            }
+        }
+        for (cell, file) in &mut self.edit_files {
+            if let Some(value) = self.edits.get_mut(cell) {
+                rebind(value, file, files);
+            }
+        }
+        for (_, value, file, _) in self.undo.iter_mut().flatten() {
+            if let (Some(value), Some(file)) = (value, file) {
+                rebind(value, file, files);
+            }
+        }
+    }
+
+    /// 仅替换仍等于已发送值的单元格，保存期间的后续编辑保持原样。
+    pub(super) fn normalize_draft_rows(
+        &mut self,
+        keys: &[String],
+        pairs: &[(RowChange, RowChange)],
+        files: &[EditFileRef],
+    ) {
+        let Ok(rows) = self.changes(keys) else {
+            return;
+        };
+        let row_numbers: Vec<_> = self
+            .edits
+            .keys()
+            .map(|cell| cell.row)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for (row_number, current) in row_numbers.into_iter().zip(rows) {
+            let Some((old, new)) = pairs
+                .iter()
+                .find(|(old, _)| old.operation == current.operation && old.key == current.key)
+            else {
+                continue;
+            };
+            for (column, old_value) in &old.values {
+                let Some(new_value) = new.values.get(column) else {
+                    continue;
+                };
+                if old_value == new_value || current.values.get(column) != Some(old_value) {
+                    continue;
+                }
+                let Some(index) = self
+                    .page
+                    .result
+                    .columns
+                    .iter()
+                    .position(|item| item.name == *column)
+                else {
+                    continue;
+                };
+                let Value::Large { id, .. } = new_value else {
+                    continue;
+                };
+                let Some(file) = files.iter().find(|file| file.edit_file_id == *id).copied() else {
+                    continue;
+                };
+                let cell = Cell {
+                    row: row_number,
+                    column: index,
+                };
+                self.edits.insert(cell, new_value.clone());
+                self.edit_files.insert(cell, file);
+            }
+        }
+    }
+
+    /// 与当前草稿关联；未产生变更时不保留会话。
+    pub fn bind_value_source(&mut self, cell: Cell, value_session: Uuid, revision: u64) -> bool {
+        if !self.edits.contains_key(&cell) {
+            return false;
+        }
+        self.value_sources.insert(
+            cell,
+            ValueSource {
+                value_session,
+                revision,
+            },
+        );
+        true
+    }
+
+    /// 返回和 changes() 同一行顺序的会话引用，offset 是前置行变更数。
+    pub fn change_value_sources(&self, offset: usize) -> Result<Vec<ChangeValueSource>> {
+        let rows: BTreeMap<_, _> = self
+            .edits
+            .keys()
+            .map(|cell| cell.row)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| (row, index))
+            .collect();
+        self.value_sources
+            .iter()
+            .map(|(cell, source)| {
+                let index = rows
+                    .get(&cell.row)
+                    .ok_or_else(|| AppError::invalid("值会话没有对应草稿行"))?;
+                let column = self
+                    .page
+                    .result
+                    .columns
+                    .get(cell.column)
+                    .ok_or_else(|| AppError::invalid("值会话的结果列已失效"))?
+                    .name
+                    .clone();
+                Ok(ChangeValueSource {
+                    value_session: source.value_session,
+                    revision: source.revision,
+                    row_index: offset + *index,
+                    column,
+                })
+            })
+            .collect()
+    }
+
+    /// 含撤销历史的活跃会话；调用方在丢弃、提交或失效后释放。
+    pub fn retained_value_sources(&self) -> Vec<ValueSource> {
+        self.value_sources
+            .values()
+            .copied()
+            .chain(
+                self.undo
+                    .iter()
+                    .flatten()
+                    .filter_map(|(_, _, _, source)| *source),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
     pub fn undo(&mut self) -> bool {
         let Some(batch) = self.undo.pop() else {
             return false;
         };
-        for (cell, previous) in batch.into_iter().rev() {
+        for (cell, previous, previous_file, previous_source) in batch.into_iter().rev() {
             if let Some(value) = previous {
                 self.edits.insert(cell, value);
             } else {
                 self.edits.remove(&cell);
+            }
+            if let Some(file) = previous_file {
+                self.edit_files.insert(cell, file);
+            } else {
+                self.edit_files.remove(&cell);
+            }
+            if let Some(source) = previous_source {
+                self.value_sources.insert(cell, source);
+            } else {
+                self.value_sources.remove(&cell);
             }
         }
         self.refresh_natural_widths();
@@ -330,6 +652,8 @@ impl GridState {
     }
     pub fn discard(&mut self) {
         self.edits.clear();
+        self.edit_files.clear();
+        self.value_sources.clear();
         self.originals.clear();
         self.undo.clear();
         self.refresh_natural_widths();

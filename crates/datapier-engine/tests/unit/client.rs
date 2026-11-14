@@ -8,7 +8,7 @@ async fn interleaved_events_and_responses_do_not_hold_client_open() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":3}}),
+            &json!({"id":open["id"],"result":{"protocol_version":crate::protocol::VERSION}}),
         )
         .await
         .unwrap();
@@ -52,7 +52,7 @@ async fn oversized_request_preserves_concurrent_requests_and_events() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":3}}),
+            &json!({"id":open["id"],"result":{"protocol_version":crate::protocol::VERSION}}),
         )
         .await
         .unwrap();
@@ -102,7 +102,7 @@ async fn cancelled_oversized_request_does_not_interrupt_writer() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":3}}),
+            &json!({"id":open["id"],"result":{"protocol_version":crate::protocol::VERSION}}),
         )
         .await
         .unwrap();
@@ -160,7 +160,7 @@ async fn concurrent_last_drops_close_a_blocked_writer() {
     let open = protocol::read(&mut peer).await.unwrap();
     protocol::write(
         &mut peer,
-        &json!({"id":open["id"],"result":{"protocol_version":3}}),
+        &json!({"id":open["id"],"result":{"protocol_version":crate::protocol::VERSION}}),
     )
     .await
     .unwrap();
@@ -208,7 +208,7 @@ async fn dropping_last_client_closes_a_stalled_heartbeat() {
         let open = protocol::read(&mut peer).await.unwrap();
         protocol::write(
             &mut peer,
-            &json!({"id":open["id"],"result":{"protocol_version":3}}),
+            &json!({"id":open["id"],"result":{"protocol_version":crate::protocol::VERSION}}),
         )
         .await
         .unwrap();
@@ -297,7 +297,7 @@ async fn client_rejects_v1_engine_and_sends_no_business_request() {
     let server = tokio::spawn(async move {
         let open = protocol::read(&mut peer).await.unwrap();
         assert_eq!(open["method"], "session.open");
-        assert_eq!(open["params"]["protocol_version"], 3);
+        assert_eq!(open["params"]["protocol_version"], 4);
         protocol::write(
             &mut peer,
             &json!({"id":open["id"],"result":{"protocol_version":1}}),

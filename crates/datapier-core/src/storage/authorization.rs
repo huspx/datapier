@@ -1,8 +1,9 @@
 use super::*;
+use sqlx::Connection;
 
 impl Store {
     pub async fn mcp_rules(&self, profile_id: Uuid) -> Result<Vec<McpAccessRule>> {
-        let rows = sqlx::query("SELECT scope_kind,scope_key,level FROM mcp_access_rules WHERE profile_id=? ORDER BY scope_kind,scope_key").bind(profile_id.to_string()).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT scope_kind,scope_key,level FROM mcp_access_rules WHERE profile_id=? ORDER BY scope_kind,scope_key").bind(profile_id.to_string()).fetch_all(&mut *self.pool.acquire().await?).await?;
         rows.iter()
             .map(|row| {
                 Ok(McpAccessRule {
@@ -30,7 +31,8 @@ impl Store {
         }) {
             return Err(AppError::invalid("授权规则无效"));
         }
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         let updated = sqlx::query("UPDATE profiles SET revision=? WHERE id=? AND revision=?")
             .bind(next as i64)
             .bind(profile_id.to_string())
@@ -66,7 +68,8 @@ impl Store {
             .checked_add(1)
             .filter(|n| *n <= i64::MAX as u64)
             .ok_or_else(|| AppError::invalid("连接版本溢出"))?;
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         let payload: Option<String> =
             sqlx::query_scalar("SELECT payload FROM profiles WHERE id=? AND revision=?")
                 .bind(id.to_string())
@@ -100,15 +103,15 @@ impl Store {
             return Err(AppError::invalid("审批请求无效或包含凭据"));
         }
         sqlx::query("INSERT INTO approvals(id,execution_id,owner,session_id,profile_id,request,digest,profile_revision,policy_revision,created_at,expires_at,state,decided_at,decision_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(approval.id.to_string()).bind(approval.execution_id.to_string()).bind(approval.owner.to_string()).bind(approval.session_id.to_string()).bind(approval.profile_id.to_string()).bind(approval.request.to_string()).bind(&approval.digest).bind(approval.profile_revision as i64).bind(approval.policy_revision as i64).bind(approval.created_at).bind(approval.expires_at).bind(&approval.state).bind(approval.decided_at).bind(&approval.decision_source).execute(&self.pool).await?;
+            .bind(approval.id.to_string()).bind(approval.execution_id.to_string()).bind(approval.owner.to_string()).bind(approval.session_id.to_string()).bind(approval.profile_id.to_string()).bind(approval.request.to_string()).bind(&approval.digest).bind(approval.profile_revision as i64).bind(approval.policy_revision as i64).bind(approval.created_at).bind(approval.expires_at).bind(&approval.state).bind(approval.decided_at).bind(&approval.decision_source).execute(&mut *self.pool.acquire().await?).await?;
         Ok(())
     }
     pub async fn approval(&self, id: Uuid) -> Result<ApprovalRecord> {
-        let row = sqlx::query("SELECT id,execution_id,owner,session_id,profile_id,request,digest,profile_revision,policy_revision,created_at,expires_at,state,decided_at,decision_source FROM approvals WHERE id=?").bind(id.to_string()).fetch_optional(&self.pool).await?.ok_or_else(|| AppError::new("not_found", "审批不存在"))?;
+        let row = sqlx::query("SELECT id,execution_id,owner,session_id,profile_id,request,digest,profile_revision,policy_revision,created_at,expires_at,state,decided_at,decision_source FROM approvals WHERE id=?").bind(id.to_string()).fetch_optional(&mut *self.pool.acquire().await?).await?.ok_or_else(|| AppError::new("not_found", "审批不存在"))?;
         approval_row(&row)
     }
     pub async fn approvals_for_owner(&self, owner: Uuid) -> Result<Vec<ApprovalRecord>> {
-        let rows = sqlx::query("SELECT id,execution_id,owner,session_id,profile_id,request,digest,profile_revision,policy_revision,created_at,expires_at,state,decided_at,decision_source FROM approvals WHERE owner=? ORDER BY created_at,id").bind(owner.to_string()).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT id,execution_id,owner,session_id,profile_id,request,digest,profile_revision,policy_revision,created_at,expires_at,state,decided_at,decision_source FROM approvals WHERE owner=? ORDER BY created_at,id").bind(owner.to_string()).fetch_all(&mut *self.pool.acquire().await?).await?;
         rows.iter().map(approval_row).collect()
     }
     pub async fn decide_approval(
@@ -126,7 +129,8 @@ impl Store {
             "expire" => "expired",
             _ => return Err(AppError::invalid("审批决定无效")),
         };
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         let changed = sqlx::query("UPDATE approvals SET state=CASE WHEN expires_at<=unixepoch() THEN 'expired' ELSE ? END,decided_at=unixepoch(),decision_source=? WHERE id=? AND owner=? AND state='pending' AND (? != 'expire' OR expires_at<=unixepoch())")
             .bind(state).bind(source).bind(id.to_string()).bind(owner.to_string()).bind(decision).execute(&mut *tx).await?;
         let row = sqlx::query("SELECT id,execution_id,owner,session_id,profile_id,request,digest,profile_revision,policy_revision,created_at,expires_at,state,decided_at,decision_source FROM approvals WHERE id=? AND owner=?").bind(id.to_string()).bind(owner.to_string()).fetch_optional(&mut *tx).await?.ok_or_else(|| AppError::new("not_found", "审批不存在"))?;

@@ -1,6 +1,9 @@
 //! Core 与调用方共享的连接、类型化值、结果和任务模型。
 
+pub mod editing;
 pub mod preview;
+pub mod replace;
+pub mod schema;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -126,6 +129,10 @@ pub enum LanguagePreference {
 pub struct AppSettings {
     pub revision: u64,
     pub language: LanguagePreference,
+    #[serde(default)]
+    pub editing: editing::EditingLimits,
+    #[serde(default)]
+    pub external_editor: Option<editing::ExternalEditorConfig>,
     pub mcp: McpSettings,
     pub paging: PagingSettings,
     pub archery: ArcherySettings,
@@ -200,6 +207,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             revision: 1,
+            editing: editing::EditingLimits::default(),
+            external_editor: None,
             language: LanguagePreference::default(),
             mcp: McpSettings::default(),
             paging: PagingSettings::default(),
@@ -261,6 +270,10 @@ impl Default for NotificationSettings {
 }
 impl AppSettings {
     pub fn validate(&self) -> Result<()> {
+        self.editing.validate()?;
+        if let Some(editor) = &self.external_editor {
+            editor.validate()?;
+        }
         let p = &self.paging;
         let l = &self.limits;
         if self.revision == 0
@@ -317,6 +330,7 @@ pub enum ClientKind {
     Tsp,
     Mcp,
     WindowBridge,
+    ValueEditor,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -381,6 +395,87 @@ pub enum ConnectionConfig {
     Direct(DirectConnection),
     Archery(ArcheryConnection),
 }
+/// MySQL 直连的会话时区和可选超时；空超时继承全局设置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MysqlConnectionOptions {
+    #[serde(default = "default_mysql_timezone")]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub connect_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub query_timeout_seconds: Option<u64>,
+}
+
+fn default_mysql_timezone() -> Option<String> {
+    Some("+00:00".into())
+}
+
+impl Default for MysqlConnectionOptions {
+    fn default() -> Self {
+        Self {
+            timezone: default_mysql_timezone(),
+            connect_timeout_seconds: None,
+            query_timeout_seconds: None,
+        }
+    }
+}
+
+impl MysqlConnectionOptions {
+    /// 在配置保存和连接前校验；名称是否存在由 MySQL 时区表决定。
+    pub fn validate(&self) -> Result<()> {
+        if [self.connect_timeout_seconds, self.query_timeout_seconds]
+            .into_iter()
+            .flatten()
+            .any(|seconds| !(1..=86_400).contains(&seconds))
+        {
+            return Err(AppError::invalid("超时必须在 1 到 86400 秒之间"));
+        }
+        if self
+            .timezone
+            .as_deref()
+            .is_some_and(|value| !valid_mysql_timezone(value))
+        {
+            return Err(AppError::invalid("时区格式无效"));
+        }
+        Ok(())
+    }
+}
+
+fn valid_mysql_timezone(value: &str) -> bool {
+    if value == "SYSTEM" {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() == 6
+        && matches!(bytes[0], b'+' | b'-')
+        && bytes[3] == b':'
+        && bytes[1..3]
+            .iter()
+            .chain(&bytes[4..6])
+            .all(u8::is_ascii_digit)
+    {
+        let hours = (bytes[1] - b'0') * 10 + bytes[2] - b'0';
+        let minutes = (bytes[4] - b'0') * 10 + bytes[5] - b'0';
+        return minutes < 60
+            && if bytes[0] == b'+' {
+                hours < 14 || (hours == 14 && minutes == 0)
+            } else {
+                hours <= 13
+            };
+    }
+    // SQLx 将时区直接拼入 SET；严格限制字符，存在性由服务端验证。
+    !value.is_empty()
+        && value.len() <= 255
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && part.len() <= 14
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+'))
+        })
+        && value.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectConnection {
     pub host: String,
@@ -395,6 +490,8 @@ pub struct DirectConnection {
     pub redis_db: u32,
     #[serde(default)]
     pub redis_databases_override: Option<u32>,
+    #[serde(default)]
+    pub mysql: MysqlConnectionOptions,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -692,6 +789,9 @@ impl Profile {
                 return Ok(());
             }
         };
+        if self.provider == ProviderKind::Mysql {
+            d.mysql.validate()?;
+        }
         if d.redis_databases_override == Some(0) {
             return Err(AppError::invalid("Redis 数据库数量必须为正数"));
         }
@@ -839,6 +939,8 @@ pub struct ResourcePage {
     pub resources: Vec<Resource>,
     pub cursor: Option<String>,
     pub complete: bool,
+    #[serde(default)]
+    pub resource_limited: bool,
 }
 /// 表结构、键、DDL 和 provider 特有的结构详情。
 #[derive(Debug, Clone, Serialize, Deserialize)]

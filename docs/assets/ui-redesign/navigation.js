@@ -8,6 +8,7 @@ function openConnectionForm(
   if (mode === 'connection-settings') {
     const targets = state.tabs.filter(tab => (tab.provider || 'mysql') === provider);
     if (!closeTabs(targets.map(tab => tab.id))) return;
+    state.connectionStatus[provider] = 'disconnected';
   }
   state.connectionForm = {
     provider,
@@ -25,6 +26,9 @@ function openConnectionForm(
       : 'default',
     password: '',
     database: '',
+    mysqlTimezone: mode === 'new-connection' ? '+00:00' : state.mysqlOptions?.timezone ?? '+00:00',
+    mysqlConnectTimeout: mode === 'new-connection' ? '' : state.mysqlOptions?.connectTimeout ?? '',
+    mysqlQueryTimeout: mode === 'new-connection' ? '' : state.mysqlOptions?.queryTimeout ?? '',
     redisDb: mode === 'new-connection' ? 0 : state.redisDb,
     redisDatabasesOverride: mode === 'new-connection' ? '' : state.redisDatabasesOverride,
     tls: false,
@@ -111,17 +115,15 @@ function connectionFormBody() {
   return `<div class="fields"><fieldset class="provider-field wide"><legend>${
     t('databaseType')
   }</legend><div class="provider-options" role="radiogroup" aria-label="${t('databaseType')}">${
-    ['mysql', 'redis'].map(provider =>
-      `<button class="provider-option" role="radio" aria-checked="${
+    ['mysql', 'redis', 'archery'].map(provider =>
+      `<button type="button" class="provider-option" role="radio" aria-checked="${
         form.provider === provider
-      }" data-connection-type="${provider}">${marker(provider)}<span>${
-        provider === 'mysql' ? 'MySQL' : 'Redis'
-      }</span></button>`
+      }" tabindex="${form.provider === provider ? '0' : '-1'}" ${
+        state.overlay === 'connection-settings' ? 'disabled' : ''
+      } ${provider === 'archery' ? 'data-archery="type-archery"' : `data-connection-type="${provider}"`}>${
+        provider === 'archery' ? '<img class="archery-mark" src="assets/archery.svg" alt="">' : marker(provider)
+      }<span>${provider === 'mysql' ? 'MySQL' : provider === 'redis' ? 'Redis' : 'Archery'}</span></button>`
     ).join('')
-  }${
-    state.overlay === 'new-connection'
-      ? `<button class="provider-option" role="radio" aria-checked="false" data-archery="type-archery"><img class="archery-mark" src="assets/archery.svg" alt=""><span>Archery</span></button>`
-      : ''
   }</div></fieldset><label class="wide">${
     t('name')
   } <span style="color:var(--danger,red)">*</span><input data-connection-field="name" required aria-required="true" value="${
@@ -142,15 +144,28 @@ function connectionFormBody() {
     form.provider === 'mysql'
       ? `<label class="wide">${t('defaultDatabase')}<input data-connection-field="database" value="${
         h(form.database)
-      }" placeholder="${t('defaultDatabaseHelp')}"></label>${databaseScope()}`
+      }" placeholder="${t('defaultDatabaseHelp')}"></label><label class="wide">${
+        az('时区（留空使用服务器默认）', 'Time zone (empty uses server default)')
+      }<input data-connection-field="mysqlTimezone" value="${
+        h(form.mysqlTimezone)
+      }" placeholder="SYSTEM / +08:00 / Asia/Shanghai"></label><p class="wide muted small">${
+        az(
+          'SQL 与结果固定使用 UTF-8。',
+          'SQL and results use UTF-8.',
+        )
+      }</p>${databaseScope()}`
       : redisConnectionPreview(form)
-  }<label class="wide"><span><input type="checkbox" data-connection-check="readOnly" ${
+  }<label class="wide connection-switch"><span>${
+    h(t('readOnlyConnection'))
+  }</span><input type="checkbox" role="switch" data-connection-check="readOnly" ${
     form.readOnly ? 'checked' : ''
-  }> ${h(t('readOnlyConnection'))}</span></label><details class="wide"><summary>${
+  }></label>${connectionTimeouts(form)}<details class="wide"><summary>${
     h(t('tlsDetails'))
-  }</summary><label><span><input type="checkbox" data-connection-check="tls" ${form.tls ? 'checked' : ''}> ${
+  }</summary><label class="connection-switch"><span>${
     h(t('tlsEnable'))
-  }</span></label><div class="fields tls-fields" ${form.tls ? '' : 'hidden'}><label class="wide">${
+  }</span><input type="checkbox" role="switch" data-connection-check="tls" ${
+    form.tls ? 'checked' : ''
+  }></label><div class="fields tls-fields" ${form.tls ? '' : 'hidden'}><label class="wide">${
     h(t('caPath'))
   }<input data-connection-field="ca" value="${h(form.ca)}"></label><label>${
     h(t('certPath'))
@@ -158,7 +173,118 @@ function connectionFormBody() {
     h(t('keyPath'))
   }<input data-connection-field="key" value="${h(form.key)}"></label></div></details></div>`;
 }
+function connectionTimeouts(form) {
+  if (form.provider !== 'mysql') return '';
+  return `<details class="wide"><summary>${az('超时设置', 'Timeout settings')}</summary><div class="fields">${
+    [['mysqlConnectTimeout', az('连接超时（秒，留空继承全局）', 'Connect timeout (seconds; empty inherits global)')], [
+      'mysqlQueryTimeout',
+      az('执行超时（秒，留空继承全局）', 'Execution timeout (seconds; empty inherits global)'),
+    ]]
+      .map(([key, label]) =>
+        `<label>${h(label)}<input type="number" min="1" max="86400" step="1" data-connection-field="${key}" value="${
+          h(form[key])
+        }"></label>`
+      ).join('')
+  }</div></details>`;
+}
+
+// 设计稿只生成 SQL 预览；真实候选由原生工作台从服务器加载这些选项。
+const databasePreviewCollations = {
+  '': [],
+  utf8mb4: ['utf8mb4_unicode_ci', 'utf8mb4_general_ci'],
+  gbk: ['gbk_chinese_ci', 'gbk_bin'],
+};
+function updateDatabasePreview() {
+  const form = state.newDatabaseForm;
+  form.sql = form.name.trim()
+    ? 'CREATE DATABASE `' + form.name.replaceAll('`', '``') + '`'
+      + (form.charset ? ' CHARACTER SET ' + form.charset : '')
+      + (form.collation ? ' COLLATE ' + form.collation : '') + ';'
+    : '';
+  document.querySelector('#database-create-sql').textContent = form.sql;
+  document.querySelector('[data-action="database-create-execute"]').disabled = !form.sql;
+}
+function newDatabaseDialog() {
+  const form = state.newDatabaseForm;
+  const field = (key, label, control) => `<label class="wide">${h(label)}${control}</label>`;
+  return modal(
+    az('新建数据库', 'Create database'),
+    `<p class="notice">${
+      az(
+        '仅预览 SQL；设计稿不连接或写入数据库。',
+        'SQL preview only; this prototype does not connect to or write to a database.',
+      )
+    }</p><div class="fields">${
+      field(
+        'name',
+        az('数据库名称', 'Database name'),
+        `<input data-new-database-field="name" maxlength="64" required value="${h(form.name)}">`,
+      )
+    }${
+      field(
+        'charset',
+        az('数据库字符集', 'Database character set'),
+        `<select data-new-database-field="charset">${
+          ['', 'utf8mb4', 'gbk'].map(value =>
+            `<option value="${value}" ${value === form.charset ? 'selected' : ''}>${
+              value || az('服务器默认', 'Server default')
+            }</option>`
+          ).join('')
+        }</select>`,
+      )
+    }${
+      field(
+        'collation',
+        az('排序规则', 'Collation'),
+        `<select data-new-database-field="collation"><option value="">${
+          az('字符集默认', 'Character set default')
+        }</option>${
+          databasePreviewCollations[form.charset].map(value =>
+            `<option ${value === form.collation ? 'selected' : ''}>${value}</option>`
+          ).join('')
+        }</select>`,
+      )
+    }</div><pre class="preview-code" id="database-create-sql">${h(form.sql || '')}</pre>`,
+    `<span class="spacer"></span><button class="button" data-action="close-modal">${
+      h(t('cancel'))
+    }</button><button class="primary" data-action="database-create-execute" ${form.sql ? '' : 'disabled'}>${
+      az('执行', 'Execute')
+    }</button>`,
+  );
+}
+
+const treeGroups = new Set();
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-tree-group]');
+  if (!button) return;
+  event.stopImmediatePropagation();
+  const key = button.dataset.treeGroup;
+  if (treeGroups.has(key)) treeGroups.delete(key);
+  else treeGroups.add(key);
+  render();
+  [...document.querySelectorAll('[data-tree-group]')].find(item => item.dataset.treeGroup === key)?.focus();
+}, true);
+function viewResourcePreview() {
+  const target = state.viewPreviewTarget;
+  if (!target) return '';
+  return modal(
+    `${az('视图', 'View')} · ${target.database}.${target.name}`,
+    `<p class="archery-note">${
+      az('只读示例数据；未连接数据库或发送请求。', 'Read-only example data; no database connection or request is made.')
+    }</p><h3>${az('结构', 'Structure')}</h3><div class="table-wrap">${
+      simpleTable([t('field'), t('type'), 'NULL', az('注释', 'Comment')], [[
+        'status',
+        'VARCHAR(32)',
+        az('是', 'Yes'),
+        az('未提供', 'Not provided'),
+      ], ['order_count', 'BIGINT', az('否', 'No'), az('未提供', 'Not provided')]])
+    }</div><h3>${az('数据', 'Data')}</h3><div class="table-wrap">${
+      simpleTable(['status', 'order_count'], [['active', '3'], ['complete', '8']])
+    }</div>`,
+  );
+}
 function tree() {
+  if (state.connectionStatus.mysql !== 'connected') return '';
   return `<div class="section-heading">${
     t('databases')
   }</div><div class="object-search-row"><input class="object-search" id="object-filter" aria-label="${
@@ -175,23 +301,28 @@ function tree() {
         icon(state.expanded.has(db) ? 'chev' : 'chev-r')
       }${icon('database')}<span>${db}</span></button>${
         state.expanded.has(db)
-          ? `<div class="tree-line depth-1">${icon('chev')}${icon('table')} ${t('tables')}<span class="count">${
-            Object.keys(tables).length
-          }</span></div>${
-            Object.keys(tables).filter(table => table.includes(state.objectFilter.toLowerCase())).map(table =>
-              `<button class="tree-line depth-2 ${
-                db === state.database && table === state.table
-                  ? 'active'
-                  : ''
-              }" data-open-table="${table}" data-table-db="${db}">${icon('table')}${table}</button>`
-            ).join('')
-          }${
-            !Object.keys(tables).some(table => table.includes(state.objectFilter.toLowerCase()))
-              ? `<div class="tree-line depth-2 small">${t('noObjects')}</div>`
-              : ''
-          }<div class="tree-line depth-1">${icon('chev-r')}${icon('eye')} ${
-            t('views')
-          }<span class="count">0</span></div>`
+          ? ['tables', 'views'].map(group => {
+            const key = `${db}:${group}`, expanded = treeGroups.has(key);
+            const items = group === 'tables' ? Object.keys(tables) : ['orders_summary'];
+            const matches = items.filter(name => name.toLowerCase().includes(state.objectFilter.toLowerCase()));
+            return `<button class="tree-line depth-1" data-tree-group="${h(key)}" aria-expanded="${expanded}">${
+              icon(expanded ? 'chev' : 'chev-r')
+            }${icon(group === 'tables' ? 'table' : 'eye')} ${
+              t(group)
+            }<span class="count">${items.length}</span></button>${
+              expanded
+                ? matches.map(name =>
+                  group === 'tables'
+                    ? `<button class="tree-line depth-2 ${
+                      db === state.database && name === state.table ? 'active' : ''
+                    }" data-open-table="${h(name)}" data-table-db="${h(db)}">${icon('table')}${h(name)}</button>`
+                    : `<button class="tree-line depth-2" data-view-preview="${h(name)}" data-view-db="${h(db)}">${
+                      icon('eye')
+                    }${h(name)} <span class="muted small">${az('示例视图', 'Example view')}</span></button>`
+                ).join('') || `<div class="tree-line depth-2 small">${t('noObjects')}</div>`
+                : ''
+            }`;
+          }).join('')
           : ''
       }`
     ).join('')
@@ -247,7 +378,8 @@ function sidebar() {
   }<div class="nav-content">${
     previewSource === 'archery'
       ? archeryTree()
-      : !state.provider
+      : !state.provider || !state.connections.has(state.provider)
+          || state.connectionStatus[state.provider] !== 'connected'
       ? ''
       : state.provider === 'mysql'
       ? tree()

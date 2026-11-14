@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use datapier_core::Result;
 use std::path::PathBuf;
+mod value_editor;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -40,6 +41,14 @@ enum Command {
     },
     /// 启动本机共享数据库内核
     Engine,
+    /// 在独立 PTY 中启动已确认的外部编辑器
+    #[command(hide = true)]
+    ValueEditor {
+        #[arg(long)]
+        handoff: String,
+        #[arg(long, hide = true)]
+        data_dir_b64: Option<String>,
+    },
 }
 fn main() {
     if let Err(error) = run() {
@@ -74,6 +83,31 @@ fn run() -> Result<()> {
                 .build()?;
             runtime.block_on(async move {
                 match command {
+                    Command::ValueEditor {
+                        handoff,
+                        data_dir_b64,
+                    } => {
+                        let root = match data_dir_b64 {
+                            Some(encoded) => {
+                                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                                let bytes = STANDARD.decode(encoded).map_err(|error| {
+                                    datapier_core::AppError::invalid(error.to_string())
+                                })?;
+                                let path =
+                                    PathBuf::from(String::from_utf8(bytes).map_err(|error| {
+                                        datapier_core::AppError::invalid(error.to_string())
+                                    })?);
+                                if !path.is_absolute() {
+                                    return Err(datapier_core::AppError::invalid(
+                                        "编辑器数据目录必须是绝对路径",
+                                    ));
+                                }
+                                path
+                            }
+                            None => root,
+                        };
+                        value_editor::run(root, handoff).await
+                    }
                     Command::Tui { workspace } => datapier_tui::run(root, workspace).await,
                     Command::Mcp { allow_connections } => {
                         datapier_mcp::run(root, allow_connections).await

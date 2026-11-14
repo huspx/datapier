@@ -1,6 +1,27 @@
 //! 冻结单元格目标的详情与编辑抽屉。
 use super::*;
 pub(super) fn cell_drawer(app: &App) -> Node<Msg> {
+    if app.workbench.overlay_close_confirm {
+        return html::div()
+            .class("drawer")
+            .child(html::strong(
+                crate::i18n::tr("丢弃未应用的输入？").into_owned(),
+            ))
+            .child(html::p(
+                crate::i18n::tr("未应用的输入将被丢弃。").into_owned(),
+            ))
+            .child(
+                ui::button(crate::i18n::tr("继续编辑").into_owned())
+                    .key("overlay-close-safe")
+                    .on_click(Msg::Action("overlay-close-continue".into())),
+            )
+            .child(
+                ui::button(crate::i18n::tr("丢弃").into_owned())
+                    .variant(ui::ButtonVariant::Danger)
+                    .on_click(Msg::Action("overlay-close-discard".into())),
+            )
+            .into();
+    }
     let mut drawer = html::div().class("drawer").child(
         html::div()
             .class("toolbar")
@@ -71,11 +92,45 @@ pub(super) fn cell_drawer(app: &App) -> Node<Msg> {
             column.name.clone(),
         ));
     }
+    let (connection, resource) = app
+        .workbench
+        .cell_context
+        .as_ref()
+        .map(|(connection, resource)| (connection.as_deref(), resource.as_deref()))
+        .unwrap_or((None, None));
+    let missing = crate::i18n::tr("未记录");
+    drawer = drawer
+        .child(html::span(crate::i18n::tr("连接").into_owned()).class("label"))
+        .child(html::span(connection.unwrap_or(&missing).to_owned()))
+        .child(html::span(crate::i18n::tr("目标资源").into_owned()).class("label"))
+        .child(html::span(resource.unwrap_or(&missing).to_owned()).class("mono"));
     drawer = drawer
         .child(html::span(crate::i18n::tr("当前行").into_owned()).class("label"))
         .child(html::span(identity.join(" · ")).class("mono"))
         .child(ui::field(crate::i18n::tr("字段").into_owned()).child(selector));
-    if writable(app) && grid.editable && !grid.page.result.columns[cell.column].generated {
+    drawer = drawer.child(button("高级值编辑", "advanced-value-open"));
+    let row_error = if app.is_redis() {
+        None
+    } else {
+        app.check_rows_not_deleted([cell.row]).err()
+    };
+    let reason = if app.profile.is_none() {
+        Some(crate::i18n::tr("连接不可用，无法编辑单元格").into_owned())
+    } else if !writable(app) {
+        Some(crate::i18n::tr("当前连接为只读，无法编辑单元格").into_owned())
+    } else if !grid.editable {
+        Some(crate::i18n::tr("当前结果不可编辑").into_owned())
+    } else if grid.page.result.columns[cell.column].generated {
+        Some(crate::i18n::tr("生成列不可编辑").into_owned())
+    } else {
+        row_error.map(|error| match error {
+            crate::i18n::UiMessage::Key("目标行已有待提交变更") => {
+                crate::i18n::tr("该行已有待提交的删除，无法编辑").into_owned()
+            }
+            other => other.render().into_owned(),
+        })
+    };
+    if reason.is_none() {
         drawer = drawer
             .child(field(app, "cell", "值"))
             .child(
@@ -98,6 +153,22 @@ pub(super) fn cell_drawer(app: &App) -> Node<Msg> {
             app.field("cell").to_owned()
         };
         drawer = drawer.child(html::pre(text).class("preview"));
+        if let Some(reason) = reason {
+            drawer = drawer.child(html::p(reason).class("muted"));
+        }
+        let mut actions = html::div().class("choice-row");
+        for (label, action) in [
+            ("加入草稿", "set-cell"),
+            ("设为 NULL", "set-null"),
+            ("设置 JSON", "set-json"),
+        ] {
+            actions = actions.child(
+                ui::button(crate::i18n::tr(label).into_owned())
+                    .disabled(true)
+                    .on_click(Msg::Action(action.into())),
+            );
+        }
+        drawer = drawer.child(actions);
     }
     drawer.into()
 }

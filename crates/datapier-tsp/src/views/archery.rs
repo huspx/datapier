@@ -11,6 +11,9 @@ fn waiting_message(state: &crate::connections::archery::Wizard) -> Option<&'stat
 
 pub(super) fn auth_dialog(app: &App) -> (html::El<Msg>, html::El<Msg>) {
     let state = &app.archery;
+    if state.discard_action.is_some() {
+        return wizard(app);
+    }
     let busy = state.pending.is_some();
     let observing = state.auth_id.is_some()
         && state.controller_token.is_none()
@@ -75,6 +78,21 @@ pub(super) fn auth_dialog(app: &App) -> (html::El<Msg>, html::El<Msg>) {
 
 pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
     let state = &app.archery;
+    if state.discard_action.is_some() {
+        let body = html::div().class("modal-body").child(html::span(
+            crate::i18n::tr("未保存的更改将被丢弃，是否继续？").into_owned(),
+        ));
+        let footer = html::div()
+            .class("modal-footer")
+            .child(html::span("").class("spacer"))
+            .child(button("继续编辑", "archery-discard-cancel"))
+            .child(
+                ui::button(crate::i18n::tr("丢弃更改").into_owned())
+                    .variant(ui::ButtonVariant::Danger)
+                    .on_click(Msg::Action("archery-discard-confirm".into())),
+            );
+        return (body, footer);
+    }
     let busy = state.pending.is_some();
     let locked = state.pending.as_ref().is_some_and(|(_, method)| {
         !matches!(
@@ -125,6 +143,7 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
             .map(|index| index.to_string())
             .unwrap_or_default();
         let mut select = ui::select()
+            .aria(crate::i18n::tr("服务器").into_owned())
             .key("input-archery-server")
             .value(selected)
             .disabled(locked || app.connection_form_is_editing())
@@ -241,43 +260,32 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         );
         let ca = std::path::Path::new(app.field("archery_ca"))
             .file_name()
-            .and_then(|name| name.to_str());
+            .and_then(|name| name.to_str())
+            .unwrap_or(&crate::i18n::tr("默认信任链"))
+            .to_owned();
+        let https = app
+            .field("archery_url")
+            .trim()
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
         form = form
+            .child(html::span(format!("CA: {ca}")).class("muted"))
             .child(
-                html::span(format!(
-                    "CA: {} · TOTP: {} · {}",
-                    ca.unwrap_or(&crate::i18n::tr("默认信任链")),
-                    crate::i18n::tr(if state.totp_automatic {
-                        "自动生成验证码"
-                    } else {
-                        "手动输入验证码"
-                    }),
-                    crate::i18n::tr(
-                        if state
-                            .server
-                            .as_ref()
-                            .is_some_and(|server| server["totp_configured"] == true)
-                        {
-                            "已配置"
-                        } else {
-                            "未配置"
-                        }
-                    )
-                ))
-                .class("muted"),
-            )
-            .child(button("CA 与 TOTP 设置", "archery-server-details"));
-        if state.server_details {
-            let https = app
-                .field("archery_url")
-                .trim()
-                .get(..8)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+                ui::button(crate::i18n::tr("CA 设置").into_owned())
+                    .disabled(!https || busy)
+                    .on_click(Msg::Action("archery-server-details".into())),
+            );
+        if !https {
+            form = form
+                .child(html::span(crate::i18n::tr("CA 仅用于 HTTPS").into_owned()).class("muted"));
+        }
+        if state.server_details && https {
             let editor = &app.fields["archery_ca"];
             form = form.child(
                 ui::field(crate::i18n::tr("CA 证书路径").into_owned()).child(
                     ui::input()
                         .variant(ui::InputVariant::Field)
+                        .aria(crate::i18n::tr("CA 证书路径").into_owned())
                         .readonly(!https || busy)
                         .key("input-archery_ca")
                         .text(editor.text.clone())
@@ -297,11 +305,37 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
                         }),
                 ),
             );
-            if !https {
-                form = form.child(
-                    html::span(crate::i18n::tr("CA 仅用于 HTTPS").into_owned()).class("muted"),
-                );
-            }
+            form = form.child(
+                ui::button(crate::i18n::tr("清除 CA").into_owned())
+                    .disabled(!https || busy || app.field("archery_ca").is_empty())
+                    .on_click(Msg::Action("archery-clear-ca".into())),
+            );
+        }
+        form = form
+            .child(
+                html::span(format!(
+                    "TOTP: {} · {}",
+                    crate::i18n::tr(if state.totp_automatic {
+                        "自动生成验证码"
+                    } else {
+                        "手动输入验证码"
+                    }),
+                    crate::i18n::tr(
+                        if state
+                            .server
+                            .as_ref()
+                            .is_some_and(|server| server["totp_configured"] == true)
+                        {
+                            "已配置"
+                        } else {
+                            "未配置"
+                        }
+                    )
+                ))
+                .class("muted"),
+            )
+            .child(button("TOTP 设置", "archery-totp-details"));
+        if state.totp_details {
             form = form
                 .child(field(app, "archery_totp_uri", "TOTP 链接"))
                 .child(
@@ -317,20 +351,21 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
                         .on_change(|_| Msg::Action("archery-toggle-totp".into())),
                 );
             if state.saved {
-                form = form
-                    .child(
-                        ui::switch(crate::i18n::tr("清除密码").into_owned())
-                            .on(state.clear_password)
-                            .disabled(busy)
-                            .on_change(|_| Msg::Action("archery-clear-password".into())),
-                    )
-                    .child(
-                        ui::switch(crate::i18n::tr("清除 TOTP 链接").into_owned())
-                            .on(state.clear_totp)
-                            .disabled(busy)
-                            .on_change(|_| Msg::Action("archery-clear-totp".into())),
-                    );
+                form = form.child(
+                    ui::switch(crate::i18n::tr("清除 TOTP 链接").into_owned())
+                        .on(state.clear_totp)
+                        .disabled(busy)
+                        .on_change(|_| Msg::Action("archery-clear-totp".into())),
+                );
             }
+        }
+        if state.saved {
+            form = form.child(
+                ui::switch(crate::i18n::tr("清除密码").into_owned())
+                    .on(state.clear_password)
+                    .disabled(busy)
+                    .on_change(|_| Msg::Action("archery-clear-password".into())),
+            );
         }
         if state.saved && state.manage {
             if state.delete_confirm {
@@ -495,6 +530,7 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
                     .baseline
                     .iter()
                     .any(|p| p.archery().is_some_and(|a| a.instance_id == id));
+                let missing = index.is_none() || instance["missing"].as_bool() == Some(true);
                 let mut heading = html::div().class("archery-instance-heading").child(
                     html::label()
                         .class("database-choice")
@@ -513,7 +549,9 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
                             "{} · {}{}",
                             instance["provider"].as_str().unwrap_or(""),
                             name,
-                            if index.is_none() || instance["missing"].as_bool() == Some(true) {
+                            if added && selection.is_none() {
+                                format!(" · {}", crate::i18n::tr("待删除本地连接；勾回可恢复原值"))
+                            } else if missing {
                                 format!(" · {}", crate::i18n::tr("平台未发现"))
                             } else if added {
                                 format!(" · {}", crate::i18n::tr("已添加"))
@@ -543,6 +581,10 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
                 if let Some(selection) = selection.filter(|_| state.expanded.contains(&id)) {
                     let mut details = html::div()
                         .class("archery-instance-details")
+                        .key(format!("archery-database-group-{id}"))
+                        .attr("tabindex", 0)
+                        .attr("role", "group")
+                        .attr("aria-label", crate::i18n::tr("数据库选择").into_owned())
                         .child(field(
                             app,
                             &format!("archery_profile_name_{}", selection.profile_id),
@@ -562,44 +604,108 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
                             "repeat",
                             "刷新数据库",
                             &format!("archery-load:{id}"),
-                            !busy,
+                            !busy && !missing,
                         ));
                         details = details.child(
-                            html::span(crate::i18n::tr("数据库列表由平台报告").into_owned())
-                                .class("muted"),
+                            html::span(
+                                crate::i18n::tr(if selection.available_databases.is_some() {
+                                    "数据库列表由平台报告"
+                                } else {
+                                    "显示已保存的数据库；刷新可核对平台可见性"
+                                })
+                                .into_owned(),
+                            )
+                            .class("muted"),
                         );
+                        let mut choices = html::div()
+                            .attr("role", "radiogroup")
+                            .attr("aria-label", crate::i18n::tr("默认目标").into_owned());
+                        let entry = databases
+                            .iter()
+                            .position(|db| {
+                                selection.selected.contains(db)
+                                    && selection
+                                        .available_databases
+                                        .as_ref()
+                                        .is_none_or(|available| available.contains(db))
+                                    && selection.default.as_ref() == Some(db)
+                            })
+                            .or_else(|| {
+                                databases.iter().position(|db| {
+                                    selection.selected.contains(db)
+                                        && selection
+                                            .available_databases
+                                            .as_ref()
+                                            .is_none_or(|available| available.contains(db))
+                                })
+                            });
                         for (index, db) in databases.iter().enumerate() {
-                            details = details.child(
-                                html::div()
-                                    .class("archery-database-row")
-                                    .child(
-                                        html::checkbox("database", db.clone())
-                                            .checked(selection.selected.contains(db))
-                                            .disabled(busy)
-                                            .on_change(move |_| {
-                                                Msg::Action(format!("archery-db:{id}:{index}"))
-                                            }),
+                            let unavailable = missing
+                                || selection
+                                    .available_databases
+                                    .as_ref()
+                                    .is_some_and(|available| !available.contains(db));
+                            let selected = selection.selected.contains(db);
+                            let mut row = html::div()
+                                .class("archery-database-row")
+                                .child(
+                                    html::label()
+                                        .class("database-choice")
+                                        .child(
+                                            html::checkbox("database", db.clone())
+                                                .checked(selected)
+                                                .disabled(busy || unavailable)
+                                                .on_change(move |_| {
+                                                    Msg::Action(format!("archery-db:{id}:{index}"))
+                                                }),
+                                        )
+                                        .child(html::span(db.clone())),
+                                )
+                                .child(
+                                    html::button(crate::i18n::tr("默认目标").into_owned())
+                                        .key(format!("archery-default-{id}-{index}"))
+                                        .attr(
+                                            "aria-label",
+                                            format!("{} · {}", crate::i18n::tr("默认目标"), db),
+                                        )
+                                        .attr("role", "radio")
+                                        .attr(
+                                            "aria-checked",
+                                            selection.default.as_ref() == Some(db),
+                                        )
+                                        .attr("tabindex", if entry == Some(index) { 0 } else { -1 })
+                                        .disabled(busy || unavailable || !selected)
+                                        .on_click(Msg::Action(format!(
+                                            "archery-default:{id}:{index}"
+                                        ))),
+                                );
+                            if unavailable {
+                                row = row.child(
+                                    html::span(
+                                        crate::i18n::tr("平台未发现，已保留原选择").into_owned(),
                                     )
-                                    .child(html::span(db.clone()))
-                                    .child(
-                                        ui::button(if selection.default.as_ref() == Some(db) {
-                                            format!("✓ {}", crate::i18n::tr("默认目标"))
-                                        } else {
-                                            crate::i18n::tr("默认目标").into_owned()
-                                        })
-                                        .disabled(busy || !selection.selected.contains(db))
-                                        .on_click(
-                                            Msg::Action(format!("archery-default:{id}:{index}")),
-                                        ),
-                                    ),
-                            );
+                                    .class("muted"),
+                                );
+                            } else if !selected {
+                                row = row.child(
+                                    html::span(crate::i18n::tr("请先选择此数据库").into_owned())
+                                        .class("muted"),
+                                );
+                            } else if selection.default.as_ref() == Some(db) {
+                                row = row.child(
+                                    html::span(crate::i18n::tr("当前默认目标").into_owned())
+                                        .class("muted"),
+                                );
+                            }
+                            choices = choices.child(row);
                         }
+                        details = details.child(choices);
                     } else {
                         details = details.child(page_button(
                             "repeat",
                             "加载数据库",
                             &format!("archery-load:{id}"),
-                            !busy,
+                            !busy && !missing,
                         ));
                     }
                     group = group.child(details);
@@ -632,11 +738,14 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         );
         if state.delete_confirm {
             footer = footer.child(
-                ui::button(crate::i18n::tr("确认删除服务").into_owned())
-                    .variant(ui::ButtonVariant::Danger)
-                    .role("archery-server-delete-confirm")
-                    .disabled(busy)
-                    .on_click(Msg::Action("archery-delete-server".into())),
+                ui::button(crate::i18n::format_message(
+                    "删除服务器及 {count} 个连接",
+                    &[("count", &state.baseline.len().to_string())],
+                ))
+                .variant(ui::ButtonVariant::Danger)
+                .role("archery-server-delete-confirm")
+                .disabled(busy)
+                .on_click(Msg::Action("archery-delete-server".into())),
             );
         } else if state.server_only {
             footer = footer.child(

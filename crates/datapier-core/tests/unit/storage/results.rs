@@ -103,3 +103,45 @@ async fn live_page_replacement_invalidates_old_values() {
     );
     cleanup(store).await;
 }
+
+#[tokio::test]
+async fn dense_json_decode_obeys_memory_budget_without_losing_cached_bytes() {
+    let store = fixture().await;
+    let task = store
+        .create_task(Uuid::new_v4(), "test", "execution.run", json!({}), false)
+        .await
+        .unwrap();
+    let result = store
+        .start_result(task.id, vec![Column::new("doc", "json")], "query")
+        .await
+        .unwrap();
+    let value = Value::Json(json!(vec![0; 8192]));
+    let encoded = serde_json::to_vec(&value).unwrap();
+    store
+        .append_rows(result, vec![vec![value.clone()]])
+        .await
+        .unwrap();
+    let page = store.result_page(result, 0, 1, 16384).await.unwrap();
+    let Value::Large { id, .. } = page.rows[0][0] else {
+        panic!("JSON 应保留为大值引用")
+    };
+    let mut settings = store.settings().await.unwrap();
+    settings.limits.result_memory_bytes_per_client = 1_048_576;
+    store.set_settings(&settings).await.unwrap();
+    assert_eq!(
+        store.read_value(id).await.unwrap_err().code,
+        "resource_limit"
+    );
+    let chunk = store.large_value(id, 0, 256).await.unwrap();
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        chunk["data_b64"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bytes, encoded[..256]);
+    settings = store.settings().await.unwrap();
+    settings.limits.result_memory_bytes_per_client = 64 * 1024 * 1024;
+    store.set_settings(&settings).await.unwrap();
+    assert_eq!(store.read_value(id).await.unwrap(), value);
+    cleanup(store).await;
+}

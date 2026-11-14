@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="assets/ui-redesign/archery.css">
     <link rel="stylesheet" href="assets/ui-redesign/mcp-pending.css">
     <link rel="stylesheet" href="assets/ui-redesign/configuration-preview.css">
+    <link rel="stylesheet" href="assets/ui-redesign/schema-design.css">
   </head>
   <body>
     <div class="preview">
@@ -41,10 +42,21 @@
         <option value="draft">草稿详情</option>
         <option value="import">导入预览详情</option>
         <option value="schema">结构详情</option>
+        <option value="schema-design">结构设计 · DDL 预览</option>
+        <option value="schema-create-table">结构 · 新建表</option>
+        <option value="schema-create-view">结构 · 新建视图</option>
+        <option value="schema-create-trigger">结构 · 新建触发器</option>
+        <option value="schema-trigger-list">结构 · 触发器列表</option>
+        <option value="replace-design">批量替换 · 冻结预览</option>
+        <option value="advanced-value">高级值编辑</option>
         <option value="restore">恢复详情</option>
         <option value="cli-success">CLI · 执行记录</option>
         <option value="cli-empty">CLI · 空结果</option>
         <option value="cli-running">CLI · 执行中</option>
+        <option value="sample-cli-value">CLI · 完整值加载与失败</option>
+        <option value="sample-paste">粘贴 · 原值与新值</option>
+        <option value="sample-unsaved">未确认输入 · 关闭保护</option>
+        <option value="sample-history-error">历史 · 全文加载失败</option>
         <option value="cli-error">CLI · 错误</option>
         <option value="connection-connected">连接 · 已连接</option>
         <option value="connection-connecting">连接 · 连接中</option>
@@ -58,9 +70,20 @@
         <option value="mcp-unselected">MCP · 未选择</option>
         <option value="mcp-loading">MCP · 加载中</option>
         <option value="mcp-error">MCP · 加载失败</option>
+        <option value="mcp-auth-only">MCP · 仅待认证</option>
+        <option value="mcp-initial-loading">MCP · 首次加载</option>
+        <option value="mcp-list-error">MCP · 列表加载失败</option>
+        <option value="mcp-refresh-error">MCP · 刷新失败保留列表</option>
         <option value="mcp-ended">MCP · 审批已结束</option>
         <option value="mcp-expired">MCP · 结果已过期</option>
         <option value="archery-login">Archery · 服务登录</option>
+        <option value="archery-auth-busy">Archery · 认证中</option>
+        <option value="archery-auth-observe">Archery · 观察认证</option>
+        <option value="archery-auth-failed">Archery · 认证失败</option>
+        <option value="archery-save-unknown">Archery · 保存结果未知</option>
+        <option value="archery-delete-busy">Archery · 删除中</option>
+        <option value="archery-delete-failed">Archery · 删除失败</option>
+        <option value="archery-delete-unknown">Archery · 删除结果未知</option>
         <option value="archery-totp">Archery · 验证码</option>
         <option value="archery-instances">Archery · 选择实例</option>
         <option value="archery-server">Archery · 服务器管理</option>
@@ -96,6 +119,8 @@
     <script src="assets/ui-redesign/i18n.js"></script>
     <script src="assets/ui-redesign/icons.js"></script>
     <script src="assets/ui-redesign/data-state.js"></script>
+    <script src="assets/ui-redesign/schema-design.js"></script>
+    <script src="assets/ui-redesign/schema-create-workspace.js"></script>
     <script src="assets/ui-redesign/configuration-preview.js"></script>
     <script src="assets/ui-redesign/sql.js"></script>
     <script src="assets/ui-redesign/navigation.js"></script>
@@ -105,6 +130,9 @@
     <script src="assets/ui-redesign/forms.js"></script>
     <script src="assets/ui-redesign/workspaces.js"></script>
     <script src="assets/ui-redesign/cli.js"></script>
+    <script src="assets/ui-redesign/advanced-preview.js"></script>
+    <script src="assets/ui-redesign/delete-preview.js"></script>
+    <script src="assets/ui-redesign/sample-preview.js"></script>
     <script src="assets/ui-redesign/dialogs-menus.js"></script>
     <script src="assets/ui-redesign/archery-state.js"></script>
     <script src="assets/ui-redesign/archery-management.js"></script>

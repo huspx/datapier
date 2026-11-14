@@ -117,6 +117,241 @@ fn saved_row_and_redis_changes_disappear_after_undo_on_inactive_tab() {
 }
 
 #[test]
+fn schema_event_invalidates_matching_background_tabs_without_losing_drafts() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("schema-event".into());
+    let profile = ui_profile("mysql", "source");
+    app.profile = Some(profile.clone());
+    app.tabs[0].profile_id = Some(profile.id);
+    app.database = Some("db".into());
+    app.schema = Some(json!({"old":true}));
+    app.edit_token = Some(json!("old-token"));
+    app.pending_rows.push(RowChange {
+        operation: "insert".into(),
+        key: BTreeMap::new(),
+        before: BTreeMap::new(),
+        values: BTreeMap::new(),
+    });
+    second_tab(&mut app);
+    app.switch_tab(1);
+    app.tabs[1].profile_id = Some(profile.id);
+    app.profile = Some(profile.clone());
+    app.database = Some("other".into());
+    app.schema = Some(json!({"other":true}));
+    app.routed_response(Response { tag: "execution.event".into(), result: Ok(json!({
+        "kind":"schema.changed", "payload":{"id":Uuid::new_v4(),"revision":1,"state":"invalidated","scope":{"profile_id":profile.id,"database":"db"}}
+    })) }, &backend);
+    assert_eq!(app.schema, Some(json!({"other":true})));
+    app.switch_tab(0);
+    assert!(app.schema.is_none());
+    assert!(app.edit_token.is_none());
+    assert_eq!(app.pending_rows.len(), 1);
+}
+
+#[test]
+fn draft_scope_requires_matching_ack_and_releases_after_discard() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = App::new("dirty-scope".into());
+    let profile = ui_profile("mysql", "source");
+    app.tabs[0].profile_id = Some(profile.id);
+    app.profile = Some(profile);
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.edit_token = Some(json!(Uuid::new_v4()));
+    app.target = Some(ResourceTarget {
+        database: Some("db".into()),
+        name: "items".into(),
+        kind: "table".into(),
+        key_b64: None,
+    });
+    app.sync_draft_scope(&backend);
+    assert!(requests.try_recv().is_err());
+    assert!(!app.guard_draft_scope(&backend, workbench::DraftScopeAction::Protect));
+    let dirty = requests.try_recv().unwrap();
+    assert_eq!(dirty.params["dirty"], true);
+    assert_eq!(dirty.params["edit_token"], app.edit_token.clone().unwrap());
+    assert!(app.draft_scope_save_check().is_err());
+    app.routed_response(
+        Response {
+            tag: dirty.tag.clone(),
+            result: Ok(json!({"revision":dirty.params["revision"]})),
+        },
+        &backend,
+    );
+    assert!(app.workbench.draft_scope.is_some());
+    assert!(app.draft_scope_save_check().is_ok());
+    app.sync_draft_scope(&backend);
+    let clean = requests.try_recv().unwrap();
+    assert_eq!(clean.params["dirty"], false);
+    assert!(clean.params["revision"].as_u64() > dirty.params["revision"].as_u64());
+}
+
+#[test]
+fn draft_scope_rejection_and_late_ack_never_authorize_new_target() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = App::new("scope-rejection".into());
+    let profile = ui_profile("mysql", "source");
+    app.tabs[0].profile_id = Some(profile.id);
+    app.profile = Some(profile);
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.edit_token = Some(json!(Uuid::new_v4()));
+    app.target = Some(ResourceTarget {
+        database: Some("db".into()),
+        name: "items".into(),
+        kind: "table".into(),
+        key_b64: None,
+    });
+    assert!(!app.guard_draft_scope(&backend, workbench::DraftScopeAction::Protect));
+    let first = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: first.tag.clone(),
+            result: Err(AppError::new("schema_conflict", "stale baseline")),
+        },
+        &backend,
+    );
+    assert_eq!(
+        app.draft_scope_save_check().unwrap_err().code,
+        "schema_conflict"
+    );
+    assert!(app.workbench.draft_scope.is_none());
+    assert!(!app.guard_draft_scope(&backend, workbench::DraftScopeAction::Protect));
+    let retry = requests.try_recv().unwrap();
+    app.target.as_mut().unwrap().name = "other".into();
+    app.sync_draft_scope(&backend);
+    let release = requests.try_recv().unwrap();
+    assert_eq!(release.params["dirty"], false);
+    app.routed_response(
+        Response {
+            tag: retry.tag,
+            result: Ok(json!({"revision":retry.params["revision"]})),
+        },
+        &backend,
+    );
+    assert!(app.workbench.draft_scope.is_none());
+    assert!(!app.guard_draft_scope(&backend, workbench::DraftScopeAction::Protect));
+    let next = requests.try_recv().unwrap();
+    assert_eq!(next.params["target"]["name"], "other");
+}
+
+#[test]
+fn native_row_input_waits_for_scope_ack() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = App::new("scope-input".into());
+    let profile = ui_profile("mysql", "source");
+    app.tabs[0].profile_id = Some(profile.id);
+    app.profile = Some(profile);
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.edit_token = Some(json!(Uuid::new_v4()));
+    app.target = Some(ResourceTarget {
+        database: Some("db".into()),
+        name: "items".into(),
+        kind: "table".into(),
+        key_b64: None,
+    });
+    app.field_set("row_values", "");
+    app.dispatch_guarded_editor_message(
+        Msg::Edit("row_values".into(), 0, 0, "x".into(), 1, 0),
+        &backend,
+    );
+    app.dispatch_guarded_editor_message(
+        Msg::Edit("row_values".into(), 1, 1, "y".into(), 2, 1),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench
+            .draft_scope_pending
+            .as_ref()
+            .unwrap()
+            .actions
+            .len(),
+        1
+    );
+    let request = requests.try_recv().unwrap();
+    assert_eq!(app.field("row_values"), "");
+    assert!(app.draft_scope_save_check().is_err());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
+    assert_eq!(app.field("row_values"), "xy");
+}
+
+#[test]
+fn rejected_input_survives_target_change_for_manual_recovery() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = App::new("scope-recovery".into());
+    let profile = ui_profile("mysql", "source");
+    app.tabs[0].profile_id = Some(profile.id);
+    app.profile = Some(profile);
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.edit_token = Some(json!(Uuid::new_v4()));
+    app.target = Some(ResourceTarget {
+        database: Some("db".into()),
+        name: "items".into(),
+        kind: "table".into(),
+        key_b64: None,
+    });
+    app.field_set("row_values", "");
+    app.dispatch_guarded_editor_message(
+        Msg::Edit("row_values".into(), 0, 0, "retain me".into(), 9, 0),
+        &backend,
+    );
+    let request = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Err(AppError::new("schema_conflict", "stale")),
+        },
+        &backend,
+    );
+    app.target.as_mut().unwrap().name = "other".into();
+    app.sync_draft_scope(&backend);
+    assert!(app.draft_scope_save_check().is_err());
+    app.action("draft-scope-recovery-view", &backend);
+    assert!(app.detail.contains("retain me"));
+    app.action("draft-scope-recovery-discard", &backend);
+    assert!(app.workbench.draft_scope_recovery.is_empty());
+}
+
+#[test]
+fn delete_confirmation_waits_for_registration_and_cancel_tombstones_it() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = App::new("scope-delete".into());
+    let profile = ui_profile("mysql", "source");
+    app.tabs[0].profile_id = Some(profile.id);
+    app.profile = Some(profile);
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
+    app.edit_token = Some(json!(Uuid::new_v4()));
+    app.target = Some(ResourceTarget {
+        database: Some("db".into()),
+        name: "items".into(),
+        kind: "table".into(),
+        key_b64: None,
+    });
+    app.workbench.overlay = Some("delete-rows".into());
+    app.action("delete-rows-confirm", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(app.workbench.overlay.as_deref(), Some("delete-rows"));
+    assert!(app.pending_rows.is_empty());
+    app.cancel_pending_draft_scope(&backend);
+    let release = requests.try_recv().unwrap();
+    assert_eq!(release.params["dirty"], false);
+    assert!(release.params["revision"].as_u64() > request.params["revision"].as_u64());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
+    assert!(app.workbench.draft_scope.is_none());
+    assert!(app.pending_rows.is_empty());
+}
+
+#[test]
 fn transfer_previews_and_pending_requests_are_isolated_by_tab() {
     let mut app = App::new("test".into());
     second_tab(&mut app);
@@ -278,7 +513,12 @@ fn grid_draft_prevents_opening_another_edit_baseline() {
 
 #[test]
 fn successful_submission_retracts_stale_rows_and_retains_column_layout() {
-    for operation in [None, Some("rename"), Some("delete_key")] {
+    for (operation, status) in [
+        (None, "applied"),
+        (None, "unchanged"),
+        (Some("rename"), "applied"),
+        (Some("delete_key"), "applied"),
+    ] {
         let (backend, _requests, _) = Backend::scripted();
         let mut app = app_with_grid_draft();
         app.grid.as_mut().unwrap().settings[0].width = 240;
@@ -290,7 +530,7 @@ fn successful_submission_retracts_stale_rows_and_retains_column_layout() {
                 tag: "execution.get".into(),
                 result: Ok(json!({
                     "state": "succeeded", "method": "change.submit", "results": [],
-                    "summary": {"items": [{"status": "applied"}]}
+                    "summary": {"items": [{"status": status}]}
                 })),
             },
             &backend,
@@ -299,6 +539,25 @@ fn successful_submission_retracts_stale_rows_and_retains_column_layout() {
         assert!(!app.has_live_drafts());
         assert_eq!(app.tabs[0].layout[0].width, 240);
         assert_eq!(app.target.is_none(), operation.is_some());
+    }
+}
+
+#[test]
+fn incomplete_submission_retains_drafts() {
+    for status in ["failed", "outcome_unknown"] {
+        let (backend, _, _) = Backend::scripted();
+        let mut app = app_with_grid_draft();
+        app.response(
+            Response {
+                tag: "execution.get".into(),
+                result: Ok(json!({
+                    "state":"succeeded", "method":"change.submit", "results":[],
+                    "summary":{"items":[{"status":"unchanged"},{"status":status}]}
+                })),
+            },
+            &backend,
+        );
+        assert!(app.has_live_drafts());
     }
 }
 
@@ -440,10 +699,20 @@ fn terminal_event_before_start_response_keeps_guard_and_poll_fallback() {
 
 #[test]
 fn reconnect_keeps_unconfirmed_text_attached_to_its_original_row() {
-    let (backend, mut requests, _) = Backend::scripted();
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = inline_app();
     let original_session = app.session_id();
     app.begin_inline(&backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    assert!(app.workbench.inline.is_none());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     app.field_set("cell", "保持原行😀");
     app.action("open", &backend);
     assert!(app.workbench.inline.is_none());
@@ -456,37 +725,37 @@ fn reconnect_keeps_unconfirmed_text_attached_to_its_original_row() {
 }
 
 #[test]
-fn paging_confirms_inline_before_changing_absolute_row_positions() {
-    let (backend, _, _) = Backend::scripted();
+fn paging_preserves_inline_draft_and_blocks_page_change() {
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = inline_app();
     let grid = app.grid.as_mut().unwrap();
     grid.page.result.row_count = 2;
     grid.page.next = Some(1);
     app.result_id = Some(grid.page.result.id.to_string());
-    let mut next = grid.page.clone();
-    next.start = 1;
-    next.next = None;
-    next.rows = vec![vec![CellValue::Text("另一行".into())]];
     app.begin_inline(&backend);
-    app.field_set("cell", "只修改旧行");
-    app.action("next", &backend);
-    app.response(
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    app.routed_response(
         Response {
-            tag: "result.page".into(),
-            result: Ok(serde_json::to_value(next).unwrap()),
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
         },
         &backend,
     );
+    app.field_set("cell", "只修改旧行");
+    app.action("next", &backend);
     let grid = app.grid.as_ref().unwrap();
     assert!(app.workbench.inline.is_none());
     assert_eq!(
         grid.edits().get(&Cell { row: 0, column: 0 }),
         Some(&CellValue::Text("只修改旧行".into()))
     );
+    assert_eq!(grid.page.start, 0);
     assert_eq!(
-        grid.value(Cell { row: 1, column: 0 }),
-        Some(&CellValue::Text("另一行".into()))
+        grid.value(Cell { row: 0, column: 0 }),
+        Some(&CellValue::Text("只修改旧行".into()))
     );
+    assert!(requests.try_recv().is_err(), "存在草稿时不得翻页或写库");
 }
 
 #[test]
@@ -644,7 +913,7 @@ fn redis_new_and_restored_tabs_reconnect_to_their_selected_database() {
 }
 
 #[test]
-fn change_preview_rejects_changed_drafts_and_pages_real_plan() {
+fn change_preview_rejects_changed_drafts_but_accepts_current_response() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("preview".into());
     app.profile_form(None);
@@ -668,7 +937,7 @@ fn change_preview_rejects_changed_drafts_and_pages_real_plan() {
     app.routed_response(
         Response {
             tag: stale.tag,
-            result: Ok(json!({"offset":0,"next_offset":20})),
+            result: Ok(json!({"provider":"redis","transactional":true,"offset":0,"next_offset":null,"items":[]})),
         },
         &backend,
     );
@@ -679,23 +948,11 @@ fn change_preview_rejects_changed_drafts_and_pages_real_plan() {
     app.routed_response(
         Response {
             tag: fresh.tag,
-            result: Ok(json!({"offset":0,"next_offset":20,"items":[]})),
+            result: Ok(json!({"provider":"redis","transactional":true,"offset":0,"next_offset":null,"items":[]})),
         },
         &backend,
     );
     assert!(app.change_preview_value().is_some());
-    app.action("change-preview-next", &backend);
-    let page = requests.try_recv().unwrap();
-    assert_eq!(page.params["offset"], 20);
-    app.routed_response(
-        Response {
-            tag: page.tag,
-            result: Ok(json!({"offset":20,"next_offset":null,"items":[]})),
-        },
-        &backend,
-    );
-    app.action("change-preview-prev", &backend);
-    assert_eq!(requests.try_recv().unwrap().params["offset"], 0);
 }
 
 #[test]
@@ -734,7 +991,7 @@ fn stale_large_value_failure_does_not_cancel_newer_value() {
     assert_eq!(app.status.render().as_ref(), status);
     let full = CellValue::Text("complete".into());
     let bytes = serde_json::to_vec(&full).unwrap();
-    app.routed_response(Response { tag:current.tag, result:Ok(json!({"bytes_b64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":0,"next":null,"total":bytes.len()})) }, &backend);
+    app.routed_response(Response { tag:current.tag, result:Ok(json!({"data_b64":base64::engine::general_purpose::STANDARD.encode(&bytes),"offset":0,"next":null,"total_bytes":bytes.len()})) }, &backend);
     assert_eq!(app.grid.as_ref().unwrap().value(cell), Some(&full));
     assert_eq!(app.field("cell"), "complete");
 }

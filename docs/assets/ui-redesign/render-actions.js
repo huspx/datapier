@@ -1,8 +1,182 @@
 'use strict';
+let dialogDraftOwner = null;
+let dialogDraftDirty = false;
+let dialogOpener = null;
+let dialogReturnFocus = null;
+function dialogOwner() {
+  if (serverForm) return 'server-form';
+  if (authStage) return 'auth';
+  return state.overlay || (state.cellDrawer ? 'cell-drawer' : null);
+}
+document.addEventListener('click', event => {
+  if (!document.querySelector('#app .modal') && event.target.closest('button')) {
+    const button = event.target.closest('button');
+    dialogOpener = button.id
+      ? `#${CSS.escape(button.id)}`
+      : button.dataset.action
+      ? `[data-action="${CSS.escape(button.dataset.action)}"]`
+      : null;
+  }
+}, true);
+document.addEventListener('change', event => {
+  if (event.target.id === 'preview-state') dialogOpener = '#preview-state';
+}, true);
+function restoreDialogOpener() {
+  (dialogOpener && document.querySelector(dialogOpener) || document.querySelector('#preview-state'))?.focus({
+    preventScroll: true,
+  });
+}
+for (const type of ['input', 'change']) {
+  document.addEventListener(type, event => {
+    if (
+      event.target.closest('#app .modal, #app .cell-drawer')
+      && !event.target.matches('[data-server-select], #cell-field') && dialogOwner() !== 'app-settings'
+    ) {
+      dialogDraftOwner = dialogOwner();
+      dialogDraftDirty = true;
+    }
+  }, true);
+}
+function requestDialogClose(onDiscard, force = false) {
+  if (state.overlay === 'new-database') {
+    dialogDraftDirty = false;
+    onDiscard();
+    restoreDialogOpener();
+    return;
+  }
+  if (state.overlay === 'app-settings') {
+    if (configPreview.confirm) {
+      configCancelConfirm();
+      return;
+    }
+    if (configRequestClose()) return;
+  }
+  const dialog = document.querySelector('#app .modal') || document.querySelector('#app .cell-drawer');
+  if (state.overlay === 'advanced-value' && state.valuePreview?.dirty) dialogDraftDirty = true;
+  if (dialogOwner() === 'cell-drawer' && state.cellInspectorDirty) dialogDraftDirty = true;
+  if (state.overlay === 'cell-details') {
+    const baseline = state.cellOverlayBaseline;
+    dialogDraftDirty = baseline
+      ? state.menuCell !== baseline.column || state.cellInspectorValue !== baseline.value
+        || state.cellInspectorIsNull !== baseline.isNull
+      : Boolean(state.cellInspectorDirty);
+    dialogDraftOwner = dialogOwner();
+  }
+  if (force) {
+    dialogDraftOwner = dialogOwner();
+    dialogDraftDirty = true;
+  }
+  if (!dialog || dialogDraftOwner !== dialogOwner() || !dialogDraftDirty) {
+    dialogDraftDirty = false;
+    onDiscard();
+    if (!document.querySelector('#app .modal') && !state.cellDrawer) restoreDialogOpener();
+    return;
+  }
+  if (dialog.querySelector('[data-discard-confirmation]')) return;
+  dialogReturnFocus = document.activeElement;
+  const body = dialog.querySelector('.modal-body'), footer = dialog.querySelector('.modal-foot');
+  body.hidden = true;
+  footer.hidden = true;
+  const confirm = document.createElement('div');
+  confirm.className = 'modal-body';
+  confirm.dataset.discardConfirmation = '';
+  confirm.innerHTML = `<p>${
+    language === 'zh-CN'
+      ? '有未应用的输入。丢弃后无法恢复。'
+      : 'There are unapplied changes. Discarding them cannot be undone.'
+  }</p><div class="row"><button type="button" data-continue-editing>${
+    language === 'zh-CN' ? '继续编辑' : 'Continue editing'
+  }</button><button type="button" class="danger" data-discard-editing>${
+    language === 'zh-CN' ? '丢弃' : 'Discard'
+  }</button></div>`;
+  dialog.append(confirm);
+  confirm.querySelector('[data-continue-editing]').onclick = () => {
+    confirm.remove();
+    body.hidden = false;
+    footer.hidden = false;
+    dialogReturnFocus?.focus();
+  };
+  confirm.querySelector('[data-discard-editing]').onclick = () => {
+    dialogDraftDirty = false;
+    if (dialogOwner() === 'cell-drawer') state.cellInspectorDirty = false;
+    if (state.overlay === 'cell-details') {
+      const baseline = state.cellOverlayBaseline;
+      if (baseline) state.menuCell = baseline.column;
+      state.cellInspectorValue = baseline?.value ?? null;
+      state.cellInspectorIsNull = baseline?.isNull ?? false;
+      state.cellInspectorDirty = baseline?.dirty ?? false;
+      state.cellOverlayBaseline = null;
+    }
+    if (state.overlay === 'advanced-value') state.valuePreview = null;
+    if (state.overlay === 'replace-design') state.replacementPreview = null;
+    confirm.remove();
+    onDiscard();
+    if (!document.querySelector('#app .modal') && !state.cellDrawer) restoreDialogOpener();
+  };
+  confirm.querySelector('[data-continue-editing]').focus();
+}
+function closePreviewDialog() {
+  if (state.overlay === 'advanced-value' && state.cellValueTarget) {
+    state.overlay = state.cellAdvancedReturn;
+    state.cellAdvancedReturn = null;
+    state.cellValueTarget = null;
+    state.valuePreview = null;
+  } else {
+    if (state.overlay === 'cell-details') state.cellOverlayBaseline = null;
+    state.overlay = null;
+  }
+  render();
+}
+function syncDialogFocus() {
+  const dialog = [...document.querySelectorAll('#app .modal[role="dialog"]')].at(-1);
+  if (!dialog) return;
+  requestAnimationFrame(() => {
+    if (!dialog.isConnected || dialog.contains(document.activeElement)) return;
+    const visible = node => node.getClientRects().length && !node.closest('[hidden]');
+    const preferred = [
+      ...dialog.querySelectorAll(
+        'input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled]), [role="tab"][aria-selected="true"]',
+      ),
+    ];
+    const first = preferred.find(visible)
+      || [...dialog.querySelectorAll('.modal-foot button:not([disabled])')].find(visible)
+      || [...dialog.querySelectorAll('button:not([disabled])')].find(visible);
+    first?.focus({ preventScroll: true });
+  });
+}
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Tab') return;
+  const dialog = [...document.querySelectorAll('#app .modal[role="dialog"]')].at(-1);
+  if (!dialog || !dialog.contains(event.target)) return;
+  const focusable = [
+    ...dialog.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ]
+    .filter(node => node.tabIndex >= 0 && node.getClientRects().length && !node.closest('[hidden]'));
+  if (!focusable.length) return;
+  const index = focusable.indexOf(document.activeElement);
+  if (event.shiftKey && index <= 0 || !event.shiftKey && (index < 0 || index === focusable.length - 1)) {
+    event.preventDefault();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
+  }
+}, true);
 function render() {
+  if (dialogDraftOwner !== dialogOwner()) {
+    dialogDraftOwner = dialogOwner();
+    dialogDraftDirty = false;
+  }
   const previousBody = document.querySelector('#app .modal-body');
   const previousOwner = previousBody?.dataset.previewOwner;
   const previousScroll = previousBody?.scrollTop;
+  const previousSchema = document.querySelector('#schema-structure-panel');
+  const previousSchemaTab = state.tabs.find(tab => String(tab.id) === previousSchema?.dataset.schemaTab);
+  const previousSchemaScroll = previousSchema?.querySelector('.schema-designer-scroll');
+  if (previousSchemaTab && previousSchemaScroll) {
+    previousSchemaTab.schemaScrollTop = previousSchemaScroll.scrollTop;
+    previousSchemaTab.schemaScrollLeft = previousSchemaScroll.scrollLeft;
+    previousSchemaTab.schemaTableScrollLeft = previousSchema.querySelector('.schema-table-scroll')?.scrollLeft || 0;
+  }
   // 在同一分区重绘加载、失败与语言状态时保留阅读位置；切换分区从顶部开始。
   const restoreDialogScroll = () => {
     const body = document.querySelector('#app .modal-body');
@@ -16,17 +190,54 @@ function render() {
       if (owner === previousOwner) body.scrollTop = previousScroll;
     }
   };
+  const focused = document.activeElement;
+  const focusId = focused?.id;
+  const selectable = focused instanceof HTMLTextAreaElement
+    || (focused instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'password'].includes(focused.type));
+  const selection = selectable
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection]
+    : null;
+  const restoreFocus = () => {
+    const attributes = [
+      'data-config-action',
+      'data-config-field',
+      'data-config-tab',
+      'data-config-key',
+      'data-config-profile',
+      'data-config-policy-owner',
+      'data-config-level',
+      'data-schema-column',
+      'data-schema-field',
+      'data-schema-section',
+      'data-schema-example',
+      'data-schema-create-target',
+      'data-schema-collection-field',
+      'data-collection',
+      'data-collection-id',
+      'data-part-id',
+      'data-mapping-id',
+    ].filter(name => focused?.hasAttribute(name));
+    const selector = attributes.map(name => `[${name}="${CSS.escape(focused.getAttribute(name))}"]`).join('');
+    const replacement = focusId ? document.getElementById(focusId) : selector ? document.querySelector(selector) : null;
+    if (replacement && (!state.overlay || focused?.closest('.modal'))) {
+      replacement.focus({ preventScroll: true });
+      if (
+        selection && (replacement instanceof HTMLTextAreaElement
+          || (replacement instanceof HTMLInputElement
+            && ['text', 'search', 'url', 'tel', 'password'].includes(replacement.type)))
+      ) {
+        replacement.setSelectionRange(...selection);
+      }
+    }
+  };
   if (previewSource === 'archery') {
     renderArchery();
     renderMcpPreview();
     restoreDialogScroll();
+    syncDialogFocus();
+    restoreFocus();
     return;
   }
-  const focused = document.activeElement;
-  const focusId = focused?.id;
-  const cursor = focused instanceof HTMLInputElement && focused.type !== 'checkbox'
-    ? focused.selectionStart
-    : null;
   if (state.previewEmpty) state.provider = null;
   else if (!state.connections.has(state.provider)) {
     state.provider = [...state.connections][0] ?? null;
@@ -41,7 +252,7 @@ function render() {
       : state.provider === 'mysql'
       ? mysql()
       : tabs() + redis()
-  }</div><footer class="statusbar"><span>${
+  }${state.cellDrawer && !state.overlay ? cellInspector(true) : ''}</div><footer class="statusbar"><span>${
     !state.provider ? t('noConnections') : state.provider === 'mysql'
       ? 'MySQL · ' + h(state.database)
       : 'Redis · DB ' + state.redisDb
@@ -62,6 +273,17 @@ function render() {
   }</footer></main>${overlay()}${archeryWizard()}${archeryDialogs()}${menu()}`;
   renderMcpPreview();
   restoreDialogScroll();
+  syncMysqlTree();
+  syncDialogFocus();
+  const schemaPanel = document.querySelector('#schema-structure-panel');
+  const schemaTab = state.tabs.find(tab => String(tab.id) === schemaPanel?.dataset.schemaTab);
+  const schemaScroll = schemaPanel?.querySelector('.schema-designer-scroll');
+  if (schemaTab && schemaScroll) {
+    schemaScroll.scrollTop = schemaTab.schemaScrollTop || 0;
+    schemaScroll.scrollLeft = schemaTab.schemaScrollLeft || 0;
+    const tableScroll = schemaPanel.querySelector('.schema-table-scroll');
+    if (tableScroll) tableScroll.scrollLeft = schemaTab.schemaTableScrollLeft || 0;
+  }
   requestAnimationFrame(() => {
     fitGrid();
     paintCellSelection();
@@ -91,29 +313,7 @@ function render() {
     );
     syncSqlEditor();
   }
-  const configAttributes = [
-    'data-config-action',
-    'data-config-field',
-    'data-config-tab',
-    'data-config-key',
-    'data-config-profile',
-    'data-config-policy-owner',
-    'data-config-level',
-  ]
-    .filter(name => focused?.hasAttribute(name));
-  const configSelector = configAttributes.map(name => `[${name}="${CSS.escape(focused.getAttribute(name))}"]`).join('');
-  const replacement = focusId
-    ? document.getElementById(focusId)
-    : configSelector
-    ? document.querySelector(configSelector)
-    : null;
-  if (replacement && (!state.overlay || focused?.closest('.modal'))) {
-    replacement.focus({ preventScroll: true });
-    if (
-      cursor !== null && replacement instanceof HTMLInputElement
-      && ['text', 'search'].includes(replacement.type)
-    ) replacement.setSelectionRange(cursor, cursor);
-  }
+  restoreFocus();
 }
 function toast(text) {
   document.querySelector('.toast')?.remove();
@@ -146,9 +346,26 @@ function selectRow(id, event) {
   }
   render();
 }
+function leaveCellDrawer(onLeave) {
+  if (!state.cellDrawer) return onLeave();
+  requestDialogClose(() => {
+    state.cellDrawer = false;
+    state.cellInspectorDirty = false;
+    state.cellInspectorValue = null;
+    state.cellInspectorIsNull = false;
+    onLeave();
+  });
+}
 function openTable(database, table) {
   if (!databases[database]?.[table]) {
     toast(t('resourceMissing'));
+    return;
+  }
+  if (
+    state.cellDrawer
+    && (state.database !== database || state.table !== table || state.tabs.find(t => t.id === state.active)?.query)
+  ) {
+    leaveCellDrawer(() => openTable(database, table));
     return;
   }
   let tab = state.tabs.find(t => !t.query && t.database === database && t.table === table);

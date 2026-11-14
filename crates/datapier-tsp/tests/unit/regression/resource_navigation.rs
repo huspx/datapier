@@ -70,6 +70,27 @@ fn changing_scan_criteria_invalidates_only_the_current_tab_scan() {
 }
 
 #[test]
+fn changing_pattern_releases_the_previous_scan() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("scan-release".into());
+    let session = Uuid::new_v4();
+    let cursor = Uuid::new_v4().to_string();
+    app.session = Some(json!({"session_id":session}));
+    app.cursor = Some(cursor.clone());
+    app.field_set("pattern", "");
+    app.dispatch_guarded_editor_message(
+        Msg::Edit("pattern".into(), 0, 0, "x".into(), 1, 0),
+        &backend,
+    );
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "resource.scan.discard");
+    assert_eq!(request.params["session_id"], json!(session));
+    assert_eq!(request.params["cursor"], json!(cursor));
+    assert!(app.cursor.is_none());
+    assert!(app.workbench.scan_dirty);
+}
+
+#[test]
 fn grid_draft_prevents_resource_browse_request() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = app_with_grid_draft();

@@ -98,7 +98,7 @@
   border-bottom: 1px solid var(--border);
   flex: none;
 }
-.subnav button {
+.subnav > button {
   height: 27px;
   min-height: 0;
   padding: 3px 2px;
@@ -110,7 +110,7 @@
   line-height: 17px;
   color: var(--muted);
 }
-.subnav button.active {
+.subnav > button.active {
   color: var(--fg);
   border-bottom: 2px solid var(--accent);
 }
@@ -195,11 +195,6 @@ tr.selected {
 #mysql-grid td.modified {
   box-shadow: inset 3px 0 var(--warning);
 }
-.schema-preview td:last-child {
-  min-width: 200px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 .key-folder {
   width: 100%;
   color: var(--muted);
@@ -256,4 +251,34 @@ tr.selected {
 .statusbar button {
   font-size: 10px;
   padding: 1px 5px;
+}
+
+.workarea {
+  position: relative;
+}
+.cell-drawer {
+  position: absolute;
+  z-index: 4;
+  inset: 0 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 100%);
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+.cell-drawer .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.cell-drawer label {
+  display: block;
+  margin-bottom: 12px;
+}
+.cell-drawer textarea, .cell-drawer select {
+  display: block;
+  width: 100%;
+}
+.cell-drawer .modal-foot {
+  flex-wrap: wrap;
 }

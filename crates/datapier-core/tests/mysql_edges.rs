@@ -34,6 +34,7 @@ impl Fixture {
                 redis_databases_override: None,
                 tls: TlsConfig::default(),
                 visible_databases: None,
+                mysql: Default::default(),
             }),
         };
         let secret = Some(std::env::var("DATAPIER_TEST_MYSQL_SECRET").expect("设置测试MySQL凭据"));
@@ -72,8 +73,36 @@ impl Fixture {
         self.db.close().await.unwrap();
         let root = (*self.store.root).clone();
         self.store.pool.close().await;
+        drop(self.store);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
+}
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn mysql_session_uses_configured_timezone_and_preserves_server_mode() {
+    let mut f = Fixture::open().await;
+    f.db.close().await.unwrap();
+    f.profile.direct_mut().unwrap().mysql.timezone = Some("+03:00".into());
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    let result = f.sql("SELECT @@session.time_zone, @@character_set_connection, REPLACE(CONCAT(',', @@session.sql_mode, ','), ',IGNORE_SPACE,', ',') = REPLACE(CONCAT(',', @@global.sql_mode, ','), ',IGNORE_SPACE,', ',')").await.unwrap();
+    let rows = f.rows(&result).await;
+    assert_eq!(rows[0][0].text(), "+03:00");
+    assert_eq!(rows[0][1].text(), "utf8mb4");
+    assert_eq!(rows[0][2].text(), "1");
+
+    f.db.close().await.unwrap();
+    f.profile.direct_mut().unwrap().mysql.timezone = None;
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    let result = f
+        .sql("SELECT @@session.time_zone = @@global.time_zone")
+        .await
+        .unwrap();
+    assert_eq!(f.rows(&result).await[0][0].text(), "1");
+    f.close().await;
 }
 
 #[tokio::test]
@@ -81,7 +110,23 @@ impl Fixture {
 async fn task_database_follows_use_instead_of_cached_prepare_context() {
     let mut f = Fixture::open().await;
     f.sql("SELECT 1").await.unwrap();
+    assert!(
+        f.call(
+            "resource.describe",
+            json!({"target":{"name":"no_such_table_for_context","kind":"table"}})
+        )
+        .await
+        .is_err()
+    );
     f.sql("USE information_schema").await.unwrap();
+    let described = f
+        .call(
+            "resource.describe",
+            json!({"target":{"name":"TABLES","kind":"table"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(described["target"]["database"], "information_schema");
     let task = f.store.create_task(Uuid::new_v4(), "fixture", "execution.run", json!({
         "_task_context":{"connection":"isolated-fixture","provider":"mysql","database":"datapier_fixture","redis_db":null,"targets":[]}
     }), false).await.unwrap();
@@ -103,6 +148,64 @@ async fn task_database_follows_use_instead_of_cached_prepare_context() {
         f.rows(&result).await[0][0],
         Value::Text("information_schema".into())
     );
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn edit_token_keeps_database_selected_when_opened() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_token_db");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    let opened = f
+        .call(
+            "change.open",
+            json!({"target":{"name":table,"kind":"table"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened["schema"]["target"]["database"], "datapier_fixture");
+    f.sql("USE information_schema").await.unwrap();
+    let token: Uuid = serde_json::from_value(opened["token"].clone()).unwrap();
+    let ProviderSession::Mysql(mysql) = &f.db else {
+        panic!("expected MySQL")
+    };
+    assert!(
+        mysql
+            .validate_draft_scope(token, "datapier_fixture", &table)
+            .is_ok()
+    );
+    assert!(
+        mysql
+            .validate_draft_scope(token, "information_schema", &table)
+            .is_err()
+    );
+    let change = RowChange {
+        operation: "insert".into(),
+        key: BTreeMap::new(),
+        before: BTreeMap::new(),
+        values: [("id".into(), Value::Integer("1".into()))]
+            .into_iter()
+            .collect(),
+    };
+    f.call("change.submit", json!({"token":token,"rows":[change]}))
+        .await
+        .unwrap();
+    let result = f
+        .sql(&format!("SELECT id FROM datapier_fixture.`{table}`"))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.rows(&result).await,
+        vec![vec![Value::Integer("1".into())]]
+    );
+    f.sql(&format!("DROP TABLE datapier_fixture.`{table}`"))
+        .await
+        .unwrap();
     f.close().await;
 }
 fn name(prefix: &str) -> String {
@@ -297,6 +400,131 @@ async fn readonly_view_cannot_call_writing_function() {
 }
 
 #[tokio::test]
+#[ignore = "需要隔离 MySQL、CREATE ROUTINE 和 CREATE VIEW 权限"]
+async fn indirect_writing_view_is_never_replayed_for_sql_or_browse() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_effects");
+    let function = name("dp_effect_fn");
+    let inner = name("dp_effect_inner");
+    let outer = name("dp_effect_outer");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT NOT NULL) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("CREATE FUNCTION `{function}`() RETURNS INT MODIFIES SQL DATA SQL SECURITY DEFINER BEGIN INSERT INTO `{table}` VALUES (1); RETURN 1; END")).await.unwrap();
+    f.sql(&format!(
+        "CREATE VIEW `{inner}` AS SELECT `{function}`() AS value"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!(
+        "CREATE VIEW `{outer}` AS SELECT value FROM `{inner}`"
+    ))
+    .await
+    .unwrap();
+    for (method, params) in [
+        (
+            "execution.run",
+            json!({"text":format!("SELECT value FROM `{outer}`"), "page_size":1}),
+        ),
+        (
+            "resource.browse",
+            json!({"target":target(&outer), "page_size":1}),
+        ),
+    ] {
+        f.sql(&format!("DELETE FROM `{table}`")).await.unwrap();
+        let result = f.call(method, params).await.unwrap();
+        let id: Uuid = serde_json::from_value(result["results"][0].clone()).unwrap();
+        assert_eq!(
+            f.store.result_meta(id).await.unwrap().summary["retrieval_mode"],
+            "single_execution_stream"
+        );
+        let _ = f.store.result_page(id, 0, 10, 1024 * 1024).await.unwrap();
+        let count = f
+            .sql(&format!("SELECT COUNT(*) FROM `{table}`"))
+            .await
+            .unwrap();
+        assert_eq!(f.rows(&count).await[0][0].text(), "1");
+    }
+    f.sql(&format!("DROP VIEW `{outer}`")).await.unwrap();
+    f.sql(&format!("DROP VIEW `{inner}`")).await.unwrap();
+    f.sql(&format!("DROP FUNCTION `{function}`")).await.unwrap();
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 和 LOCK TABLES 权限"]
+async fn cancelled_live_queries_and_counts_preserve_transaction() {
+    let mut f = Fixture::open().await;
+    let mut blocker = Fixture::open().await;
+    let table = name("dp_live_lock");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("INSERT INTO `{table}` VALUES (1)"))
+        .await
+        .unwrap();
+    let initial = f.sql(&format!("SELECT id FROM `{table}`")).await.unwrap();
+    let id: Uuid = serde_json::from_value(initial["results"][0].clone()).unwrap();
+    f.sql("CREATE TEMPORARY TABLE dp_cancel_tx (id INT)")
+        .await
+        .unwrap();
+    f.call("transaction.begin", json!({})).await.unwrap();
+    f.sql("INSERT INTO dp_cancel_tx VALUES (7)").await.unwrap();
+    blocker
+        .sql(&format!("LOCK TABLES `{table}` WRITE"))
+        .await
+        .unwrap();
+    for (method, params) in [
+        ("result.count", json!({"result_id":id})),
+        (
+            "execution.run",
+            json!({"text":format!("SELECT id FROM `{table}`")}),
+        ),
+    ] {
+        let task = f
+            .store
+            .create_task(Uuid::new_v4(), "fixture", method, json!({}), false)
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let signal = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            signal.cancel();
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            f.db.call(
+                method,
+                params,
+                &ExecutionSink::new(f.store.clone(), task.id),
+                &cancel,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            f.call("connection.info", json!({})).await.unwrap()["transaction"],
+            true
+        );
+        let result = f.sql("SELECT id FROM dp_cancel_tx").await.unwrap();
+        assert_eq!(f.rows(&result).await[0][0].text(), "7");
+    }
+    blocker.sql("UNLOCK TABLES").await.unwrap();
+    f.call("transaction.rollback", json!({})).await.unwrap();
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    blocker.close().await;
+    f.close().await;
+}
+
+#[tokio::test]
 #[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
 async fn decimal_write_rejects_rounding_but_accepts_trailing_zero() {
     let mut f = Fixture::open().await;
@@ -423,10 +651,9 @@ async fn myisam_cas_detects_case_and_trailing_spaces_and_accepts_same_value() {
     assert_eq!(schema.engine.to_ascii_lowercase(), "myisam");
     let baseline = before(&mut f, &table, &schema).await;
     let same = update(baseline.clone(), "label", Value::Text("alpha".into()));
-    assert_eq!(
-        submit(&mut f, &target, &same).await.unwrap()["items"][0]["status"],
-        "applied"
-    );
+    let unchanged = submit(&mut f, &target, &same).await.unwrap();
+    assert_eq!(unchanged["affected_rows"], 0);
+    assert_eq!(before(&mut f, &table, &schema).await, baseline);
     f.sql(&format!("UPDATE `{table}` SET label='ALPHA' WHERE id=1"))
         .await
         .unwrap();
@@ -451,6 +678,363 @@ async fn myisam_cas_detects_case_and_trailing_spaces_and_accepts_same_value() {
     assert_eq!(f.rows(&actual).await[0][0], Value::Text("ALPHA ".into()));
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn enum_and_set_survive_comment_only_structure_edit() {
+    use datapier_core::{
+        model::schema::{SchemaDefinition, SchemaEditIntent, SchemaSnapshot},
+        providers::mysql::schema::build_plan,
+    };
+    let mut f = Fixture::open().await;
+    let table = name("dp_enum_type");
+    let result = f.sql("SELECT @@session.sql_mode").await.unwrap();
+    let mode = f.rows(&result).await[0][0].text();
+    let member = if mode
+        .split(',')
+        .any(|m| m.eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES"))
+    {
+        r"a\b"
+    } else {
+        r"a\\b"
+    };
+    f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, e ENUM('{member}'), s SET('{member}')) ENGINE=InnoDB")).await.unwrap();
+    f.sql(&format!("INSERT INTO `{table}` VALUES (1, 1, 1)"))
+        .await
+        .unwrap();
+    let target = target(&table);
+    let snapshot: SchemaSnapshot = serde_json::from_value(
+        f.call("schema.describe", json!({"target":target}))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let mut definition = snapshot.definition.clone();
+    let SchemaDefinition::Table(table_definition) = &mut definition else {
+        panic!("expected table")
+    };
+    table_definition
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "e")
+        .unwrap()
+        .comment = "changed".into();
+    let plan = build_plan(&SchemaEditIntent {
+        target: target.clone(),
+        server_version: snapshot.server_version.clone(),
+        sql_mode: snapshot.sql_mode.clone(),
+        baseline: Some(snapshot),
+        definition: Some(definition),
+        profile_revision: "1".into(),
+        algorithm: None,
+        lock: None,
+    })
+    .unwrap();
+    let outcome = f
+        .call("schema.execute", json!({"plan":plan}))
+        .await
+        .unwrap();
+    assert_eq!(outcome["state"], "applied", "{outcome}");
+    let result = f
+        .sql(&format!("SELECT HEX(e), HEX(s), e+0, s+0 FROM `{table}`"))
+        .await
+        .unwrap();
+    let rows = f.rows(&result).await;
+    assert_eq!(rows[0][0].text(), "615C62");
+    assert_eq!(rows[0][1].text(), "615C62");
+    assert_eq!(rows[0][2].text(), "1");
+    assert_eq!(rows[0][3].text(), "1");
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 且启用 MyISAM"]
+async fn latin1_cas_uses_utf8_baselines_for_both_engines() {
+    let mut f = Fixture::open().await;
+    for engine in ["InnoDB", "MyISAM"] {
+        let table = name("dp_latin1");
+        f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, label VARCHAR(40), n INT) ENGINE={engine} DEFAULT CHARSET=latin1")).await.unwrap();
+        f.sql(&format!(
+            "INSERT INTO `{table}` VALUES (1, CONVERT(X'E9' USING latin1), 1)"
+        ))
+        .await
+        .unwrap();
+        let target = target(&table);
+        let schema = describe(&mut f, &target).await;
+        let baseline = before(&mut f, &table, &schema).await;
+        let same = update(baseline.clone(), "label", Value::Text("é".into()));
+        assert_eq!(
+            submit(&mut f, &target, &same).await.unwrap()["affected_rows"],
+            0
+        );
+        let change = update(baseline, "n", Value::Integer("2".into()));
+        assert_eq!(
+            submit(&mut f, &target, &change).await.unwrap()["affected_rows"],
+            1
+        );
+        f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL、MyISAM 和 TRIGGER 权限"]
+async fn myisam_trigger_error_preserves_unknown_current_write() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_myisam_error");
+    let trigger = name("dp_trigger");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=MyISAM"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!("CREATE TRIGGER `{trigger}` AFTER INSERT ON `{table}` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='trigger failure'")).await.unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target(&table)}))
+        .await
+        .unwrap();
+    let change = RowChange {
+        operation: "insert".into(),
+        key: BTreeMap::new(),
+        before: BTreeMap::new(),
+        values: [("id".into(), Value::Integer("1".into()))]
+            .into_iter()
+            .collect(),
+    };
+    let error = f
+        .call(
+            "change.submit",
+            json!({"token":opened["token"],"rows":[change]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "outcome_unknown");
+    assert_eq!(error.details["items"][0]["status"], "unknown");
+    assert_eq!(error.details["original_error"]["code"], "database");
+    let result = f
+        .sql(&format!("SELECT COUNT(*) FROM `{table}`"))
+        .await
+        .unwrap();
+    assert_eq!(f.rows(&result).await[0][0].text(), "1");
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 且启用 MyISAM"]
+async fn table_edit_token_rejects_engine_change_before_writing() {
+    let mut f = Fixture::open().await;
+    let mut other = Fixture::open().await;
+    let table = name("dp_changed_engine");
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY) ENGINE=InnoDB"
+    ))
+    .await
+    .unwrap();
+    let opened = f
+        .call("change.open", json!({"target":target(&table)}))
+        .await
+        .unwrap();
+    other
+        .sql(&format!("ALTER TABLE `{table}` ENGINE=MyISAM"))
+        .await
+        .unwrap();
+    let change = RowChange {
+        operation: "insert".into(),
+        key: BTreeMap::new(),
+        before: BTreeMap::new(),
+        values: [("id".into(), Value::Integer("1".into()))]
+            .into_iter()
+            .collect(),
+    };
+    let error = f
+        .call(
+            "change.submit",
+            json!({"token":opened["token"],"rows":[change]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "conflict");
+    let result = other
+        .sql(&format!("SELECT COUNT(*) FROM `{table}`"))
+        .await
+        .unwrap();
+    assert_eq!(other.rows(&result).await[0][0].text(), "0");
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    other.close().await;
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4、MyISAM 和 TRIGGER 权限"]
+async fn unchanged_updates_validate_visible_baseline_without_writing() {
+    let mut f = Fixture::open().await;
+    let mut observer = Fixture::open().await;
+    let mut observations = Vec::new();
+    for engine in ["InnoDB", "MyISAM"] {
+        for is_view in [false, true] {
+            let table = name("dp_noop");
+            let audit = name("dp_noop_audit");
+            let view = name("dp_noop_view");
+            let trigger = name("dp_noop_trigger");
+            f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci NOT NULL, note VARCHAR(40) NOT NULL, enabled INT NOT NULL) ENGINE={engine} DEFAULT CHARSET=utf8mb4")).await.unwrap();
+            f.sql(&format!(
+                "CREATE TABLE `{audit}` (id INT NOT NULL) ENGINE={engine}"
+            ))
+            .await
+            .unwrap();
+            f.sql(&format!(
+                "INSERT INTO `{table}` VALUES (1, 'alpha', 'note', 1), (2, 'beta', 'note', 1)"
+            ))
+            .await
+            .unwrap();
+            f.sql(&format!("CREATE TRIGGER `{trigger}` AFTER UPDATE ON `{table}` FOR EACH ROW INSERT INTO `{audit}` VALUES (NEW.id)")).await.unwrap();
+            let mut target = target(&table);
+            if is_view {
+                f.sql(&format!("CREATE ALGORITHM=MERGE VIEW `{view}` AS SELECT id, label, note FROM `{table}` WHERE enabled > 0")).await.unwrap();
+                target.name = view.clone();
+                target.kind = "view".into();
+            }
+            let schema = describe(&mut f, &target).await;
+            let baseline = before(&mut f, &target.name, &schema).await;
+            let same = update(baseline, "label", Value::Text("alpha".into()));
+            let opened = f
+                .call("change.open", json!({"target":target}))
+                .await
+                .unwrap();
+            let preview = f
+                .call(
+                    "change.preview",
+                    json!({"token":opened["token"],"rows":[same]}),
+                )
+                .await
+                .unwrap();
+            let unchanged = f
+                .call(
+                    "change.submit",
+                    json!({"token":opened["token"],"rows":[same]}),
+                )
+                .await
+                .unwrap();
+            let count = f
+                .sql(&format!("SELECT COUNT(*) FROM `{audit}`"))
+                .await
+                .unwrap();
+            let audit_count = f.rows(&count).await[0][0].text();
+            let mut conflicts = Vec::new();
+            for mutation in [
+                format!("UPDATE `{table}` SET label='ALPHA' WHERE id=1"),
+                format!("UPDATE `{table}` SET note='changed' WHERE id=1"),
+                format!("UPDATE `{table}` SET enabled=0 WHERE id=1"),
+                format!("DELETE FROM `{table}` WHERE id=1"),
+            ] {
+                observer
+                    .sql(&format!("DELETE FROM `{table}` WHERE id=1"))
+                    .await
+                    .unwrap();
+                observer
+                    .sql(&format!(
+                        "INSERT INTO `{table}` VALUES (1, 'alpha', 'note', 1)"
+                    ))
+                    .await
+                    .unwrap();
+                let opened = f
+                    .call("change.open", json!({"target":target}))
+                    .await
+                    .unwrap();
+                observer.sql(&mutation).await.unwrap();
+                let result = f
+                    .call(
+                        "change.submit",
+                        json!({"token":opened["token"],"rows":[same]}),
+                    )
+                    .await;
+                conflicts.push(result.map(|_| "success".into()).unwrap_or_else(|e| e.code));
+            }
+            let second = f
+                .sql(&format!("SELECT * FROM `{}` WHERE id=2", target.name))
+                .await
+                .unwrap();
+            let second_before = schema
+                .columns
+                .iter()
+                .zip(f.rows(&second).await.remove(0))
+                .map(|(column, value)| (column.name.clone(), value))
+                .collect();
+            let first = update(second_before, "label", Value::Text("written".into()));
+            let opened = f
+                .call("change.open", json!({"target":target}))
+                .await
+                .unwrap();
+            let batch = f
+                .call(
+                    "change.submit",
+                    json!({"token":opened["token"],"rows":[first,same]}),
+                )
+                .await;
+            let actual = f
+                .sql(&format!("SELECT label FROM `{table}` WHERE id=2"))
+                .await
+                .unwrap();
+            let first_value = f.rows(&actual).await[0][0].text();
+            let batch_error = batch
+                .err()
+                .map(|e| json!({"code":e.code,"items":e.details["items"]}));
+            observations.push(json!({"engine":engine,"view":is_view,"unchanged":unchanged,"audit":audit_count,"conflicts":conflicts,"batch_error":batch_error,"first_value":first_value,"preview":preview,"target":target.name}));
+            if is_view {
+                f.sql(&format!("DROP VIEW `{view}`")).await.unwrap();
+            }
+            f.sql(&format!("DROP TABLE `{table}`, `{audit}`"))
+                .await
+                .unwrap();
+        }
+    }
+    observer.close().await;
+    f.close().await;
+    // 在所有断言前清理 UUID 资源，失败复现也不遗留表、视图或触发器。
+    for observed in observations {
+        assert_eq!(
+            observed["conflicts"],
+            json!(["conflict", "conflict", "conflict", "conflict"]),
+            "{observed}"
+        );
+        assert_eq!(observed["unchanged"]["affected_rows"], 0);
+        assert_eq!(observed["unchanged"]["items"][0]["status"], "unchanged");
+        assert_eq!(observed["audit"], "0", "同值更新不能触发 UPDATE 触发器");
+        assert_eq!(observed["batch_error"]["code"], "conflict");
+        assert_eq!(observed["batch_error"]["items"][1]["status"], "conflict");
+        let transactional = observed["engine"] == "InnoDB";
+        assert_eq!(
+            observed["first_value"],
+            if transactional { "beta" } else { "written" }
+        );
+        assert_eq!(
+            observed["batch_error"]["items"][0]["status"],
+            if transactional {
+                "rolled_back"
+            } else {
+                "applied"
+            }
+        );
+        let statements = observed["preview"]["items"][0]["statements"]
+            .as_array()
+            .unwrap();
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0]["role"], "check");
+        let text = statements[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("SELECT 1 FROM "));
+        assert!(text.contains(&format!("`{}`", observed["target"].as_str().unwrap())));
+        assert_eq!(
+            statements[0]["parameters"].as_array().unwrap().len(),
+            if observed["view"] == true { 3 } else { 4 }
+        );
+        assert_eq!(
+            text.contains("FOR UPDATE"),
+            transactional && observed["view"] == false
+        );
+    }
 }
 
 #[tokio::test]

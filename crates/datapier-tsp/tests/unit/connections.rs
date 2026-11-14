@@ -45,6 +45,111 @@ fn connection_edit_keeps_mcp_policy_and_creation_uses_global_default() {
         ApprovalPolicy::AllWrites
     );
 }
+
+#[test]
+fn mysql_options_roundtrip_and_validate_without_losing_input() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("mysql-options".into());
+    app.profile_form(None);
+    assert!(!app.workbench.profile_timeout_details);
+    app.field_set("name", "mysql");
+    assert_eq!(
+        app.form_profile()
+            .unwrap()
+            .direct()
+            .unwrap()
+            .mysql
+            .timezone
+            .as_deref(),
+        Some("+00:00")
+    );
+    app.field_set("mysql_timezone", "");
+    app.field_set("mysql_connect_timeout_seconds", "12");
+    app.field_set("mysql_query_timeout_seconds", "86401");
+    app.action("test-profile", &backend);
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        "mysql_query_timeout_seconds"
+    );
+    assert!(app.workbench.profile_timeout_details);
+    assert_eq!(app.field("mysql_connect_timeout_seconds"), "12");
+    assert!(requests.try_recv().is_err());
+    app.field_set("mysql_query_timeout_seconds", "86400");
+    let profile = app.form_profile().unwrap();
+    let mysql = &profile.direct().unwrap().mysql;
+    assert_eq!(mysql.timezone, None);
+    assert_eq!(mysql.connect_timeout_seconds, Some(12));
+    assert_eq!(mysql.query_timeout_seconds, Some(86400));
+    app.profile_form(Some(profile));
+    assert_eq!(app.field("mysql_timezone"), "");
+    assert_eq!(app.field("mysql_connect_timeout_seconds"), "12");
+    app.action("test-profile", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(
+        request.params["profile"]["connection"]["mysql"]["timezone"],
+        Value::Null
+    );
+    assert_eq!(
+        request.params["profile"]["connection"]["mysql"]["query_timeout_seconds"],
+        86400
+    );
+}
+
+#[test]
+fn inactive_redis_fields_do_not_block_mysql_submission() {
+    for invalid in ["0", "abc", "4294967296"] {
+        for action in ["save-profile", "test-profile", "profile-databases-load"] {
+            let (backend, mut requests, _) = Backend::scripted();
+            let mut app = App::new("inactive-redis".into());
+            app.profile_form(None);
+            app.field_set("name", "mysql");
+            app.field_set("provider", "redis");
+            app.field_set("redis_databases_override", invalid);
+            app.field_set("provider", "mysql");
+            app.action(action, &backend);
+            assert!(requests.try_recv().is_ok(), "{action}: {invalid}");
+            assert_eq!(app.field("redis_databases_override"), invalid);
+            app.field_set("provider", "redis");
+            assert!(!app.validate_profile_form());
+            assert_eq!(
+                app.workbench.field_error.as_ref().unwrap().field,
+                "redis_databases_override"
+            );
+        }
+    }
+}
+
+#[test]
+fn saving_mysql_options_preserves_other_connection_settings() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("mysql-options-save".into());
+    app.profile_form(None);
+    app.field_set("name", "primary");
+    app.field_set("mysql_timezone", "Asia/Shanghai");
+    app.field_set("mysql_connect_timeout_seconds", "25");
+    app.field_set("access", "read_write");
+    app.field_set("tls", "true");
+    app.action("save-profile", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "profile.save");
+    assert_eq!(
+        request.params["profile"]["connection"]["mysql"]["timezone"],
+        "Asia/Shanghai"
+    );
+    assert_eq!(
+        request.params["profile"]["connection"]["mysql"]["connect_timeout_seconds"],
+        25
+    );
+    assert_eq!(
+        request.params["profile"]["connection"]["mysql"]["query_timeout_seconds"],
+        Value::Null
+    );
+    assert_eq!(
+        request.params["profile"]["connection"]["tls"]["enabled"],
+        true
+    );
+    assert_eq!(request.params["profile"]["access_mode"], "read_write");
+}
 #[test]
 fn all_profile_submissions_reject_invalid_fields_without_requests() {
     let (backend, mut requests, _) = Backend::scripted();

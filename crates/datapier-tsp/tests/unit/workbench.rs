@@ -35,9 +35,9 @@ fn redis_key_copy_preserves_original_bytes() {
 }
 
 #[test]
-fn cli_toggle_saves_visibility_for_both_directions() {
+fn cli_toggle_persists_visibility_for_both_directions() {
     for initial in [false, true] {
-        let (backend, mut requests, _) = Backend::scripted();
+        let (backend, _, _) = Backend::scripted();
         let mut app = app_for("redis", "string", page(&["value"], vec![]));
         app.workspace_loaded = true;
         app.workbench.cli = initial;
@@ -45,15 +45,16 @@ fn cli_toggle_saves_visibility_for_both_directions() {
 
         app.action("cli-toggle", &backend);
         assert!(app.dirty);
-        app.save_workspace(&backend);
-        let request = requests.try_recv().unwrap();
-        assert_eq!(request.method, "workspace.save");
-        assert_eq!(
-            request.params["state"]["tabs"][0]["browse"]["cli_visible"],
-            !initial
+        let state = serde_json::to_value(app.workspace_snapshot()).unwrap();
+        let mut restored = App::new("restored".into());
+        restored.response(
+            Response {
+                tag: "workspace.load".into(),
+                result: Ok(json!({"revision":1,"state":state})),
+            },
+            &backend,
         );
-        assert!(app.saving);
-        assert!(!app.dirty);
+        assert_eq!(restored.workbench.cli, !initial);
     }
 }
 
@@ -336,7 +337,7 @@ fn key(name: &str, shift: bool) -> tern_sdk::Key {
 }
 #[test]
 fn regression_refresh_finishes_inline_without_replacing_its_row() {
-    let (backend, mut requests, _) = Backend::scripted();
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = app_for(
         "mysql",
         "table",
@@ -357,6 +358,16 @@ fn regression_refresh_finishes_inline_without_replacing_its_row() {
     let cell = Cell { row: 1, column: 1 };
     app.grid.as_mut().unwrap().select(cell, false).unwrap();
     assert!(app.workbench_key(&key("enter", false), &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    assert!(app.workbench.inline.is_none());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     app.field_set("cell", "draft");
     let result = app.grid.as_ref().unwrap().page.result.id;
     app.action("browse", &backend);
@@ -403,7 +414,7 @@ fn regression_redis_history_return_keeps_key_drafts_and_cli_result() {
 
 #[test]
 fn inline_commit_cancel_and_tab_do_not_send_writes() {
-    let (backend, mut requests, _) = Backend::scripted();
+    let (backend, mut requests, _responses) = Backend::scripted();
     let mut app = app_for(
         "mysql",
         "table",
@@ -416,6 +427,16 @@ fn inline_commit_cancel_and_tab_do_not_send_writes() {
         ),
     );
     assert!(app.workbench_key(&key("enter", false), &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    assert!(app.workbench.inline.is_none());
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     app.field_set("cell", "修改😀");
     assert!(app.workbench_key(&key("tab", false), &backend));
     assert_eq!(
@@ -445,6 +466,15 @@ fn inline_commit_cancel_and_tab_do_not_send_writes() {
         page(&["a"], vec![vec![DataValue::Integer("1".into())]]),
     );
     numeric.workbench_key(&key("enter", false), &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "workspace.draft_scope");
+    numeric.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
     numeric.field_set("cell", "invalid");
     numeric.workbench_key(&key("enter", false), &backend);
     assert!(numeric.workbench.inline.is_some());
@@ -472,18 +502,127 @@ fn redis_hash_rename_preserves_old_binary_field_and_multiline_value() {
     assert_eq!(app.field("redis_value"), "第一行\n第二行");
     app.field_set("redis_field", "新字段");
     app.workbench_action("redis-stage", &backend);
-    assert_eq!(app.redis_changes.len(), 2);
-    assert_eq!(
-        app.redis_changes[0],
-        json!({"operation":"hash_delete","field":{"type":"bytes","value":STANDARD.encode(original)}})
-    );
-    assert_eq!(
-        app.redis_changes[1],
-        json!({"operation":"hash_set","field":{"type":"text","value":"新字段"},"value":{"type":"text","value":"第一行\n第二行"}})
-    );
+    assert_eq!(app.redis_changes.len(), 1);
+    let change = &app.redis_changes[0];
+    assert_eq!(change["operation"], "hash_replace_field");
+    assert_eq!(change["field"]["value"], STANDARD.encode(original));
+    assert_eq!(change["new_field"]["value"], "新字段");
+    assert_eq!(change["value"]["value"], "第一行\n第二行");
     app.workbench_action("redis-undo", &backend);
     assert!(app.redis_changes.is_empty());
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn redis_row_edits_preserve_identity_and_hash_expiry() {
+    let (backend, _, _) = Backend::scripted();
+    let bytes = |s: &str| DataValue::Bytes(STANDARD.encode(s));
+    let mut hash = app_for(
+        "redis",
+        "hash",
+        page(&["field", "value"], vec![vec![bytes("a"), bytes("old")]]),
+    );
+    hash.workbench_action("redis-edit", &backend);
+    hash.field_set("redis_value", "new");
+    hash.workbench_action("redis-stage", &backend);
+    assert_eq!(hash.redis_changes[0]["operation"], "hash_set");
+    assert_eq!(hash.redis_changes[0]["preserve_field_ttl"], true);
+    assert_eq!(hash.redis_changes[0]["value"]["value"], "new");
+
+    for kind in ["set", "zset"] {
+        let (columns, row) = if kind == "set" {
+            (vec!["member"], vec![bytes("a")])
+        } else {
+            (
+                vec!["member", "score"],
+                vec![bytes("a"), DataValue::Float("1".into())],
+            )
+        };
+        let mut app = app_for("redis", kind, page(&columns, vec![row]));
+        app.workbench_action("redis-edit", &backend);
+        app.field_set("redis_member", "b");
+        if kind == "zset" {
+            app.field_set("redis_score", "2");
+        }
+        app.workbench_action("redis-stage", &backend);
+        let replacement = &app.redis_changes[0];
+        assert_eq!(replacement["operation"], format!("{kind}_replace_member"));
+        assert_eq!(replacement["member"]["value"], STANDARD.encode("a"));
+        assert_eq!(replacement["new_member"]["value"], "b");
+        if kind == "zset" {
+            assert_eq!(replacement["score"], "2");
+            assert!(replacement.get("preserve_score").is_none());
+        }
+        assert_eq!(app.redis_changes.len(), 1);
+    }
+}
+
+#[test]
+fn advanced_list_value_uses_original_baseline_and_translates_staged_index() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let rows = ["A", "B"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, value)| {
+            vec![
+                DataValue::Integer(i.to_string()),
+                DataValue::Bytes(STANDARD.encode(value)),
+            ]
+        })
+        .collect();
+    let mut app = app_for("redis", "list", page(&["index", "value"], rows));
+    app.redis_changes
+        .push(json!({"operation":"list_delete","index":0}));
+    let result = app.grid.as_ref().unwrap().page.result.id;
+    let params = |app: &App, row| {
+        json!({"session_id":app.session_id(),"target":app.target,
+        "edit_token":app.edit_token,"result_id":result,"row_no":row,"column":"value"})
+    };
+    app.grid
+        .as_mut()
+        .unwrap()
+        .select(Cell { row: 0, column: 1 }, false)
+        .unwrap();
+    let open = params(&app, 0);
+    app.advanced_value_open(&backend, open);
+    assert!(requests.try_recv().is_err());
+    assert!(app.advanced_value.session.is_none());
+
+    app.grid
+        .as_mut()
+        .unwrap()
+        .select(Cell { row: 1, column: 1 }, false)
+        .unwrap();
+    let open = params(&app, 1);
+    app.advanced_value_open(&backend, open);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.params["index"], 1);
+    let (nonce, _) = app.advanced_value.request.clone().unwrap();
+    let id = Uuid::new_v4().to_string();
+    app.advanced_value_response(
+        &format!("advanced-value/{nonce}"),
+        &Ok(json!({
+            "value_session":id,"revision":1,"total_bytes":1,"writable":true,
+            "kind":"text","is_null":false,"offset":0,"data_b64":STANDARD.encode("B")
+        })),
+        &backend,
+    );
+    app.advanced_value_action("advanced-value-stage", &backend);
+    let (nonce, _) = app.advanced_value.request.clone().unwrap();
+    app.advanced_value_response(
+        &format!("advanced-value/{nonce}"),
+        &Ok(json!({
+            "value_session":id,"revision":1,"result_id":result,"row_no":1,"column":"value",
+            "redis_changes":[{"operation":"list_set","index":1,"value":{"type":"text","value":"X"}}]
+        })),
+        &backend,
+    );
+    assert_eq!(app.redis_changes.len(), 2);
+    assert_eq!(app.redis_changes[1]["index"], 0);
+    let mut list = vec!["A", "B"];
+    list.remove(app.redis_changes[0]["index"].as_u64().unwrap() as usize);
+    list[app.redis_changes[1]["index"].as_u64().unwrap() as usize] = "X";
+    assert_eq!(list, vec!["X"]);
 }
 
 #[test]
@@ -688,7 +827,7 @@ fn ttl_keep_set_and_persist_do_not_confuse_empty_input_with_removal() {
 }
 
 #[test]
-fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
+fn tree_navigation_expands_and_collapses_loaded_keys() {
     let (backend, _, _) = Backend::scripted();
     let mut app = app_for("redis", "string", page(&["value"], vec![]));
     app.workbench.tree = true;
@@ -703,24 +842,18 @@ fn tree_navigation_normalizes_pages_after_scan_and_collapse() {
         .collect();
     app.workbench.redis_tree.reset(&app.resources);
     app.workbench.redis_tree_owner = app.redis_selection_scope();
-    app.workbench.key_page = 4;
-    app.normalize_key_page();
-    assert_eq!(app.workbench.key_page, 0);
+    assert_eq!(app.workspace_tree_items().len(), 2);
     app.workbench_action("redis-tree:YTo=", &backend);
-    app.workbench_action("keys-next", &backend);
-    assert_eq!(app.workbench.key_page, 1);
-    app.workbench.key_page = 4;
-    app.workbench_action("keys-previous", &backend);
-    assert_eq!(app.workbench.key_page, 0);
-    app.workbench_action("keys-next", &backend);
+    assert_eq!(app.workspace_tree_items().len(), 302);
     app.workbench_action("redis-tree:YTo=", &backend);
-    assert_eq!(app.workbench.key_page, 0);
+    assert_eq!(app.workspace_tree_items().len(), 2);
 }
 
 #[test]
 fn redis_tree_keeps_selection_on_append_and_resets_for_another_db() {
-    let (backend, _, _) = Backend::scripted();
+    let (backend, _requests, _) = Backend::scripted();
     let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    app.session = Some(json!({"session_id":Uuid::new_v4()}));
     app.workbench.tree = true;
     let resource = |key: &str| {
         json!({
@@ -786,6 +919,139 @@ fn redis_tree_keeps_selection_on_append_and_resets_for_another_db() {
         .rows(&app.workbench.redis_expansion, app.redis_selection_scope());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, b"c");
+}
+
+#[test]
+fn redis_scan_empty_duplicates_failure_and_stale_cursor() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = app_for("redis", "string", page(&["value"], vec![]));
+    let resource = json!({"name":"a", "kind":"string", "database":null, "key_b64":STANDARD.encode("a"), "data":null});
+    app.action("list", &backend);
+    let first = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: first.tag,
+            result: Ok(json!({"resources":[],"cursor":"one","complete":false})),
+        },
+        &backend,
+    );
+    assert!(app.resources.is_empty());
+    assert_eq!(app.cursor.as_deref(), Some("one"));
+    app.action("more", &backend);
+    let next = requests.try_recv().unwrap();
+    app.routed_response(Response { tag: next.tag, result: Ok(json!({"resources":[resource.clone(),resource.clone()],"cursor":"two","complete":false})) }, &backend);
+    assert_eq!(app.resources.len(), 1);
+    app.action("more", &backend);
+    let failed = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: failed.tag,
+            result: Err(AppError::new("test", "scan failed")),
+        },
+        &backend,
+    );
+    assert!(app.workbench.query_ui.redis_scan_failed);
+    assert_eq!(app.resources.len(), 1);
+    app.action("more", &backend);
+    let stale = requests.try_recv().unwrap();
+    assert!(!app.workbench.query_ui.redis_scan_failed);
+    app.action("list", &backend);
+    let discard = requests.try_recv().unwrap();
+    assert_eq!(discard.method, "resource.scan.discard");
+    let fresh = requests.try_recv().unwrap();
+    assert_eq!(fresh.method, "resource.list");
+    app.routed_response(
+        Response {
+            tag: stale.tag,
+            result: Ok(json!({"resources":[],"cursor":"stale","complete":false})),
+        },
+        &backend,
+    );
+    let discard = requests.try_recv().unwrap();
+    assert_eq!(discard.method, "resource.scan.discard");
+    assert_eq!(discard.params["cursor"], "stale");
+    assert_eq!(app.resources.len(), 1);
+}
+
+#[test]
+fn browse_replaces_old_result_only_after_new_page_succeeds() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let old_page = page(&["value"], vec![]);
+    let old_id = old_page.result.id.to_string();
+    let mut app = app_for("mysql", "table", old_page);
+    app.browse_result = false;
+    app.settings.paging.mysql_table_rows = 3;
+    app.settings.paging.sql_rows = 100;
+    app.result_id = Some(old_id.clone());
+    app.results = vec![old_id.clone()];
+    let task = Uuid::new_v4().to_string();
+    let new_id = Uuid::new_v4();
+    app.response(
+        Response {
+            tag: "resource.browse".into(),
+            result: Ok(json!({"task_id":task})),
+        },
+        &backend,
+    );
+    let tag = format!("{}:{}:execution.get/{task}", app.tabs[0].id, app.generation);
+    app.routed_response(
+        Response {
+            tag: tag.clone(),
+            result: Ok(
+                json!({"id":task,"state":"running","method":"resource.browse","results":[new_id]}),
+            ),
+        },
+        &backend,
+    );
+    assert_eq!(app.result_id.as_deref(), Some(old_id.as_str()));
+    assert!(requests.try_recv().is_err());
+    app.routed_response(Response { tag, result:Ok(json!({"id":task,"state":"succeeded","method":"resource.browse","results":[new_id]})) }, &backend);
+    let read = requests.try_recv().unwrap();
+    assert_eq!(read.method, "result.read");
+    assert_eq!(read.params["max_rows"], 3);
+    assert_eq!(app.result_id.as_deref(), Some(old_id.as_str()));
+    let mut new_page = page(&["value"], vec![]);
+    new_page.result.id = new_id;
+    app.routed_response(
+        Response {
+            tag: read.tag,
+            result: Ok(serde_json::to_value(new_page).unwrap()),
+        },
+        &backend,
+    );
+    assert_eq!(app.result_id.as_deref(), Some(new_id.to_string().as_str()));
+    assert_eq!(app.grid.as_ref().unwrap().page.result.id, new_id);
+}
+
+#[test]
+fn failed_browse_page_preserves_existing_result() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let old_page = page(&["value"], vec![]);
+    let old_id = old_page.result.id.to_string();
+    let mut app = app_for("mysql", "table", old_page);
+    app.result_id = Some(old_id.clone());
+    app.results = vec![old_id.clone()];
+    let task = Uuid::new_v4().to_string();
+    app.response(
+        Response {
+            tag: "resource.browse".into(),
+            result: Ok(json!({"task_id":task})),
+        },
+        &backend,
+    );
+    let tag = format!("{}:{}:execution.get/{task}", app.tabs[0].id, app.generation);
+    app.routed_response(Response { tag, result:Ok(json!({"id":task,"state":"succeeded","method":"resource.browse","results":[Uuid::new_v4()]})) }, &backend);
+    let read = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: read.tag,
+            result: Err(AppError::new("test", "read failed")),
+        },
+        &backend,
+    );
+    assert_eq!(app.result_id.as_deref(), Some(old_id.as_str()));
+    assert_eq!(app.results, vec![old_id]);
+    assert!(app.status.render().contains("read failed"));
 }
 
 #[test]
@@ -860,11 +1126,11 @@ fn readonly_redis_large_values_load_in_chunks_without_edit_baseline() {
         assert_eq!(request.method, "result.value");
         let tag = request.tag.splitn(3, ':').nth(2).unwrap();
         let split = bytes.len() / 2;
-        app.large_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total":bytes.len()}), &backend);
+        app.large_response(tag, json!({"data_b64":STANDARD.encode(&bytes[..split]),"offset":0,"next":split,"total_bytes":bytes.len()}), &backend);
         let request = requests.try_recv().unwrap();
         assert_eq!(request.params["offset"], split);
         let tag = request.tag.splitn(3, ':').nth(2).unwrap();
-        app.large_response(tag, json!({"bytes_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total":bytes.len()}), &backend);
+        app.large_response(tag, json!({"data_b64":STANDARD.encode(&bytes[split..]),"offset":split,"next":null,"total_bytes":bytes.len()}), &backend);
         assert_eq!(
             app.grid.as_ref().unwrap().value(Cell { row: 0, column: 0 }),
             Some(&full)

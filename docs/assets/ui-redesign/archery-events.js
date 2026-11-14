@@ -1,11 +1,31 @@
 'use strict';
+let authParentDraftDirty = false;
+let archeryHistoryOwner = `${activeServerId}:${ap.instance}`;
+function closeArcheryAuth() {
+  authStage = null;
+  authReturn = null;
+  authExampleState = '';
+  if (serverForm) {
+    dialogDraftOwner = 'server-form';
+    dialogDraftDirty = authParentDraftDirty;
+  }
+}
+function focusProviderAfterRender(keyboard) {
+  if (keyboard) {
+    requestAnimationFrame(() => {
+      document.querySelector('.provider-options [role="radio"][aria-checked="true"]')?.focus();
+    });
+  }
+}
 document.addEventListener('input', event => {
   const field = event.target.dataset.serverField;
   if (serverForm && field) {
     if (field === 'password') {
+      serverForm.password = event.target.value;
       serverForm.passwordChanged = !!event.target.value;
     } else if (field === 'totpInput') {
       serverForm.totpChanged = !!event.target.value;
+      serverForm.totpInput = event.target.value;
       try {
         const uri = new URL(event.target.value);
         serverForm.totpValid = uri.protocol === 'otpauth:'
@@ -24,7 +44,9 @@ document.addEventListener('input', event => {
         https = event.target.value.toLowerCase().startsWith('https://');
       if (ca) {
         ca.disabled = !https;
-        const summary = ca.closest('details').querySelector('summary');
+        const details = ca.closest('details');
+        const summary = details.querySelector('summary');
+        if (!https) details.open = false;
         summary.setAttribute('aria-disabled', String(!https));
         summary.textContent = az('CA 证书', 'CA certificate') + ' · '
           + (https
@@ -33,6 +55,8 @@ document.addEventListener('input', event => {
               : az('默认信任链', 'Default trust chain'))
             : az('仅 HTTPS 使用', 'HTTPS only'));
       }
+      const clearCa = document.querySelector('[data-archery="ca-clear"]');
+      if (clearCa) clearCa.disabled = !https;
     }
   }
   if (event.target.dataset.connectionName) {
@@ -43,9 +67,12 @@ document.addEventListener('change', event => {
   if (event.target.id === 'redis-ttl-policy') {
     const required = event.target.value === 'set',
       input = document.getElementById('redis-ttl-value');
-    input.required = required;
-    input.setAttribute('aria-required', String(required));
-    document.getElementById('ttl-required').hidden = !required;
+    if (input) {
+      input.required = required;
+      input.setAttribute('aria-required', String(required));
+    }
+    const marker = document.getElementById('ttl-required');
+    if (marker) marker.hidden = !required;
   }
   if (event.target.hasAttribute('data-server-clear') && serverForm) {
     const password = document.querySelector('[data-server-field="password"]')?.value
@@ -54,18 +81,25 @@ document.addEventListener('change', event => {
         || '';
     serverForm.clearTotp = event.target.checked;
     if (serverForm.clearTotp) {
+      serverForm.totpInput = '';
       serverForm.totpChanged = false;
       serverForm.totpValid = false;
     }
     render();
-    document.querySelector('[data-server-field="password"]').value = password;
-    if (!serverForm.clearTotp) {
-      document.querySelector('[data-server-field="totpInput"]').value = uri;
-    }
-    document.querySelector('[data-server-clear]').closest('details').open = true;
+    const passwordInput = document.querySelector('[data-server-field="password"]');
+    if (passwordInput) passwordInput.value = password;
+    const totpInput = document.querySelector('[data-server-field="totpInput"]');
+    if (totpInput && !serverForm.clearTotp) totpInput.value = uri;
+    document.querySelector('[data-server-clear]')?.closest('details')?.setAttribute('open', '');
   }
   if (event.target.hasAttribute('data-save-password') && serverForm) {
     serverForm.savePassword = event.target.checked;
+  }
+  if (event.target.hasAttribute('data-save-totp') && serverForm) {
+    serverForm.saveTotp = event.target.checked;
+  }
+  if (event.target.hasAttribute('data-clear-password') && serverForm) {
+    serverForm.clearPassword = event.target.checked;
   }
   if (event.target.hasAttribute('data-totp-mode') && serverForm) {
     const password = document.querySelector('[data-server-field="password"]')?.value
@@ -75,12 +109,18 @@ document.addEventListener('change', event => {
     serverForm.totpMode = event.target.value;
     render();
     document.querySelector('[data-totp-mode]').closest('details').open = true;
-    document.querySelector('[data-server-field="password"]').value = password;
-    document.querySelector('[data-server-field="totpInput"]').value = uri;
+    const passwordInput = document.querySelector('[data-server-field="password"]');
+    if (passwordInput) passwordInput.value = password;
+    const totpInput = document.querySelector('[data-server-field="totpInput"]');
+    if (totpInput) totpInput.value = uri;
   }
   if (event.target.hasAttribute('data-server-select')) {
-    beginManagement(event.target.value);
-    render();
+    const nextServer = event.target.value;
+    event.target.value = serverId;
+    requestDialogClose(() => {
+      beginManagement(nextServer);
+      render();
+    });
   }
   if (event.target.id === 'local-history-size') {
     state.historyPageSize = Number(event.target.value);
@@ -186,6 +226,12 @@ document.addEventListener('change', event => {
     ap.result = false;
     render();
   }
+  if (event.target.dataset.defaultInstance) {
+    const id = event.target.dataset.defaultInstance;
+    ap.defaults[id] = event.target.value;
+    managementFocus = id;
+    render();
+  }
   if (event.target.dataset.ai) {
     const id = event.target.dataset.ai;
     managementFocus = id;
@@ -286,6 +332,12 @@ document.addEventListener('click', event => {
   render();
 }, true);
 document.addEventListener('click', event => {
+  const summary = event.target.closest('summary[data-ca-summary]');
+  if (summary && serverForm && !serverForm.url.toLowerCase().startsWith('https://')) {
+    event.preventDefault();
+  }
+}, true);
+document.addEventListener('click', event => {
   if (!event.target.closest('[data-action="close-modal"]')) return;
   const overlays = document.querySelectorAll('#app .overlay');
   if (event.target.closest('.overlay') !== overlays[overlays.length - 1]) {
@@ -297,12 +349,17 @@ document.addEventListener('click', event => {
     const child = serverForm || serverDelete || connectionDelete
       || authStage;
     event.stopImmediatePropagation();
-    serverForm = null;
-    serverDelete = null;
-    connectionDelete = null;
-    authStage = null;
-    if (!child && ap.modal) ap.modal = false;
-    render();
+    requestDialogClose(() => {
+      if (authStage) {
+        closeArcheryAuth();
+      } else {
+        serverForm = null;
+        serverDelete = null;
+        connectionDelete = null;
+      }
+      if (!child && ap.modal) ap.modal = false;
+      render();
+    });
   } else if (
     previewSource === 'archery' && ap.view === 'history' && !state.overlay
   ) {
@@ -318,6 +375,15 @@ document.addEventListener('click', event => {
   event.stopImmediatePropagation();
   const [action, id, db] = target.dataset.archery.split(':');
   const targetServer = target.dataset.connectionServer || activeServerId;
+  if (['reconcile-save', 'reconcile-delete', 'reconcile-auth'].includes(action)) {
+    recoveryReviewed = true;
+    render();
+    return;
+  }
+  if (action === 'copy-schema-ddl') {
+    copy('CREATE TABLE orders (\n  id BIGINT PRIMARY KEY,\n  status VARCHAR(32),\n  total DECIMAL(10,2)\n);');
+    return;
+  }
   if (action === 'ca-clear' && serverForm) {
     const password = document.querySelector('[data-server-field="password"]')?.value
         || '',
@@ -325,8 +391,10 @@ document.addEventListener('click', event => {
         || '';
     serverForm.ca = '';
     render();
-    document.querySelector('[data-server-field="password"]').value = password;
-    document.querySelector('[data-server-field="totpInput"]').value = uri;
+    const passwordInput = document.querySelector('[data-server-field="password"]');
+    if (passwordInput) passwordInput.value = password;
+    const totpInput = document.querySelector('[data-server-field="totpInput"]');
+    if (totpInput) totpInput.value = uri;
     document.querySelector('[data-server-field="ca"]').closest('details')
       .open = true;
     return;
@@ -342,7 +410,16 @@ document.addEventListener('click', event => {
     return;
   }
   if (action === 'server-cancel') {
-    serverForm = null;
+    requestDialogClose(() => {
+      serverForm = null;
+      render();
+    });
+    return;
+  }
+  if (action === 'server-reauth') {
+    authParentDraftDirty = dialogDraftOwner === 'server-form' && dialogDraftDirty;
+    authStage = 'password';
+    authReturn = 'server-form';
     render();
     return;
   }
@@ -408,10 +485,11 @@ document.addEventListener('click', event => {
     }
     if (
       ap.task === 'running'
-      && (f.passwordChanged || f.totpChanged || f.clearTotp
+      && (f.passwordChanged || f.clearPassword || f.totpChanged || f.clearTotp
         || (old
           && (old.ca !== f.ca || old.totpMode !== f.totpMode
-            || old.passwordSaved !== f.savePassword)))
+            || old.passwordSaved !== f.savePassword
+            || (old.saveTotp ?? !!old.totp) !== f.saveTotp)))
     ) {
       toast(
         az(
@@ -427,9 +505,10 @@ document.addEventListener('click', event => {
       url: normalized,
       username: f.username.trim(),
       ca: normalized.startsWith('https:') ? f.ca : '',
-      totp: f.clearTotp ? false : (f.totpChanged || f.totp),
+      totp: !f.clearTotp && (f.totpChanged || f.totp),
+      saveTotp: !f.clearTotp && f.saveTotp,
       totpMode: f.totpMode,
-      passwordSaved: f.savePassword
+      passwordSaved: !f.clearPassword && f.savePassword
         && (f.passwordChanged || f.passwordSaved || false),
       requiresOtp: old?.requiresOtp ?? true,
       loggedIn: old?.loggedIn || false,
@@ -444,15 +523,34 @@ document.addEventListener('click', event => {
   }
   if (action === 'server-delete') {
     serverDelete = id;
+    serverDeleteSnapshot = {
+      server: { ...servers.find(s => s.id === id) },
+      connections: archeryConnections.filter(c => c.server === id).map(c => ({ ...c, dbs: [...c.dbs] })),
+    };
     render();
     return;
   }
   if (action === 'server-delete-cancel') {
+    if (authExampleState === 'archery-delete-busy') {
+      authExampleState = 'archery-delete-unknown';
+      render();
+      return;
+    }
     serverDelete = null;
+    authExampleState = '';
+    serverDeleteSnapshot = null;
     render();
     return;
   }
   if (action === 'server-delete-confirm') {
+    if (
+      JSON.stringify(archeryConnections.filter(c => c.server === serverDelete))
+        !== JSON.stringify(serverDeleteSnapshot?.connections)
+      || JSON.stringify(servers.find(s => s.id === serverDelete)) !== JSON.stringify(serverDeleteSnapshot?.server)
+    ) {
+      toast(az('目标已变化，请重新打开删除确认。', 'The target changed; reopen the delete confirmation.'));
+      return;
+    }
     if (
       ap.task === 'running' || ap.draft || state.tabs.some(tab => tab.running) || state.drafts.length
       || currentDrafts().length
@@ -485,9 +583,8 @@ document.addEventListener('click', event => {
       || (s.passwordSaved
         && (!s.requiresOtp || (s.totp && s.totpMode === 'automatic')))
     ) {
-      s.loggedIn = true;
       refreshedServers.add(serverId);
-      toast(az('实例已刷新（示例）。', 'Instances refreshed (example).'));
+      toast(az('已显示示例实例；未发送请求。', 'Example instances shown; no request sent.'));
     } else {
       authStage = s.passwordSaved ? 'otp' : 'password';
       authReturn = 'refresh';
@@ -496,15 +593,15 @@ document.addEventListener('click', event => {
     return;
   }
   if (action === 'auth-cancel') {
-    authStage = null;
-    authReturn = null;
-    toast(
-      az(
-        '认证已取消，未刷新实例。',
-        'Authentication cancelled; instances were not refreshed.',
-      ),
-    );
-    render();
+    if (authExampleState === 'archery-auth-busy') {
+      authExampleState = 'archery-auth-unknown';
+      render();
+      return;
+    }
+    requestDialogClose(() => {
+      closeArcheryAuth();
+      render();
+    });
     return;
   }
   if (action === 'auth-next') {
@@ -522,25 +619,34 @@ document.addEventListener('click', event => {
       );
       return;
     }
-    const s = servers.find(item => item.id === serverId);
     if (
-      authStage === 'password' && s?.requiresOtp
-      && !(s.totp && s.totpMode === 'automatic')
-    ) authStage = 'otp';
-    else {
-      if (s) s.loggedIn = true;
-      authStage = null;
-      if (authReturn === 'refresh') {
-        refreshedServers.add(serverId);
-        authReturn = null;
-        toast(az('实例已刷新（示例）。', 'Instances refreshed (example).'));
-      }
-      if (ap.reauth) {
-        ap.modal = false;
-        ap.reauth = false;
+      authStage === 'password' && authReturn !== 'server-form'
+      && servers.find(item => item.id === serverId)?.requiresOtp
+    ) {
+      authStage = 'otp';
+      toast(
+        az(
+          '下一步为验证码示例；未发送认证请求。',
+          'The next step is a verification code example; no authentication request was sent.',
+        ),
+      );
+      render();
+    } else {
+      toast(
+        az(
+          '认证示例未发送请求，未验证凭据。',
+          'Authentication example: no request was sent and credentials were not verified.',
+        ),
+      );
+      if (authReturn === 'server-form') {
+        serverForm.password = value;
+        serverForm.passwordChanged = true;
+        serverForm.clearPassword = false;
+        closeArcheryAuth();
+        dialogDraftDirty = true;
+        render();
       }
     }
-    render();
     return;
   }
   if (action === 'connection-edit') {
@@ -592,15 +698,30 @@ document.addEventListener('click', event => {
     translatePreview();
   } else if (action === 'otp-visible') ap.otpVisible = !ap.otpVisible;
   else if (action === 'type-archery' || action === 'wizard') {
-    state.overlay = null;
-    ap.reauth = false;
-    beginManagement(serverId);
-  } else if (action === 'type-mysql' || action === 'type-redis') {
-    ap.modal = false;
-    openConnectionForm('new-connection', action.slice(5));
+    const keyboard = event.detail === 0;
+    requestDialogClose(() => {
+      state.overlay = null;
+      ap.reauth = false;
+      beginManagement(serverId);
+      render();
+      focusProviderAfterRender(keyboard);
+    });
     return;
-  } else if (action === 'close') ap.modal = false;
-  else if (action === 'new' || action === 'saved') {
+  } else if (action === 'type-mysql' || action === 'type-redis') {
+    const keyboard = event.detail === 0;
+    requestDialogClose(() => {
+      ap.modal = false;
+      openConnectionForm('new-connection', action.slice(5));
+      focusProviderAfterRender(keyboard);
+    });
+    return;
+  } else if (action === 'close') {
+    requestDialogClose(() => {
+      ap.modal = false;
+      render();
+    });
+    return;
+  } else if (action === 'new' || action === 'saved') {
     ap.mode = action;
     ap.step = 'login';
     ap.challenge = false;
@@ -697,6 +818,7 @@ document.addEventListener('click', event => {
     ap.step = 'preview';
   } else if (action === 'back') ap.step = 'instances';
   else if (action === 'save') {
+    if (authExampleState === 'archery-save-unknown') return;
     const c = managementChanges();
     if (
       serverId === activeServerId && [...c.modified, ...c.removed].some(v => v.instance === ap.instance)
@@ -842,12 +964,12 @@ document.addEventListener('click', event => {
   } else if (action === 'instance') {
     switchArcheryInstance(id, db);
     serverId = id;
-    if (ap.historyServer !== id) {
+    if (archeryHistoryOwner !== `${id}:${db}`) {
       ap.filter = '';
       ap.historyApplied = '';
       ap.page = 0;
       ap.selectedHistory = 0;
-      ap.historyServer = id;
+      archeryHistoryOwner = `${id}:${db}`;
     }
   } else if (action === 'check') {
     ap.view = 'query';
@@ -855,16 +977,20 @@ document.addEventListener('click', event => {
     ap.result = true;
     ap.reviewDetail = false;
   } else if (['query', 'schema', 'ddl', 'history'].includes(action)) {
-    if (action === 'history') ap.historyReturn = ap.view;
+    if (action === 'history') {
+      const owner = `${activeServerId}:${ap.instance}`;
+      if (archeryHistoryOwner !== owner) {
+        ap.filter = '';
+        ap.historyApplied = '';
+        ap.page = 0;
+        ap.selectedHistory = 0;
+        archeryHistoryOwner = owner;
+      }
+      if (ap.view !== 'history') ap.historyReturn = ap.view;
+    }
     ap.view = action === 'query' && ap.view === 'history'
       ? (ap.historyReturn || 'query')
       : action;
-    if (action === 'history') {
-      ap.page = 0;
-      ap.filter = '';
-      ap.historyApplied = '';
-    }
-    ap.selectedHistory = 0;
   } else if (action === 'result' || action === 'selection') {
     ap.result = true;
     ap.review = false;

@@ -145,12 +145,12 @@ async fn redis_resolve_rows(
                     )
                     .await?;
                 if chunk.get("offset").and_then(Value::as_u64) != Some(offset)
-                    || chunk.get("total").and_then(Value::as_u64) != Some(expected)
+                    || chunk.get("total_bytes").and_then(Value::as_u64) != Some(expected)
                 {
                     return Err(AppError::invalid("Redis 大字段分块不一致"));
                 }
                 let encoded = chunk
-                    .get("bytes_b64")
+                    .get("data_b64")
                     .and_then(Value::as_str)
                     .ok_or_else(|| AppError::invalid("缺少 Redis 大字段分块"))?;
                 let decoded = STANDARD
@@ -215,12 +215,12 @@ async fn redis_copy_value(client: &Client, result_id: Uuid, kind: &str) -> Resul
                             )
                             .await?;
                         if chunk.get("offset").and_then(Value::as_u64) != Some(offset)
-                            || chunk.get("total").and_then(Value::as_u64) != Some(expected)
+                            || chunk.get("total_bytes").and_then(Value::as_u64) != Some(expected)
                         {
                             return Err(AppError::invalid("Redis 大字段分块不一致"));
                         }
                         let encoded = chunk
-                            .get("bytes_b64")
+                            .get("data_b64")
                             .and_then(Value::as_str)
                             .ok_or_else(|| AppError::invalid("缺少 Redis 大字段分块"))?;
                         let decoded = STANDARD

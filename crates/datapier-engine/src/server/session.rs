@@ -46,7 +46,7 @@ pub(super) async fn client_with_lease(
         } else if request
             .pointer("/params/protocol_version")
             .and_then(Value::as_u64)
-            != Some(3)
+            != Some(protocol::VERSION)
         {
             Err(AppError::new(
                 "protocol_incompatible",
@@ -72,7 +72,7 @@ pub(super) async fn client_with_lease(
                             Some(engine.state.lock().unwrap().event_senders[&owner].subscribe());
                         match engine.store.settings().await {
                             Ok(settings) => Ok(
-                                json!({"protocol_version":3,"engine_id":engine.id,"client_session_id":owner,"settings_revision":settings.revision,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
+                                json!({"protocol_version":protocol::VERSION,"engine_id":engine.id,"client_session_id":owner,"settings_revision":settings.revision,"heartbeat_seconds":10,"lease_seconds":45,"grace_seconds":30}),
                             ),
                             Err(error) => Err(error),
                         }

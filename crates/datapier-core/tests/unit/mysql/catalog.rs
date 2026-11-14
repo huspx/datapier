@@ -1,4 +1,8 @@
-use super::{column_flags, grant_schema_matches};
+use super::column_flags;
+
+fn grant_schema_matches(scope: &str, database: &str, case_insensitive: bool) -> bool {
+    super::grant_schema_matches(scope, database, case_insensitive, false)
+}
 
 #[test]
 fn auto_increment_and_generated_are_independent() {
@@ -52,4 +56,21 @@ fn schema_grants_preserve_escaped_wildcards_and_identifier_quotes() {
     assert!(grant_schema_matches("`Fixture`.*", "fixture", true));
     assert!(!grant_schema_matches("`Fixture`.*", "fixture_extra", true));
     assert!(!grant_schema_matches("`db`.`table`", "db", false));
+}
+
+#[test]
+fn partial_revokes_treats_wildcards_as_literal_database_names() {
+    assert!(super::grant_schema_matches(
+        "`tenant_%`.*",
+        "tenant_%",
+        false,
+        true
+    ));
+    assert!(!super::grant_schema_matches(
+        "`tenant_%`.*",
+        "tenant_audit",
+        false,
+        true
+    ));
+    assert!(super::grant_schema_matches(r"`a\b`.*", r"a\b", false, true));
 }

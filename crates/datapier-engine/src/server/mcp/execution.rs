@@ -456,7 +456,7 @@ impl Engine {
         let id: Uuid = model::param(params, "execution_id")?;
         let include_text = optional::<bool>(params, "include_text")?.unwrap_or(false);
         let mut task = if include_text {
-            self.store.task_details(id).await?
+            self.task_details(id).await?
         } else {
             self.task(id).await?
         };

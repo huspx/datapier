@@ -1,6 +1,7 @@
 //! TSP 界面及编辑状态，通过 Engine IPC 操作数据；Session 由运行入口所在 UI 线程独占。
 
 mod action;
+mod advanced;
 mod app;
 mod application;
 mod approval;
@@ -11,6 +12,7 @@ mod clipboard;
 #[path = "../tests/unit/close_regression.rs"]
 mod close_regression;
 mod connections;
+mod editing_files;
 mod editor;
 mod forms;
 mod grid;
@@ -35,6 +37,8 @@ mod values;
 mod views;
 mod workbench;
 mod workspace;
+mod workspace_drafts;
+mod workspace_load;
 
 pub use runtime::{run, window_bridge};
 
@@ -133,6 +137,10 @@ struct Tab {
     #[serde(default)]
     browse: BrowseSettings,
     #[serde(default)]
+    schema_draft: Option<advanced::schema::SchemaDraft>,
+    #[serde(default)]
+    replace_draft: Option<Value>,
+    #[serde(default)]
     pending: Value,
     #[serde(skip)]
     pending_live: bool,
@@ -168,6 +176,9 @@ struct TabRuntime {
     database: Option<String>,
     target: Option<ResourceTarget>,
     task: Option<String>,
+    result_task: Option<(String, u64)>,
+    pending_result: Option<PendingResult>,
+    scan_restart: Option<Uuid>,
     operation_pending: bool,
     results: Vec<String>,
     result_id: Option<String>,
@@ -177,6 +188,13 @@ struct TabRuntime {
     schema: Option<Value>,
     edit_token: Option<Value>,
     pending_rows: Vec<datapier_core::model::RowChange>,
+    pending_edit_files: Vec<grid::EditFileRef>,
+    draft_revision: u64,
+    restore_rows: Option<workspace::RowRestore>,
+    advanced_schema: Option<advanced::schema::SchemaEditor>,
+    advanced_replace: advanced::replace::ReplaceState,
+    advanced_value: advanced::value::ValueUi,
+    advanced_files: advanced::files::FileUi,
     redis_changes: Vec<Value>,
     redis_changes_revision: u64,
     large: Option<LargeLoad>,
@@ -193,6 +211,15 @@ struct TabRuntime {
     workbench: Workbench,
     view: String,
 }
+#[derive(Clone)]
+struct PendingResult {
+    task: String,
+    generation: u64,
+    id: String,
+    results: Vec<String>,
+    browse: bool,
+}
+
 // 零标签只保留连接身份与目标，不保留已关闭的物理会话、结果或编辑基线。
 #[derive(Clone, Serialize, Deserialize)]
 struct EmptyConnectionContext {
@@ -230,9 +257,11 @@ struct App {
     window_data_dir: Option<PathBuf>,
     revision: u64,
     workspace_loaded: bool,
+    workspace_load: Option<workspace_load::WorkspaceLoad>,
     restore_focus_pending: bool,
     workspace_interacted: bool,
     saving: bool,
+    workspace_upload: Option<workspace::WorkspaceUpload>,
     save_blocked: bool,
     copy_pending: Option<String>,
     dirty: bool,
@@ -266,6 +295,13 @@ struct App {
     edit_token: Option<Value>,
     pending_rows: Vec<datapier_core::model::RowChange>,
     redis_changes: Vec<Value>,
+    draft_revision: u64,
+    pending_edit_files: Vec<grid::EditFileRef>,
+    restore_rows: Option<workspace::RowRestore>,
+    advanced_schema: Option<advanced::schema::SchemaEditor>,
+    advanced_replace: advanced::replace::ReplaceState,
+    advanced_value: advanced::value::ValueUi,
+    advanced_files: advanced::files::FileUi,
     redis_changes_revision: u64,
     large: Option<LargeLoad>,
     preview: Option<Value>,
@@ -292,6 +328,7 @@ struct App {
     settings_epoch: u64,
     settings_save_token: Option<Uuid>,
     settings_unsaved: bool,
+    editing_files: editing_files::FileManagement,
     last_settings_poll: Instant,
     tab_close: Option<tabs::CloseOperation>,
     change_preview: change_preview::PreviewState,

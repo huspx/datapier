@@ -111,41 +111,49 @@ function resultPager(id, count, options = {}) {
       : az(`第 ${page.page + 1} 页`, `Page ${page.page + 1}`)
   }</span>${button('next', t('nextPage'), icon('chev-r'), expired || (page.page + 1) * page.size >= count)}</div>`;
 }
-const redisScanPreview = { signature: '', cursor: 0, pending: [], loaded: [], scanning: false, changed: false };
+const redisScanPreview = { signature: '', generation: 0, cursor: 0, pending: [], loaded: [], scanning: false };
 function redisScanKeys() {
   const signature = JSON.stringify([state.redisDb, state.keyFilter, state.keyType]);
-  if (!redisScanPreview.signature) {
+  if (signature !== redisScanPreview.signature) {
     redisScanPreview.signature = signature;
-    redisScanPreview.pending = state.redisDb === 0 ? keySamples.slice() : [];
-    redisScanPreview.cursor = redisScanPreview.pending.length ? 1 : 0;
+    redisScanPreview.generation++;
+    redisScanPreview.loaded = [];
+    redisScanPreview.scanning = false;
+    redisScanPreview.pending = state.redisDb === 0
+      ? keySamples.filter(key =>
+        key.name.toLowerCase().includes(state.keyFilter.toLowerCase().replaceAll('*', ''))
+        && (state.keyType === 'all' || key.type === state.keyType)
+      )
+      : [];
+    state.selectedKeys.clear();
+    state.keyAnchor = null;
     redisScanAdvance();
-  } else if (signature !== redisScanPreview.signature) redisScanPreview.changed = true;
-  return redisScanPreview.loaded.filter(key =>
-    state.redisDb === 0 && key.name.toLowerCase().includes(state.keyFilter.toLowerCase().replaceAll('*', ''))
-    && (state.keyType === 'all' || key.type === state.keyType)
-  );
+  }
+  return redisScanPreview.loaded;
 }
 function redisScanAdvance() {
-  redisScanPreview.loaded.push(...redisScanPreview.pending.splice(0, 3));
+  const known = new Set(redisScanPreview.loaded.map(key => key.name));
+  for (const key of redisScanPreview.pending.splice(0, 3)) {
+    if (!known.has(key.name)) {
+      redisScanPreview.loaded.push(key);
+      known.add(key.name);
+    }
+  }
   redisScanPreview.cursor = redisScanPreview.pending.length ? 1 : 0;
 }
 function redisScanFooter() {
   const scan = redisScanPreview;
   const complete = !scan.cursor && !scan.pending.length;
-  const label = scan.changed
-    ? az('条件已更改，请重新扫描', 'Criteria changed; restart scan')
-    : scan.scanning
-    ? az('扫描中', 'Scanning')
+  const label = scan.scanning
+    ? az('加载中…', 'Loading…')
     : complete
     ? az('扫描完成', 'Scan complete')
-    : az('可继续扫描', 'More keys can be scanned');
-  return `<div class="table-footer small"><span>${h(label)} · ${
-    az('仅示例', 'Example only')
-  }</span><span class="spacer"></span><button type="button" class="icon-button result-page-button" data-result-scan title="${
-    h(scan.changed ? az('重新扫描', 'Restart scan') : t('scanMore'))
-  }" aria-label="${h(scan.changed ? az('重新扫描', 'Restart scan') : t('scanMore'))}" ${
-    scan.scanning || (complete && !scan.changed) ? 'disabled' : ''
-  }>${icon('chev-r')}</button></div>`;
+    : az('可加载更多', 'More keys available');
+  return `<div class="table-footer small redis-scan-footer"><span>${
+    h(label)
+  }</span><span class="spacer"></span><button type="button" class="button" data-result-scan ${
+    scan.scanning || complete ? 'disabled' : ''
+  }>${h(az('加载更多', 'Load more'))}</button></div>`;
 }
 function clearResultSelection() {
   state.selected.clear();
@@ -160,16 +168,12 @@ document.addEventListener('click', event => {
     if (scanButton.disabled) return;
     event.stopImmediatePropagation();
     const scan = redisScanPreview;
-    if (scan.changed) {
-      scan.signature = JSON.stringify([state.redisDb, state.keyFilter, state.keyType]);
-      scan.loaded = [];
-      scan.pending = state.redisDb === 0 ? keySamples.slice() : [];
-      scan.cursor = scan.pending.length ? 1 : 0;
-      scan.changed = false;
-    }
+    const generation = scan.generation;
     scan.scanning = true;
     render();
     setTimeout(() => {
+      // 条件变化后，旧扫描的迟到回包不得追加到新的 key 集合。
+      if (generation !== scan.generation) return;
       redisScanAdvance();
       scan.scanning = false;
       render();

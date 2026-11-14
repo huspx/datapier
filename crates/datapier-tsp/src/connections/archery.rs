@@ -23,9 +23,14 @@ pub(crate) struct Wizard {
     pub error: Option<String>,
     pub preview: bool,
     pub manage: bool,
+    pub available_by_instance: BTreeMap<i64, BTreeSet<String>>,
     pub server_only: bool,
     parent_server_form: Option<ServerFormParent>,
     pub server_details: bool,
+    pub totp_details: bool,
+    pub discard_action: Option<String>,
+    pub discard_accepted: bool,
+    pub direct_draft: Option<(Vec<String>, bool, BTreeSet<String>)>,
     pub delete_confirm: bool,
     pub reauth_server: Option<Uuid>,
     pub save_secret: bool,
@@ -64,6 +69,7 @@ pub(crate) struct Selection {
     pub profile_id: Uuid,
     pub instance: Value,
     pub databases: Option<Vec<String>>,
+    pub available_databases: Option<BTreeSet<String>>,
     pub selected: BTreeSet<String>,
     pub default: Option<String>,
     pub error: Option<String>,
@@ -80,6 +86,52 @@ struct ServerFormParent {
 }
 
 impl App {
+    /// 比较可提交内容；发现列表或展开状态变化不构成编辑。
+    fn archery_draft_dirty(&self) -> bool {
+        let state = &self.archery;
+        if state.server_only {
+            let original = state
+                .server
+                .as_ref()
+                .and_then(|server| state.servers.iter().find(|item| item["id"] == server["id"]));
+            let changed = |field: &str, value: &str| self.field(field) != value;
+            return changed(
+                "archery_name",
+                original.and_then(|s| s["name"].as_str()).unwrap_or(""),
+            ) || changed(
+                "archery_url",
+                original.and_then(|s| s["base_url"].as_str()).unwrap_or(""),
+            ) || changed(
+                "archery_user",
+                original.and_then(|s| s["username"].as_str()).unwrap_or(""),
+            ) || changed(
+                "archery_ca",
+                original
+                    .and_then(|s| s["http_tls"]["ca_path"].as_str())
+                    .unwrap_or(""),
+            ) || !self.field("password").is_empty()
+                || !self.field("archery_totp_uri").is_empty()
+                || state.clear_password
+                || state.clear_totp
+                || original.is_some_and(|s| {
+                    state.save_secret != (s["credential_mode"] == "keyring")
+                        || state.save_totp != (s["totp_credential_mode"] == "keyring")
+                        || state.totp_automatic != (s["totp_mode"] == "automatic")
+                })
+                || (original.is_none()
+                    && (!state.save_secret || state.save_totp || state.totp_automatic));
+        }
+        state.server.as_ref().is_some_and(|server| {
+            let desired = self.archery_desired_profiles(server);
+            desired.len() != state.baseline.len()
+                || state
+                    .baseline
+                    .iter()
+                    .any(|old| !desired.contains(&json!(old)))
+        }) || !self.field("password").is_empty()
+            || !self.field("archery_otp").is_empty()
+    }
+
     pub(crate) fn archery_capture_connection_open(&mut self, params: &Value) {
         self.archery.open_continuation = None;
         self.archery.open_capture = self
@@ -148,7 +200,7 @@ impl App {
                         .is_none_or(|server| server["totp_configured"] != true)))
                 || (self.archery.server_only && self.archery_totp_policy_changed()))
         {
-            self.archery.server_details = true;
+            self.archery.totp_details = true;
             self.field_error("archery_totp_uri", i18n::UiMessage::key("请填写 TOTP 链接"));
             return false;
         }
@@ -231,6 +283,7 @@ impl App {
         self.archery.server_only = true;
         self.archery.manage = true;
         self.archery.server_details = false;
+        self.archery.totp_details = false;
         self.archery.clear_password = false;
         self.archery.clear_totp = false;
         self.archery.auth_candidate = false;
@@ -335,6 +388,7 @@ impl App {
             self.archery.selected.insert(connection.instance_id, Selection {
                 profile_id: profile.id,
                 instance: json!({"id": connection.instance_id, "name": connection.instance_name, "provider": profile.provider}),
+                available_databases: None,
                 databases: Some(connection.databases.clone()),
                 selected: connection.databases.iter().cloned().collect(),
                 default: Some(connection.default_database.clone()),
@@ -457,11 +511,28 @@ impl App {
 
     pub(crate) fn archery_desired_profiles(&self, server: &Value) -> Vec<Value> {
         self.archery.selected.values().map(|s| {
-            let databases = self.archery.baseline.iter().find(|old| old.id == s.profile_id).and_then(Profile::archery)
+            let baseline = self.archery.baseline.iter().find(|old| old.id == s.profile_id);
+            let databases = baseline.and_then(Profile::archery)
                 .filter(|old| old.databases.iter().cloned().collect::<BTreeSet<_>>() == s.selected)
                 .map(|old| old.databases.clone()).unwrap_or_else(|| s.selected.iter().cloned().collect());
-            json!({"id":s.profile_id,"name":self.field(&format!("archery_profile_name_{}", s.profile_id)),"provider":s.instance["provider"],"access_mode":"read_only","connection":{"kind":"archery","server_id":server["id"],"instance_id":s.instance["id"],"instance_name":s.instance["name"],"databases":databases,"default_database":s.default}})
+            json!({"id":s.profile_id,"revision":baseline.map_or(1, |old| old.revision),"approval_policy":baseline.map_or(self.settings.approval.default_policy, |old| old.approval_policy),"name":self.field(&format!("archery_profile_name_{}", s.profile_id)),"provider":s.instance["provider"],"access_mode":"read_only","connection":{"kind":"archery","server_id":server["id"],"instance_id":s.instance["id"],"instance_name":s.instance["name"],"databases":databases,"default_database":s.default}})
         }).collect()
+    }
+
+    fn archery_committed_profiles(&self, server: &Value) -> Option<Vec<Value>> {
+        let mut profiles = self.archery_desired_profiles(server);
+        for profile in &mut profiles {
+            if let Some(old) = self
+                .archery
+                .baseline
+                .iter()
+                .find(|old| profile["id"] == json!(old.id))
+                && *profile != json!(old)
+            {
+                profile["revision"] = json!(old.revision.checked_add(1)?);
+            }
+        }
+        Some(profiles)
     }
 
     fn archery_save_batch(&mut self, backend: &Backend) {

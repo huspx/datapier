@@ -28,11 +28,13 @@ use uuid::Uuid;
 
 mod archery;
 mod discovery;
+mod editing;
 mod mcp;
 mod results;
 mod rpc;
 mod session;
 mod tasks;
+mod workspaces;
 #[cfg(test)]
 use datapier_core::model::AccessMode;
 use session::client;
@@ -115,11 +117,13 @@ struct State {
     unpersisted: HashMap<Uuid, UnpersistedCompletion>,
     profile_locks: HashMap<Uuid, Arc<AsyncMutex<()>>>,
     archery: archery::ArcheryState,
+    editing: editing::EditingState,
+    workspace_uploads: workspaces::WorkspaceUploadState,
 }
 impl State {
     fn stop_if_idle(&mut self) -> bool {
         if self.clients.is_empty()
-            && self.tasks.is_empty()
+            && self.workspace_uploads.is_empty()
             && !self.archery.has_persistent_operations()
             && self.idle.elapsed() >= Duration::from_secs(30)
         {
@@ -134,6 +138,7 @@ struct Engine {
     id: Uuid,
     store: Store,
     state: Mutex<State>,
+    send_gate: Arc<AsyncMutex<()>>,
 }
 fn serialize<T: serde::Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
@@ -150,6 +155,39 @@ fn optional<T: serde::de::DeserializeOwned>(params: &Value, key: &str) -> Result
         .filter(|v| !v.is_null())
         .map(|v| serde_json::from_value(v.clone()).map_err(Into::into))
         .transpose()
+}
+fn mysql_connect_timeout(profile: &Profile, fallback: u64) -> u64 {
+    if profile.provider == model::ProviderKind::Mysql {
+        profile
+            .direct()
+            .ok()
+            .and_then(|direct| direct.mysql.connect_timeout_seconds)
+            .unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
+fn mysql_query_timeout(profile: &Profile, fallback: u64) -> u64 {
+    if profile.provider == model::ProviderKind::Mysql {
+        profile
+            .direct()
+            .ok()
+            .and_then(|direct| direct.mysql.query_timeout_seconds)
+            .unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
+fn profile_with_connect_timeout(profile: &Profile, fallback: u64) -> Profile {
+    let mut effective = profile.clone();
+    if effective.provider == model::ProviderKind::Mysql
+        && let Ok(direct) = effective.direct_mut()
+    {
+        direct.mysql.connect_timeout_seconds.get_or_insert(fallback);
+    }
+    effective
 }
 // 执行记录不保留结构化认证字段；SQL 正文属于查询历史，不通过关键词替换改写。
 fn redact(value: &mut Value) {
@@ -194,9 +232,11 @@ pub async fn run(root: PathBuf) -> Result<()> {
     let mut listener = platform::Listener::bind(&endpoint)?;
     let store = Store::open(&root).await?;
     store.recover_tasks().await?;
+    store.recover_edit_files().await?;
     let engine = Arc::new(Engine {
         id: Uuid::new_v4(),
         store,
+        send_gate: Arc::new(AsyncMutex::new(())),
         state: Mutex::new(State {
             accepting: true,
             clients: HashSet::new(),
@@ -215,18 +255,21 @@ pub async fn run(root: PathBuf) -> Result<()> {
             unpersisted: HashMap::new(),
             profile_locks: HashMap::new(),
             archery: archery::ArcheryState::default(),
+            editing: editing::EditingState::default(),
+            workspace_uploads: Default::default(),
         }),
     });
     let descriptor = root.join("engine.json");
     std::fs::write(
         &descriptor,
         serde_json::to_vec(
-            &json!({"protocol_version":3,"engine_id":engine.id,"endpoint":endpoint}),
+            &json!({"protocol_version":crate::protocol::VERSION,"engine_id":engine.id,"endpoint":endpoint}),
         )?,
     )?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut history_tick = tokio::time::interval(Duration::from_secs(60));
     let mut history_cleanup: Option<tokio::task::JoinHandle<()>> = None;
+    let mut editing_cleanup: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -248,10 +291,20 @@ pub async fn run(root: PathBuf) -> Result<()> {
                 // 与 register 共用临界区，先停止接入再收尾，防止最后一次检查后接入新会话。
                 let stop = engine.state.lock().unwrap().stop_if_idle();
                 if stop { break; }
+                if editing_cleanup.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
+                    let engine = engine.clone();
+                    editing_cleanup = Some(tokio::spawn(async move {
+                        if let Err(error) = engine.editing_sweep().await { tracing::warn!("编辑会话回收失败: {error}"); }
+                    }));
+                }
             }
         }
     }
     if let Some(cleanup) = history_cleanup {
+        cleanup.abort();
+        let _ = cleanup.await;
+    }
+    if let Some(cleanup) = editing_cleanup {
         cleanup.abort();
         let _ = cleanup.await;
     }
@@ -264,10 +317,16 @@ pub async fn run(root: PathBuf) -> Result<()> {
         .values()
         .filter_map(|task| task.abort.clone())
         .collect();
-    for abort in aborts {
+    for abort in &aborts {
         abort.abort();
     }
-    tokio::task::yield_now().await;
+    // 等待中止生效再恢复持久化状态，避免尚在运行的任务覆盖恢复结果。
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while aborts.iter().any(|abort| !abort.is_finished()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
     // 无人计时同时是已发送写入的宽限期；到期中断后按持久化阶段记录待确认结果。
     engine.store.recover_tasks().await?;
     let _ = std::fs::remove_file(descriptor);
@@ -383,6 +442,7 @@ impl Engine {
     }
     async fn disconnect(self: &Arc<Self>, owner: Uuid) {
         // 先在锁内撤销归属、禁止新请求，再在锁外取消任务与关闭各自连接，避免拖住其他客户端。
+        let send_guard = self.send_gate.lock().await;
         let (databases, tasks) = {
             let mut state = self.state.lock().unwrap();
             if state.clients.remove(&owner) && state.clients.is_empty() {
@@ -409,6 +469,7 @@ impl Engine {
                 .collect::<Vec<_>>();
             (dbs, tasks)
         };
+        drop(send_guard);
         if let Err(error) = self.mcp_disconnected(owner).await {
             tracing::warn!("清理客户端审批失败: {error}");
         }
@@ -419,6 +480,9 @@ impl Engine {
         self.disconnect_archery(owner).await;
         for (id, cancel, transition) in tasks {
             self.cancel_if_safe(id, cancel, transition).await;
+        }
+        if let Err(error) = self.editing_disconnect(owner).await {
+            tracing::warn!("清理客户端编辑会话失败: {error}");
         }
         for (id, db) in databases {
             let engine = self.clone();

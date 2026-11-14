@@ -1,5 +1,49 @@
+.settings-modal {
+  width: min(1040px, 100%);
+}
+.config-caption, .config-status {
+  margin: 4px 0 8px;
+}
+.config-language {
+  max-width: 400px;
+  margin: 8px 0 12px;
+}
+.config-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px 24px;
+}
+.config-section {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.config-section-wide {
+  grid-column: 1 / -1;
+}
+.config-section h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.config-section p {
+  margin: 4px 0 8px;
+}
+.config-demo-controls {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+@media (max-width: 760px) {
+  .config-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+}
 .config-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 20px;
   border-bottom: 1px solid var(--border);
 }
@@ -8,18 +52,27 @@
   border-bottom: 2px solid transparent;
   border-radius: 0;
   background: transparent;
+  white-space: nowrap;
   padding: 8px 2px;
 }
 .config-tabs button[aria-selected="true"] {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
+:root[data-theme="light"] .config-tabs button {
+  background: transparent;
+}
 .config-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
-  margin: 8px 0;
+  gap: 8px;
+  margin: 6px 0;
+}
+.config-number-label small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
 }
 .config-row > span {
   overflow-wrap: anywhere;
@@ -27,6 +80,45 @@
 .config-row > input, .config-row > select {
   width: 100%;
   min-width: 0;
+}
+.config-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.config-field input, .config-field textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.config-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+.config-field small {
+  overflow-wrap: anywhere;
+}
+.config-file-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 4px 0;
+  white-space: normal;
+}
+.config-file-row[aria-pressed="true"] {
+  background: var(--selected);
+}
+.config-file-detail {
+  margin-top: 12px;
+}
+.config-file-detail dl, .config-preview dl {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr);
+  gap: 6px 12px;
+}
+.config-preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .config-row > .config-switch {
   justify-self: end;
@@ -47,13 +139,19 @@
   background: var(--accent);
   border-color: var(--accent);
 }
+:root[data-theme="light"] .config-switch {
+  background: var(--muted);
+}
+:root[data-theme="light"] .config-switch[aria-checked="true"] {
+  background: var(--accent);
+}
 .config-switch span {
   position: absolute;
   left: 2px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: white;
+  background: var(--panel);
   transition: transform 0.15s;
 }
 .config-switch[aria-checked="true"] span {
@@ -94,4 +192,60 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.design-tabs {
+  flex-wrap: wrap;
+  gap: 0 20px;
+}
+.design-workbench .facts {
+  margin-top: 16px;
+}
+.design-value-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.design-value-label textarea, .design-value-label input {
+  width: 100%;
+  color: var(--fg);
+}
+.design-value-label textarea {
+  resize: vertical;
+  font: 12px/1.5 var(--mono);
+}
+.design-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.design-actions button {
+  max-width: 100%;
+  white-space: normal;
+}
+.design-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.config-row > span, .config-server-info, .config-server-group {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 480px) {
+  .config-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .config-field {
+    grid-column: 1 / -1;
+  }
+  .config-server-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .config-server-actions {
+    justify-content: flex-end;
+  }
 }

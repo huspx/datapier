@@ -5,6 +5,7 @@ pub mod model;
 pub mod policy;
 pub mod providers;
 pub mod storage;
+pub mod value;
 pub use execution::ExecutionSink;
 pub use model::{AppError, Result};
 pub use storage::Store;

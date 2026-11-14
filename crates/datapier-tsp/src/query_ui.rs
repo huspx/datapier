@@ -2,7 +2,7 @@ use super::*;
 use crate::i18n::{UiMessage, tr};
 
 /// 查询编辑器的临时 UI 状态，随所属 tab 一起切换。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct QueryUiState {
     pub menu_open: bool,
     pub results_hidden: bool,
@@ -10,6 +10,9 @@ pub struct QueryUiState {
     pub request_limit: u64,
     pub result_info: Option<String>,
     pub pagination: std::collections::HashMap<String, ResultPaginationState>,
+    pub redis_scan_complete: bool,
+    pub redis_scan_limited: bool,
+    pub redis_scan_failed: bool,
 }
 
 #[derive(Clone)]
@@ -31,20 +34,14 @@ impl Default for ResultPaginationState {
     }
 }
 
-impl Default for QueryUiState {
-    fn default() -> Self {
-        Self {
-            menu_open: false,
-            results_hidden: false,
-            executed: false,
-            request_limit: 100,
-            result_info: None,
-            pagination: Default::default(),
+impl App {
+    pub(super) fn archery_request_limit(&self) -> u64 {
+        match self.workbench.query_ui.request_limit {
+            0 => self.settings.archery.request_rows as u64,
+            limit => limit,
         }
     }
-}
 
-impl App {
     pub(super) fn close_result_info(&mut self, restore_focus: bool) {
         if self.workbench.query_ui.result_info.take().is_some() && restore_focus {
             self.focus = "result_info".into();
@@ -62,7 +59,7 @@ impl App {
     pub(super) fn remember_result_start(&mut self, page: &ResultPage) {
         let id = page.result.id.to_string();
         let cli = self.workbench.cli_result_id.as_deref() == Some(id.as_str());
-        let size = self.result_page_size_for(&id, cli);
+        let size = self.result_page_size_for(&id, !cli && self.browse_result);
         let state = self
             .workbench
             .query_ui
@@ -84,7 +81,7 @@ impl App {
         }
     }
 
-    pub(super) fn result_page_size_for(&self, id: &str, cli: bool) -> u64 {
+    pub(super) fn result_page_size_for(&self, id: &str, browse: bool) -> u64 {
         self.workbench.query_ui.pagination.get(id).map_or_else(
             || {
                 let paging = &self.settings.paging;
@@ -96,7 +93,7 @@ impl App {
                     paging.archery_grid_rows as u64
                 } else if self.is_redis() {
                     paging.redis_value_rows as u64
-                } else if !cli && self.browse_result {
+                } else if browse {
                     paging.mysql_table_rows as u64
                 } else {
                     paging.sql_rows as u64
@@ -107,14 +104,14 @@ impl App {
     }
 
     pub(super) fn result_page_size(&self, id: &str) -> u64 {
-        self.result_page_size_for(id, false)
+        self.result_page_size_for(id, self.browse_result)
     }
 }
 
 pub(super) fn request_limit_picker(app: &App) -> Node<Msg> {
     let mut select = ui::select()
         .key("archery-request-limit")
-        .value(app.workbench.query_ui.request_limit.to_string())
+        .value(app.archery_request_limit().to_string())
         .disabled(app.operation_pending || app.task.is_some() || app.workbench.cli_running)
         .open(app.workbench.generic_select.as_deref() == Some("archery-request-limit"))
         .on_toggle(|collapsed| {
@@ -126,7 +123,13 @@ pub(super) fn request_limit_picker(app: &App) -> Node<Msg> {
                 change.value.as_str().unwrap_or_default()
             ))
         });
-    for size in [100, 500, 1000] {
+    let mut sizes = vec![100, 500, 1000];
+    let default = app.settings.archery.request_rows as u64;
+    if !sizes.contains(&default) {
+        sizes.push(default);
+        sizes.sort_unstable();
+    }
+    for size in sizes {
         select = select.option(ui::SelectOption::new(size.to_string(), size.to_string()));
     }
     html::div()

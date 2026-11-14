@@ -38,6 +38,8 @@ const paths = {
   copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
   edit: '<path d="m16 3 5 5L8 21H3v-5L16 3ZM13 6l5 5"/>',
   trash: '<path d="M4 7h16M10 3h4m-8 4 1 14h10l1-14M10 11v6m4-6v6"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9m-4 4 2 2m-5 1 2 2"/>',
+  link: '<path d="M10 13a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-2 2M14 11a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l2-2"/>',
   play: '<path d="m7 4 13 8-13 8V4Z"/>',
   stop: '<rect x="5" y="5" width="14" height="14" rx="1"/>',
   download: '<path d="M12 3v12m-5-5 5 5 5-5M4 15v6h16v-6"/>',

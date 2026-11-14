@@ -5,11 +5,13 @@ impl App {
         if action == "archery-open" {
             self.archery_release(backend);
             let servers = std::mem::take(&mut self.archery.servers);
+            let direct_draft = self.archery.direct_draft.take();
             self.archery = Wizard {
                 open: true,
                 epoch: Uuid::new_v4(),
                 save_secret: true,
                 servers,
+                direct_draft,
                 ..Wizard::default()
             };
             for name in [
@@ -27,6 +29,67 @@ impl App {
         }
         if !self.archery.open {
             return false;
+        }
+        if action == "archery-discard-cancel"
+            || (action == "overlay-close" && self.archery.discard_action.is_some())
+        {
+            self.archery.discard_action = None;
+            return true;
+        }
+        if action == "archery-discard-confirm" {
+            if let Some(next) = self.archery.discard_action.take() {
+                self.archery.discard_accepted = true;
+                if next.starts_with("field:provider:") {
+                    self.action(&next, backend);
+                    return true;
+                }
+                let next = if next == "overlay-close" && self.archery.auth_dialog {
+                    "archery-auth-back"
+                } else {
+                    &next
+                };
+                return self.archery_action(next, backend);
+            }
+            return true;
+        }
+        if self.archery.discard_action.is_some() {
+            return true;
+        }
+        let accepted = std::mem::take(&mut self.archery.discard_accepted);
+        if action.starts_with("field:provider:") {
+            if self.connection_form_busy() {
+                return true;
+            }
+            if !accepted && self.archery_draft_dirty() {
+                self.archery.discard_action = Some(action.to_owned());
+                return true;
+            }
+            self.archery_release(backend);
+            self.archery.open = false;
+            return false;
+        }
+        let switching = action
+            .strip_prefix("archery-server:")
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| self.archery.servers.get(index))
+            .is_some_and(|server| {
+                self.archery
+                    .server
+                    .as_ref()
+                    .is_some_and(|old| old["id"] != server["id"])
+            });
+        let leaving = (matches!(action, "overlay-close" | "archery-direct")
+            && !self.archery.auth_dialog)
+            || (matches!(action, "overlay-close" | "archery-auth-back")
+                && self.archery.auth_dialog
+                && self.archery.reauth_server.is_some());
+        if !accepted
+            && (leaving || switching)
+            && !self.connection_form_busy()
+            && self.archery_draft_dirty()
+        {
+            self.archery.discard_action = Some(action.to_owned());
+            return true;
         }
         if action == "overlay-close" && self.archery.auth_dialog {
             return self.archery_action("archery-auth-back", backend);
@@ -124,7 +187,18 @@ impl App {
                     self.archery_server_form_open(false);
                 }
             }
-            "archery-server-details" => self.archery.server_details = !self.archery.server_details,
+            "archery-totp-details" => self.archery.totp_details = !self.archery.totp_details,
+            "archery-clear-ca" => self.field_set("archery_ca", ""),
+            "archery-server-details" => {
+                if self
+                    .field("archery_url")
+                    .trim()
+                    .get(..8)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+                {
+                    self.archery.server_details = !self.archery.server_details;
+                }
+            }
             "archery-relogin" => {
                 self.archery_release(backend);
                 self.archery.state.clear();
@@ -154,12 +228,16 @@ impl App {
             "archery-auth-back" => {
                 self.archery.open_continuation = None;
                 let password = self.field("password").to_owned();
+                let otp = self.field("archery_otp").to_owned();
                 self.archery.save_after_auth = false;
                 self.archery_release(backend);
                 self.field_set("password", password);
+                self.field_set("archery_otp", otp);
                 self.archery.auth_dialog = false;
                 self.archery.state.clear();
                 if self.archery.reauth_server.take().is_some() {
+                    self.field_set("password", "");
+                    self.field_set("archery_otp", "");
                     self.archery.open = false;
                     self.workbench.overlay = self.archery.return_overlay.take();
                 } else {
@@ -257,7 +335,7 @@ impl App {
                 }
             }
             "archery-preview" => {
-                let invalid_name = self
+                let ids: Vec<_> = self
                     .archery
                     .instances
                     .iter()
@@ -269,30 +347,33 @@ impl App {
                             .iter()
                             .any(|instance| instance["id"].as_i64() == Some(*id))
                     }))
-                    .filter_map(|id| {
-                        self.archery
-                            .selected
-                            .get(&id)
-                            .map(|selection| (id, selection))
-                    })
-                    .find_map(|(id, selection)| {
-                        let field = format!("archery_profile_name_{}", selection.profile_id);
-                        self.field(&field).trim().is_empty().then_some((id, field))
-                    });
-                if let Some((id, field)) = invalid_name {
-                    self.archery.expanded.insert(id);
-                    self.field_error(&field, i18n::UiMessage::key("请填写连接名称"));
-                    return true;
+                    .collect();
+                for id in ids {
+                    let Some(selection) = self.archery.selected.get(&id) else {
+                        continue;
+                    };
+                    let field = format!("archery_profile_name_{}", selection.profile_id);
+                    if self.field(&field).trim().is_empty() {
+                        self.archery.expanded.insert(id);
+                        self.field_error(&field, i18n::UiMessage::key("请填写连接名称"));
+                        return true;
+                    }
+                    if selection.databases.is_none()
+                        || selection.selected.is_empty()
+                        || selection
+                            .default
+                            .as_ref()
+                            .is_none_or(|d| !selection.selected.contains(d))
+                    {
+                        self.archery.expanded.insert(id);
+                        self.archery.selected.get_mut(&id).unwrap().error = Some(
+                            i18n::tr("每个所选实例必须成功加载并选择数据库及默认目标").into_owned(),
+                        );
+                        self.workbench.focus_request = Some(format!("archery-database-group-{id}"));
+                        return true;
+                    }
                 }
-                if self.archery.selected.values().any(|s| {
-                    s.databases.is_none()
-                        || s.selected.is_empty()
-                        || s.default.as_ref().is_none_or(|d| !s.selected.contains(d))
-                }) {
-                    self.archery.error = Some(
-                        i18n::tr("每个所选实例必须成功加载并选择数据库及默认目标").into_owned(),
-                    );
-                } else if let Some(server) = self.archery.server.as_ref() {
+                if let Some(server) = self.archery.server.as_ref() {
                     let desired = self.archery_desired_profiles(server);
                     if desired.len() == self.archery.baseline.len()
                         && self
@@ -398,6 +479,14 @@ impl App {
                 if let Ok(index) = action[15..].parse::<usize>()
                     && let Some(server) = self.archery.servers.get(index).cloned()
                 {
+                    if self
+                        .archery
+                        .server
+                        .as_ref()
+                        .is_some_and(|current| current["id"] == server["id"])
+                    {
+                        return true;
+                    }
                     if self.form_editing
                         && !self.archery.server_only
                         && self
@@ -422,6 +511,7 @@ impl App {
                     self.archery.save_totp = server["totp_credential_mode"] == "keyring";
                     self.archery.state.clear();
                     self.archery.instances.clear();
+                    self.archery.available_by_instance.clear();
                     if let Some(id) = server["id"]
                         .as_str()
                         .and_then(|id| Uuid::parse_str(id).ok())
@@ -469,6 +559,11 @@ impl App {
                         Selection {
                             profile_id: profile.id,
                             instance: json!({"id":connection.instance_id,"name":connection.instance_name,"provider":profile.provider}),
+                            available_databases: self
+                                .archery
+                                .available_by_instance
+                                .get(&id)
+                                .cloned(),
                             databases: Some(connection.databases.clone()),
                             selected: connection.databases.iter().cloned().collect(),
                             default: Some(connection.default_database.clone()),
@@ -483,6 +578,7 @@ impl App {
                         Selection {
                             profile_id,
                             instance,
+                            available_databases: None,
                             databases: None,
                             selected: BTreeSet::new(),
                             default: None,
@@ -535,12 +631,23 @@ impl App {
                 };
                 if let Some((id, index)) = rest.split_once(':')
                     && let (Ok(id), Ok(index)) = (id.parse::<i64>(), index.parse::<usize>())
+                    && self.archery.instances.iter().any(|instance| {
+                        instance["id"].as_i64() == Some(id)
+                            && instance["missing"].as_bool() != Some(true)
+                    })
                     && let Some(sel) = self.archery.selected.get_mut(&id)
                     && let Some(db) = sel.databases.as_ref().and_then(|d| d.get(index)).cloned()
+                    && sel
+                        .available_databases
+                        .as_ref()
+                        .is_none_or(|available| available.contains(&db))
                 {
+                    sel.error = None;
                     if default {
                         if sel.selected.contains(&db) {
                             sel.default = Some(db);
+                            self.focus = format!("archery-default-{id}-{index}");
+                            self.workbench.focus_request = Some(String::new());
                         }
                     } else if !sel.selected.remove(&db) {
                         sel.selected.insert(db);

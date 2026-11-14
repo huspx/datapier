@@ -16,6 +16,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod forms;
+#[cfg(test)]
+#[path = "../tests/unit/regression.rs"]
+mod regression;
 use forms::Form;
 
 struct TerminalGuard;
@@ -52,7 +55,6 @@ pub async fn run(root: PathBuf, workspace: String) -> Result<()> {
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) { break Ok(()); }
                     if app.key(key.code, key.modifiers) { break Ok(()); }
                 }
                 Some(Ok(_)) => {},
@@ -60,7 +62,7 @@ pub async fn run(root: PathBuf, workspace: String) -> Result<()> {
                 None => break Ok(()),
             },
             Some((tag, response)) = rx.recv() => app.response(&tag, response),
-            event = engine_events.recv(), if events_open => match event { Ok(event) => match event.kind.as_str() { "connections.changed" => app.request("profiles", "profile.list", json!({})), "settings.changed" if app.screen != Screen::Settings => app.request("settings_load", "settings.get", json!({})), _ => {} }, Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { app.request("profiles", "profile.list", json!({})); if app.screen != Screen::Settings { app.request("settings_load", "settings.get", json!({})); } }, Err(tokio::sync::broadcast::error::RecvError::Closed) => events_open = false },
+            event = engine_events.recv(), if events_open => match event { Ok(event) => match event.kind.as_str() { "connections.changed" => app.request("profiles", "profile.list", json!({})), "settings.changed" if !app.editing_settings() => app.request("settings_load", "settings.get", json!({})), _ => {} }, Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { app.request("profiles", "profile.list", json!({})); if !app.editing_settings() { app.request("settings_load", "settings.get", json!({})); } }, Err(tokio::sync::broadcast::error::RecvError::Closed) => events_open = false },
         }
     };
     drop(_guard);
@@ -83,6 +85,15 @@ enum Screen {
     Cache,
     Confirm,
 }
+fn reset_page_feedback(
+    status: &mut String,
+    done: &mut bool,
+    field_error: &mut Option<(String, String)>,
+) {
+    status.clear();
+    *done = false;
+    *field_error = None;
+}
 
 struct App {
     client: Client,
@@ -92,10 +103,19 @@ struct App {
     cursor: usize,
     scroll: usize,
     status: String,
+    status_done: bool,
+    profiles_loaded: bool,
+    profiles_error: Option<String>,
+    profiles_pending: usize,
     profiles: Vec<Value>,
     servers: Vec<Value>,
     settings: Value,
     form: Form,
+    initial_form: Form,
+    server_initial: Form,
+    database_initial: (Vec<String>, Option<String>),
+    field_error: Option<(String, String)>,
+    server_form: Option<Form>,
     selected_profile: Option<Value>,
     server: Value,
     auth: Value,
@@ -110,6 +130,9 @@ struct App {
     pending: usize,
     english: bool,
     confirm: String,
+    confirm_payload: Value,
+    confirm_rows: usize,
+    confirm_cursor: usize,
     staged_credentials: Option<Value>,
     default_database: Option<String>,
     rules_revision: u64,
@@ -124,10 +147,19 @@ impl App {
             cursor: 0,
             scroll: 0,
             status: String::new(),
+            status_done: false,
+            profiles_loaded: false,
+            profiles_error: None,
+            profiles_pending: 0,
             profiles: vec![],
             servers: vec![],
             settings: Value::Null,
             form: Form::default(),
+            initial_form: Form::default(),
+            server_initial: Form::default(),
+            database_initial: (Vec::new(), None),
+            field_error: None,
+            server_form: None,
             selected_profile: None,
             server: Value::Null,
             auth: Value::Null,
@@ -142,6 +174,9 @@ impl App {
             pending: 0,
             english: false,
             confirm: String::new(),
+            confirm_payload: Value::Null,
+            confirm_cursor: 0,
+            confirm_rows: 0,
             staged_credentials: None,
             default_database: None,
             rules_revision: 0,
@@ -152,6 +187,9 @@ impl App {
     }
     fn request(&mut self, tag: &str, method: &str, params: Value) {
         self.pending += 1;
+        if tag == "profiles" {
+            self.profiles_pending += 1;
+        }
         let client = self.client.clone();
         let tx = self.tx.clone();
         let tag = tag.to_owned();
@@ -161,23 +199,54 @@ impl App {
             let _ = tx.send((tag, result));
         });
     }
+    fn clear_status(&mut self) {
+        self.status.clear();
+        self.status_done = false;
+    }
     fn navigate(&mut self, screen: Screen) {
         self.screen = screen;
         self.cursor = 0;
         self.scroll = 0;
+        reset_page_feedback(
+            &mut self.status,
+            &mut self.status_done,
+            &mut self.field_error,
+        );
+    }
+    fn editing_settings(&self) -> bool {
+        self.screen == Screen::Settings
+            || (self.screen == Screen::Confirm && self.previous == Screen::Settings)
     }
     fn response(&mut self, tag: &str, result: Result<Value>) {
+        if tag == "profiles" {
+            self.profiles_pending = self.profiles_pending.saturating_sub(1);
+        }
         self.pending = self.pending.saturating_sub(1);
+        // 后台刷新不能替换设置草稿的 revision，否则旧表单会覆盖其他客户端的修改。
+        if tag == "settings_load" && self.editing_settings() {
+            return;
+        }
         let value = match result {
             Ok(v) => v,
             Err(e) => {
+                if tag == "profiles" {
+                    self.profiles_error = Some(e.to_string());
+                }
+                self.status_done = false;
                 self.status = e.to_string();
                 return;
             }
         };
-        self.status = self.text("操作完成", "Done").into();
+        if !matches!(tag, "profiles" | "settings_load" | "auth_closed") {
+            self.status.clear();
+            self.status_done = true;
+        }
         match tag {
-            "profiles" => self.profiles = value["profiles"].as_array().cloned().unwrap_or_default(),
+            "profiles" => {
+                self.profiles = value["profiles"].as_array().cloned().unwrap_or_default();
+                self.profiles_loaded = true;
+                self.profiles_error = None;
+            }
             "settings_load" => {
                 self.settings = value;
                 self.set_language();
@@ -186,6 +255,7 @@ impl App {
                 self.settings = value;
                 self.set_language();
                 self.form = forms::settings(&self.settings);
+                self.initial_form = self.form.clone();
                 self.navigate(Screen::Settings);
             }
             "settings_save" => {
@@ -196,6 +266,7 @@ impl App {
                 self.navigate(Screen::Home);
                 self.request("profiles", "profile.list", json!({}));
                 self.status = if tag == "direct_save" && value["credential_saved"] == false {
+                    self.status_done = false;
                     self.text(
                         "已保存；凭据仅保存在当前会话或未提供",
                         "Saved; credential is session-only or absent",
@@ -217,6 +288,9 @@ impl App {
             "server_saved" => {
                 self.server = value;
                 self.form = forms::server(Some(&self.server));
+                self.initial_form = self.form.clone();
+                self.server_initial = self.form.clone();
+                self.staged_credentials = None;
                 self.status = self.text("服务器已保存", "Server saved").into();
                 self.request("profiles", "profile.list", json!({}));
             }
@@ -226,10 +300,20 @@ impl App {
             }
             "auth" => {
                 self.auth = value;
+                let (zh, en) = match self.auth["state"].as_str().unwrap_or("") {
+                    "ready" => ("已认证", "Authenticated"),
+                    "disconnected" | "auth_required" | "password_required" => {
+                        ("待认证", "Authentication needed")
+                    }
+                    "challenge_required" => ("等待验证码", "Waiting for verification code"),
+                    "authenticating" => ("认证中", "Authenticating"),
+                    "auth_failed" => ("认证失败", "Authentication failed"),
+                    _ => ("未知", "Unknown"),
+                };
                 self.status = format!(
                     "{}: {}",
                     self.text("认证状态", "Authentication"),
-                    self.auth["state"].as_str().unwrap_or("?")
+                    self.text(zh, en)
                 );
             }
             "instances" => {
@@ -254,13 +338,33 @@ impl App {
                 self.navigate(Screen::Databases);
             }
             "batch" => {
-                self.navigate(Screen::Home);
+                self.baseline = value["profiles"].as_array().cloned().unwrap_or_default();
+                self.desired = self.baseline.clone();
+                if let Some(form) = self
+                    .server_form
+                    .take()
+                    .filter(|f| *f != self.server_initial)
+                {
+                    self.form = form;
+                    self.navigate(Screen::Server);
+                    self.cursor = 2;
+                    self.status_done = false;
+                    self.status = self
+                        .text(
+                            "连接已保存；服务器表单仍有未保存修改",
+                            "Connections saved; server form still has unsaved changes",
+                        )
+                        .into();
+                } else {
+                    self.navigate(Screen::Home);
+                }
                 self.request("profiles", "profile.list", json!({}));
             }
             "rules" => {
                 self.rules_revision = value["revision"].as_u64().unwrap_or(0);
                 self.rules = value["rules"].as_array().cloned().unwrap_or_default();
                 self.form = forms::rules(&self.rules, self.selected_profile.as_ref().unwrap());
+                self.initial_form = self.form.clone();
                 self.navigate(Screen::Rules);
             }
             "rules_save" => {
@@ -276,6 +380,9 @@ impl App {
                 self.navigate(Screen::Cache);
             }
             _ => {}
+        }
+        if matches!(tag, "direct_test" | "server_saved" | "auth") {
+            self.status_done = false;
         }
     }
     fn set_language(&mut self) {
@@ -293,6 +400,16 @@ impl App {
         self.profiles.get(self.cursor).cloned()
     }
     fn confirm(&mut self, action: &str) {
+        self.confirm_cursor = self.cursor;
+        self.confirm_payload = match action {
+            "profile.delete" => json!({"profile": self.selected_profile}),
+            "archery.server.delete" => json!({"server": self.server, "profiles": self.baseline}),
+            "archery.profile.apply_batch" => {
+                json!({"server": self.server, "baseline": self.baseline, "desired": self.desired, "auth_id": self.auth["auth_id"]})
+            }
+            "cache.retired.clear" => self.cache.clone(),
+            _ => Value::Null,
+        };
         self.confirm = action.into();
         self.previous = self.screen;
         self.navigate(Screen::Confirm);
@@ -301,12 +418,12 @@ impl App {
         let areas = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(3),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(f.area());
         let title = match self.screen {
             Screen::Home => self.text("连接", "Connections"),
-            Screen::Direct => "Direct",
+            Screen::Direct => self.text("直连", "Direct"),
             Screen::Settings => self.text("全局设置", "Global settings"),
             Screen::Servers | Screen::Server => self.text("Archery 服务", "Archery servers"),
             Screen::Instances => self.text("选择实例", "Select instances"),
@@ -329,15 +446,41 @@ impl App {
         match self.screen {
             Screen::Home => {
                 for p in &self.profiles {
+                    let provider = match p["provider"].as_str() {
+                        Some("mysql") => "MySQL",
+                        Some("redis") => "Redis",
+                        _ => self.text("未知", "Unknown"),
+                    };
+                    let source = match p["connection"]["kind"].as_str() {
+                        Some("direct") => self.text("直连", "Direct"),
+                        Some("archery") => "Archery",
+                        _ => self.text("未知", "Unknown"),
+                    };
                     rows.push(format!(
-                        "{}  [{} / {}]  {}",
-                        p["name"].as_str().unwrap_or("?"),
-                        p["provider"].as_str().unwrap_or("?"),
-                        p["connection"]["kind"].as_str().unwrap_or("?"),
-                        p["id"].as_str().unwrap_or("")
+                        "{} · {provider} · {source}",
+                        p["name"]
+                            .as_str()
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(self.text("未记录", "Not recorded"))
                     ));
                 }
-                if rows.is_empty() {
+                if let Some(error) = &self.profiles_error {
+                    rows.push(format!(
+                        "{}: {error}",
+                        self.text(
+                            "连接列表加载失败；按 R 重试",
+                            "Connection list failed; press R to retry"
+                        )
+                    ));
+                }
+                if self.profiles_pending > 0 {
+                    rows.push(self.text("正在加载连接…", "Loading connections…").into());
+                } else if !self.profiles_loaded && self.profiles_error.is_none() {
+                    rows.push(self.text("连接尚未加载", "Connections not loaded").into());
+                } else if self.profiles_loaded
+                    && self.profiles.is_empty()
+                    && self.profiles_error.is_none()
+                {
                     rows.push(self.text("暂无连接", "No connections").into());
                 }
             }
@@ -359,8 +502,29 @@ impl App {
             | Screen::Settings
             | Screen::Rules
             | Screen::ProfileName => {
-                for field in &self.form.fields {
-                    rows.push(field.display(self.english));
+                for (index, field) in self.form.fields.iter().enumerate() {
+                    let width = areas[1].width.saturating_sub(2) as usize;
+                    let mut display = field.display(self.english);
+                    if self.screen == Screen::Settings {
+                        display = format!(
+                            "{} · {}",
+                            forms::settings_group(&field.key, self.english),
+                            display
+                        );
+                        let hint = forms::settings_hint(&field.key, self.english);
+                        if !hint.is_empty() && (index != self.cursor || !field.choices.is_empty()) {
+                            display.push_str(&format!("  ({hint})"));
+                        }
+                    }
+                    if index == self.cursor && field.choices.is_empty() {
+                        display = forms::visible_tail(&display, width);
+                    }
+                    if let Some((key, error)) = &self.field_error
+                        && key == &field.key
+                    {
+                        display.push_str(&format!("  ← {error}"));
+                    }
+                    rows.push(display);
                 }
             }
             Screen::Instances => {
@@ -422,24 +586,120 @@ impl App {
                     }
                 }
             }
-            Screen::Confirm => rows.push(
-                match self.confirm.as_str() {
-                    "profile.delete" => self.text("确认删除此连接？", "Delete this connection?"),
-                    "archery.server.delete" => self.text(
-                        "确认删除此 Archery 服务及其连接？",
-                        "Delete this Archery server and its connections?",
-                    ),
-                    "archery.profile.apply_batch" => {
-                        self.text("确认保存以上连接变更？", "Apply these connection changes?")
-                    }
-                    "cache.retired.clear" => self.text(
-                        "确认清理以上旧结果缓存？",
-                        "Clear the listed retired result cache?",
-                    ),
-                    _ => self.text("确认此操作？", "Confirm this operation?"),
+            Screen::Confirm => match self.confirm.as_str() {
+                "discard" | "quit" => rows.push(
+                    self.text(
+                        "存在未保存的输入。y 丢弃，n/Esc 继续编辑",
+                        "Unsaved input. y discard, n/Esc continue editing",
+                    )
+                    .into(),
+                ),
+                "profile.delete" => {
+                    rows.push(format!(
+                        "{}: {}",
+                        self.text("删除连接", "Delete connection"),
+                        self.confirm_payload["profile"]["name"]
+                            .as_str()
+                            .unwrap_or("?")
+                    ));
+                    rows.push(
+                        self.text(
+                            "删除连接配置；此操作不能撤销。",
+                            "Deletes the connection configuration; this cannot be undone.",
+                        )
+                        .into(),
+                    );
                 }
-                .into(),
-            ),
+                "archery.server.delete" => {
+                    rows.push(format!(
+                        "{}: {}",
+                        self.text("删除服务", "Delete server"),
+                        self.confirm_payload["server"]["name"]
+                            .as_str()
+                            .unwrap_or("?")
+                    ));
+                    let profiles = self.confirm_payload["profiles"].as_array();
+                    rows.push(format!(
+                        "{}: {}",
+                        self.text("关联连接数量", "Associated connections"),
+                        profiles.map_or(0, Vec::len)
+                    ));
+                    if let Some(profiles) = profiles {
+                        for p in profiles {
+                            rows.push(format!("  {}", p["name"].as_str().unwrap_or("?")));
+                        }
+                    }
+                    rows.push(self.text("删除服务及关联连接配置；不能撤销。", "Deletes the server and associated connection configurations; cannot be undone.").into());
+                }
+                "archery.profile.apply_batch" => {
+                    rows.push(format!(
+                        "{}: {}",
+                        self.text("服务", "Server"),
+                        self.confirm_payload["server"]["name"]
+                            .as_str()
+                            .unwrap_or("?")
+                    ));
+                    if let Some(profiles) = self.confirm_payload["desired"].as_array() {
+                        rows.push(format!(
+                            "{}: {}",
+                            self.text("保存连接数量", "Connections to save"),
+                            profiles.len()
+                        ));
+                        for p in profiles {
+                            rows.push(format!(
+                                "  {} · {}",
+                                p["name"].as_str().unwrap_or("?"),
+                                p["connection"]["databases"]
+                            ));
+                        }
+                    }
+                    if let Some(profiles) = self.confirm_payload["baseline"].as_array() {
+                        let removed: Vec<_> =
+                            profiles
+                                .iter()
+                                .filter(|p| {
+                                    !self.confirm_payload["desired"].as_array().is_some_and(
+                                        |desired| desired.iter().any(|d| d["id"] == p["id"]),
+                                    )
+                                })
+                                .collect();
+                        rows.push(format!(
+                            "{}: {}",
+                            self.text("删除连接数量", "Connections to delete"),
+                            removed.len()
+                        ));
+                        for p in removed {
+                            rows.push(format!(
+                                "{}: {}",
+                                self.text("删除连接", "Delete connection"),
+                                p["name"].as_str().unwrap_or("?")
+                            ));
+                        }
+                    }
+                    rows.push(self.text("将保存所列配置并删除列出的连接；删除不可撤销。", "Saves the listed configurations and deletes listed connections; deletion cannot be undone.").into());
+                }
+                "cache.retired.clear" => {
+                    rows.push(format!(
+                        "{}: {}",
+                        self.text("预览旧结果缓存字节", "Previewed retired cache bytes"),
+                        self.confirm_payload["bytes"]
+                    ));
+                    if let Some(entries) = self.confirm_payload["entries"].as_array() {
+                        for entry in entries {
+                            rows.push(format!(
+                                "{} · {} B",
+                                entry["path"].as_str().unwrap_or("?"),
+                                entry["bytes"]
+                            ));
+                        }
+                    }
+                    rows.push(self.text("仅清理所列旧缓存，内容变化时必须重新预览确认；删除不可撤销。", "Only the listed retired cache is cleared. Changed content requires a new preview and confirmation; deletion cannot be undone.").into());
+                }
+                _ => {}
+            },
+        }
+        if self.screen == Screen::Confirm {
+            self.confirm_rows = rows.len();
         }
         let height = areas[1].height.saturating_sub(2) as usize;
         if self.cursor < self.scroll {
@@ -469,7 +729,7 @@ impl App {
             areas[1],
         );
         let help = match self.screen {
-            Screen::Home => self.text("↑↓ 选择  n 新建  e 编辑  t 测试  d 删除  a Archery  r 权限  s 设置  c 清理  q 退出", "↑↓ select  n new  e edit  t test  d delete  a Archery  r rules  s settings  c cleanup  q quit"),
+            Screen::Home => self.text("↑↓ 选择  n 新建  e 编辑  t 测试  d 删除  a Archery  r 权限  s 设置  c 清理  R 刷新  q 退出", "↑↓ select  n new  e edit  t test  d delete  a Archery  r rules  s settings  c cleanup  R refresh  q quit"),
             Screen::Direct => self.text("↑↓/Tab 字段  输入编辑  Space 切换  F2 保存  F5 测试  Esc 返回", "↑↓/Tab field  type edit  Space toggle  F2 save  F5 test  Esc back"),
             Screen::Settings => self.text("↑↓/Tab 字段  输入编辑  Space 切换  F2 保存  Esc 返回", "↑↓/Tab field  type edit  Space toggle  F2 save  Esc back"),
             Screen::Rules => self.text("↑↓ 字段  Space 权限  输入库名 F4 添加  F2 保存  Esc 返回", "↑↓ field  Space level  type DB name and F4 add  F2 save  Esc back"),
@@ -479,15 +739,47 @@ impl App {
             Screen::Databases => self.text("↑↓ 选择  Space 多选  d 默认库  Enter 确认  Esc 返回", "↑↓ select  Space toggle  d default  Enter confirm  Esc back"),
             Screen::ProfileName => self.text("输入名称  Enter 确认  Esc 返回", "Type name  Enter confirm  Esc back"),
             Screen::Preview => self.text("F2 确认批量保存  Esc 返回", "F2 apply batch  Esc back"),
-            Screen::Cache => self.text("d 清理  Esc 返回", "d clear  Esc back"), Screen::Confirm => self.text("y 确认  n/Esc 取消", "y confirm  n/Esc cancel"),
+            Screen::Cache => self.text("d 清理  Esc 返回", "d clear  Esc back"), Screen::Confirm => self.text("↑↓ 查看明细  y 确认  n/Esc 取消", "↑↓ details  y confirm  n/Esc cancel"),
         };
+        let footer = Block::default().borders(Borders::ALL);
+        let inner = footer.inner(areas[2]);
+        f.render_widget(footer, areas[2]);
+        let footer_areas =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(inner);
         f.render_widget(
-            Paragraph::new(format!("{help}\n{}", self.status))
-                .block(Block::default().borders(Borders::ALL)),
-            areas[2],
+            Paragraph::new(help).wrap(ratatui::widgets::Wrap { trim: false }),
+            footer_areas[0],
+        );
+        f.render_widget(
+            Paragraph::new(if self.status_done {
+                self.text("操作完成", "Done")
+            } else if self.status.is_empty() && self.screen == Screen::Settings {
+                self.form
+                    .fields
+                    .get(self.cursor)
+                    .map_or("", |field| forms::settings_hint(&field.key, self.english))
+            } else {
+                &self.status
+            }),
+            footer_areas[1],
         );
     }
     fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        // 请求回包可能切换页面；在途期间锁住输入以保持表单及确认目标的归属。
+        if self.pending > 0 {
+            return false;
+        }
+        if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
+            if self.screen == Screen::Confirm {
+                return false;
+            }
+            if self.has_draft() {
+                self.confirm("quit");
+                return false;
+            }
+            return true;
+        }
+        self.clear_status();
         let count = match self.screen {
             Screen::Home => self.profiles.len(),
             Screen::Servers => self.servers.len(),
@@ -496,6 +788,7 @@ impl App {
             Screen::Direct | Screen::Server | Screen::Settings | Screen::Rules => {
                 self.form.fields.len()
             }
+            Screen::Confirm => self.confirm_rows,
             _ => 0,
         };
         match code {
@@ -511,19 +804,13 @@ impl App {
             }
             _ => {}
         }
-        if self.pending > 0
-            && (matches!(
-                code,
-                KeyCode::F(2) | KeyCode::F(3) | KeyCode::F(5) | KeyCode::F(6)
-            ) || (self.screen == Screen::Confirm && code == KeyCode::Char('y')))
-        {
-            return false;
-        }
         match self.screen {
             Screen::Home => match code {
                 KeyCode::Char('q') => return true,
+                KeyCode::Char('R') => self.request("profiles", "profile.list", json!({})),
                 KeyCode::Char('n') => {
                     self.form = forms::direct(None, &self.settings["approval"]["default_policy"]);
+                    self.initial_form = self.form.clone();
                     self.navigate(Screen::Direct);
                     self.cursor = 2;
                 }
@@ -534,6 +821,7 @@ impl App {
                                 Some(&p),
                                 &self.settings["approval"]["default_policy"],
                             );
+                            self.initial_form = self.form.clone();
                             self.navigate(Screen::Direct);
                             self.cursor = 2;
                         } else {
@@ -564,10 +852,7 @@ impl App {
                 _ => {}
             },
             Screen::Direct => match code {
-                KeyCode::Esc => {
-                    self.form = Form::default();
-                    self.navigate(Screen::Home);
-                }
+                KeyCode::Esc => self.leave_form(Screen::Home),
                 KeyCode::F(2) | KeyCode::F(5) => {
                     let profile = match forms::direct_value(&self.form) {
                         Ok(v) => v,
@@ -576,11 +861,7 @@ impl App {
                             return false;
                         }
                     };
-                    let password = if code == KeyCode::F(5) {
-                        self.form.get("password").to_owned()
-                    } else {
-                        self.form.take("password")
-                    };
+                    let password = self.form.get("password").to_owned();
                     let action = self.form.get("credential").to_owned();
                     if matches!(action.as_str(), "keyring" | "session") && password.is_empty() {
                         self.status = self.text("请输入密码", "Enter a password").into();
@@ -613,19 +894,42 @@ impl App {
                 }
             },
             Screen::Settings => match code {
-                KeyCode::Esc => self.navigate(Screen::Home),
+                KeyCode::Esc => self.leave_form(Screen::Home),
                 KeyCode::F(2) => match forms::settings_value(&self.form, &self.settings) {
                     Ok(v) => self.request("settings_save", "settings.set", json!({"settings":v})),
-                    Err(e) => self.status = e,
+                    Err((key, error)) => {
+                        if let Some(index) =
+                            self.form.fields.iter().position(|field| field.key == key)
+                        {
+                            self.cursor = index;
+                        }
+                        self.status = error.clone();
+                        self.field_error = Some((key, error));
+                        self.status_done = false;
+                    }
                 },
                 _ => {
                     if !modifiers.contains(KeyModifiers::CONTROL) {
+                        if matches!(
+                            code,
+                            KeyCode::Char(_)
+                                | KeyCode::Enter
+                                | KeyCode::Backspace
+                                | KeyCode::Delete
+                        ) && self.field_error.as_ref().is_some_and(|(key, _)| {
+                            self.form
+                                .fields
+                                .get(self.cursor)
+                                .is_some_and(|field| &field.key == key)
+                        }) {
+                            self.field_error = None;
+                        }
                         self.form.edit(self.cursor, code);
                     }
                 }
             },
             Screen::Rules => match code {
-                KeyCode::Esc => self.navigate(Screen::Home),
+                KeyCode::Esc => self.leave_form(Screen::Home),
                 KeyCode::F(4) => forms::add_rule(&mut self.form),
                 KeyCode::F(2) => {
                     if let Some(p) = &self.selected_profile {
@@ -646,7 +950,10 @@ impl App {
                     self.server = Value::Null;
                     self.auth = Value::Null;
                     self.form = forms::server(None);
+                    self.initial_form = self.form.clone();
+                    self.server_initial = self.form.clone();
                     self.baseline.clear();
+                    self.staged_credentials = None;
                     self.desired.clear();
                     self.navigate(Screen::Server);
                     self.cursor = 2;
@@ -658,7 +965,10 @@ impl App {
                 }
                 KeyCode::Char('d') => {
                     if let Some(s) = self.servers.get(self.cursor).cloned() {
+                        let selected = self.cursor;
                         self.open_server(s);
+                        self.navigate(Screen::Servers);
+                        self.cursor = selected;
                         self.confirm("archery.server.delete");
                     }
                 }
@@ -666,24 +976,26 @@ impl App {
             },
             Screen::Server => match code {
                 KeyCode::Esc => {
-                    self.staged_credentials = None;
-                    if !self.auth["auth_id"].is_null() {
-                        self.request("auth_closed", "archery.auth.close", json!({"auth_id":self.auth["auth_id"],"controller_token":self.auth["controller_token"],"auth_generation":self.auth["auth_generation"]}));
-                        self.auth = Value::Null;
+                    if self.has_draft() {
+                        self.confirm("discard");
+                    } else {
+                        self.leave_server();
                     }
-                    self.request("servers", "archery.server.list", json!({}));
                 }
                 KeyCode::F(5) => self.login(),
                 KeyCode::F(6) => {
-                    let otp = self.form.take("otp");
+                    let otp = self.form.get("otp").to_owned();
                     self.request("auth", "archery.auth.verify", json!({"operation_id":Uuid::new_v4(),"auth_id":self.auth["auth_id"],"controller_token":self.auth["controller_token"],"auth_generation":self.auth["auth_generation"],"otp":otp}));
                 }
                 KeyCode::F(2) => self.save_server(),
-                KeyCode::F(3) => self.request(
-                    "instances",
-                    "archery.instances",
-                    json!({"operation_id":Uuid::new_v4(),"auth_id":self.auth["auth_id"]}),
-                ),
+                KeyCode::F(3) => {
+                    self.server_form = Some(self.form.clone());
+                    self.request(
+                        "instances",
+                        "archery.instances",
+                        json!({"operation_id":Uuid::new_v4(),"auth_id":self.auth["auth_id"]}),
+                    );
+                }
                 _ => {
                     if self.cursor >= 2 && !modifiers.contains(KeyModifiers::CONTROL) {
                         self.form.edit(self.cursor, code);
@@ -692,7 +1004,9 @@ impl App {
             },
             Screen::Instances => match code {
                 KeyCode::Esc => {
-                    self.form = forms::server(Some(&self.server));
+                    if let Some(form) = self.server_form.take() {
+                        self.form = form;
+                    }
                     self.navigate(Screen::Server);
                 }
                 KeyCode::Char('p') => self.navigate(Screen::Preview),
@@ -710,6 +1024,7 @@ impl App {
                             .find(|p| p["connection"]["instance_id"] == i["id"])
                     {
                         self.form = forms::profile_name(p["name"].as_str().unwrap_or(""));
+                        self.initial_form = self.form.clone();
                         self.instance = i;
                         self.navigate(Screen::ProfileName);
                     }
@@ -720,7 +1035,12 @@ impl App {
                         let old = self
                             .desired
                             .iter()
-                            .find(|p| p["connection"]["instance_id"] == i["id"]);
+                            .find(|p| p["connection"]["instance_id"] == i["id"])
+                            .or_else(|| {
+                                self.baseline
+                                    .iter()
+                                    .find(|p| p["connection"]["instance_id"] == i["id"])
+                            });
                         self.selected_databases = old
                             .and_then(|p| p["connection"]["databases"].as_array())
                             .map(|v| {
@@ -733,13 +1053,27 @@ impl App {
                         self.default_database = old
                             .and_then(|p| p["connection"]["default_database"].as_str())
                             .map(str::to_owned);
+                        self.database_initial = (
+                            self.selected_databases.clone(),
+                            self.default_database.clone(),
+                        );
                         self.request("databases", "archery.databases", json!({"operation_id":Uuid::new_v4(),"auth_id":self.auth["auth_id"],"instance_id":i["id"]}));
                     }
                 }
                 _ => {}
             },
             Screen::Databases => match code {
-                KeyCode::Esc => self.navigate(Screen::Instances),
+                KeyCode::Esc => {
+                    if (
+                        self.selected_databases.clone(),
+                        self.default_database.clone(),
+                    ) != self.database_initial
+                    {
+                        self.confirm("discard");
+                    } else {
+                        self.navigate(Screen::Instances);
+                    }
+                }
                 KeyCode::Char(' ') => {
                     if let Some(d) = self.databases.get(self.cursor).cloned() {
                         if self.selected_databases.contains(&d) {
@@ -763,7 +1097,7 @@ impl App {
                 _ => {}
             },
             Screen::ProfileName => match code {
-                KeyCode::Esc => self.navigate(Screen::Instances),
+                KeyCode::Esc => self.leave_form(Screen::Instances),
                 KeyCode::Enter => {
                     let name = self.form.get("name").to_owned();
                     if let Some(p) = self
@@ -792,10 +1126,21 @@ impl App {
                 _ => {}
             },
             Screen::Confirm => match code {
-                KeyCode::Esc | KeyCode::Char('n') => self.navigate(self.previous),
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.navigate(self.previous);
+                    self.cursor = self.confirm_cursor;
+                }
                 KeyCode::Char('y') => {
                     let action = self.confirm.clone();
-                    match action.as_str() { "profile.delete" => if let Some(p) = &self.selected_profile { self.request("delete", &action, json!({"profile_id":p["id"]})); }, "cache.retired.clear" => self.request("cache_clear", &action, json!({})), "archery.server.delete" => { let ids: Vec<_> = self.baseline.iter().map(|p| p["id"].clone()).collect(); self.request("server_deleted", &action, json!({"server_id":self.server["id"],"expected_revision":self.server["revision"],"expected_profile_ids":ids})); }, "archery.profile.apply_batch" => self.request("batch", &action, json!({"auth_id":self.auth["auth_id"],"server_id":self.server["id"],"expected_server_revision":self.server["revision"],"expected_profiles":self.baseline,"desired_profiles":self.desired})), _ => {} }
+                    match action.as_str() {
+                        "quit" => return true,
+                        "discard" => match self.previous { Screen::Server => self.leave_server(), Screen::ProfileName | Screen::Databases => self.navigate(Screen::Instances), _ => self.navigate(Screen::Home) },
+                        "profile.delete" => self.request("delete", &action, json!({"profile_id":self.confirm_payload["profile"]["id"]})),
+                        "cache.retired.clear" => self.request("cache_clear", &action, json!({"expected_preview":self.confirm_payload})),
+                        "archery.server.delete" => { let ids: Vec<_> = self.confirm_payload["profiles"].as_array().into_iter().flatten().map(|p| p["id"].clone()).collect(); self.request("server_deleted", &action, json!({"server_id":self.confirm_payload["server"]["id"],"expected_revision":self.confirm_payload["server"]["revision"],"expected_profile_ids":ids})); },
+                        "archery.profile.apply_batch" => self.request("batch", &action, json!({"auth_id":self.confirm_payload["auth_id"],"server_id":self.confirm_payload["server"]["id"],"expected_server_revision":self.confirm_payload["server"]["revision"],"expected_profiles":self.confirm_payload["baseline"],"desired_profiles":self.confirm_payload["desired"]})),
+                        _ => {}
+                    }
                 }
                 _ => {}
             },
@@ -811,42 +1156,111 @@ impl App {
             .collect();
         self.desired = self.baseline.clone();
         self.form = forms::server(Some(&server));
+        self.initial_form = self.form.clone();
+        self.server_initial = self.form.clone();
         self.server = server;
         self.auth = Value::Null;
         self.staged_credentials = None;
         self.navigate(Screen::Server);
         self.cursor = 2;
     }
+    fn has_draft(&self) -> bool {
+        match self.screen {
+            Screen::Direct | Screen::Settings | Screen::Rules => self.form != self.initial_form,
+            Screen::ProfileName => {
+                self.form != self.initial_form
+                    || self.desired != self.baseline
+                    || self
+                        .server_form
+                        .as_ref()
+                        .is_some_and(|f| *f != self.server_initial)
+            }
+            Screen::Server => {
+                self.form != self.server_initial
+                    || self.desired != self.baseline
+                    || self.staged_credentials.is_some()
+            }
+            Screen::Instances | Screen::Preview => {
+                self.desired != self.baseline
+                    || self
+                        .server_form
+                        .as_ref()
+                        .is_some_and(|f| *f != self.server_initial)
+            }
+            Screen::Databases => {
+                self.desired != self.baseline
+                    || (
+                        self.selected_databases.clone(),
+                        self.default_database.clone(),
+                    ) != self.database_initial
+                    || self
+                        .server_form
+                        .as_ref()
+                        .is_some_and(|f| *f != self.server_initial)
+            }
+            _ => false,
+        }
+    }
+    fn leave_form(&mut self, target: Screen) {
+        if self.has_draft() {
+            self.confirm("discard");
+        } else {
+            self.navigate(target);
+        }
+    }
+    fn leave_server(&mut self) {
+        self.staged_credentials = None;
+        if !self.auth["auth_id"].is_null() {
+            self.request("auth_closed", "archery.auth.close", json!({"auth_id":self.auth["auth_id"],"controller_token":self.auth["controller_token"],"auth_generation":self.auth["auth_generation"]}));
+            self.auth = Value::Null;
+        }
+        self.request("servers", "archery.server.list", json!({}));
+    }
     fn login(&mut self) {
         let server = forms::server_value(&self.form);
-        let password = self.form.take("password");
-        let totp = self.form.take("totp");
-        let password_action = self.form.get("password_action");
-        let totp_action = self.form.get("totp_action");
-        let update = |action: &str, value: &str| match action {
-            "clear" => json!({"kind":"clear"}),
-            "keyring" | "session" if !value.is_empty() => {
-                json!({"kind":"replace","value":value,"persist":action=="keyring"})
+        let password = self.form.get("password").to_owned();
+        let totp = self.form.get("totp").to_owned();
+        let updates = match forms::server_credential_updates(&self.form) {
+            Ok(updates) => updates,
+            Err(message) => {
+                self.status = self
+                    .text("选择保存密码或 TOTP 时必须填写对应内容", message)
+                    .into();
+                return;
             }
-            _ => json!({"kind":"keep"}),
         };
-        let password_update = update(password_action, &password);
-        let totp_update = update(totp_action, &totp);
+        let password_update = &updates["password_update"];
+        let totp_update = &updates["totp_update"];
         let candidate = server["revision"] == 0
             || password_update["kind"] != "keep"
             || totp_update["kind"] != "keep"
             || server["http_tls"] != self.server["http_tls"]
             || server["totp_mode"] != self.server["totp_mode"];
-        self.staged_credentials =
-            Some(json!({"password_update":password_update,"totp_update":totp_update}));
+        self.staged_credentials = Some(updates);
+        self.auth = Value::Null;
         self.server = server.clone();
         self.request("auth", "archery.auth.begin", json!({"operation_id":Uuid::new_v4(),"expected_revision":server["revision"],"server":server,"password":if password.is_empty(){None}else{Some(password)},"totp_uri":if totp.is_empty(){None}else{Some(totp)},"candidate":candidate}));
     }
     fn save_server(&mut self) {
         let server = forms::server_value(&self.form);
-        let updates = self.staged_credentials.take().unwrap_or_else(
-            || json!({"password_update":{"kind":"keep"},"totp_update":{"kind":"keep"}}),
-        );
+        let updates = match forms::server_credential_updates(&self.form) {
+            Ok(updates) => updates,
+            Err(message) => {
+                self.status = self
+                    .text("选择保存密码或 TOTP 时必须填写对应内容", message)
+                    .into();
+                return;
+            }
+        };
+        if !forms::credentials_match_login(&updates, self.staged_credentials.as_ref()) {
+            self.status = self
+                .text(
+                    "凭据操作已变更，请按 F5 重新登录验证",
+                    "Credential actions changed; press F5 to authenticate again",
+                )
+                .into();
+            return;
+        }
         self.request("server_saved", "archery.server.save", json!({"server":server,"expected_revision":server["revision"],"auth_id":self.auth["auth_id"],"password_update":updates["password_update"],"totp_update":updates["totp_update"]}));
     }
     fn select_databases(&mut self) {
@@ -860,14 +1274,15 @@ impl App {
             .default_database
             .clone()
             .unwrap_or_else(|| self.selected_databases[0].clone());
-        let old = self
-            .desired
-            .iter()
-            .find(|p| p["connection"]["instance_id"] == self.instance["id"])
-            .cloned();
-        let mut p = old.unwrap_or_else(|| json!({"id":Uuid::new_v4(),"revision":1,"name":self.instance["name"],"provider":self.instance["provider"],"access_mode":"read_only","approval_policy":self.settings["approval"]["default_policy"],"connection":{"kind":"archery","server_id":self.server["id"],"instance_id":self.instance["id"],"instance_name":self.instance["name"]}}));
-        p["connection"]["databases"] = json!(self.selected_databases);
-        p["connection"]["default_database"] = json!(default);
+        let p = forms::archery_selected_profile(
+            &self.desired,
+            &self.baseline,
+            &self.instance,
+            &self.server["id"],
+            &self.settings["approval"]["default_policy"],
+            &self.selected_databases,
+            &default,
+        );
         self.desired
             .retain(|p| p["connection"]["instance_id"] != self.instance["id"]);
         self.desired.push(p);

@@ -35,6 +35,21 @@ impl McpState {
         self.authentication
             .retain(|(client, _), _| *client != owner);
     }
+    pub(super) fn release_session_handles(
+        &mut self,
+        owner: Uuid,
+        session: Uuid,
+        results: &HashSet<Uuid>,
+    ) {
+        self.cursors.retain(|_, cursor| {
+            cursor.owner != owner
+                || (cursor.resource != session && !results.contains(&cursor.resource))
+        });
+        self.pages
+            .retain(|(client, result, _), _| *client != owner || !results.contains(result));
+        self.values
+            .retain(|_, (client, result)| *client != owner || !results.contains(result));
+    }
 }
 #[derive(Clone)]
 struct AuthenticationRequest {
@@ -165,7 +180,7 @@ impl Engine {
             "mcp.get_server_info" => {
                 let settings = self.store.settings().await?;
                 Ok(
-                    json!({"version":env!("CARGO_PKG_VERSION"),"engine_id":self.id,"protocol_version":3,
+                    json!({"version":env!("CARGO_PKG_VERSION"),"engine_id":self.id,"protocol_version":crate::protocol::VERSION,
                     "capabilities":{"tools":true,"transport":"stdio","transactions":true},
                     "limits":settings.limits,"fine_grained_access":settings.mcp.fine_grained_access}),
                 )

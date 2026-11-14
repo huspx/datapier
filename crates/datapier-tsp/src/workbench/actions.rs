@@ -102,7 +102,8 @@ impl App {
             .strip_prefix("archery-request-limit:")
             .and_then(|value| value.parse::<u64>().ok())
         {
-            if matches!(limit, 100 | 500 | 1000)
+            if (matches!(limit, 100 | 500 | 1000)
+                || limit == self.settings.archery.request_rows as u64)
                 && self
                     .profile
                     .as_ref()
@@ -153,6 +154,7 @@ impl App {
                 "persist" => RedisTtlPolicy::Persist,
                 _ => return true,
             };
+            self.workbench.generic_select = None;
             return true;
         }
         if let Some(operation) = name.strip_prefix("redis-op:") {
@@ -212,8 +214,12 @@ impl App {
         }
         if let Some(kind) = name.strip_prefix("key-type:") {
             if self.is_redis() && matches!(kind, "" | "string" | "hash" | "list" | "set" | "zset") {
+                let scan = self.session_id().zip(self.cursor.clone());
                 self.field_set("type", kind);
                 self.changed_field("type");
+                if let Some((session, cursor)) = scan {
+                    self.discard_resource_scan(backend, session, cursor);
+                }
                 self.workbench.key_type_menu = false;
                 if self.session.is_some() {
                     self.action("list", backend);
@@ -223,7 +229,17 @@ impl App {
         }
         if let Some(rest) = name.strip_prefix("field:") {
             if let Some((field, value)) = rest.split_once(':')
-                && matches!(field, "provider" | "type" | "access" | "tls" | "format")
+                && matches!(
+                    field,
+                    "provider"
+                        | "type"
+                        | "access"
+                        | "tls"
+                        | "format"
+                        | "external_mode"
+                        | "backslash_escape"
+                        | "column"
+                )
             {
                 if field == "provider" {
                     if self.connection_form_busy() {
@@ -243,9 +259,28 @@ impl App {
             }
             return true;
         }
+        if let Some(section) = name.strip_prefix("schema-read-section:") {
+            if matches!(
+                section,
+                "columns" | "indexes" | "foreign_keys" | "checks" | "options"
+            ) {
+                self.workbench.schema_section = section.into();
+                self.focus = format!("schema-section-{section}");
+                self.workbench.focus_request = Some(String::new());
+            }
+            return true;
+        }
         if let Some(section) = name.strip_prefix("section:") {
             if matches!(section, "data" | "structure" | "ddl") && self.finish_inline(true) {
                 self.workbench.section = section.into();
+                if section == "structure"
+                    && let Some(target) = self
+                        .target
+                        .clone()
+                        .filter(|target| matches!(target.kind.as_str(), "table" | "view"))
+                {
+                    self.advanced_schema_open_existing(backend, target);
+                }
             }
             return true;
         }
@@ -443,8 +478,6 @@ impl App {
                     prefix,
                 );
             }
-            self.normalize_key_page();
-            self.redis_prune_key_selection();
             return true;
         }
         match name {
@@ -456,21 +489,14 @@ impl App {
                     self.dirty = true;
                 }
             }
+            "profile-timeouts-toggle" => {
+                self.workbench.profile_timeout_details = !self.workbench.profile_timeout_details;
+            }
             "profile-tls-toggle" => {
                 self.workbench.profile_tls_details = !self.workbench.profile_tls_details;
             }
             "transfer-advanced-toggle" => {
                 self.workbench.transfer_advanced = !self.workbench.transfer_advanced;
-            }
-            "keys-previous" | "keys-next" => {
-                let last = self.visible_key_count().saturating_sub(1) / KEY_PAGE_SIZE;
-                let current = self.workbench.key_page.min(last);
-                self.workbench.key_page = if name == "keys-previous" {
-                    current.saturating_sub(1)
-                } else {
-                    current.saturating_add(1).min(last)
-                };
-                self.redis_prune_key_selection();
             }
             "cli-toggle" => {
                 self.workbench.cli = !self.workbench.cli;
@@ -534,7 +560,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|profile| profile.is_archery())
                 {
-                    params["limit"] = json!(self.workbench.query_ui.request_limit);
+                    params["limit"] = json!(self.archery_request_limit());
                 }
                 self.request(backend, "cli.start", "execution.start", params);
                 if self.operation_pending {
@@ -599,10 +625,13 @@ impl App {
             }
             "tree-toggle" => {
                 self.workbench.tree = !self.workbench.tree;
-                self.workbench.key_page = 0;
-                self.redis_prune_key_selection();
             }
             "overlay-close" => {
+                if self.workbench.overlay.as_deref() == Some("replace")
+                    && self.advanced_replace.busy()
+                {
+                    return true;
+                }
                 if self.workbench.overlay.as_deref() == Some("profile")
                     && self.connection_form_busy()
                 {
@@ -617,6 +646,19 @@ impl App {
                 self.workbench.field_error = None;
                 self.workbench.delete_rows = None;
                 self.workbench.redis_identity = None;
+                self.workbench.overlay_close_confirm = false;
+                self.workbench.modal_draft = None;
+                if let Some(focus) = self.workbench.modal_return_focus.take() {
+                    let key = match focus.as_str() {
+                        "query" => "query-editor".to_owned(),
+                        "grid" => "grid".to_owned(),
+                        "" => String::new(),
+                        _ if self.fields.contains_key(&focus) => format!("input-{focus}"),
+                        _ => focus.clone(),
+                    };
+                    self.focus = focus;
+                    self.workbench.focus_request = Some(key);
+                }
             }
             "inline-begin" => {
                 self.begin_inline(backend);
@@ -635,6 +677,7 @@ impl App {
                 {
                     self.redis_changes.truncate(start);
                     self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+                    self.draft_revision = self.draft_revision.wrapping_add(1);
                     self.workbench.redis_undo_groups.pop();
                     self.detail =
                         serde_json::to_string_pretty(&self.redis_changes).unwrap_or_default();

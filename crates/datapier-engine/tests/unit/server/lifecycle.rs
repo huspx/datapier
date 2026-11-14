@@ -1,6 +1,31 @@
 use super::*;
 
 #[tokio::test]
+async fn idle_deadline_does_not_wait_for_running_write() {
+    let (engine, root) = engine().await;
+    let id = Uuid::new_v4();
+    {
+        let mut state = engine.state.lock().unwrap();
+        state.idle = Instant::now() - Duration::from_secs(31);
+        state.tasks.insert(
+            id,
+            Running {
+                owner: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                cancel: CancellationToken::new(),
+                transition: Arc::new(AsyncMutex::new(())),
+                started: Some(Instant::now()),
+                abort: None,
+            },
+        );
+        assert!(state.stop_if_idle());
+        assert!(!state.accepting);
+    }
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn invalid_handshake_does_not_extend_idle_lifetime() {
     let (engine, root) = engine().await;
     let idle = engine.state.lock().unwrap().idle;
@@ -25,13 +50,13 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
     let handler = tokio::spawn(client(engine.clone(), owner, Box::new(stream)));
     protocol::write(
         &mut peer,
-        &json!({"id":"2","method":"session.open","params":{"protocol_version":3,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
+        &json!({"id":"2","method":"session.open","params":{"protocol_version":crate::protocol::VERSION,"client_kind":"tsp","workspace":"default","allow_connections":[]}}),
     )
     .await
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        3
+        4
     );
     assert!(engine.state.lock().unwrap().clients.contains(&owner));
     protocol::write(
@@ -209,13 +234,10 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
 
     let (mut engine, root) = engine().await;
     engine.store.pool.close().await;
-    Arc::get_mut(&mut engine).unwrap().store.pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new().filename(root.join("datapier.sqlite3")),
-        )
-        .await
-        .unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new().filename(root.join("datapier.sqlite3"));
+    let connection = sqlx::ConnectOptions::connect(&options).await.unwrap();
+    Arc::get_mut(&mut engine).unwrap().store.pool =
+        datapier_core::storage::FixedPool::new(vec![connection]);
     let owner = Uuid::new_v4();
     assert!(engine.register(owner));
     let mut events = engine.state.lock().unwrap().event_senders[&owner].subscribe();
@@ -252,9 +274,7 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
             },
         ));
     }
-    engine
-        .store
-        .pool
+    (&mut *engine.store.pool.acquire().await.unwrap())
         .execute("PRAGMA max_page_count=1")
         .await
         .unwrap();
@@ -286,6 +306,11 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
             "13"
         );
         assert_eq!(task["error"]["details"]["observed_state"], "succeeded");
+        let details = engine.task_details(*id).await.unwrap();
+        assert_eq!(details.state, *expected);
+        assert_eq!(details.text.as_deref(), Some("SELECT 1"));
+        assert_eq!(details.error.unwrap().code, "storage");
+        assert!(details.elapsed_ms.unwrap() >= 20);
         let cancelled = engine
             .dispatch(owner, "execution.cancel", json!({"task_id":id}))
             .await
@@ -477,6 +502,67 @@ async fn state_events_are_isolated_ordered_and_stop_on_disconnect() {
         Err(broadcast::error::TryRecvError::Empty)
     ));
     engine.disconnect(other).await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn workspace_activation_requires_saved_target_and_matching_context() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    assert!(engine.register(owner));
+    assert_eq!(
+        engine
+            .dispatch(
+                owner,
+                "workspace.activate",
+                json!({"workspace_id":"copy","expected_workspace_id":"default"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    engine
+        .store
+        .workspace_save("copy", 0, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .dispatch(
+                owner,
+                "workspace.activate",
+                json!({"workspace_id":"copy","expected_workspace_id":"other"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "stale_revision"
+    );
+    assert_eq!(
+        engine
+            .dispatch(
+                owner,
+                "workspace.activate",
+                json!({"workspace_id":"copy","expected_workspace_id":"default"})
+            )
+            .await
+            .unwrap()["workspace_id"],
+        "copy"
+    );
+    assert_eq!(
+        engine
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&owner)
+            .unwrap()
+            .workspace,
+        "copy"
+    );
+    engine.disconnect(owner).await;
     drop(engine);
     let _ = std::fs::remove_dir_all(root);
 }

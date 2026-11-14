@@ -81,13 +81,13 @@ function detail(kind) {
           t('duration'),
           language === 'zh-CN' ? '未记录' : 'Not recorded',
         )
-      }${fact(t('result'), t('dimensions'))}${fact(t('started'), language === 'zh-CN' ? '未记录' : 'Not recorded')}${
-        fact(t('taskId'), '7e91c151-13bc-4823-a197-1efb6f27c4a2')
+      }${fact(t('result'), t('dimensions'))}${
+        fact(t('started'), language === 'zh-CN' ? '未记录' : 'Not recorded')
       }</dl><section class="detail-section"><h3>${t('resultSet')}</h3>${
         simpleTable([t('result'), t('type'), t('rowCount'), t('status')], [[
           t('resultOne'),
           t('tableData'),
-          '4',
+          language === 'zh-CN' ? '未记录' : 'Not recorded',
           t('readComplete'),
         ]])
       }</section><section class="detail-section"><h3>${t('executedStatement')}</h3><span class="muted">${
@@ -97,7 +97,12 @@ function detail(kind) {
   const diagnosticText = new DOMParser().parseFromString(body, 'text/html')
     .body.textContent.trim();
   const diagnostic = JSON.stringify(
-    { kind, sample: true, content: diagnosticText },
+    {
+      kind,
+      sample: true,
+      ...(kind === 'task' ? { taskId: '7e91c151-13bc-4823-a197-1efb6f27c4a2' } : {}),
+      content: diagnosticText,
+    },
     null,
     2,
   );
@@ -112,9 +117,9 @@ function detail(kind) {
     }</button><button class="button row" data-action="copy-detail">${icon('copy')} ${t('copyDetails')}</button>`,
   );
 }
-function modal(title, body, foot = '') {
+function modal(title, body, foot = '', className = '') {
   requestAnimationFrame(syncConditionalRequirements);
-  return `<div class="overlay"><section class="modal" role="dialog" aria-modal="true" aria-label="${
+  return `<div class="overlay"><section class="modal ${h(className)}" role="dialog" aria-modal="true" aria-label="${
     h(title)
   }"><header class="modal-head"><h2>${h(title)}</h2><span class="spacer"></span>${
     ib('x', t('closeDialog'), 'close-modal')
@@ -123,11 +128,65 @@ function modal(title, body, foot = '') {
     || `<span class="spacer"></span><button class="button" data-action="close-modal">${h(t('close'))}</button>`
   }</footer></section></div>`;
 }
+function cellInspector(drawer) {
+  const row = databases[state.database]?.[state.table]?.find(item => rowId(item) === state.menuRow);
+  if (!row) return '';
+  const value = state.cellInspectorIsNull
+    ? ''
+    : state.cellInspectorValue ?? (row[state.menuCell] === null
+      ? ''
+      : typeof row[state.menuCell] === 'object'
+      ? JSON.stringify(row[state.menuCell], null, 2)
+      : String(row[state.menuCell]));
+  const blocked = deletedRows.has(row)
+    ? (language === 'zh-CN' ? '该行已标记删除。' : 'This row is marked for deletion.')
+    : state.connectionModes.mysql
+    ? (language === 'zh-CN' ? '连接为只读。' : 'The connection is read-only.')
+    : '';
+  const body = `<dl class="facts">${fact(t('resource'), state.database + '.' + state.table)}${
+    fact(t('rowField'), 'id = ' + state.menuRow)
+  }</dl><label>${h(t('field'))}<select id="cell-field">${
+    Object.keys(row).map(column =>
+      `<option value="${h(column)}" ${column === state.menuCell ? 'selected' : ''}>${h(column)}</option>`
+    ).join('')
+  }</select></label><label>${h(t('value'))}${
+    state.cellInspectorIsNull ? ' <span class="null">NULL</span>' : ''
+  }<textarea id="cell-value" rows="8" ${blocked ? 'readonly' : ''}>${h(value)}</textarea></label>${
+    blocked ? `<p class="notice">${h(blocked)}</p>` : ''
+  }<button type="button" data-action="cell-advanced">${
+    language === 'zh-CN' ? '高级值编辑' : 'Advanced value editor'
+  }</button>${
+    drawer
+      ? `<button type="button" data-action="cell-open-overlay">${
+        language === 'zh-CN' ? '在完整值窗口中打开' : 'Open full value window'
+      }</button>`
+      : ''
+  }`;
+  const foot = `<button data-action="cell-null" ${blocked || state.menuCell !== 'email' ? 'disabled' : ''}>${
+    h(t('setNull'))
+  }</button><button data-action="cell-json" ${blocked ? 'disabled' : ''}>${
+    language === 'zh-CN' ? '设置 JSON' : 'Set JSON'
+  }</button><span class="spacer"></span><button data-action="${drawer ? 'close-cell-drawer' : 'close-modal'}">${
+    h(t('close'))
+  }</button><button class="primary" data-action="cell-stage" ${blocked ? 'disabled' : ''}>${
+    h(t('stageDraft'))
+  }</button>`;
+  if (!drawer) return modal(t('cellDetails'), body, foot);
+  return `<aside class="cell-drawer" aria-label="${h(t('cellDetails'))}"><header class="modal-head"><h2>${
+    h(t('cellDetails'))
+  }</h2><span class="spacer"></span>${
+    ib('x', t('closeDialog'), 'close-cell-drawer')
+  }</header><div class="modal-body">${body}</div><footer class="modal-foot">${foot}</footer></aside>`;
+}
 function overlay() {
   if (!state.overlay) return '';
   if (serverForm || serverDelete || connectionDelete || authStage) {
     return '';
   }
+  if (state.overlay.startsWith('sample-')) return samplePreview(state.overlay);
+  if (state.overlay === 'view-resource-preview') return viewResourcePreview();
+  if (state.overlay === 'replace-design') return replacementPreview();
+  if (state.overlay === 'advanced-value') return advancedValuePreview();
   if (state.overlay === 'columns') {
     const key = state.columnsTarget;
     const redisKey = key.startsWith('redis:')
@@ -149,19 +208,17 @@ function overlay() {
       `<div class="fields">${
         names.map((name, i) => {
           const id = redisKey ? String(i) : name;
-          return `<label><input type="checkbox" data-column-choice="${h(id)}" ${
+          return `<div><label><input type="checkbox" data-column-choice="${h(id)}" ${
             state.hiddenColumns[key]?.includes(id) ? '' : 'checked'
-          }> ${h(name)}${
-            !redisKey
-              ? `<input type="number" min="1" max="65535" data-column-width="${h(id)}" aria-label="${h(name)} ${
-                language === 'zh-CN'
-                  ? '宽度（留空自动）'
-                  : 'width (blank for auto)'
-              }" placeholder="${language === 'zh-CN' ? '自动' : 'Auto'}" value="${
-                state.columnWidths[key]?.[id] ?? ''
-              }">`
-              : ''
-          }</label>`;
+          }> ${h(name)}</label>
+            <label>${
+            language === 'zh-CN' ? '宽度（像素，留空自动）' : 'Width (pixels, blank for auto)'
+          } <input type="number" min="1" max="65535" data-column-width="${h(id)}" value="${
+            state.columnWidths[key]?.[id] ?? ''
+          }"></label>
+            <label><input type="checkbox" data-column-freeze="${h(id)}" ${
+            state.frozenColumns?.[key]?.includes(id) ? 'checked' : ''
+          }> ${language === 'zh-CN' ? '冻结列' : 'Freeze column'} · ${h(name)}</label></div>`;
         }).join('')
       }</div>`,
       `<span class="spacer"></span><button data-action="apply-columns" class="primary">${h(t('applyFilter'))}</button>`,
@@ -185,31 +242,36 @@ function overlay() {
     ].includes(state.overlay)
   ) return formOverlay(state.overlay);
   if (state.overlay === 'history') {
+    const hasHistory = historySamples.some(item =>
+      `${item.sql} ${item.time} ${item.status} ${item.status === 'success' ? t('successSample') : t('errorSample')}`
+        .toLowerCase().includes((state.historyApplied ?? '').toLowerCase())
+    );
+    const historyBlocked = !hasHistory
+      ? (language === 'zh-CN' ? '请先选择历史记录。' : 'Select a history entry first.')
+      : currentDrafts().length
+      ? (language === 'zh-CN' ? '请先处理当前草稿。' : 'Resolve the current draft first.')
+      : queryTab()?.running
+      ? (language === 'zh-CN' ? '任务正在运行。' : 'A task is running.')
+      : '';
     return modal(
       t('queryHistory'),
       `<div class="history-layout">${historyPanel()}</div>`,
-      `<span class="spacer"></span><button data-action="close-modal">${
+      `<span class="muted small">${
+        h(historyBlocked)
+      }</span><span class="spacer"></span><button data-action="close-modal">${
         h(t('close'))
-      }</button><button class="primary" data-action="open-history" ${
-        state.historyApplied !== null && historySamples.some(item =>
-            `${item.sql} ${item.time} ${item.status} ${
-              item.status === 'success'
-                ? t('successSample')
-                : t('errorSample')
-            }`.toLowerCase().includes(state.historyApplied.toLowerCase())
-          )
-          ? ''
-          : 'disabled'
-      }>${h(t('openInQuery'))}</button>`,
+      }</button><button class="primary" data-action="open-history" ${historyBlocked ? 'disabled' : ''}>${
+        h(t('openInQuery'))
+      }</button>`,
     );
   }
   if (state.overlay === 'delete-rows') {
     const target = state.deleteRowsTarget;
     return modal(
       t('deleteRowsConfirm'),
-      `<p>${h(target.database)}.${h(target.table)} · ${
-        h(t('selectedRows', { count: target.rows.length }))
-      }</p><p class="muted">${h(t('deleteRowsHelp'))}</p>`,
+      `<p>${h(target.database)}.${h(target.table)} · ${h(t('selectedRows', { count: target.rows.length }))}</p><ul>${
+        target.rows.map(row => `<li><code>${h(rowId(row))}</code></li>`).join('')
+      }</ul><p class="muted">${h(t('deleteRowsHelp'))}</p>`,
       `<span class="spacer"></span><button class="button" data-action="close-modal">${
         t('cancel')
       }</button><button class="button danger" data-action="confirm-delete-rows">${t('stageDraft')}</button>`,
@@ -221,7 +283,7 @@ function overlay() {
       t('deleteConnection'),
       `<p>${h(provider === 'mysql' ? 'Commerce · MySQL' : 'Cache · Redis')}</p><p class="muted">${
         h(t('deleteConnectionHelp'))
-      }</p>`,
+      }</p>${deleteStateExamples()}`,
       `<span class="spacer"></span><button class="button" data-action="close-modal">${
         t('cancel')
       }</button><button class="button danger" data-action="confirm-delete-connection">${
@@ -236,7 +298,7 @@ function overlay() {
       t(isTable ? 'deleteTable' : 'deleteDatabase'),
       `<p>${h(target.database)}${isTable ? '.' + h(target.table) : ''}</p><p class="muted">${
         h(t(isTable ? 'deleteTableHelp' : 'deleteDatabaseHelp'))
-      }</p>`,
+      }</p>${deleteStateExamples()}`,
       `<span class="spacer"></span><button class="button" data-action="close-modal">${
         t('cancel')
       }</button><button class="button danger" data-action="confirm-delete-resource">${
@@ -263,44 +325,10 @@ function overlay() {
       t('settings'),
       settingsPreview(),
       settingsPreviewFooter(),
+      'settings-modal',
     );
   }
-  if (state.overlay === 'cell-details') {
-    const row = databases[state.database][state.table].find(row => rowId(row) === state.menuRow);
-    if (!row) return '';
-    const value = row[state.menuCell];
-    return modal(
-      t('cellDetails'),
-      `<dl class="facts">${fact(t('resource'), state.database + '.' + state.table)}${
-        fact(t('rowField'), 'id = ' + state.menuRow)
-      }</dl><div class="fields"><label>${
-        t('field')
-      } <span class="required-mark" aria-hidden="true">*</span><select id="cell-field" required aria-required="true">${
-        Object.keys(row).map(column =>
-          `<option value="${h(column)}" ${column === state.menuCell ? 'selected' : ''}>${h(column)}</option>`
-        ).join('')
-      }</select></label><label>${t('value')}${
-        typeof value === 'number'
-          || (value !== null && typeof value === 'object')
-          ? ' <span class="required-mark" aria-hidden="true">*</span>'
-          : ''
-      }${value === null ? '<span class="null">NULL</span>' : ''}<textarea id="cell-value" rows="6" ${
-        typeof value === 'number'
-          || (value !== null && typeof value === 'object')
-          ? 'required aria-required="true"'
-          : ''
-      } ${deletedRows.has(row) ? 'readonly' : ''}>${h(value ?? '')}</textarea></label></div>`,
-      `<button class="button" data-action="cell-null" ${
-        state.menuCell === 'email' && !deletedRows.has(row)
-          ? ''
-          : 'disabled'
-      }>${t('setNull')}</button><span class="spacer"></span><button class="button" data-action="close-modal">${
-        t('cancel')
-      }</button><button class="primary" data-action="cell-stage" ${deletedRows.has(row) ? 'disabled' : ''}>${
-        t('stageDraft')
-      }</button>`,
-    );
-  }
+  if (state.overlay === 'cell-details') return cellInspector(false);
   if (state.overlay === 'details') return detail(state.detailKind);
   if (state.overlay === 'sql-copy') {
     return modal(
@@ -317,6 +345,7 @@ function overlay() {
       }</button><button class="primary row" data-action="copy-sql">${icon('copy')} ${t('copy')}</button>`,
     );
   }
+  if (state.overlay === 'new-database') return newDatabaseDialog();
   if (
     state.overlay === 'new-connection'
     || state.overlay === 'connection-settings'
@@ -454,7 +483,23 @@ function menu() {
         c?.name
           || (provider === 'mysql' ? 'Commerce · MySQL' : 'Cache · Redis'),
       )
-    }</div><button role="menuitem" ${attrs('edit')}>${icon('gear')} ${
+    }</div>${
+      !aid && provider === 'mysql'
+        ? `<button role="menuitem" data-action="profile-create-database:mysql" ${
+          state.connectionModes.mysql || state.connectionStatus.mysql !== 'connected' ? 'disabled' : ''
+        } title="${
+          state.connectionStatus.mysql !== 'connected'
+            ? h(az('请先连接数据库', 'Connect first'))
+            : state.connectionModes.mysql
+            ? h(az('当前连接为只读', 'The connection is read-only'))
+            : ''
+        }">${icon('plus')} ${
+          az('新建数据库…', 'Create database…')
+        }</button><button role="menuitem" data-action="profile-close:mysql">${icon('x')} ${
+          az('关闭连接', 'Close connection')
+        }</button>`
+        : ''
+    }<button role="menuitem" ${attrs('edit')}>${icon('gear')} ${
       t('connectionSettings')
     }</button><button role="menuitem" ${attrs('copy')}>${icon('copy')} ${
       t('copyConnectionName')
@@ -465,25 +510,47 @@ function menu() {
   if (state.menu.kind === 'database' || state.menu.kind === 'resource') {
     const item = state.menu;
     const table = item.kind === 'resource';
+    const readOnly = Boolean(state.connectionModes.mysql);
+    const readOnlyReason = language === 'zh-CN'
+      ? '只读连接不能新建或删除资源。'
+      : 'Resources cannot be created or deleted on a read-only connection.';
     return `<div class="context-menu" role="menu" aria-label="${
       h(t('tableMenu'))
     }" style="left:${item.x}px;top:${item.y}px"><div class="menu-caption">${
       h(table ? item.table : item.database)
     }</div><button role="menuitem" data-action="resource-open">${icon('eye')} ${
-      h(t(table ? 'openResource' : 'expandDatabase'))
+      h(
+        table
+          ? t('openResource')
+          : state.expanded.has(item.database)
+          ? (language === 'zh-CN' ? '折叠数据库' : 'Collapse database')
+          : t('expandDatabase'),
+      )
     }</button><button role="menuitem" data-action="resource-refresh">${icon('repeat')} ${
       h(t(table ? 'refreshData' : 'refreshResources'))
     }</button>${
       table
         ? `<button role="menuitem" data-action="resource-structure">${icon('columns')} ${
           h(t('structure'))
-        }</button><button role="menuitem" data-action="resource-ddl">${icon('terminal')} DDL</button>`
-        : ''
+        }</button><button role="menuitem" data-action="resource-ddl">${
+          icon('terminal')
+        } DDL</button><button role="menuitem" data-action="schema-trigger-list">${
+          language === 'zh-CN' ? '触发器列表' : 'Trigger list'
+        }</button>`
+        : `<button role="menuitem" data-action="schema-create:new-table" ${readOnly ? 'disabled' : ''}>${
+          language === 'zh-CN' ? '新建表' : 'New table'
+        }</button><button role="menuitem" data-action="schema-create:view" ${readOnly ? 'disabled' : ''}>${
+          language === 'zh-CN' ? '新建视图' : 'New view'
+        }</button><button role="menuitem" data-action="schema-create:trigger" ${readOnly ? 'disabled' : ''}>${
+          language === 'zh-CN' ? '新建触发器' : 'New trigger'
+        }</button>`
     }<button role="menuitem" data-action="resource-copy">${icon('copy')} ${
       h(t('copyResourceName'))
-    }</button><button class="danger" role="menuitem" data-action="resource-delete">${icon('trash')} ${
-      h(t(table ? 'deleteTable' : 'deleteDatabase'))
-    }</button></div>`;
+    }</button><button class="danger" role="menuitem" data-action="resource-delete" ${readOnly ? 'disabled' : ''}>${
+      icon('trash')
+    } ${h(t(table ? 'deleteTable' : 'deleteDatabase'))}</button>${
+      readOnly ? `<div class="menu-caption">${h(readOnlyReason)}</div>` : ''
+    }</div>`;
   }
   const selectedRows = currentRows().filter(row => state.selected.has(rowId(row)));
   return `<div class="context-menu" role="menu" aria-label="${
@@ -514,7 +581,8 @@ function closeTabs(ids) {
   const targets = state.tabs.filter(tab => ids.includes(tab.id));
   const blocked = targets.some(tab =>
     tab.running || ((tab.provider || 'mysql') === 'mysql'
-      ? (!tab.query && resourceHasDrafts(tab.database, tab.table))
+      ? ((!tab.schemaCreateKind && !tab.query && resourceHasDrafts(tab.database, tab.table))
+        || (!tab.query && schemaHasDraft(tab)))
       : tab.redisKeyDraft || state.drafts.some(d => d.db === tab.redisDb && d.key === tab.key)
         || state.cliState === 'running')
   );
@@ -555,6 +623,16 @@ function activateProvider(provider) {
       title: state.key,
       key: state.key,
       redisDb: state.redisDb,
+    };
+    state.tabs.push(tab);
+  } else if (!tab && provider === 'mysql') {
+    tab = {
+      id: state.nextTab++,
+      provider: 'mysql',
+      query: true,
+      title: t('queryFile', { number: state.nextTab }),
+      sql: '',
+      database: state.database,
     };
     state.tabs.push(tab);
   }

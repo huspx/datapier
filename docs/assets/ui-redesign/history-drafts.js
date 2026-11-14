@@ -35,18 +35,16 @@ function historyPanel(platform = false) {
       sql: r.text,
       detail: `${r.instance} / ${r.db}`,
     }))
-    : (state.historyApplied === null
-      ? []
-      : historySamples.map((r, index) => ({
-        index,
-        sql: r.sql,
-        status: r.status,
-        detail: `${r.time} · ${r.status === 'success' ? t('successSample') : t('errorSample')}`,
-      })).filter(r =>
-        `${r.sql} ${r.detail} ${r.status}`.toLowerCase().includes(
-          state.historyApplied.toLowerCase(),
-        )
-      ));
+    : historySamples.map((r, index) => ({
+      index,
+      sql: r.sql,
+      status: r.status,
+      detail: `${r.time} · ${r.status === 'success' ? t('successSample') : t('errorSample')}`,
+    })).filter(r =>
+      `${r.sql} ${r.detail} ${r.status}`.toLowerCase().includes(
+        (state.historyApplied ?? '').toLowerCase(),
+      )
+    );
   const pageNo = platform ? ap.page : state.historyPage,
     size = platform ? ap.pageSize : state.historyPageSize;
   const page = rows.slice(pageNo * size, (pageNo + 1) * size);
@@ -56,7 +54,7 @@ function historyPanel(platform = false) {
   if (!platform && selected) state.historySelected = selected.index;
   const queried = platform
     ? ap.historyApplied !== null
-    : state.historyApplied !== null;
+    : true;
   const control = platform ? 'data-af="filter"' : 'id="history-filter"';
   const action = platform ? 'data-archery' : 'data-action';
   const query = platform ? 'history-query' : 'local-history-query';
@@ -125,34 +123,38 @@ function currentDrafts() {
       ...(batch ? [batch] : []),
     ];
   }
-  return (databases[state.database]?.[state.table] || []).flatMap(row => [
-    ...[...(cellOriginals.get(row) || [])].map(([column, before]) => ({
-      row,
-      column,
-      before,
-      after: row[column],
-      label: `${state.database}.${state.table}[${rowId(row)}].${column}`,
-    })),
-    ...(deletedRows.has(row)
-      ? [{
+  return [
+    ...(state.newRowDrafts || []).filter(d => d.database === state.database && d.table === state.table),
+    ...(databases[state.database]?.[state.table] || []).flatMap(row => [
+      ...[...(cellOriginals.get(row) || [])].map(([column, before]) => ({
         row,
-        deletion: true,
-        before: { ...row },
-        after: t('deletedDraft'),
-        label: `${state.database}.${state.table}[${rowId(row)}]`,
-      }]
-      : []),
-  ]);
+        column,
+        before,
+        after: row[column],
+        label: `${state.database}.${state.table}[${rowId(row)}].${column}`,
+      })),
+      ...(deletedRows.has(row)
+        ? [{
+          row,
+          deletion: true,
+          before: { ...row },
+          after: t('deletedDraft'),
+          label: `${state.database}.${state.table}[${rowId(row)}]`,
+        }]
+        : []),
+    ]),
+  ];
 }
 // 删除资源前检查其所有示例行，包括尚未完成的原位编辑。
 function resourceHasDrafts(database, table) {
   const tables = databases[database];
   if (!tables) return false;
   const rows = table ? (tables[table] || []) : Object.values(tables).flat();
-  return rows.some(row =>
-    cellOriginals.get(row)?.size || deletedRows.has(row)
-    || state.cellEdit?.row === row
-  );
+  return (state.newRowDrafts || []).some(d => d.database === database && (!table || d.table === table))
+    || rows.some(row =>
+      cellOriginals.get(row)?.size || deletedRows.has(row)
+      || state.cellEdit?.row === row
+    );
 }
 function connectionHasDrafts(provider) {
   return provider === 'mysql'

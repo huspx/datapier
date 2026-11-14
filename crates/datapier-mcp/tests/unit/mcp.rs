@@ -40,6 +40,30 @@ fn result_page_rejects_zero_and_non_uuid() {
         .is_ok()
     );
 }
+#[test]
+fn database_and_history_tools_accept_cursor_with_filters() {
+    let id = Uuid::new_v4().to_string();
+    for (name, args) in [
+        (
+            "list_databases",
+            json!({"connection_id":id,"refresh":false,"cursor":"token"}),
+        ),
+        (
+            "list_history",
+            json!({"connection_id":id,"source":"platform","search":"x","page_size":10,"cursor":"token"}),
+        ),
+    ] {
+        let spec = SPECS.iter().find(|spec| spec.name == name).unwrap();
+        assert!(validate(spec, args.as_object().unwrap()).is_ok());
+        assert!(
+            validate(
+                spec,
+                json!({"connection_id":id,"cursor":3}).as_object().unwrap()
+            )
+            .is_err()
+        );
+    }
+}
 
 #[test]
 fn database_diagnostics_are_structured_without_duplicating_rows() {

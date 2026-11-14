@@ -3,6 +3,7 @@
 use datapier_core::{AppError, Result};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+pub(crate) const VERSION: u64 = 4;
 
 // 与协议 v1 的 8 MiB 上限一致；必须在按不可信长度分配缓冲区之前拒绝超限帧。
 const MAX_FRAME: usize = 8 * 1024 * 1024;

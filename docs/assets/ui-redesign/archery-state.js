@@ -14,6 +14,13 @@ const archeryPreviewLabels = {
     'Archery · Instance unavailable',
   ],
   'archery-login': ['Archery · 服务登录', 'Archery · Service login'],
+  'archery-auth-busy': ['Archery · 认证中', 'Archery · Authenticating'],
+  'archery-auth-observe': ['Archery · 观察认证', 'Archery · Observing authentication'],
+  'archery-auth-failed': ['Archery · 认证失败', 'Archery · Authentication failed'],
+  'archery-save-unknown': ['Archery · 保存结果未知', 'Archery · Save result unknown'],
+  'archery-delete-busy': ['Archery · 删除中', 'Archery · Deleting'],
+  'archery-delete-failed': ['Archery · 删除失败', 'Archery · Deletion failed'],
+  'archery-delete-unknown': ['Archery · 删除结果未知', 'Archery · Deletion result unknown'],
   'archery-totp': ['Archery · 验证码', 'Archery · Verification code'],
   'archery-instances': ['Archery · 选择实例', 'Archery · Select instances'],
   'archery-query': ['Archery · 查询结果', 'Archery · Query result'],
@@ -295,28 +302,79 @@ function archeryConnectionCards() {
     }</span></span><span class="connection-sub">${h(s?.name || '')} · ${h(i.name)}</span></span></button>`;
   }).join('');
 }
+let archeryTreeFocus = null;
 function archeryTree() {
   const i = ai.find(item => item.id === ap.instance);
   if (i.provider === 'redis') return '';
+  const dbs = archeryConnections.find(c => c.server === activeServerId && c.instance === i.id)?.dbs || i.dbs;
+  if (
+    !dbs.some(db =>
+      archeryTreeFocus === `tree:${db}`
+      || (archeryTreeFocus === `table:${db}` && ap.expandedDatabases.has(db)
+        && 'orders'.includes((ap.objectFilter || '').toLowerCase()))
+    )
+  ) archeryTreeFocus = null;
   return `<div class="object-search-row"><input class="object-search" data-af="objectFilter" aria-label="${
     h(t('filterObjects'))
-  }" placeholder="${h(t('filterObjectsPlaceholder'))}" value="${h(ap.objectFilter || '')}"></div>${
-    (archeryConnections.find(c => c.server === activeServerId && c.instance === i.id)?.dbs || i.dbs).map(db => {
+  }" placeholder="${h(t('filterObjectsPlaceholder'))}" value="${
+    h(ap.objectFilter || '')
+  }"></div><div role="tree" aria-label="${h(t('filterObjects'))}">${
+    dbs.map((db, index) => {
       const open = ap.expandedDatabases.has(db);
-      return `<button class="tree-line ${db === ap.db ? 'active' : ''}" data-archery="tree:${
-        h(db)
+      const parent = `tree:${db}`, child = `table:${db}`;
+      return `<button class="tree-line ${db === ap.db ? 'active' : ''}" data-archery="${
+        h(parent)
+      }" role="treeitem" tabindex="${
+        archeryTreeFocus === parent || (!archeryTreeFocus && index === 0) ? '0' : '-1'
       }" aria-expanded="${open}">${icon(open ? 'chev' : 'chev-r')}${icon('database')}<span>${h(db)}</span></button>${
         open && 'orders'.includes((ap.objectFilter || '').toLowerCase())
-          ? `<button class="tree-line depth-1" data-archery="table:${h(db)}">${icon('table')} orders</button>`
+          ? `<div role="group"><button class="tree-line depth-1" data-archery="${h(child)}" role="treeitem" tabindex="${
+            archeryTreeFocus === child ? '0' : '-1'
+          }">${icon('table')} orders</button></div>`
           : ''
       }`;
     }).join('')
-  }<div class="section-heading">${t('workspace')}</div><button class="tree-line" data-archery="new-tab">${
+  }</div><div class="section-heading">${t('workspace')}</div><button class="tree-line" data-archery="new-tab">${
     icon('terminal')
   } ${t('sqlQuery')}</button><button class="tree-line" data-archery="history">${icon('history')} ${
     t('queryHistory')
   }</button>`;
 }
+document.addEventListener('focusin', event => {
+  const item = event.target.closest?.('[role="tree"] [role="treeitem"][data-archery]');
+  if (!item) return;
+  item.closest('[role="tree"]').querySelectorAll('[role="treeitem"]').forEach(other => {
+    other.tabIndex = other === item ? 0 : -1;
+  });
+  archeryTreeFocus = item.dataset.archery;
+});
+document.addEventListener('keydown', event => {
+  const item = event.target.matches?.('[role="tree"] [role="treeitem"][data-archery]') ? event.target : null;
+  if (!item || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const items = [...item.closest('[role="tree"]').querySelectorAll('[role="treeitem"]')];
+  const index = items.indexOf(item);
+  let next;
+  if (event.key === 'ArrowDown') next = items[Math.min(index + 1, items.length - 1)];
+  else if (event.key === 'ArrowUp') next = items[Math.max(index - 1, 0)];
+  else if (event.key === 'Home') next = items[0];
+  else if (event.key === 'End') next = items[items.length - 1];
+  else if (event.key === 'ArrowRight' && item.hasAttribute('aria-expanded')) {
+    if (item.getAttribute('aria-expanded') === 'false') {
+      archeryTreeFocus = item.dataset.archery;
+      item.click();
+      next = document.querySelector(`[role="treeitem"][data-archery="${CSS.escape(archeryTreeFocus)}"]`);
+    } else next = item.nextElementSibling?.querySelector('[role="treeitem"]');
+  } else if (event.key === 'ArrowLeft') {
+    if (item.getAttribute('aria-expanded') === 'true') {
+      archeryTreeFocus = item.dataset.archery;
+      item.click();
+      next = document.querySelector(`[role="treeitem"][data-archery="${CSS.escape(archeryTreeFocus)}"]`);
+    } else next = item.parentElement.closest('[role="group"]')?.previousElementSibling;
+  }
+  event.preventDefault();
+  next?.focus();
+});
 const platformHistorySamples = Array.from(
   { length: 125 },
   (_, n) => ({

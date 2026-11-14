@@ -1,3 +1,12 @@
+/* 仅作用于 Datapier 的表单字段，不改写宿主其他字段。 */
+[data-role="datapier.form-field"] .sf-field-lbl {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  gap: 4px;
+}
 /* 只重置工作台行与轻量入口，表单和主要操作保留宿主样式。 */
 .brand,
 .connection,
@@ -73,6 +82,16 @@
 }
 .status-action.active {
   color: var(--accent);
+}
+.mcp-tab.focused, .status-action.focused {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.schema-panel .schema-sticky-actions {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--card);
 }
 .status-action *, .sidebar-action *, .tab-title * {
   pointer-events: none;

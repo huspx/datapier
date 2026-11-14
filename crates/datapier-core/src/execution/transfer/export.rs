@@ -39,7 +39,7 @@ pub(super) async fn export(
     } else if retained {
         let id: Uuid = param(params, "result_id")?;
         let meta = sink.store.result_meta(id).await?;
-        coverage = json!({"scope":"retained_rows","page_start":meta.summary.get("page_start").and_then(Json::as_u64).unwrap_or(0),"complete":meta.complete && !meta.summary.get("resource_limited").and_then(Json::as_bool).unwrap_or(false),"source_coverage":meta.summary.get("coverage")});
+        coverage = json!({"scope":"retained_rows","page_start":meta.summary.get("page_start").and_then(Json::as_u64).unwrap_or(0),"complete":retained_complete(meta.complete, &meta.summary),"source_coverage":meta.summary.get("coverage")});
         export_cached(id, sink, cancel, progress, fmt, file, false).await
     } else {
         match session.profile().provider {
@@ -56,6 +56,23 @@ pub(super) async fn export(
         output["coverage"] = coverage;
     }
     Ok(output)
+}
+fn retained_complete(complete: bool, summary: &Json) -> bool {
+    complete
+        && !summary
+            .get("resource_limited")
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+        && !summary
+            .get("retained_prefix")
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+}
+
+#[test]
+fn retained_prefix_is_not_complete_coverage() {
+    assert!(!retained_complete(true, &json!({"retained_prefix": true})));
+    assert!(retained_complete(true, &json!({"retained_prefix": false})));
 }
 pub(super) fn finish_export(
     result: Result<()>,

@@ -21,8 +21,14 @@ async fn redis_test_session(engine: &Arc<Engine>, owner: Uuid, mode: AccessMode)
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
+    engine
+        .store
+        .save_profile(&profile, None, false)
+        .await
+        .unwrap();
     let session = ProviderSession::connect(profile.clone(), None)
         .await
         .unwrap();
@@ -72,6 +78,159 @@ async fn redis_test_command(
 
 #[tokio::test]
 #[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
+async fn stale_profile_rejects_new_requests_and_close_releases_only_its_results() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    engine.register(owner);
+    engine.register(other);
+    let session = redis_test_session(&engine, owner, AccessMode::ReadWrite).await;
+    let other_session = redis_test_session(&engine, other, AccessMode::ReadWrite).await;
+    let first = redis_test_command(&engine, owner, session, "PING").await;
+    let second = redis_test_command(&engine, other, other_session, "PING").await;
+    let result = first.results[0];
+    let other_result = second.results[0];
+    let profile_id = engine.state.lock().unwrap().databases[&session].profile.id;
+    let dispatched = engine
+        .store
+        .create_task(owner, "redis-test", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let sink = ExecutionSink::new(engine.store.clone(), dispatched.id).with_profile_revision(
+        profile_id,
+        1,
+        engine.profile_lock(profile_id),
+    );
+    sink.mark_sent(true).await.unwrap();
+    let mut profile = engine.store.profile(profile_id).await.unwrap();
+    profile.access_mode = AccessMode::ReadOnly;
+    engine
+        .store
+        .save_profile(&profile, None, false)
+        .await
+        .unwrap();
+    // 已发送的同一请求继续收尾，不再被新版本配置中断。
+    sink.mark_sent(true).await.unwrap();
+    let rejected = redis_test_command(&engine, owner, session, "SET datapier-stale-test x").await;
+    assert_eq!(rejected.state, "failed");
+    assert!(!rejected.sent);
+    assert_eq!(rejected.error.unwrap().code, "invalidated");
+    engine
+        .dispatch(owner, "connection.close", json!({"session_id":session}))
+        .await
+        .unwrap();
+    assert!(engine.store.result_meta(result).await.is_err());
+    assert!(engine.store.result_meta(other_result).await.is_ok());
+    engine
+        .dispatch(
+            other,
+            "connection.close",
+            json!({"session_id":other_session}),
+        )
+        .await
+        .unwrap();
+    engine.store.pool.close().await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
+async fn mcp_rollback_uses_current_authorized_profile_revision() {
+    let (engine, root) = engine().await;
+    let controller = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    engine.register(controller);
+    engine.register_with(
+        owner,
+        ClientContext {
+            kind: model::ClientKind::Mcp,
+            workspace: "default".into(),
+            allow_connections: vec![],
+        },
+    );
+    let initial_session = redis_test_session(&engine, controller, AccessMode::ReadWrite).await;
+    let profile_id = engine.state.lock().unwrap().databases[&initial_session]
+        .profile
+        .id;
+    let opened = engine
+        .dispatch(
+            owner,
+            "mcp.open_session",
+            json!({"connection_id":profile_id}),
+        )
+        .await
+        .unwrap();
+    let session = opened["session_id"].clone();
+    let begin = engine
+        .dispatch(
+            owner,
+            "mcp.begin_transaction",
+            json!({"session_id":session}),
+        )
+        .await
+        .unwrap();
+    let begin_id: Uuid = serde_json::from_value(begin["execution_id"].clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let task = engine.store.task(begin_id).await.unwrap();
+            if !matches!(task.state.as_str(), "queued" | "running" | "cancelling") {
+                assert_eq!(task.state, "succeeded");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    engine
+        .dispatch(
+            controller,
+            "profile.rules.set",
+            json!({"profile_id":profile_id,"expected_revision":1,"rules":[]}),
+        )
+        .await
+        .unwrap();
+    let rollback = engine
+        .dispatch(
+            owner,
+            "mcp.rollback_transaction",
+            json!({"session_id":session}),
+        )
+        .await
+        .unwrap();
+    let id: Uuid = serde_json::from_value(rollback["execution_id"].clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let task = engine.store.task(id).await.unwrap();
+            if !matches!(task.state.as_str(), "queued" | "running" | "cancelling") {
+                assert_eq!(task.state, "succeeded", "{:?}", task.error);
+                assert!(task.sent);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    engine
+        .dispatch(owner, "mcp.close_session", json!({"session_id":session}))
+        .await
+        .unwrap();
+    engine
+        .dispatch(
+            controller,
+            "connection.close",
+            json!({"session_id":initial_session}),
+        )
+        .await
+        .unwrap();
+    engine.store.pool.close().await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
 async fn redis_auth_is_rejected_before_any_task_is_persisted() {
     let (engine, root) = engine().await;
     let owner = Uuid::new_v4();
@@ -101,7 +260,7 @@ async fn redis_auth_is_rejected_before_any_task_is_persisted() {
     assert!(records.is_empty());
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM executions WHERE params LIKE '%secret-marker%'")
-            .fetch_one(&engine.store.pool)
+            .fetch_one(&mut *engine.store.pool.acquire().await.unwrap())
             .await
             .unwrap();
     assert_eq!(count, 0);
@@ -437,8 +596,14 @@ async fn redis_first_command_connect_cancels_before_proxy_releases() {
             redis_databases_override: None,
             tls: model::TlsConfig::default(),
             visible_databases: None,
+            mysql: Default::default(),
         }),
     };
+    engine
+        .store
+        .save_profile(&profile, None, false)
+        .await
+        .unwrap();
     let session = ProviderSession::connect(profile.clone(), None)
         .await
         .unwrap();

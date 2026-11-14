@@ -98,23 +98,31 @@ function redisRows(key) {
     : key.type === 'ZSET'
     ? [t('member'), t('score')]
     : [t('member')];
-  return `<table id="redis-grid"><thead><tr><th class="row-number">#</th>${
+  return `<table id="redis-grid" role="grid"><thead><tr><th class="row-number">#</th>${
     headers.map((label, i) =>
       state.hiddenColumns['redis:' + key.type]?.includes(String(i))
         ? ''
-        : `<th>${h(label)}</th>`
+        : `<th data-grid-column="${i}">${h(label)}</th>`
     ).join('')
   }</tr></thead><tbody>${
     key.rows.map((row, index) =>
       `<tr class="${
         state.selectedEntries.has(index) ? 'selected' : ''
-      }" data-redis-row="${index}"><td class="row-number" data-redis-row-number="${index}" tabindex="0" role="button" aria-label="${
+      }" data-redis-row="${index}"><td class="row-number" data-redis-row-number="${index}" tabindex="-1" role="button" aria-label="${
         h(t('selectRow', { number: index + 1 }))
       }" aria-pressed="${state.selectedEntries.has(index)}">${index + 1}</td>${
         row.map((value, i) =>
           state.hiddenColumns['redis:' + key.type]?.includes(String(i))
             ? ''
-            : `<td data-cell="${i}" tabindex="0">${h(value)}</td>`
+            : `<td data-cell="${i}" tabindex="${
+              index === 0
+                && i
+                  === headers.findIndex((_, column) =>
+                    !state.hiddenColumns['redis:' + key.type]?.includes(String(column))
+                  )
+                ? '0'
+                : '-1'
+            }">${h(value)}</td>`
         ).join('')
       }</tr>`
     ).join('')

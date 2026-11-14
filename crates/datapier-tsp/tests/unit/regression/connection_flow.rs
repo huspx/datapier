@@ -394,6 +394,8 @@ fn tls_recovery_does_not_reopen_settings_after_a_transport_failure() {
     assert_eq!(app.workbench.overlay.as_deref(), Some("profile"));
     assert_eq!(app.field("tls"), "true");
     app.action("overlay-close", &backend);
+    assert!(app.workbench.overlay_close_confirm);
+    app.action("overlay-close-discard", &backend);
     drop(requests);
     app.action("open", &backend);
     assert!(app.workbench.connection_error.is_some());

@@ -12,7 +12,7 @@ use self::json::{JsonReader, JsonSpool, json_document};
 #[cfg(test)]
 use export::{ExportFile, export_cached, finish_export};
 use export::{csv_error, export, flush_csv};
-use mysql_import::{import_mysql_csv, import_mysql_json};
+use mysql_import::{MysqlImportInput, import_mysql_csv, import_mysql_json};
 pub use preview::preview;
 use redis_export::export_redis;
 use redis_import::{import_redis_csv, import_redis_json};
@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 const PAGE: usize = 500;
 const BYTES: usize = 1024 * 1024;
-const REDIS_HEADER: [&str; 10] = [
+const REDIS_HEADER: [&str; 11] = [
     "version",
     "record",
     "key_b64",
@@ -53,6 +53,7 @@ const REDIS_HEADER: [&str; 10] = [
     "member_b64",
     "score",
     "value_b64",
+    "field_expires_at_ms",
 ];
 
 // 只统计已确认的行和 key；错误中另附剩余工作与可能的部分文件路径。
@@ -62,11 +63,12 @@ struct Progress {
     keys: u64,
     failed: u64,
     skipped: u64,
+    unknown: u64,
     partial: Option<PathBuf>,
 }
 impl Progress {
     fn details(&self) -> Json {
-        json!({"completed_rows":self.rows,"completed_keys":self.keys,"failed":self.failed,"skipped":self.skipped,"partial_path":self.partial,"remaining":"not_executed"})
+        json!({"completed_rows":self.rows,"completed_keys":self.keys,"failed":self.failed,"skipped":self.skipped,"unknown":self.unknown,"partial_path":self.partial,"remaining":if self.unknown > 0 { "after_current_batch_not_executed" } else { "not_executed" }})
     }
 }
 
@@ -205,7 +207,7 @@ pub(crate) fn validate_redis_score(score: &str) -> Result<()> {
 }
 fn redis_csv_row(key: &str, ty: &str, row: &[Value]) -> Result<Vec<String>> {
     let mut r = vec![
-        "1".into(),
+        "2".into(),
         "item".into(),
         key.into(),
         ty.into(),
@@ -215,12 +217,20 @@ fn redis_csv_row(key: &str, ty: &str, row: &[Value]) -> Result<Vec<String>> {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     ];
     match (ty, row) {
         ("string", [v]) => r[9] = redis_bytes(v)?,
-        ("hash", [f, v]) => {
+        ("hash", [f, v, Value::Integer(expiry)]) => {
+            let expiry_num = expiry
+                .parse::<i64>()
+                .map_err(|_| AppError::invalid("无效 Hash 字段期限"))?;
+            if expiry_num < -1 {
+                return Err(AppError::invalid("无效 Hash 字段期限"));
+            }
             r[5] = redis_bytes(f)?;
             r[9] = redis_bytes(v)?;
+            r[10] = expiry.clone();
         }
         ("list", [i, v]) => {
             r[6] = match i {
@@ -260,20 +270,53 @@ async fn import(
     let source = path(params)?;
     let file = File::open(&source)?;
     let target: ResourceTarget = param(params, "target")?;
-    match (session.profile().provider, fmt) {
+    let id = Uuid::new_v4();
+    let owner = sink.store.task(sink.execution_id).await?.owner;
+    let budget = sink.store.available_memory_for_owner(owner).await?;
+    if budget == 0 {
+        return Err(AppError::new("resource_limit", "客户端内存预算已用尽"));
+    }
+    sink.store
+        .reserve_auxiliary(sink.execution_id, id, budget)
+        .await?;
+    let reservation = Some((id, budget));
+    let budget = reservation.map(|(_, bytes)| bytes).unwrap_or(0);
+    let result = match (session.profile().provider, fmt) {
         (ProviderKind::Mysql, "csv") => {
-            import_mysql_csv(session, params, &target, sink, cancel, p, file).await?
+            import_mysql_csv(
+                session,
+                params,
+                &target,
+                sink,
+                cancel,
+                p,
+                MysqlImportInput { file, budget },
+            )
+            .await
         }
         (ProviderKind::Mysql, _) => {
-            import_mysql_json(session, params, &target, sink, cancel, p, file).await?
+            import_mysql_json(
+                session,
+                params,
+                &target,
+                sink,
+                cancel,
+                p,
+                MysqlImportInput { file, budget },
+            )
+            .await
         }
         (ProviderKind::Redis, "csv") => {
-            import_redis_csv(session, &target, sink, cancel, p, file).await?
+            import_redis_csv(session, &target, sink, cancel, p, file, budget).await
         }
         (ProviderKind::Redis, _) => {
-            import_redis_json(session, &target, sink, cancel, p, file).await?
+            import_redis_json(session, &target, sink, cancel, p, file, budget).await
         }
+    };
+    if let Some((id, _)) = reservation {
+        sink.store.release_auxiliary(id).await?;
     }
+    result?;
     Ok(json!({"path":source,"progress":p.details()}))
 }
 struct ColumnProjection {
@@ -427,6 +470,10 @@ async fn insert_batch(
                     .iter()
                     .filter(|i| i.get("status").and_then(Json::as_str) == Some("failed"))
                     .count() as u64;
+                p.unknown += items
+                    .iter()
+                    .filter(|i| i.get("status").and_then(Json::as_str) == Some("unknown"))
+                    .count() as u64;
                 if success != count {
                     return Err(
                         AppError::new("import_failed", "导入批次包含失败或未确认的记录")
@@ -436,6 +483,7 @@ async fn insert_batch(
             } else if v.get("affected_rows").and_then(Json::as_u64) == Some(count as u64) {
                 p.rows += count as u64;
             } else {
+                p.unknown += count as u64;
                 return Err(AppError::unknown("数据库未返回可确认的导入批次结果").with_details(v));
             }
             Ok(())
@@ -455,6 +503,12 @@ async fn insert_batch(
                     .iter()
                     .filter(|i| i.get("status").and_then(Json::as_str) == Some("failed"))
                     .count() as u64;
+                p.unknown += items
+                    .iter()
+                    .filter(|i| i.get("status").and_then(Json::as_str) == Some("unknown"))
+                    .count() as u64;
+            } else if e.code == "outcome_unknown" {
+                p.unknown += count as u64;
             }
             Err(e)
         }
@@ -530,6 +584,7 @@ struct KeyImport {
     key: String,
     kind: String,
     batch: Vec<Vec<Value>>,
+    batch_bytes: usize,
     rows: u64,
     next_index: u64,
 }
@@ -583,7 +638,8 @@ async fn begin_key(
         token,
         key,
         kind,
-        batch: Vec::with_capacity(PAGE),
+        batch: Vec::new(),
+        batch_bytes: 0,
         rows: 0,
         next_index: 0,
     })
@@ -599,6 +655,7 @@ async fn append_key(
     }
     ensure_not_cancelled(cancel)?;
     let rows = std::mem::take(&mut key.batch);
+    key.batch_bytes = 0;
     let count = rows.len() as u64;
     session
         .call(
@@ -615,12 +672,21 @@ async fn push_key(
     session: &mut ProviderSession,
     key: &mut KeyImport,
     row: Vec<Value>,
+    charge: usize,
+    budget: usize,
     sink: &ExecutionSink,
     cancel: &CancellationToken,
 ) -> Result<()> {
     // 写入临时 key 前校验与 provider 浏览相同的行布局和 List 索引。
     validate_key_row(key, &row)?;
+    if charge > budget / 2 {
+        return Err(AppError::new("resource_limit", "Redis 导入行超过内存预算"));
+    }
+    if !key.batch.is_empty() && key.batch_bytes.saturating_add(charge) > budget / 2 {
+        append_key(session, key, sink, cancel).await?;
+    }
     key.batch.push(row);
+    key.batch_bytes = key.batch_bytes.saturating_add(charge);
     if key.batch.len() == PAGE {
         append_key(session, key, sink, cancel).await?;
     }
@@ -709,7 +775,7 @@ async fn cleanup_key(
     error
 }
 fn csv_item(record: &csv::StringRecord, key: &KeyImport) -> Result<Vec<Value>> {
-    if &record[0] != "1" || &record[1] != "item" || record[2] != key.key || record[3] != key.kind {
+    if &record[0] != "2" || &record[1] != "item" || record[2] != key.key || record[3] != key.kind {
         return Err(AppError::invalid("Redis CSV 元素不属于当前 key"));
     }
     let bytes = |n: usize| -> Result<Value> {
@@ -718,7 +784,11 @@ fn csv_item(record: &csv::StringRecord, key: &KeyImport) -> Result<Vec<Value>> {
     };
     match key.kind.as_str() {
         "string" => Ok(vec![bytes(9)?]),
-        "hash" => Ok(vec![bytes(5)?, bytes(9)?]),
+        "hash" => Ok(vec![
+            bytes(5)?,
+            bytes(9)?,
+            Value::Integer(record[10].to_owned()),
+        ]),
         "list" => {
             record[6]
                 .parse::<u64>()

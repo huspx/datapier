@@ -246,25 +246,37 @@ impl App {
                         return true;
                     }
                 };
-                if old != new {
-                    let remove = match operation.as_str() {
-                        "hash_set" => "hash_delete",
-                        "set_add" => "set_remove",
-                        "zset_set" => "zset_remove",
-                        _ => {
-                            self.status = UiMessage::key("Redis 编辑操作已改变，请重新选择行");
-                            return true;
-                        }
-                    };
-                    let mut removal = json!({"operation":remove});
-                    removal[field.as_str()] =
-                        json!({"type":"bytes", "value": STANDARD.encode(old)});
-                    self.redis_changes.push(removal);
+                let old_value = json!({"type":"bytes", "value": STANDARD.encode(&old)});
+                match (field.as_str(), operation.as_str()) {
+                    ("field", "hash_set") if old != new => {
+                        change["operation"] = json!("hash_replace_field");
+                        change["new_field"] = change["field"].clone();
+                        change["field"] = old_value;
+                    }
+                    ("field", "hash_set") => {
+                        change["preserve_field_ttl"] = json!(true);
+                    }
+                    ("member", "set_add") if old != new => {
+                        change["operation"] = json!("set_replace_member");
+                        change["new_member"] = change["member"].clone();
+                        change["member"] = old_value;
+                    }
+                    ("member", "zset_set") if old != new => {
+                        change["operation"] = json!("zset_replace_member");
+                        change["new_member"] = change["member"].clone();
+                        change["member"] = old_value;
+                    }
+                    ("member", "set_add" | "zset_set") => {}
+                    _ => {
+                        self.status = UiMessage::key("Redis 编辑操作已改变，请重新选择行");
+                        return true;
+                    }
                 }
             }
         }
         self.redis_changes.push(change);
         self.redis_changes_revision = self.redis_changes_revision.wrapping_add(1);
+        self.draft_revision = self.draft_revision.wrapping_add(1);
         self.workbench
             .redis_undo_groups
             .push((start, self.redis_changes.len()));

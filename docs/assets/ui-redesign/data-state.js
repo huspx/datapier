@@ -276,29 +276,40 @@ const state = {
   visibleDatabases: new Set(Object.keys(databases)),
 };
 const currentRows = () => {
-  const sort = state.sortColumns[`${state.database}.${state.table}`];
-  const rows = (databases[state.database]?.[state.table] || []).filter(
-    row => {
-      const filter = state.filters[`${state.database}.${state.table}`];
-      const value = filter && row[filter.column];
-      return Object.values(row).some(v => String(v).toLowerCase().includes(state.rowFilter.toLowerCase()))
-        && (!filter || (filter.operator === 'null'
-          ? value === null
-          : filter.operator === 'equals'
-          ? String(value) === filter.value
-          : String(value).toLowerCase().includes(
-            filter.value.toLowerCase(),
-          )));
-    },
-  );
-  if (sort?.column) {
-    rows.sort((a, b) =>
-      String(a[sort.column] ?? '').localeCompare(
-        String(b[sort.column] ?? ''),
-        undefined,
-        { numeric: true },
-      ) * (sort.desc ? -1 : 1)
-    );
+  const sorts = state.sortColumns[`${state.database}.${state.table}`] || [];
+  const filters = state.filters[`${state.database}.${state.table}`] || [];
+  const rows = (databases[state.database]?.[state.table] || []).filter(row => {
+    if (!Object.values(row).some(value => String(value).toLowerCase().includes(state.rowFilter.toLowerCase()))) {
+      return false;
+    }
+    return filters.every(filter => {
+      const value = row[filter.column], op = filter.op || 'eq';
+      if (op === 'is_null') return value === null;
+      if (op === 'is_not_null') return value !== null;
+      if (value === null || value === undefined) return false;
+      const actual = String(value), expected = String(filter.value);
+      const comparison = actual.localeCompare(expected, undefined, { numeric: true });
+      if (op === 'eq') return comparison === 0;
+      if (op === 'ne') return comparison !== 0;
+      if (op === 'lt') return comparison < 0;
+      if (op === 'lte') return comparison <= 0;
+      if (op === 'gt') return comparison > 0;
+      if (op === 'gte') return comparison >= 0;
+      const pattern = expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.');
+      const matches = new RegExp(`^${pattern}$`, 'i').test(actual);
+      return op === 'not_like' ? !matches : matches;
+    });
+  });
+  if (sorts.length) {
+    rows.sort((a, b) => {
+      for (const sort of sorts) {
+        const comparison = String(a[sort.column] ?? '').localeCompare(String(b[sort.column] ?? ''), undefined, {
+          numeric: true,
+        });
+        if (comparison) return comparison * (sort.direction === 'desc' ? -1 : 1);
+      }
+      return 0;
+    });
   }
   return rows;
 };

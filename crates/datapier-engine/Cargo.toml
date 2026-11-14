@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 [dependencies]
+base64.workspace = true
 datapier-core = { path = "../datapier-core" }
 directories.workspace = true
 fs2.workspace = true

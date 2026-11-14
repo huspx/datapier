@@ -2,18 +2,22 @@
 //! 凭据不写入 SQLite；原生读取使用有界独立线程，写入和删除在线程池完成。
 mod archery;
 mod authorization;
+mod edit_files;
+mod fixed_pool;
 mod migration;
 mod profiles;
 mod results;
+mod retired_cache;
 mod tasks;
 
 use crate::model::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+pub use fixed_pool::FixedPool;
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use sqlx::{
-    Connection, Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    ConnectOptions, Connection, Row,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode},
 };
 use std::{
     collections::HashMap,
@@ -27,8 +31,10 @@ use uuid::Uuid;
 /// 克隆共享配置连接池、凭据与有界内存结果。
 #[derive(Clone)]
 pub struct Store {
-    pub pool: SqlitePool,
+    pub pool: FixedPool,
     pub root: Arc<PathBuf>,
+    // 与 Store 同寿命固定根目录身份，清理时不重新解析可能被替换的绝对路径。
+    retired_cache_root: Arc<cap_std::fs::Dir>,
     secrets: Arc<RwLock<HashMap<Uuid, String>>>,
     archery_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
     archery_totp_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
@@ -43,21 +49,14 @@ impl Store {
     pub async fn open(root: &Path) -> Result<Self> {
         tokio::fs::create_dir_all(root).await?;
         let root = tokio::fs::canonicalize(root).await?;
-        let pool = open_database(&root.join("datapier.sqlite3")).await?;
-        let initialized: Result<()> = async {
-            migration::preflight_config(&pool).await?;
-            migration::migrate_config(&pool).await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = initialized {
-            // Pool 的 drop 不等待 SQLite worker 退出，Windows 会继续占用文件。
-            pool.close().await;
-            return Err(error);
-        }
+        let retired_cache_root =
+            cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())?;
+        check_root_identity(&root, &retired_cache_root)?;
+        let pool = open_database(&root, &retired_cache_root).await?;
         let store = Self {
             pool,
             root: Arc::new(root),
+            retired_cache_root: Arc::new(retired_cache_root),
             archery_secrets: Arc::new(RwLock::new(HashMap::new())),
             archery_totp_secrets: Arc::new(RwLock::new(HashMap::new())),
             secrets: Arc::new(RwLock::new(HashMap::new())),
@@ -67,7 +66,7 @@ impl Store {
         let validated: Result<()> = async {
             store.profiles().await?;
             if !sqlx::query("PRAGMA foreign_key_check")
-                .fetch_all(&store.pool)
+                .fetch_all(&mut *store.pool.acquire().await?)
                 .await?
                 .is_empty()
             {
@@ -87,7 +86,7 @@ impl Store {
     pub async fn settings(&self) -> Result<AppSettings> {
         let (payload, revision): (String, i64) =
             sqlx::query_as("SELECT payload,revision FROM app_settings WHERE id=1")
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *self.pool.acquire().await?)
                 .await?;
         let mut settings: AppSettings = serde_json::from_str(&payload)?;
         settings.revision = revision as u64;
@@ -108,7 +107,7 @@ impl Store {
                 .bind(serde_json::to_string(settings)?)
                 .bind(next as i64)
                 .bind(settings.revision as i64)
-                .execute(&self.pool)
+                .execute(&mut *self.pool.acquire().await?)
                 .await?;
         if updated.rows_affected() != 1 {
             return Err(AppError::conflict("设置已更新，请重新载入"));
@@ -117,63 +116,21 @@ impl Store {
         Ok(())
     }
 
-    /// 预览旧版本结果缓存；不会打开旧数据库或跟随符号链接。
-    pub async fn retired_cache_preview(&self) -> Result<Json> {
-        let mut paths = Vec::new();
-        let mut bytes = 0u64;
-        for name in [
-            "cache.sqlite3",
-            "cache.sqlite3-wal",
-            "cache.sqlite3-shm",
-            "values",
-        ] {
-            let path = self.root.join(name);
-            match tokio::fs::symlink_metadata(&path).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
-            paths.push(name.to_owned());
-            let mut stack = vec![path];
-            while let Some(path) = stack.pop() {
-                let meta = tokio::fs::symlink_metadata(&path).await?;
-                if meta.is_file() {
-                    bytes = bytes.saturating_add(meta.len());
-                } else if meta.is_dir() {
-                    let mut entries = tokio::fs::read_dir(path).await?;
-                    while let Some(entry) = entries.next_entry().await? {
-                        stack.push(entry.path());
-                    }
-                }
-            }
-        }
-        Ok(json!({"paths": paths, "bytes": bytes}))
-    }
-    /// 显式删除预览中的退休缓存，不触及其他数据。
-    pub async fn clear_retired_cache(&self) -> Result<Json> {
-        let preview = self.retired_cache_preview().await?;
-        for name in preview["paths"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Json::as_str)
-        {
-            let path = self.root.join(name);
-            let meta = tokio::fs::symlink_metadata(&path).await?;
-            if meta.is_dir() {
-                tokio::fs::remove_dir_all(path).await?;
-            } else {
-                tokio::fs::remove_file(path).await?;
-            }
-        }
-        Ok(preview)
+    /// 只读取工作区版本，供切换前检查；不加载可能很大的编辑快照。
+    pub async fn workspace_revision(&self, id: &str) -> Result<u64> {
+        let revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM workspaces WHERE id=?")
+                .bind(id)
+                .fetch_optional(&mut *self.pool.acquire().await?)
+                .await?;
+        u64::try_from(revision.unwrap_or(0)).map_err(|_| AppError::invalid("工作区版本无效"))
     }
 
     /// 加载工作区快照及版本；不存在时返回版本零和空状态。
     pub async fn workspace_load(&self, id: &str) -> Result<Json> {
         let row = sqlx::query("SELECT revision,payload FROM workspaces WHERE id=?")
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.pool.acquire().await?)
             .await?;
         match row {
             Some(row) => Ok(
@@ -194,7 +151,8 @@ impl Store {
             .checked_add(1)
             .filter(|next| *next <= i64::MAX as u64)
             .ok_or_else(|| AppError::invalid("工作区版本溢出"))?;
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         let result = if expected_revision == 0 {
             sqlx::query("INSERT INTO workspaces(id,revision,payload) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING")
                 .bind(id).bind(next as i64).bind(state.to_string()).execute(&mut *tx).await?
@@ -270,17 +228,50 @@ async fn read_keyring(account: String) -> Result<Vec<u8>> {
 fn parse_id(text: &str) -> Result<Uuid> {
     Uuid::parse_str(text).map_err(|e| AppError::new("storage", e.to_string()))
 }
-async fn open_database(path: &Path) -> Result<SqlitePool> {
+fn check_root_identity(path: &Path, opened: &cap_std::fs::Dir) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let original = opened.try_clone()?.into_std_file().metadata()?;
+        let current = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?
+            .into_std_file()
+            .metadata()?;
+        if original.dev() != current.dev() || original.ino() != current.ino() {
+            return Err(AppError::conflict("数据目录已被替换"));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, opened);
+    Ok(())
+}
+
+async fn open_database(root: &Path, root_dir: &cap_std::fs::Dir) -> Result<FixedPool> {
     let options = SqliteConnectOptions::new()
-        .filename(path)
+        .filename(root.join("datapier.sqlite3"))
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(10));
-    Ok(SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(options)
-        .await?)
+    let mut connections = Vec::with_capacity(4);
+    let initialized: Result<()> = async {
+        connections.push(options.connect().await?);
+        migration::preflight_config(&mut connections[0]).await?;
+        migration::migrate_config(&mut connections[0]).await?;
+        for _ in 1..4 {
+            check_root_identity(root, root_dir)?;
+            connections.push(options.connect().await?);
+        }
+        check_root_identity(root, root_dir)?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = initialized {
+        for connection in connections {
+            let _ = connection.close().await;
+        }
+        return Err(error);
+    }
+    Ok(FixedPool::new(connections))
 }
 
 #[cfg(test)]

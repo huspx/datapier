@@ -9,6 +9,12 @@ impl App {
             }
             return true;
         }
+        if response.tag == "navigation.discard" {
+            if let Err(error) = &response.result {
+                self.status = UiMessage::raw(error.to_string());
+            }
+            return true;
+        }
         let Some(token) = response
             .tag
             .strip_prefix("navigation/")
@@ -37,6 +43,9 @@ impl App {
         backend: &Backend,
     ) {
         match pending {
+            Pending::CreateDatabase { token, stage } => {
+                self.create_database_response(token, stage, result, backend)
+            }
             Pending::DropOpen { token } => {
                 let Some(operation) = self
                     .navigation
@@ -225,69 +234,6 @@ impl App {
                     }
                 }
             }
-            Pending::CloseProfileSession {
-                token,
-                tab,
-                session,
-            } => {
-                let Some(operation) = self
-                    .navigation
-                    .delete_operation
-                    .as_ref()
-                    .filter(|operation| operation.token == token)
-                else {
-                    return;
-                };
-                let id = operation.id;
-                let result = match result {
-                    Err(error) if error.code == "not_found" => Ok(Value::Null),
-                    other => other,
-                };
-                match result {
-                    Ok(_) => {
-                        self.navigation_profile_session_closed(tab, &session);
-                        self.navigation_profile_delete_unlock(id);
-                        if self.navigation_profile_has_pending_work(id) {
-                            self.navigation.delete_operation = None;
-                            if let Some(confirmation) = self
-                                .navigation
-                                .delete_confirmation
-                                .as_mut()
-                                .filter(|confirmation| confirmation.token == token)
-                            {
-                                confirmation.busy = false;
-                                confirmation.error = Some("该连接存在草稿或任务，请先处理".into());
-                            }
-                            self.status = UiMessage::key("该连接存在草稿或任务，请先处理");
-                        } else {
-                            for index in 0..self.tabs.len() {
-                                if self.tabs[index].profile_id == Some(id) {
-                                    if index == self.active {
-                                        self.operation_pending = true;
-                                    } else {
-                                        self.tabs[index].runtime.operation_pending = true;
-                                    }
-                                }
-                            }
-                            self.navigation_profile_delete_next(backend);
-                        }
-                    }
-                    Err(error) => {
-                        self.navigation.delete_operation = None;
-                        self.navigation_profile_delete_unlock(id);
-                        if let Some(confirmation) = self
-                            .navigation
-                            .delete_confirmation
-                            .as_mut()
-                            .filter(|confirmation| confirmation.token == token)
-                        {
-                            confirmation.busy = false;
-                            confirmation.error = Some(error.to_string());
-                        }
-                        self.status = UiMessage::raw(error.to_string());
-                    }
-                }
-            }
             Pending::DeleteProfile { id, token } => {
                 if self
                     .navigation
@@ -298,7 +244,6 @@ impl App {
                     return;
                 }
                 self.navigation.delete_operation = None;
-                self.navigation_profile_delete_unlock(id);
                 match result {
                     Ok(_) => {
                         self.profiles.retain(|profile| profile.id != id);
@@ -313,8 +258,9 @@ impl App {
                             .is_some_and(|confirmation| confirmation.token == token)
                         {
                             let confirmation = self.navigation.delete_confirmation.take().unwrap();
-                            if let Some(index) =
-                                self.tabs.iter().position(|tab| tab.id == confirmation.tab)
+                            if let Some(index) = confirmation
+                                .tab
+                                .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
                             {
                                 let workbench = if index == self.active {
                                     &mut self.workbench
@@ -324,6 +270,11 @@ impl App {
                                 if workbench.overlay.as_deref() == Some("profile-delete") {
                                     workbench.overlay = None;
                                 }
+                            } else if confirmation.tab.is_none()
+                                && self.tabs.is_empty()
+                                && self.workbench.overlay.as_deref() == Some("profile-delete")
+                            {
+                                self.workbench.overlay = None;
                             }
                         }
                         self.status = UiMessage::key("连接配置已删除");
@@ -567,6 +518,11 @@ impl App {
                                     == Some(u64::from(db))
                                 && value.get("session_id").is_some()
                             {
+                                if let Some((session, cursor)) =
+                                    self.session_id().zip(self.cursor.take())
+                                {
+                                    self.discard_resource_scan(backend, session, cursor);
+                                }
                                 if let Some(session) = self.session_id() {
                                     let _ = backend.request(
                                         "navigation.close",

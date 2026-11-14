@@ -26,6 +26,7 @@ pub(super) fn render(app: &App, pager: Pager<'_>) -> Node<Msg> {
     let action = pager.size_action;
     let mut select = ui::select()
         .key(key)
+        .aria(crate::i18n::tr("每页行数").into_owned())
         .value(pager.size.to_string())
         .disabled(pager.loading)
         .open(app.workbench.generic_select.as_deref() == Some(key))

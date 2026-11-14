@@ -1,5 +1,9 @@
 'use strict';
+let authExampleState = '';
+let serverDeleteSnapshot = null;
+let recoveryReviewed = false;
 function selectArcheryPreview(kind) {
+  recoveryReviewed = false;
   state.overlay = null;
   state.menu = null;
   ap.view = 'query';
@@ -9,6 +13,23 @@ function selectArcheryPreview(kind) {
   serverForm = null;
   serverDelete = null;
   authStage = null;
+  authExampleState = '';
+  if (['archery-delete-busy', 'archery-delete-failed', 'archery-delete-unknown'].includes(kind)) {
+    authExampleState = kind;
+    serverDelete = serverId;
+    serverDeleteSnapshot = {
+      server: { ...servers.find(s => s.id === serverId) },
+      connections: archeryConnections.filter(c => c.server === serverId).map(c => ({ ...c, dbs: [...c.dbs] })),
+    };
+    return;
+  }
+  if (['archery-auth-busy', 'archery-auth-observe', 'archery-auth-failed', 'archery-save-unknown'].includes(kind)) {
+    beginManagement(serverId);
+    authExampleState = kind;
+    if (kind === 'archery-save-unknown') ap.step = 'preview';
+    else authStage = 'password';
+    return;
+  }
   occupiedConnections.clear();
   unavailableInstances.clear();
   if (kind === 'archery-management-busy') {
@@ -137,6 +158,7 @@ function openServerForm(id, origin) {
       editing: true,
       password: '',
       savePassword: s.passwordSaved,
+      saveTotp: s.saveTotp ?? !!s.totp,
       totpInput: '',
       clearTotp: false,
     }
@@ -148,6 +170,7 @@ function openServerForm(id, origin) {
       totp: false,
       totpMode: 'manual',
       savePassword: true,
+      saveTotp: true,
       password: '',
       totpInput: '',
       clearTotp: false,
@@ -244,7 +267,9 @@ function archeryWizard() {
         marker('mysql')
       }<span>MySQL</span></button><button class="provider-option" role="radio" aria-checked="false" data-archery="type-redis" ${
         ap.step === 'preview' ? 'disabled' : ''
-      }>${marker('redis')}<span>Redis</span></button><button class="provider-option" role="radio" aria-checked="true" ${
+      }>${
+        marker('redis')
+      }<span>Redis</span></button><button class="provider-option" role="radio" aria-checked="true" tabindex="0" data-archery="type-current" ${
         ap.step === 'preview' ? 'disabled' : ''
       }><img class="archery-mark" src="assets/archery.svg" alt=""><span>Archery</span></button></div>`
   }<p class="archery-note">${
@@ -336,16 +361,19 @@ function archeryWizard() {
             item.dbs.map(db =>
               `<div class="archery-actions"><label><input type="checkbox" data-ad="${item.id}:${h(db)}" ${
                 ap.selected[item.id].includes(db) ? 'checked' : ''
-              } ${item.unavailable ? 'disabled' : ''}> ${h(db)}</label>${
-                ab(
-                  (ap.defaults[item.id] === db ? '✓ ' : '')
-                    + az('设为默认', 'Set default'),
-                  'default:' + item.id + ':' + db,
-                  !item.unavailable && ap.selected[item.id].includes(db)
-                    ? ''
-                    : 'disabled',
-                )
-              }</div>`
+              } ${item.unavailable ? 'disabled' : ''}> ${
+                h(db)
+              }</label>${`<label class="archery-default"><input type="radio" name="default-${
+                h(item.id)
+              }" data-default-instance="${h(item.id)}" value="${h(db)}" ${
+                ap.defaults[item.id] === db ? 'checked' : ''
+              } ${!item.unavailable && ap.selected[item.id].includes(db) ? '' : 'disabled'}> ${
+                az('默认数据库', 'Default database')
+              }</label>${
+                !item.unavailable && !ap.selected[item.id].includes(db)
+                  ? `<span class="muted small">${az('请先选择此数据库', 'Select this database first')}</span>`
+                  : ''
+              }`}</div>`
             ).join('')
           }`
           : existing
@@ -392,6 +420,26 @@ function archeryWizard() {
       )
     }</p>`;
   }
+  if (authExampleState === 'archery-save-unknown') {
+    body += `<p role="status">${
+      az(
+        '保存结果未知；示例未发送请求。请重新核对本地连接配置，不要自动重试。',
+        'Save outcome unknown; this example sent no request. Recheck local connections before retrying.',
+      )
+    }</p>`;
+    if (recoveryReviewed) {
+      body += `<div role="status"><p>${
+        az(
+          '本地示例连接如下；未读取远端或确认保存结果，草稿保留。',
+          'Local example connections are shown below; no remote result was read or confirmed. The draft is retained.',
+        )
+      }</p><ul>${
+        archeryConnections.filter(c => c.server === serverId).map(c =>
+          `<li>${h(c.name)} · ${h(c.instanceName)} · ${h(c.dbs.join(', '))}</li>`
+        ).join('') || `<li>${az('无连接', 'No connections')}</li>`
+      }</ul></div>`;
+    }
+  }
   const footer = `${ab(az('取消', 'Cancel'), 'close')}<span class="spacer"></span>${
     ap.step === 'instances'
       ? ab(
@@ -399,11 +447,13 @@ function archeryWizard() {
         'preview',
         'class="primary"',
       )
-      : `${ab(az('返回修改', 'Back to edit'), 'back')} ${
+      : `${authExampleState === 'archery-save-unknown' ? ab(az('核对结果', 'Review result'), 'reconcile-save') : ''} ${
+        ab(az('返回修改', 'Back to edit'), 'back')
+      } ${
         ab(
           az('保存全部连接', 'Save all connections'),
           'save',
-          'class="primary"',
+          authExampleState === 'archery-save-unknown' ? 'class="primary" disabled' : 'class="primary"',
         )
       }`
   }`;
@@ -414,7 +464,7 @@ function archeryWizard() {
   );
 }
 function archeryDialogs() {
-  if (serverForm) {
+  if (serverForm && !authStage) {
     const f = serverForm,
       https = f.url.toLowerCase().startsWith('https://');
     const input = (key, label, type = 'text', readonly = false) => {
@@ -434,15 +484,19 @@ function archeryDialogs() {
     }</p><div class="fields">${input('name', az('服务器名称', 'Server name'))}${
       input('url', az('服务器地址', 'Server URL'), 'url', f.editing)
     }${input('username', az('用户名', 'Username'), 'text', f.editing)}${
-      input(
-        'password',
-        az('密码（留空不更改）', 'Password (leave blank to keep)'),
-        'password',
-      )
+      f.editing ? '' : input('password', az('密码', 'Password'), 'password')
     }</div>
-          <label><input type="checkbox" data-save-password ${f.savePassword ? 'checked' : ''}> ${
+          ${f.editing ? ab(az('重新登录或修改密码', 'Sign in again or change password'), 'server-reauth') : ''}
+          <label class="connection-switch"><span>${
       az('保存密码', 'Save password')
-    }</label>
+    }</span><input type="checkbox" role="switch" data-save-password ${f.savePassword ? 'checked' : ''}></label>
+          ${
+      f.editing && f.passwordSaved
+        ? `<label class="connection-switch"><span>${
+          az('清除已保存密码', 'Clear saved password')
+        }</span><input type="checkbox" role="switch" data-clear-password ${f.clearPassword ? 'checked' : ''}></label>`
+        : ''
+    }
           <p class="muted small">${
       az(
         '保存后地址和用户名不可修改；更换账号请新建服务器。运行任务期间不可保存认证修改。',
@@ -463,7 +517,7 @@ function archeryDialogs() {
         }</p>`
         : ''
     }
-          <details><summary aria-disabled="${!https}">${az('CA 证书', 'CA certificate')} · ${
+          <details><summary data-ca-summary aria-disabled="${!https}">${az('CA 证书', 'CA certificate')} · ${
       https
         ? (f.ca
           ? h(f.ca.split('/').pop())
@@ -504,13 +558,17 @@ function archeryDialogs() {
       f.totpMode === 'automatic' && (!f.totp || f.clearTotp)
         ? ' <span style="color:var(--danger,red)">*</span>'
         : ''
-    }<input data-server-field="totpInput" type="password" value="" autocomplete="off" ${
+    }<input data-server-field="totpInput" type="password" value="${h(f.totpInput || '')}" autocomplete="off" ${
       f.totpMode === 'automatic'
         ? ((!f.totp || f.clearTotp) ? 'required aria-required="true"' : '')
         : 'disabled'
-    }></label><label><input data-server-clear type="checkbox" ${f.clearTotp ? 'checked' : ''}> ${
+    }></label><label class="connection-switch"><span>${
+      az('保存 TOTP 种子', 'Save TOTP seed')
+    }</span><input data-save-totp type="checkbox" role="switch" ${
+      f.saveTotp ? 'checked' : ''
+    }></label><label class="connection-switch"><span>${
       az('清除已保存种子', 'Clear saved seed')
-    }</label></details>
+    }</span><input data-server-clear type="checkbox" role="switch" ${f.clearTotp ? 'checked' : ''}></label></details>
           <p class="muted small">${
       az(
         '密码与种子分别保存在系统凭据库；不可用时仅保留在 Engine 会话。此示例仅展示状态，不保存或生成验证码。',
@@ -550,33 +608,84 @@ function archeryDialogs() {
     );
   }
   if (serverDelete) {
-    const s = servers.find(item => item.id === serverDelete),
-      linked = archeryConnections.filter(c => c.server === serverDelete);
+    const s = serverDeleteSnapshot?.server,
+      linked = serverDeleteSnapshot?.connections || [];
+    const deleting = authExampleState === 'archery-delete-busy';
+    const deleteFailed = authExampleState === 'archery-delete-failed';
+    const deleteUnknown = authExampleState === 'archery-delete-unknown';
     if (!s) return '';
     return modal(
       az('删除服务器', 'Delete server'),
-      `<p>${h(s.name)} · ${h(s.url)} · ${h(s.username)}</p><p>${az('关联连接', 'Associated connections')}: ${
+      `<p class="archery-note">${
+        az('交互示例：不会发送删除请求。', 'Interactive example: no deletion request is sent.')
+      }</p><p>${h(s.name)} · ${h(s.url)} · ${h(s.username)}</p><p>${az('关联连接', 'Associated connections')}: ${
         linked.map(c => h(c.name)).join(', ') || '—'
       }</p><p>${
         az(
           '仅删除本地配置，不删除远端数据；历史保留。运行任务、草稿或其他占用会阻止删除。',
           'Deletes local configuration only, not remote data; history is retained. Running tasks, drafts or other use block deletion.',
         )
-      }</p>`,
-      `${ab(az('取消', 'Cancel'), 'server-delete-cancel')} <span class="spacer"></span>${
+      }</p>${
+        deleting
+          ? `<p role="status">${
+            az(
+              '删除中（状态示例）；停止等待不会取消远端操作。',
+              'Deleting (example state); stopping the wait does not cancel a remote operation.',
+            )
+          }</p>`
+          : ''
+      }${
+        deleteFailed
+          ? `<p role="alert">${
+            az(
+              '删除失败（状态示例）；目标保留，可重新核对。',
+              'Deletion failed (example state); the target is retained for review.',
+            )
+          }</p>`
+          : ''
+      }${
+        deleteUnknown
+          ? `<p role="status">${
+            az(
+              '删除结果未知；请重新核对服务器与连接，勿自动重试。',
+              'Deletion outcome unknown; recheck the server and connections before retrying.',
+            )
+          }</p>`
+          : ''
+      }${
+        deleteUnknown && recoveryReviewed
+          ? `<p role="status">${
+            az(
+              `本地示例中服务器${
+                servers.some(item => item.id === serverDelete) ? '仍存在' : '不存在'
+              }；未读取远端或确认删除结果。`,
+              `The server ${
+                servers.some(item => item.id === serverDelete) ? 'is present' : 'is absent'
+              } in the local example; no remote deletion result was read or confirmed.`,
+            )
+          }</p>`
+          : ''
+      }`,
+      `${ab(az(deleting ? '停止等待' : '取消', deleting ? 'Stop waiting' : 'Cancel'), 'server-delete-cancel')} ${
+        deleteUnknown ? ab(az('核对结果', 'Review result'), 'reconcile-delete') : ''
+      } <span class="spacer"></span>${
         ab(
           az(
             `删除服务器及 ${linked.length} 个连接`,
             `Delete server and ${linked.length} connections`,
           ),
           'server-delete-confirm',
-          'class="primary server-danger"',
+          deleting || deleteUnknown ? 'class="primary server-danger" disabled' : 'class="primary server-danger"',
         )
       }`,
     );
   }
   if (authStage) {
-    const s = servers.find(item => item.id === serverId);
+    const s = serverForm || servers.find(item => item.id === serverId);
+    const authBusy = authExampleState === 'archery-auth-busy';
+    const authObserve = authExampleState === 'archery-auth-observe';
+    const authFailed = authExampleState === 'archery-auth-failed';
+    const authUnknown = authExampleState === 'archery-auth-unknown';
     return modal(
       az('服务器认证', 'Server authentication'),
       `<p>${h(s?.name || '')} · ${h(s?.username || '')}</p><p class="archery-note">${
@@ -584,7 +693,52 @@ function archeryDialogs() {
           '独立认证示例；不会发送请求或保存凭据。',
           'Independent authentication example; no request or credentials are saved.',
         )
-      }</p><label>${
+      }</p>${
+        authBusy
+          ? `<p role="status">${
+            az(
+              '认证中（状态示例）；停止等待不会取消远端操作。',
+              'Authenticating (example state); stopping the wait does not cancel a remote operation.',
+            )
+          }</p>`
+          : ''
+      }${
+        authObserve
+          ? `<p role="status">${
+            az(
+              '其他窗口正在处理认证；此处只能观察。',
+              'Authentication is controlled by another window; this window can only observe.',
+            )
+          }</p>`
+          : ''
+      }${
+        authUnknown
+          ? `<p role="status">${
+            az(
+              '已停止等待，远端状态未知；请重新核对认证状态。',
+              'Stopped waiting; the remote state is unknown. Recheck authentication status.',
+            )
+          }</p>`
+          : ''
+      }${
+        authUnknown && recoveryReviewed
+          ? `<p role="status">${
+            az(
+              '本地示例无法读取或确认远端认证状态；未发送请求，可返回后人工核对。',
+              'The local example cannot read or confirm remote authentication status; no request was sent. Return and check it separately.',
+            )
+          }</p>`
+          : ''
+      }${
+        authFailed
+          ? `<p role="alert">${
+            az(
+              '认证失败（状态示例）；输入保留，可重试。',
+              'Authentication failed (example state); input is retained and can be retried.',
+            )
+          }</p>`
+          : ''
+      }<label>${
         authStage === 'password'
           ? az('密码', 'Password')
           : az('验证码', 'Verification code')
@@ -592,13 +746,16 @@ function archeryDialogs() {
         authStage === 'password' ? 'password' : 'text'
       }" data-auth-input required aria-required="true" autocomplete="${
         authStage === 'password' ? 'off' : 'one-time-code'
-      }" autofocus></label>`,
-      `${ab(az('取消', 'Cancel'), 'auth-cancel')} ${
+      }" ${authBusy || authObserve || authUnknown ? 'disabled' : ''} autofocus></label>`,
+      `${ab(az(authBusy ? '停止等待' : '取消', authBusy ? 'Stop waiting' : 'Cancel'), 'auth-cancel')} ${
+        authUnknown ? ab(az('核对认证状态', 'Review authentication status'), 'reconcile-auth') : ''
+      } ${
         ab(
           authStage === 'password'
             ? az('继续', 'Continue')
             : az('验证', 'Verify'),
           'auth-next',
+          authBusy || authObserve || authUnknown ? 'class="primary" disabled' : 'class="primary"',
         )
       }`,
     );

@@ -57,6 +57,21 @@ fn redis_edit_dialog_preserves_multiline_values_and_member_controls() {
 }
 
 #[test]
+fn redis_import_uses_connection_permission_without_selected_key() {
+    let mut app = App::new("redis-empty-import".into());
+    app.profile_form(None);
+    app.field_set("provider", "redis");
+    app.field_set("access", "read_write");
+    app.profile = Some(app.form_profile().unwrap());
+    app.session = Some(json!({"session_id":uuid::Uuid::new_v4()}));
+    assert!(app.target.is_none());
+    assert!(app.edit_token.is_none());
+    assert!(import_writable(&app));
+    app.profile.as_mut().unwrap().access_mode = datapier_core::model::AccessMode::ReadOnly;
+    assert!(!import_writable(&app));
+}
+
+#[test]
 fn schema_view_preserves_comments_and_empty_values() {
     let mut app = App::new("test".into());
     let comment = "字段\n第二行 {value} 和中文";
@@ -87,7 +102,45 @@ fn schema_view_preserves_comments_and_empty_values() {
 }
 
 #[test]
-fn tree_pages_preserve_all_visible_keys_without_unbounded_views() {
+fn limited_scan_is_not_shown_as_complete_or_empty_match() {
+    fn texts(node: &Node<Msg>, out: &mut Vec<String>) {
+        if let Some(text) = node.props().get("text").and_then(Value::as_str) {
+            out.push(text.to_owned());
+        }
+        for child in node.child_nodes() {
+            texts(child, out);
+        }
+    }
+    let (backend, _, _) = crate::backend::Backend::scripted();
+    let mut app = App::new("redis-limited".into());
+    app.profile_form(None);
+    app.field_set("provider", "redis");
+    app.profile = Some(app.form_profile().unwrap());
+    app.response(
+        crate::backend::Response {
+            tag: "resource.list".into(),
+            result: Ok(json!({
+                "resources":[], "cursor":null, "complete":false, "resource_limited":true
+            })),
+        },
+        &backend,
+    );
+    let view = View::new().main(vec![redis_browser(&app)]);
+    let mut actual = Vec::new();
+    texts(view.regions()[0].unwrap(), &mut actual);
+    let limited = crate::i18n::tr("扫描受内存限制，结果不完整");
+    assert!(actual.iter().any(|text| text.contains(limited.as_ref())));
+    assert!(
+        !actual
+            .iter()
+            .any(|text| text == crate::i18n::tr("没有匹配的 key").as_ref())
+    );
+    assert!(!app.workbench.query_ui.redis_scan_complete);
+    assert!(app.workbench.query_ui.redis_scan_limited);
+}
+
+#[test]
+fn tree_shows_all_loaded_keys() {
     let mut app = App::new("test".into());
     app.workbench.tree = true;
     app.resources = (0..450)
@@ -108,20 +161,11 @@ fn tree_pages_preserve_all_visible_keys_without_unbounded_views() {
             labels(child, output);
         }
     }
-    let (backend, _, _) = crate::backend::Backend::scripted();
-    for page in 0..3 {
-        let view = View::new().main(vec![redis_browser(&app)]);
-        let mut actual = Vec::new();
-        labels(view.regions()[0].unwrap(), &mut actual);
-        let start = page * workbench::KEY_PAGE_SIZE;
-        let end = (start + workbench::KEY_PAGE_SIZE).min(450);
-        let expected: Vec<_> = (start..end)
-            .map(|index| format!("flat{index:03}"))
-            .collect();
-        assert_eq!(actual, expected);
-        app.workbench_action("keys-next", &backend);
-    }
-    assert_eq!(app.workbench.key_page, 2);
+    let view = View::new().main(vec![redis_browser(&app)]);
+    let mut actual = Vec::new();
+    labels(view.regions()[0].unwrap(), &mut actual);
+    let expected: Vec<_> = (0..450).map(|index| format!("flat{index:03}")).collect();
+    assert_eq!(actual, expected);
 }
 
 #[test]

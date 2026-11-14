@@ -92,6 +92,11 @@ pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         );
     if app.field("provider") == "mysql" {
         form = form.child(field(app, "database", "默认数据库"));
+        form = form.child(field(
+            app,
+            "mysql_timezone",
+            "时区（SYSTEM、±HH:MM 或时区名称；留空使用服务端默认）",
+        ));
         let state = &app.navigation.form;
         let mut databases = html::div().class("profile-databases").child(
             html::div()
@@ -174,37 +179,69 @@ pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         form = form.child(field(
             app,
             "redis_databases_override",
-            "Redis DB 数量覆盖（留空为自动探测）",
+            "Redis DB 数量覆盖（1–4294967295；留空为自动探测）",
         ));
     }
     let read_only = app.field("access") == "read_only";
-    form = form
-        .child(
-            ui::switch(crate::i18n::tr("以只读模式连接").into_owned())
-                .on(read_only)
-                .disabled(app.connection_form_busy())
-                .on_change(|change| {
-                    Msg::Action(if change.value.as_bool().unwrap_or(false) {
-                        "field:access:read_only".into()
-                    } else {
-                        "field:access:read_write".into()
-                    })
-                }),
-        )
-        .child(
-            html::button(
-                crate::i18n::tr(if app.workbench.profile_tls_details {
-                    "▾ TLS 与证书"
+    form = form.child(
+        ui::switch(crate::i18n::tr("以只读模式连接").into_owned())
+            .on(read_only)
+            .disabled(app.connection_form_busy())
+            .on_change(|change| {
+                Msg::Action(if change.value.as_bool().unwrap_or(false) {
+                    "field:access:read_only".into()
                 } else {
-                    "▸ TLS 与证书"
+                    "field:access:read_write".into()
                 })
-                .into_owned(),
-            )
+            }),
+    );
+    if app.field("provider") == "mysql" {
+        form = form.child(
+            html::button(format!(
+                "{} {}",
+                if app.workbench.profile_timeout_details {
+                    "▾"
+                } else {
+                    "▸"
+                },
+                crate::i18n::tr("超时设置")
+            ))
             .class("tls-disclosure")
-            .attr("aria-expanded", app.workbench.profile_tls_details)
-            .attr("disabled", app.connection_form_busy())
-            .on_click(Msg::Action("profile-tls-toggle".into())),
+            .attr("aria-expanded", app.workbench.profile_timeout_details)
+            .disabled(app.connection_form_busy())
+            .on_click(Msg::Action("profile-timeouts-toggle".into())),
         );
+        if app.workbench.profile_timeout_details {
+            form = form.child(
+                html::div()
+                    .class("form-grid")
+                    .child(field(
+                        app,
+                        "mysql_connect_timeout_seconds",
+                        "连接超时秒数（1–86400；留空继承全局设置）",
+                    ))
+                    .child(field(
+                        app,
+                        "mysql_query_timeout_seconds",
+                        "执行超时秒数（1–86400；留空继承全局设置）",
+                    )),
+            );
+        }
+    }
+    form = form.child(
+        html::button(
+            crate::i18n::tr(if app.workbench.profile_tls_details {
+                "▾ TLS 与证书"
+            } else {
+                "▸ TLS 与证书"
+            })
+            .into_owned(),
+        )
+        .class("tls-disclosure")
+        .attr("aria-expanded", app.workbench.profile_tls_details)
+        .attr("disabled", app.connection_form_busy())
+        .on_click(Msg::Action("profile-tls-toggle".into())),
+    );
     if app.workbench.profile_tls_details {
         form = form.child(
             html::div().class("readonly-toggle").child(

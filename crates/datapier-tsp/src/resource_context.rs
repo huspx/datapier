@@ -8,41 +8,18 @@ impl App {
             return;
         };
         self.close_result_info(false);
-        if self.tabs.is_empty() {
-            self.action("new-tab", backend);
-        }
         if let Some(index) = self.tabs.iter().enumerate().find_map(|(index, tab)| {
             let session = if index == self.active {
                 &self.session
             } else {
                 &tab.runtime.session
             };
-            let has_cli_history = if index == self.active {
-                !self.workbench.cli_history.is_empty()
-            } else {
-                !tab.runtime.workbench.cli_history.is_empty()
-            };
-            (tab.profile_id == Some(profile.id) && (session.is_some() || has_cli_history))
-                .then_some(index)
+            (tab.profile_id == Some(profile.id) && session.is_some()).then_some(index)
         }) {
             self.select_tab(index);
-            if self.active == index && self.session_id().is_none() {
-                self.action("open", backend);
-            }
             return;
         }
-        if self.session.is_some()
-            || self.has_live_drafts()
-            || self.operation_pending
-            || self.task.is_some()
-            || (self.tabs[self.active].profile_id != Some(profile.id)
-                && (self.target.is_some()
-                    || !self.tabs[self.active].query.text.is_empty()
-                    || !self.tabs[self.active].cli_query.text.is_empty()
-                    || !self.workbench.cli_history.is_empty()))
-        {
-            self.action("new-tab", backend);
-        }
+        self.create_query_tab();
         if self.tabs[self.active].profile_id != Some(profile.id) {
             self.resources.clear();
             self.workbench.redis_tree.reset(&[]);

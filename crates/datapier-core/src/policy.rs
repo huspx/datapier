@@ -740,7 +740,7 @@ pub fn analyze_view_ddl(text: &str, context: &SqlContext) -> Result<SqlAccess> {
             read_databases: BTreeSet::new(),
             write_databases: BTreeSet::new(),
             objects: Vec::new(),
-            replayable: false,
+            replayable: true,
             dangerous: false,
             change_database: None,
             transaction_actions: Vec::new(),
