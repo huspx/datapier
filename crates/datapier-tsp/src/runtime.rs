@@ -164,6 +164,59 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         // Engine 事件只是提示，定期查询每个 tab 的当前任务以补偿遗漏事件。
         if app.last_poll.elapsed() >= Duration::from_millis(700) {
             app.last_poll = Instant::now();
+            let active = app.active;
+            for index in 0..app.tabs.len() {
+                let status = (index != active).then(|| app.status.clone());
+                app.switch_tab(index);
+                if app.workbench.transfer.cleanup_wait && app.workbench.transfer.pending.is_none() {
+                    app.transfer_action("transfer-ui-cleanup-poll", &backend);
+                }
+                if app.workbench.transfer.pending.is_none()
+                    && app
+                        .workbench
+                        .transfer
+                        .plan
+                        .as_ref()
+                        .and_then(|p| p.get("state"))
+                        .and_then(Value::as_str)
+                        == Some("preparing")
+                {
+                    app.transfer_action("transfer-ui-refresh-plan", &backend);
+                }
+                if app.workbench.transfer.pending.is_none()
+                    && app
+                        .workbench
+                        .transfer
+                        .plan
+                        .as_ref()
+                        .is_some_and(|plan| plan["state"] == "ready" && plan.get("spec").is_none())
+                {
+                    if app.workbench.transfer.plan_section != "spec" {
+                        app.transfer_action("transfer-ui-section:spec", &backend);
+                    } else {
+                        app.transfer_action("transfer-ui-page-read", &backend);
+                    }
+                } else if app.workbench.transfer.pending.is_none()
+                    && app.workbench.transfer.chunk_offset > 0
+                {
+                    app.transfer_action("transfer-ui-page-read", &backend);
+                }
+                if app.workbench.transfer.pending.is_none()
+                    && app.workbench.transfer.run.as_ref().is_some_and(|run| {
+                        run.get("run_id").or_else(|| run.get("id")).is_some()
+                            && matches!(
+                                run.get("state").and_then(Value::as_str),
+                                None | Some("queued") | Some("running") | Some("cancelling")
+                            )
+                    })
+                {
+                    app.transfer_action("transfer-ui-refresh-run", &backend);
+                }
+                if let Some(status) = status {
+                    app.status = status;
+                }
+            }
+            app.switch_tab(active);
             for (index, tab) in app.tabs.iter().enumerate() {
                 let (task, generation) = if index == app.active {
                     (&app.task, app.generation)
@@ -374,6 +427,9 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         }
                     }
                     Msg::Focus(name) => {
+                        let Some(name) = app.resolve_project_editor(name) else {
+                            continue;
+                        };
                         if app.modal_allows_field(&name) {
                             app.focus = name;
                             if app.focus == "cli_height" {
@@ -571,6 +627,8 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             "right" => Some(Navigation::Right),
                             "home" => Some(Navigation::Home),
                             "end" => Some(Navigation::End),
+                            "tab" if key.shift => Some(Navigation::BackTab),
+                            "tab" => Some(Navigation::Tab),
                             _ => None,
                         };
                         if let Some(nav) = nav {

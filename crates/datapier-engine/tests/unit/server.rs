@@ -25,6 +25,9 @@ pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
         archery: Default::default(),
         editing: Default::default(),
         workspace_uploads: Default::default(),
+        projects: Default::default(),
+        transfers: Default::default(),
+        operations: Default::default(),
     };
     (
         Arc::new(Engine {
@@ -39,12 +42,16 @@ pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
 
 #[path = "server/lifecycle.rs"]
 mod lifecycle;
+#[path = "server/project_queries.rs"]
+mod project_queries;
 #[path = "server/redis.rs"]
 mod redis;
 #[path = "server/results.rs"]
 mod results;
 #[path = "server/sessions.rs"]
 mod sessions;
+#[path = "server/transfer_file_retry.rs"]
+mod transfer_file_retry;
 
 #[path = "archery.rs"]
 mod archery_tests;
@@ -92,4 +99,150 @@ async fn redis_partial_failure_preserves_item_details() {
     engine.store.pool.close().await;
     drop(engine);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn input_index_task_guards_claim_and_file_identity() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    let claimant = Uuid::new_v4();
+    assert!(engine.register(owner));
+    assert!(engine.register(claimant));
+    let task = engine
+        .store
+        .create_task(owner, "test", "transfer.prepare", json!({}), false)
+        .await
+        .unwrap();
+    let path = root.join("index.json");
+    std::fs::write(&path, b"initial").unwrap();
+    let baseline = datapier_core::execution::data_files::output_snapshot(&path, true).unwrap();
+    let identity = json!({"task_id":task.id,"path":baseline.canonical_path,"canonical_path":baseline.canonical_path,"file_id":baseline.file_id,"size":baseline.size,"sha256":baseline.sha256,"export_name":"sql-input-index.json","media_type":"application/json"});
+    let id = engine
+        .store
+        .transfer_register_artifact(owner, None, "input_index", &identity)
+        .await
+        .unwrap();
+    engine.state.lock().unwrap().tasks.insert(
+        task.id,
+        Running {
+            owner,
+            session_id: Uuid::nil(),
+            cancel: CancellationToken::new(),
+            transition: Arc::new(AsyncMutex::new(())),
+            abort: None,
+            started: None,
+        },
+    );
+    let args = json!({"id":id,"revision":1});
+    assert_eq!(
+        engine
+            .project_rpc(owner, "transfer.artifact.cleanup", args.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "busy"
+    );
+    engine.disconnect(owner).await;
+    assert_eq!(
+        engine
+            .project_rpc(claimant, "transfer.artifact.claim", args.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "busy"
+    );
+    assert_eq!(
+        engine
+            .project_rpc(claimant, "transfer.artifact.get", args.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "busy"
+    );
+    engine.state.lock().unwrap().tasks.remove(&task.id);
+    std::fs::write(&path, b"grown index").unwrap();
+    let observed = engine
+        .project_rpc(claimant, "transfer.artifact.get", args.clone())
+        .await
+        .unwrap();
+    assert_eq!(observed["requires_partial_confirmation"], true);
+    assert_eq!(
+        engine
+            .project_rpc(claimant, "transfer.artifact.claim", args.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "confirmation_required"
+    );
+    let claimed = engine.project_rpc(claimant, "transfer.artifact.claim", json!({"id":id,"revision":1,"confirm_partial_sha256":observed["observed_identity"]["sha256"]})).await.unwrap();
+    assert_eq!(claimed["artifact"]["state"], "cleanup_pending");
+    assert_eq!(
+        claimed["artifact"]["identity"]["task_id"],
+        task.id.to_string()
+    );
+    let revision = claimed["artifact"]["revision"].as_u64().unwrap();
+    let export = root.join("export.json");
+    engine
+        .project_rpc(
+            claimant,
+            "transfer.artifact.export",
+            json!({"id":id,"revision":revision,"path":export}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(export).unwrap(), b"grown index");
+    let original = root.join("original.json");
+    std::fs::rename(&path, &original).unwrap();
+    std::fs::write(&path, b"grown index").unwrap();
+    assert_eq!(
+        engine
+            .project_rpc(
+                claimant,
+                "transfer.artifact.cleanup",
+                json!({"id":id,"revision":revision})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "recovery_conflict"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"grown index");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(original, &path).unwrap();
+    let revision = engine.store.transfer_artifact(id).await.unwrap().revision;
+    engine
+        .project_rpc(
+            claimant,
+            "transfer.artifact.cleanup",
+            json!({"id":id,"revision":revision}),
+        )
+        .await
+        .unwrap();
+    assert!(!path.exists());
+    let ready_path = root.join("ready-index.json");
+    std::fs::write(&ready_path, b"ready index").unwrap();
+    let snapshot =
+        datapier_core::execution::data_files::output_snapshot(&ready_path, true).unwrap();
+    let ready_identity = json!({"task_id":task.id,"path":snapshot.canonical_path,"canonical_path":snapshot.canonical_path,"file_id":snapshot.file_id,"size":snapshot.size,"sha256":snapshot.sha256,"export_name":"sql-input-index.json","media_type":"application/json"});
+    let ready = engine
+        .store
+        .transfer_register_artifact(claimant, None, "input_index", &ready_identity)
+        .await
+        .unwrap();
+    let ready_revision = engine
+        .store
+        .transfer_update_artifact(ready, claimant, Some(1), "ready", None)
+        .await
+        .unwrap();
+    engine
+        .project_rpc(
+            claimant,
+            "transfer.artifact.cleanup",
+            json!({"id":ready,"revision":ready_revision}),
+        )
+        .await
+        .unwrap();
+    assert!(!ready_path.exists());
+    engine.store.pool.close().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
 }

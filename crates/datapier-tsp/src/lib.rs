@@ -20,6 +20,8 @@ mod i18n;
 mod input;
 mod menus;
 mod navigation;
+mod project_layout;
+mod project_workbench;
 mod query_ui;
 mod redis_key_selection;
 mod redis_rows;
@@ -33,6 +35,7 @@ mod resource_context;
 mod response;
 mod runtime;
 mod tabs;
+mod transfer_workbench;
 mod values;
 mod views;
 mod workbench;
@@ -135,6 +138,10 @@ struct Tab {
     #[serde(default)]
     layout: Vec<grid::ColumnSetting>,
     #[serde(default)]
+    project_query: Option<project_layout::ProjectQueryIdentity>,
+    #[serde(default)]
+    project_columns: Option<Vec<String>>,
+    #[serde(default)]
     browse: BrowseSettings,
     #[serde(default)]
     schema_draft: Option<advanced::schema::SchemaDraft>,
@@ -142,6 +149,8 @@ struct Tab {
     replace_draft: Option<Value>,
     #[serde(default)]
     pending: Value,
+    #[serde(default)]
+    workbench_draft: Value,
     #[serde(skip)]
     pending_live: bool,
     #[serde(skip)]
@@ -237,6 +246,8 @@ struct Workspace {
     navigation_expanded: bool,
     #[serde(default)]
     empty_context: Option<EmptyConnectionContext>,
+    #[serde(default)]
+    project_splits: Vec<Vec<Uuid>>,
 }
 
 fn expanded_by_default() -> bool {
@@ -267,6 +278,7 @@ struct App {
     dirty: bool,
     tabs: Vec<Tab>,
     active: usize,
+    project_layout: project_layout::ProjectLayoutState,
     fields: BTreeMap<String, Editor>,
     focus: String,
     profiles: Vec<Profile>,

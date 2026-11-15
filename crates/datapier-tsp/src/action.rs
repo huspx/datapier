@@ -24,6 +24,9 @@ impl App {
         if self.modal_close_action(name, backend) {
             return;
         }
+        if self.project_layout_action(name, backend) {
+            return;
+        }
         for (prefix, action) in [
             ("column-select-hide:", "column-hide"),
             ("column-select-freeze:", "column-freeze"),
@@ -270,6 +273,25 @@ impl App {
             return;
         }
         if self.approval_action(name, backend) {
+            return;
+        }
+        if self.transfer_action(name, backend) || self.project_action(name, backend) {
+            return;
+        }
+        if name == "overlay:result-export" {
+            self.workbench_action("overlay:export", backend);
+            return;
+        }
+        if matches!(name, "overlay:import" | "overlay:export")
+            && !self.profile.as_ref().is_some_and(|p| p.is_archery())
+            && !self.workbench.cli_export
+        {
+            let mode = if name == "overlay:import" {
+                "import"
+            } else {
+                "export"
+            };
+            self.transfer_action(&format!("transfer-new:{mode}"), backend);
             return;
         }
         if self.empty_context_action(name, backend) {
@@ -640,7 +662,7 @@ impl App {
                     json!({"path":self.field("path"),"text":self.tabs[self.active].query.text}),
                 );
             }
-            "preview-import" | "import" | "export" => {
+            "export" => {
                 if let Some(s) = session {
                     if self.field("path").trim().is_empty() {
                         self.field_error("path", i18n::UiMessage::key("请填写路径"));
@@ -718,45 +740,28 @@ impl App {
                     } else {
                         self.result_id.clone()
                     };
-                    if name == "export" && archery && result_id.is_none() {
+                    if archery && result_id.is_none() {
                         self.status = i18n::UiMessage::key("请先选择导入或导出目标");
                         return;
                     }
-                    if params.get("target").is_none() && (name != "export" || result_id.is_none()) {
+                    if params.get("target").is_none() && result_id.is_none() {
                         self.status = i18n::UiMessage::key("请先选择导入或导出目标");
                         return;
                     }
-                    if name == "export" {
-                        let direct_redis_key = self.is_redis()
-                            && !archery
-                            && !self.workbench.cli_export
-                            && self.browse_result
-                            && self.target.as_ref().is_some_and(|target| {
-                                matches!(
-                                    target.kind.as_str(),
-                                    "string" | "hash" | "list" | "set" | "zset"
-                                )
-                            });
-                        if let Some(id) = result_id.filter(|_| !direct_redis_key) {
-                            params["result_id"] = json!(id);
-                        }
-                        self.request(backend, "transfer.export", "transfer.export", params);
-                    } else if name == "preview-import" {
-                        let id = Uuid::new_v4();
-                        self.preview = None;
-                        self.preview_pending = Some((id, params.clone()));
-                        self.request(
-                            backend,
-                            &format!("transfer.preview/{id}"),
-                            "transfer.preview",
-                            params,
-                        );
-                    } else if self.preview.as_ref() == Some(&params) {
-                        self.preview = None;
-                        self.request(backend, "transfer.import", "transfer.import", params);
-                    } else {
-                        self.status = "请先预览并确认当前导入设置".into();
+                    let direct_redis_key = self.is_redis()
+                        && !archery
+                        && !self.workbench.cli_export
+                        && self.browse_result
+                        && self.target.as_ref().is_some_and(|target| {
+                            matches!(
+                                target.kind.as_str(),
+                                "string" | "hash" | "list" | "set" | "zset"
+                            )
+                        });
+                    if let Some(id) = result_id.filter(|_| !direct_redis_key) {
+                        params["result_id"] = json!(id);
                     }
+                    self.request(backend, "transfer.export", "transfer.export", params);
                 }
             }
             "undo-grid" => {

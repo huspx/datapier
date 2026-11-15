@@ -375,7 +375,7 @@ pub(super) fn flush_csv(
     Ok(())
 }
 // NULL 使用独立标记；普通值的反斜线加倍，使字面量 `\N` 可以往返。
-fn csv_value(v: &Value) -> Result<String> {
+pub(crate) fn csv_value(v: &Value) -> Result<String> {
     let s = match v {
         Value::Null => return Ok("\\N".into()),
         Value::Missing | Value::Large { .. } => {

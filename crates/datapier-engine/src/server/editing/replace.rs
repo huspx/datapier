@@ -277,6 +277,7 @@ impl Engine {
             .and_then(Value::as_u64)
             .filter(|revision| *revision > 0)
             .ok_or_else(|| AppError::new("internal", "替换计划缺少版本"))?;
+        let operation = self.operation_scope(db, Some(&target)).await?;
         self.store
             .reserve_auxiliary_for_owner(owner, budget_handle, bytes)
             .await?;
@@ -294,6 +295,7 @@ impl Engine {
                 gate: Arc::new(AsyncMutex::new(())),
                 execution: None,
                 touched: Instant::now(),
+                _operation: Some(operation),
             },
         );
         self.emit_editing(owner, "edit_plan.changed", id, revision, "ready");
@@ -315,6 +317,9 @@ impl Engine {
                 .map(|plan| plan.budget_handle)
         };
         if let Some(handle) = handle {
+            if let Some(plan) = self.state.lock().unwrap().editing.replacements.get_mut(&id) {
+                plan._operation.take();
+            }
             self.store.release_auxiliary(handle).await?;
         }
         Ok(())

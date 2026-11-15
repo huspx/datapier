@@ -1,5 +1,5 @@
 use super::*;
-fn supports_field_expiry(info: &str) -> Result<bool> {
+pub(super) fn supports_field_expiry(info: &str) -> Result<bool> {
     let version = info
         .lines()
         .find_map(|line| line.strip_prefix("redis_version:"))
@@ -25,163 +25,86 @@ fn redis_field_expiry_version_support() {
     assert!(supports_field_expiry("unknown").is_err());
 }
 
+use crate::model::transfer::ConflictPolicy;
+
+/// 已验证的导入临时对象身份，可用于崩溃后的显式清理。
+pub struct RedisTemporaryIdentity {
+    args: Vec<Vec<u8>>,
+}
+
+impl RedisTemporaryIdentity {
+    pub fn new(identity: &crate::storage::transfer::ArtifactIdentity) -> Result<Self> {
+        let invalid = || AppError::new("recovery_conflict", "Redis 临时对象登记身份无效");
+        let decode = |value: Option<&str>| -> Result<Vec<u8>> {
+            STANDARD
+                .decode(value.ok_or_else(invalid)?)
+                .map_err(|_| invalid())
+        };
+        let temp = decode(identity.temp_b64.as_deref())?;
+        let marker = decode(identity.marker_b64.as_deref())?;
+        let pending = identity
+            .pending_marker_b64
+            .as_deref()
+            .map(|value| decode(Some(value)))
+            .transpose()?;
+        let valid_marker = |value: &[u8]| {
+            std::str::from_utf8(value)
+                .ok()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .is_some()
+        };
+        let valid_temp = std::str::from_utf8(&temp)
+            .ok()
+            .and_then(|s| s.strip_prefix("__datapier_import_"))
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .is_some();
+        let kind = identity.kind.as_deref().ok_or_else(invalid)?;
+        if !valid_temp
+            || !valid_marker(&marker)
+            || pending.as_deref().is_some_and(|m| !valid_marker(m))
+            || !matches!(kind, "string" | "hash" | "list" | "set" | "zset")
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            args: import_cleanup_args_parts(&temp, kind, &marker, pending.as_deref()),
+        })
+    }
+}
+
 impl RedisSession {
-    pub(super) async fn export_meta(&mut self, p: &Json) -> Result<Json> {
-        let t = target(p, &self.profile)?;
-        let k = key(&t)?;
-        // 用 Redis 服务端时间换算绝对期限，导入时不会因传输时间延长寿命。
-        let script = "local t=redis.call('TYPE',KEYS[1]).ok; local ttl=redis.call('PTTL',KEYS[1]); if ttl==-2 then return {t, false} end; if ttl==-1 then return {t, false} end; local now=redis.call('TIME'); return {t, tostring(now[1]*1000+math.floor(now[2]/1000)+ttl)}";
-        let (kind, expires): (String, Option<String>) = query(
-            self.conn.as_mut().unwrap(),
-            &[
-                b"EVAL".to_vec(),
-                script.as_bytes().to_vec(),
-                b"1".to_vec(),
-                k,
-            ],
-        )
-        .await?;
-        if kind == "none" {
-            return Err(AppError::new("not_found", "key 不存在"));
-        }
-        Ok(json!({"type":kind,"expires_at_ms":expires}))
+    /// 活跃导入持有临时对象时，恢复操作不能接管它。
+    pub fn owns_temporary_artifact(&self, id: Uuid) -> bool {
+        self.imports.values().any(|import| import.artifact_id == id)
     }
-    pub(super) async fn export_read(&mut self, p: &Json) -> Result<Json> {
-        let t = target(p, &self.profile)?;
-        let k = key(&t)?;
-        let kind: String = param(p, "type")?;
-        let position = p.get("cursor").and_then(Json::as_u64).unwrap_or(0);
-        let conn = self.conn.as_mut().unwrap();
-        let actual: String = query(conn, &[b"TYPE".to_vec(), k.clone()]).await?;
-        if actual != kind {
-            return Err(AppError::conflict("导出期间 key 类型发生变化"));
+
+    /// 调用者必须在发送前持久化结果未知的事实；发生 I/O 错误后不能自动重发。
+    pub async fn cleanup_temporary(&mut self, identity: &RedisTemporaryIdentity) -> Result<()> {
+        self.profile.ensure_write()?;
+        let mut cmd = redis::cmd("EVAL");
+        for arg in &identity.args[1..] {
+            cmd.arg(arg);
         }
-        let field_expiry_supported = if kind == "hash" {
-            let info: String = query(conn, &args(&["INFO", "server"])).await?;
-            supports_field_expiry(&info)?
-        } else {
-            false
-        };
-        let (rows, next): (Vec<Vec<Value>>, Option<u64>) = match kind.as_str() {
-            "string" => {
-                let end = position
-                    .checked_add(49151)
-                    .ok_or_else(|| AppError::invalid("Redis 字段偏移无效"))?;
-                let value: Vec<u8> = query(
-                    conn,
-                    &[
-                        b"GETRANGE".to_vec(),
-                        k,
-                        position.to_string().into_bytes(),
-                        end.to_string().into_bytes(),
-                    ],
-                )
-                .await?;
-                let next = if value.len() == 49152 {
-                    Some(position + 49152)
-                } else {
-                    None
-                };
-                (vec![vec![val(value)]], next)
-            }
-            "list" => {
-                let values: Vec<Vec<u8>> = query(
-                    conn,
-                    &[
-                        b"LRANGE".to_vec(),
-                        k,
-                        position.to_string().into_bytes(),
-                        (position + 99).to_string().into_bytes(),
-                    ],
-                )
-                .await?;
-                let count = values.len();
-                let rows = values
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, value)| {
-                        vec![
-                            Value::Integer((position + i as u64).to_string()),
-                            val(value),
-                        ]
-                    })
-                    .collect();
-                (
-                    rows,
-                    if count == 100 {
-                        Some(position + 100)
-                    } else {
-                        None
-                    },
-                )
-            }
-            "hash" | "set" | "zset" => {
-                let cmd = match kind.as_str() {
-                    "hash" => "HSCAN",
-                    "set" => "SSCAN",
-                    _ => "ZSCAN",
-                };
-                let (cursor, values): (u64, Vec<Vec<u8>>) = query(
-                    conn,
-                    &[
-                        cmd.as_bytes().to_vec(),
-                        k.clone(),
-                        position.to_string().into_bytes(),
-                        b"COUNT".to_vec(),
-                        b"100".to_vec(),
-                    ],
-                )
-                .await?;
-                if kind != "set" && values.len() % 2 != 0 {
-                    return Err(AppError::new("database", "无效扫描响应"));
-                }
-                let mut rows = Vec::new();
-                let mut iter = values.into_iter();
-                while let Some(member) = iter.next() {
-                    let mut row = vec![val(member.clone())];
-                    if kind != "set" {
-                        let value = iter.next().unwrap();
-                        row.push(if kind == "hash" {
-                            val(value)
-                        } else {
-                            Value::Float(
-                                String::from_utf8(value)
-                                    .map_err(|e| AppError::new("database", e.to_string()))?,
-                            )
-                        });
-                        if kind == "hash" {
-                            let expiry = if field_expiry_supported {
-                                let expiry: Vec<i64> = query(
-                                    conn,
-                                    &[
-                                        b"HPEXPIRETIME".to_vec(),
-                                        k.clone(),
-                                        b"FIELDS".to_vec(),
-                                        b"1".to_vec(),
-                                        member,
-                                    ],
-                                )
-                                .await?;
-                                *expiry.first().ok_or_else(|| {
-                                    AppError::new("database", "缺少 Hash 字段期限")
-                                })?
-                            } else {
-                                -1
-                            };
-                            if expiry < -1 {
-                                return Err(AppError::conflict("导出期间 Hash 字段消失"));
-                            }
-                            row.push(Value::Integer(expiry.to_string()));
-                        }
-                    }
-                    rows.push(row);
-                }
-                (rows, if cursor == 0 { None } else { Some(cursor) })
-            }
-            _ => return Err(AppError::invalid("不支持的 Redis 类型")),
-        };
-        Ok(json!({"rows":rows,"next":next}))
+        let result: i64 = cmd
+            .query_async(
+                self.conn
+                    .as_mut()
+                    .ok_or_else(|| AppError::new("disconnected", "Redis 连接已关闭"))?,
+            )
+            .await
+            .map_err(error_unknown)?;
+        match result {
+            0 | 1 => Ok(()),
+            -1 => Err(AppError::new(
+                "recovery_conflict",
+                "Redis 临时对象归属不匹配",
+            )),
+            _ => Err(AppError::new("database", "无效的 Redis 清理响应")),
+        }
     }
+}
+
+impl RedisSession {
     pub(super) async fn import_begin(&mut self, p: &Json, sink: &ExecutionSink) -> Result<Json> {
         self.profile.ensure_write()?;
         let t = target(p, &self.profile)?;
@@ -198,23 +121,31 @@ impl RedisSession {
             ),
             _ => return Err(AppError::invalid("无效过期时间")),
         };
-        let exists: i64 = query(
-            self.conn.as_mut().unwrap(),
-            &[b"EXISTS".to_vec(), k.clone()],
-        )
-        .await?;
-        if exists != 0 {
-            let (sec, micro): (i64, i64) =
-                query(self.conn.as_mut().unwrap(), &args(&["TIME"])).await?;
-            if expires.is_none_or(|e| e > sec * 1000 + micro / 1000) {
-                return Err(AppError::conflict("目标 key 已存在"));
-            }
-        }
+        let conflict: ConflictPolicy = match p.get("conflict_policy") {
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|e| AppError::invalid(e.to_string()))?,
+            None => ConflictPolicy::Insert,
+        };
+        // WATCH 必须占有独立物理连接，直至最终 EXEC 或丢弃。
+        let mut watch_conn =
+            connect_database(&self.client, &self.profile, self.secret.as_deref()).await?;
+        let _: String = query(&mut watch_conn, &[b"WATCH".to_vec(), k.clone()]).await?;
+        let _: i64 = query(&mut watch_conn, &[b"EXISTS".to_vec(), k.clone()]).await?;
         let id = Uuid::new_v4();
         let temp = format!("__datapier_import_{id}").into_bytes();
         // 标记保存在临时对象本身，避免单独的所有权 key 在对象被替换后仍然有效。
         let marker = Uuid::new_v4().to_string().into_bytes();
         // 在发送创建请求前记账：响应丢失时 close 仍可按标记清理。
+        let artifact_id = sink
+            .register_transfer_artifact(
+                "redis_temporary",
+                json!({
+                    "profile_id": self.profile.id, "redis_db": self.profile.redis_db(),
+                    "temp_b64": STANDARD.encode(&temp), "marker_b64": STANDARD.encode(&marker),
+                    "pending_marker_b64": null, "kind": kind,
+                }),
+            )
+            .await?;
         self.imports.insert(
             id,
             Import {
@@ -227,6 +158,9 @@ impl RedisSession {
                 wrote: false,
                 valid: false,
                 count: 0,
+                watch_conn,
+                conflict,
+                artifact_id,
             },
         );
         let script = r#"
@@ -255,10 +189,14 @@ return 1
         .await?;
         if created == 0 {
             self.imports.remove(&id);
+            sink.finish_transfer_artifact(artifact_id, "cleaned")
+                .await?;
             return Err(AppError::conflict("临时 key 已存在"));
         }
         self.imports.get_mut(&id).unwrap().valid = true;
-        Ok(json!({"token":id}))
+        Ok(
+            json!({"token":id,"temporary_key_b64":STANDARD.encode(&self.imports[&id].temp),"marker_b64":STANDARD.encode(&self.imports[&id].marker),"type":self.imports[&id].kind}),
+        )
     }
     pub(super) async fn import_append(&mut self, p: &Json, sink: &ExecutionSink) -> Result<Json> {
         self.profile.ensure_write()?;
@@ -310,6 +248,20 @@ return 1
             };
             commands.push(cmd);
         }
+        let mut batch_bytes = 0usize;
+        for command in &commands {
+            for value in command.iter().skip(2) {
+                if value.len() > crate::model::transfer::MAX_VALUE_BYTES {
+                    return Err(AppError::invalid("Redis 单值超过迁移限制"));
+                }
+                batch_bytes = batch_bytes
+                    .checked_add(value.len())
+                    .ok_or_else(|| AppError::invalid("Redis 批次过大"))?;
+            }
+        }
+        if commands.len() > 1 && batch_bytes > crate::model::transfer::MAX_BATCH_BYTES {
+            return Err(AppError::invalid("Redis 批次超过字节限制"));
+        }
         let script = format!(
             r#"{IMPORT_OWNED}
 if not owned(ARGV[2]) then return redis.error_reply('temporary key invalid') end
@@ -333,6 +285,9 @@ elseif k == 'hash' then
     r = redis.pcall(unpack(ARGV, 4, #ARGV - 1))
     if not (type(r) == 'table' and r.err) and ARGV[#ARGV] ~= '-1' then
         r = redis.pcall('HPEXPIREAT', KEYS[1], ARGV[#ARGV], 'FIELDS', 1, ARGV[6])
+        if type(r) == 'table' and not r.err and r[1] ~= 1 then
+            r = {{err = 'hash field expired during import'}}
+        end
     end
 else r = redis.pcall(unpack(ARGV, 4)) end
 if type(r) == 'table' and r.err then
@@ -372,6 +327,16 @@ return rotate and 2 or 1
             // 丢响应时旧标记或新标记均可能有效，清理须保留两者。
             if collides {
                 import.pending_marker = Some(next_marker.clone());
+                sink.update_transfer_artifact(
+                    import.artifact_id,
+                    json!({
+                        "profile_id": self.profile.id, "redis_db": self.profile.redis_db(),
+                        "temp_b64": STANDARD.encode(&import.temp),
+                        "marker_b64": STANDARD.encode(&import.marker),
+                        "pending_marker_b64": STANDARD.encode(&next_marker), "kind": import.kind,
+                    }),
+                )
+                .await?;
             }
             let res: Result<i64> = send_write(self.conn.as_mut().unwrap(), &wrapped, sink).await;
             match res {
@@ -404,7 +369,8 @@ return rotate and 2 or 1
         if !import.wrote {
             return Err(AppError::invalid("不能导入空集合"));
         }
-        // 验证标记、移除标记及发布处于同一脚本，替换对象不能被提交或到期清理。
+        // 自重命名检查发布命令对各 key 的权限，不改变数据且兼容 Redis 6.2。
+        // 临时值先完成清理和期限设置，最后一次操作才原子替换目标。
         let script = format!(
             r#"{IMPORT_OWNED}
 if not owned(ARGV[2]) then return -2 end
@@ -412,41 +378,34 @@ local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local expiry = tonumber(ARGV[3])
 if expiry and expiry <= now then redis.call('DEL', KEYS[1]); return -1 end
-if redis.call('EXISTS', KEYS[2]) ~= 0 then return 0 end
-local k, m = ARGV[1], ARGV[2]
--- The destination is absent and scripts are atomic, so these probes cannot
--- change data. They check the same command and key used after RENAMENX.
-local probe
-if k == 'string' then
-    probe = redis.pcall('GET', KEYS[2])
-    if type(probe) == 'table' and probe.err then return probe end
-    probe = redis.pcall('SET', KEYS[2], '', 'XX', 'KEEPTTL')
-elseif k == 'hash' then probe = redis.pcall('HDEL', KEYS[2], m)
-elseif k == 'list' then probe = redis.pcall('LPOP', KEYS[2])
-elseif k == 'set' then probe = redis.pcall('SREM', KEYS[2], m)
-else probe = redis.pcall('ZREM', KEYS[2], m) end
+local exists = redis.call('EXISTS', KEYS[2]) ~= 0
+if exists and ARGV[4] ~= 'overwrite' then
+    if ARGV[4] == 'skip' then redis.call('DEL', KEYS[1]); return -3 end
+    return 0
+end
+local cmd = ARGV[4] == 'overwrite' and 'RENAME' or 'RENAMENX'
+local probe = redis.pcall(cmd, KEYS[1], KEYS[1])
 if type(probe) == 'table' and probe.err then return probe end
-if expiry then probe = redis.pcall('PEXPIREAT', KEYS[2], ARGV[3])
-else probe = redis.pcall('PERSIST', KEYS[2]) end
-if type(probe) == 'table' and probe.err then return probe end
-local published = redis.pcall('RENAMENX', KEYS[1], KEYS[2])
-if type(published) == 'table' and published.err then return published end
-if published == 0 then return 0 end
-local dst = KEYS[2]
+probe = redis.pcall(cmd, KEYS[2], KEYS[2])
+if type(probe) == 'table' and probe.err and (exists or not string.find(string.lower(probe.err), 'no such key', 1, true)) then return probe end
 local result
+if expiry then result = redis.pcall('PEXPIREAT', KEYS[1], ARGV[3])
+else result = redis.pcall('PERSIST', KEYS[1]) end
+if type(result) == 'table' and result.err then return result end
+local k, m = ARGV[1], ARGV[2]
 if k == 'string' then
-    local v = redis.pcall('GET', dst)
-    if type(v) == 'table' and v.err then return -3 end
-    result = redis.pcall('SET', dst, string.sub(v, string.len(m) + 1), 'KEEPTTL')
-elseif k == 'hash' then result = redis.pcall('HDEL', dst, m)
-elseif k == 'list' then result = redis.pcall('LPOP', dst)
-elseif k == 'set' then result = redis.pcall('SREM', dst, m)
-else result = redis.pcall('ZREM', dst, m) end
-if type(result) == 'table' and result.err then return -3 end
-if expiry then result = redis.pcall('PEXPIREAT', dst, ARGV[3])
-else result = redis.pcall('PERSIST', dst) end
-if type(result) == 'table' and result.err then return -3 end
-return 1
+    local v = redis.call('GET', KEYS[1])
+    result = redis.pcall('SET', KEYS[1], string.sub(v, string.len(m) + 1), 'KEEPTTL')
+elseif k == 'hash' then result = redis.pcall('HDEL', KEYS[1], m)
+elseif k == 'list' then result = redis.pcall('LPOP', KEYS[1])
+elseif k == 'set' then result = redis.pcall('SREM', KEYS[1], m)
+else result = redis.pcall('ZREM', KEYS[1], m) end
+if type(result) == 'table' and result.err then return result end
+if cmd == 'RENAME' then
+    redis.call(cmd, KEYS[1], KEYS[2])
+    return 1
+end
+return redis.call(cmd, KEYS[1], KEYS[2])
 "#
         );
         let expiry = import.expires.map(|n| n.to_string()).unwrap_or_default();
@@ -459,34 +418,60 @@ return 1
             import.kind.as_bytes().to_vec(),
             import.marker.clone(),
             expiry.into_bytes(),
+            match import.conflict {
+                ConflictPolicy::Insert => b"insert".to_vec(),
+                ConflictPolicy::Skip => b"skip".to_vec(),
+                ConflictPolicy::Overwrite => b"overwrite".to_vec(),
+            },
         ];
-        let code: i64 = match send_write(self.conn.as_mut().unwrap(), &a, sink).await {
-            Ok(v) => v,
+        let _: String = query(&mut import.watch_conn, &args(&["MULTI"])).await?;
+        let _: String = query(&mut import.watch_conn, &a).await?;
+        let result: Result<Option<Vec<i64>>> =
+            send_write(&mut import.watch_conn, &args(&["EXEC"]), sink).await;
+        let code = match result {
+            Ok(Some(values)) if values.len() == 1 => values[0],
+            Ok(None) => {
+                import.valid = false;
+                return Err(AppError::conflict("目标 key 在构建期间已变化"));
+            }
+            Ok(_) => {
+                import.valid = false;
+                return Err(AppError::new("database", "无效 EXEC 响应"));
+            }
             Err(e) => {
                 import.valid = false;
+                if e.code == "outcome_unknown" {
+                    sink.finish_transfer_artifact(import.artifact_id, "outcome_unknown")
+                        .await?;
+                }
                 return Err(e);
             }
         };
         match code {
             1 => {
+                let artifact_id = import.artifact_id;
                 self.imports.remove(&id);
+                sink.finish_transfer_artifact(artifact_id, "published")
+                    .await?;
                 Ok(json!({"published":true}))
             }
             -1 => {
+                let artifact_id = import.artifact_id;
                 self.imports.remove(&id);
-                Ok(json!({"skipped":true}))
+                sink.finish_transfer_artifact(artifact_id, "cleaned")
+                    .await?;
+                Ok(json!({"skipped":true,"reason":"expired"}))
+            }
+            -3 => {
+                let artifact_id = import.artifact_id;
+                self.imports.remove(&id);
+                sink.finish_transfer_artifact(artifact_id, "cleaned")
+                    .await?;
+                Ok(json!({"skipped":true,"reason":"exists"}))
             }
             0 => {
                 import.valid = false;
                 Err(AppError::conflict("目标 key 已存在"))
-            }
-            -3 => {
-                import.temp = import.key.clone();
-                import.valid = false;
-                Err(AppError::new(
-                    "import_failed",
-                    "发布后未能完成清理，目标保留有限期限",
-                ))
             }
             _ => {
                 import.valid = false;
@@ -501,13 +486,34 @@ return 1
             .imports
             .get(&id)
             .ok_or_else(|| AppError::invalid("导入令牌已失效"))?;
-        let _: i64 = send_write(
+        let artifact_id = import.artifact_id;
+        let result: Result<i64> = send_write(
             self.conn.as_mut().unwrap(),
             &import_cleanup_args(import),
             sink,
         )
-        .await?;
-        self.imports.remove(&id);
+        .await;
+        match result {
+            Ok(-1) => {
+                self.imports.remove(&id);
+                sink.finish_transfer_artifact(artifact_id, "recovery_conflict")
+                    .await?;
+                return Err(AppError::new(
+                    "recovery_conflict",
+                    "Redis 临时对象归属不匹配",
+                ));
+            }
+            Ok(_) => {
+                self.imports.remove(&id);
+                sink.finish_transfer_artifact(artifact_id, "cleaned")
+                    .await?;
+            }
+            Err(e) => {
+                sink.finish_transfer_artifact(artifact_id, "cleanup_pending")
+                    .await?;
+                return Err(e);
+            }
+        }
         Ok(json!({"discarded":true}))
     }
 }

@@ -15,8 +15,8 @@ use super::{
 use crate::{
     ExecutionSink,
     model::{
-        AppError, Column, Resource, ResourcePage, ResourceTarget, Result, TableSchema, Value,
-        ensure_not_cancelled, param,
+        AccessMode, AppError, Column, Resource, ResourcePage, ResourceTarget, Result, TableSchema,
+        Value, ensure_not_cancelled, param,
     },
 };
 
@@ -862,12 +862,31 @@ pub(super) async fn browse(
             _ = cancel.cancelled() => return Err(AppError::cancelled()),
             result = s.new_connection() => result?,
         };
-        sink.mark_sent(false).await?;
-        let (ids, affected) = tokio::select! {
+        // 不可证明的视图依赖可能调用写入函数；取消时仍需消费协议终态。
+        let may_write = s.profile.access_mode != AccessMode::ReadOnly;
+        sink.mark_sent(may_write).await?;
+        let future = super::results::execute_statement(
+            &mut conn, &sql, sink, cancel, may_write, size, &bindings,
+        );
+        tokio::pin!(future);
+        let outcome = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Err(AppError::cancelled()),
-            result = super::results::execute_statement(&mut conn, &sql, sink, cancel, false, size, &bindings) => result?,
+            result = &mut future => result,
+            _ = cancel.cancelled(), if may_write => {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), &mut future).await {
+                    Ok(result) => result,
+                    Err(_) => Err(AppError::unknown("取消后浏览查询可能写入且结果无法确认")),
+                }
+            },
+            _ = cancel.cancelled() => Err(AppError::cancelled()),
         };
+        let (ids, affected) = outcome.map_err(|mut error| {
+            if may_write && error.code == "database" && error.database_code.is_none() {
+                error.code = "outcome_unknown".into();
+                error.message = format!("浏览查询可能写入，结果无法确认: {}", error.message);
+            }
+            error
+        })?;
         return Ok(json!({"results": ids, "affected_rows": affected}));
     }
     let recipe = Recipe {

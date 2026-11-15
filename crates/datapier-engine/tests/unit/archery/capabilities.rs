@@ -67,6 +67,95 @@ async fn info_keeps_observed_capabilities_and_local_rejection_does_not_revoke_qu
 }
 
 #[tokio::test]
+async fn mcp_catalog_preserves_unknown_incomplete_and_local_continuation() {
+    let (engine, root, controller, fixture, auth) = setup().await;
+    let profile = profile(fixture.server.id, 7, "one");
+    save(&engine, controller, &fixture, &auth, vec![profile.clone()])
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let (stream, server) = tokio::io::duplex(65536);
+    let handler = tokio::spawn(client(engine.clone(), owner, Box::new(server)));
+    let mcp = crate::Client::handshake(
+        Box::new(stream),
+        crate::ClientOptions {
+            kind: model::ClientKind::Mcp,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let opened = mcp
+        .request("mcp.open_session", json!({"connection_id":profile.id}))
+        .await
+        .unwrap();
+    let session = &opened["session_id"];
+    let unfiltered = mcp
+        .request(
+            "mcp.list_resources",
+            json!({"session_id":session,"database":"db_a"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unfiltered["complete"], false);
+    assert_eq!(unfiltered["has_more"], false);
+    assert!(unfiltered["next_cursor"].is_null());
+    let resources = unfiltered["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 2);
+    for name in ["db_a", "db_b"] {
+        assert!(resources.iter().any(|item| item["name"] == name
+            && item["kind"] == "unknown"
+            && item["database"] == "db_a"
+            && item["data"]["relation_kind"] == "unknown"));
+    }
+
+    fixture.many_resources.store(true, Ordering::Release);
+    let mut settings = engine.store.settings().await.unwrap();
+    settings.limits.response_bytes = 1024;
+    settings.limits.value_preview_bytes = settings.limits.value_preview_bytes.min(1024);
+    engine.store.set_settings(&settings).await.unwrap();
+    let mut cursor = Value::Null;
+    let mut names = std::collections::BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let page = mcp
+            .request(
+                "mcp.list_resources",
+                json!({"session_id":session,"database":"db_a","kind":"table","cursor":cursor}),
+            )
+            .await
+            .unwrap();
+        pages += 1;
+        assert!(pages <= 24);
+        assert_eq!(page["complete"], false);
+        let resources = page["resources"].as_array().unwrap();
+        assert!(!resources.is_empty());
+        for item in resources {
+            assert_eq!(item["kind"], "unknown");
+            assert_eq!(item["database"], "db_a");
+            assert_eq!(item["data"]["relation_kind"], "unknown");
+            assert!(names.insert(item["name"].as_str().unwrap().to_owned()));
+        }
+        cursor = page["next_cursor"].clone();
+        if page["has_more"] == false {
+            assert!(cursor.is_null());
+            break;
+        }
+        assert_eq!(page["has_more"], true);
+        assert!(cursor.is_string());
+    }
+    assert!(pages > 1);
+    let expected: std::collections::BTreeSet<_> =
+        (0..24).map(|i| format!("table_{i:02}")).collect();
+    assert_eq!(names, expected);
+    mcp.close().await.unwrap();
+    handler.await.unwrap();
+    engine.disconnect(controller).await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn cancellation_after_validated_response_preserves_remote_completion() {
     let (engine, root) = engine().await;
     let owner = Uuid::new_v4();

@@ -408,7 +408,7 @@ async fn indirect_writing_view_is_never_replayed_for_sql_or_browse() {
     let inner = name("dp_effect_inner");
     let outer = name("dp_effect_outer");
     f.sql(&format!(
-        "CREATE TABLE `{table}` (id INT NOT NULL) ENGINE=InnoDB"
+        "CREATE TABLE `{table}` (id INT NOT NULL) ENGINE=MyISAM"
     ))
     .await
     .unwrap();
@@ -434,7 +434,22 @@ async fn indirect_writing_view_is_never_replayed_for_sql_or_browse() {
         ),
     ] {
         f.sql(&format!("DELETE FROM `{table}`")).await.unwrap();
-        let result = f.call(method, params).await.unwrap();
+        let task = f
+            .store
+            .create_task(Uuid::new_v4(), "fixture", method, json!({}), false)
+            .await
+            .unwrap();
+        let result =
+            f.db.call(
+                method,
+                params,
+                &ExecutionSink::new(f.store.clone(), task.id),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let recorded = f.store.task(task.id).await.unwrap();
+        assert!(recorded.sent && recorded.may_write);
         let id: Uuid = serde_json::from_value(result["results"][0].clone()).unwrap();
         assert_eq!(
             f.store.result_meta(id).await.unwrap().summary["retrieval_mode"],
@@ -654,6 +669,7 @@ async fn myisam_cas_detects_case_and_trailing_spaces_and_accepts_same_value() {
     let unchanged = submit(&mut f, &target, &same).await.unwrap();
     assert_eq!(unchanged["affected_rows"], 0);
     assert_eq!(before(&mut f, &table, &schema).await, baseline);
+
     f.sql(&format!("UPDATE `{table}` SET label='ALPHA' WHERE id=1"))
         .await
         .unwrap();
@@ -678,6 +694,176 @@ async fn myisam_cas_detects_case_and_trailing_spaces_and_accepts_same_value() {
     assert_eq!(f.rows(&actual).await[0][0], Value::Text("ALPHA ".into()));
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4、MyISAM 和 TRIGGER 权限"]
+async fn unchanged_updates_validate_visible_baseline_without_writing() {
+    let mut f = Fixture::open().await;
+    let mut observer = Fixture::open().await;
+    let mut observations = Vec::new();
+    for engine in ["InnoDB", "MyISAM"] {
+        for is_view in [false, true] {
+            let table = name("dp_noop");
+            let audit = name("dp_noop_audit");
+            let view = name("dp_noop_view");
+            let trigger = name("dp_noop_trigger");
+            f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci NOT NULL, note VARCHAR(40) NOT NULL, enabled INT NOT NULL) ENGINE={engine} DEFAULT CHARSET=utf8mb4")).await.unwrap();
+            f.sql(&format!(
+                "CREATE TABLE `{audit}` (id INT NOT NULL) ENGINE={engine}"
+            ))
+            .await
+            .unwrap();
+            f.sql(&format!(
+                "INSERT INTO `{table}` VALUES (1, 'alpha', 'note', 1), (2, 'beta', 'note', 1)"
+            ))
+            .await
+            .unwrap();
+            f.sql(&format!("CREATE TRIGGER `{trigger}` AFTER UPDATE ON `{table}` FOR EACH ROW INSERT INTO `{audit}` VALUES (NEW.id)")).await.unwrap();
+            let mut target = target(&table);
+            if is_view {
+                f.sql(&format!("CREATE ALGORITHM=MERGE VIEW `{view}` AS SELECT id, label, note FROM `{table}` WHERE enabled > 0")).await.unwrap();
+                target.name = view.clone();
+                target.kind = "view".into();
+            }
+            let schema = describe(&mut f, &target).await;
+            let baseline = before(&mut f, &target.name, &schema).await;
+            let same = update(baseline, "label", Value::Text("alpha".into()));
+            let opened = f
+                .call("change.open", json!({"target":target}))
+                .await
+                .unwrap();
+            let preview = f
+                .call(
+                    "change.preview",
+                    json!({"token":opened["token"],"rows":[same]}),
+                )
+                .await
+                .unwrap();
+            let unchanged = f
+                .call(
+                    "change.submit",
+                    json!({"token":opened["token"],"rows":[same]}),
+                )
+                .await
+                .unwrap();
+            let count = f
+                .sql(&format!("SELECT COUNT(*) FROM `{audit}`"))
+                .await
+                .unwrap();
+            let audit_count = f.rows(&count).await[0][0].text();
+            let mut conflicts = Vec::new();
+            for mutation in [
+                format!("UPDATE `{table}` SET label='ALPHA' WHERE id=1"),
+                format!("UPDATE `{table}` SET note='changed' WHERE id=1"),
+                format!("UPDATE `{table}` SET enabled=0 WHERE id=1"),
+                format!("DELETE FROM `{table}` WHERE id=1"),
+            ] {
+                observer
+                    .sql(&format!("DELETE FROM `{table}` WHERE id=1"))
+                    .await
+                    .unwrap();
+                observer
+                    .sql(&format!(
+                        "INSERT INTO `{table}` VALUES (1, 'alpha', 'note', 1)"
+                    ))
+                    .await
+                    .unwrap();
+                let opened = f
+                    .call("change.open", json!({"target":target}))
+                    .await
+                    .unwrap();
+                observer.sql(&mutation).await.unwrap();
+                let result = f
+                    .call(
+                        "change.submit",
+                        json!({"token":opened["token"],"rows":[same]}),
+                    )
+                    .await;
+                conflicts.push(result.map(|_| "success".into()).unwrap_or_else(|e| e.code));
+            }
+            let second = f
+                .sql(&format!("SELECT * FROM `{}` WHERE id=2", target.name))
+                .await
+                .unwrap();
+            let second_before = schema
+                .columns
+                .iter()
+                .zip(f.rows(&second).await.remove(0))
+                .map(|(column, value)| (column.name.clone(), value))
+                .collect();
+            let first = update(second_before, "label", Value::Text("written".into()));
+            let opened = f
+                .call("change.open", json!({"target":target}))
+                .await
+                .unwrap();
+            let batch = f
+                .call(
+                    "change.submit",
+                    json!({"token":opened["token"],"rows":[first,same]}),
+                )
+                .await;
+            let actual = f
+                .sql(&format!("SELECT label FROM `{table}` WHERE id=2"))
+                .await
+                .unwrap();
+            let first_value = f.rows(&actual).await[0][0].text();
+            let batch_error = batch
+                .err()
+                .map(|e| json!({"code":e.code,"items":e.details["items"]}));
+            observations.push(json!({"engine":engine,"view":is_view,"unchanged":unchanged,"audit":audit_count,"conflicts":conflicts,"batch_error":batch_error,"first_value":first_value,"preview":preview,"target":target.name}));
+            if is_view {
+                f.sql(&format!("DROP VIEW `{view}`")).await.unwrap();
+            }
+            f.sql(&format!("DROP TABLE `{table}`, `{audit}`"))
+                .await
+                .unwrap();
+        }
+    }
+    observer.close().await;
+    f.close().await;
+    // 在所有断言前清理 UUID 资源，失败复现也不遗留表、视图或触发器。
+    for observed in observations {
+        assert_eq!(
+            observed["conflicts"],
+            json!(["conflict", "conflict", "conflict", "conflict"]),
+            "{observed}"
+        );
+        assert_eq!(observed["unchanged"]["affected_rows"], 0);
+        assert_eq!(observed["unchanged"]["items"][0]["status"], "unchanged");
+        assert_eq!(observed["audit"], "0", "同值更新不能触发 UPDATE 触发器");
+        assert_eq!(observed["batch_error"]["code"], "conflict");
+        assert_eq!(observed["batch_error"]["items"][1]["status"], "conflict");
+        let transactional = observed["engine"] == "InnoDB";
+        assert_eq!(
+            observed["first_value"],
+            if transactional { "beta" } else { "written" }
+        );
+        assert_eq!(
+            observed["batch_error"]["items"][0]["status"],
+            if transactional {
+                "rolled_back"
+            } else {
+                "applied"
+            }
+        );
+        let statements = observed["preview"]["items"][0]["statements"]
+            .as_array()
+            .unwrap();
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0]["role"], "check");
+        let text = statements[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("SELECT 1 FROM "));
+        assert!(text.contains(&format!("`{}`", observed["target"].as_str().unwrap())));
+        assert_eq!(
+            statements[0]["parameters"].as_array().unwrap().len(),
+            if observed["view"] == true { 3 } else { 4 }
+        );
+        assert_eq!(
+            text.contains("FOR UPDATE"),
+            transactional && observed["view"] == false
+        );
+    }
 }
 
 #[tokio::test]
@@ -865,176 +1051,6 @@ async fn table_edit_token_rejects_engine_change_before_writing() {
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
     other.close().await;
     f.close().await;
-}
-
-#[tokio::test]
-#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4、MyISAM 和 TRIGGER 权限"]
-async fn unchanged_updates_validate_visible_baseline_without_writing() {
-    let mut f = Fixture::open().await;
-    let mut observer = Fixture::open().await;
-    let mut observations = Vec::new();
-    for engine in ["InnoDB", "MyISAM"] {
-        for is_view in [false, true] {
-            let table = name("dp_noop");
-            let audit = name("dp_noop_audit");
-            let view = name("dp_noop_view");
-            let trigger = name("dp_noop_trigger");
-            f.sql(&format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, label VARCHAR(40) COLLATE utf8mb4_general_ci NOT NULL, note VARCHAR(40) NOT NULL, enabled INT NOT NULL) ENGINE={engine} DEFAULT CHARSET=utf8mb4")).await.unwrap();
-            f.sql(&format!(
-                "CREATE TABLE `{audit}` (id INT NOT NULL) ENGINE={engine}"
-            ))
-            .await
-            .unwrap();
-            f.sql(&format!(
-                "INSERT INTO `{table}` VALUES (1, 'alpha', 'note', 1), (2, 'beta', 'note', 1)"
-            ))
-            .await
-            .unwrap();
-            f.sql(&format!("CREATE TRIGGER `{trigger}` AFTER UPDATE ON `{table}` FOR EACH ROW INSERT INTO `{audit}` VALUES (NEW.id)")).await.unwrap();
-            let mut target = target(&table);
-            if is_view {
-                f.sql(&format!("CREATE ALGORITHM=MERGE VIEW `{view}` AS SELECT id, label, note FROM `{table}` WHERE enabled > 0")).await.unwrap();
-                target.name = view.clone();
-                target.kind = "view".into();
-            }
-            let schema = describe(&mut f, &target).await;
-            let baseline = before(&mut f, &target.name, &schema).await;
-            let same = update(baseline, "label", Value::Text("alpha".into()));
-            let opened = f
-                .call("change.open", json!({"target":target}))
-                .await
-                .unwrap();
-            let preview = f
-                .call(
-                    "change.preview",
-                    json!({"token":opened["token"],"rows":[same]}),
-                )
-                .await
-                .unwrap();
-            let unchanged = f
-                .call(
-                    "change.submit",
-                    json!({"token":opened["token"],"rows":[same]}),
-                )
-                .await
-                .unwrap();
-            let count = f
-                .sql(&format!("SELECT COUNT(*) FROM `{audit}`"))
-                .await
-                .unwrap();
-            let audit_count = f.rows(&count).await[0][0].text();
-            let mut conflicts = Vec::new();
-            for mutation in [
-                format!("UPDATE `{table}` SET label='ALPHA' WHERE id=1"),
-                format!("UPDATE `{table}` SET note='changed' WHERE id=1"),
-                format!("UPDATE `{table}` SET enabled=0 WHERE id=1"),
-                format!("DELETE FROM `{table}` WHERE id=1"),
-            ] {
-                observer
-                    .sql(&format!("DELETE FROM `{table}` WHERE id=1"))
-                    .await
-                    .unwrap();
-                observer
-                    .sql(&format!(
-                        "INSERT INTO `{table}` VALUES (1, 'alpha', 'note', 1)"
-                    ))
-                    .await
-                    .unwrap();
-                let opened = f
-                    .call("change.open", json!({"target":target}))
-                    .await
-                    .unwrap();
-                observer.sql(&mutation).await.unwrap();
-                let result = f
-                    .call(
-                        "change.submit",
-                        json!({"token":opened["token"],"rows":[same]}),
-                    )
-                    .await;
-                conflicts.push(result.map(|_| "success".into()).unwrap_or_else(|e| e.code));
-            }
-            let second = f
-                .sql(&format!("SELECT * FROM `{}` WHERE id=2", target.name))
-                .await
-                .unwrap();
-            let second_before = schema
-                .columns
-                .iter()
-                .zip(f.rows(&second).await.remove(0))
-                .map(|(column, value)| (column.name.clone(), value))
-                .collect();
-            let first = update(second_before, "label", Value::Text("written".into()));
-            let opened = f
-                .call("change.open", json!({"target":target}))
-                .await
-                .unwrap();
-            let batch = f
-                .call(
-                    "change.submit",
-                    json!({"token":opened["token"],"rows":[first,same]}),
-                )
-                .await;
-            let actual = f
-                .sql(&format!("SELECT label FROM `{table}` WHERE id=2"))
-                .await
-                .unwrap();
-            let first_value = f.rows(&actual).await[0][0].text();
-            let batch_error = batch
-                .err()
-                .map(|e| json!({"code":e.code,"items":e.details["items"]}));
-            observations.push(json!({"engine":engine,"view":is_view,"unchanged":unchanged,"audit":audit_count,"conflicts":conflicts,"batch_error":batch_error,"first_value":first_value,"preview":preview,"target":target.name}));
-            if is_view {
-                f.sql(&format!("DROP VIEW `{view}`")).await.unwrap();
-            }
-            f.sql(&format!("DROP TABLE `{table}`, `{audit}`"))
-                .await
-                .unwrap();
-        }
-    }
-    observer.close().await;
-    f.close().await;
-    // 在所有断言前清理 UUID 资源，失败复现也不遗留表、视图或触发器。
-    for observed in observations {
-        assert_eq!(
-            observed["conflicts"],
-            json!(["conflict", "conflict", "conflict", "conflict"]),
-            "{observed}"
-        );
-        assert_eq!(observed["unchanged"]["affected_rows"], 0);
-        assert_eq!(observed["unchanged"]["items"][0]["status"], "unchanged");
-        assert_eq!(observed["audit"], "0", "同值更新不能触发 UPDATE 触发器");
-        assert_eq!(observed["batch_error"]["code"], "conflict");
-        assert_eq!(observed["batch_error"]["items"][1]["status"], "conflict");
-        let transactional = observed["engine"] == "InnoDB";
-        assert_eq!(
-            observed["first_value"],
-            if transactional { "beta" } else { "written" }
-        );
-        assert_eq!(
-            observed["batch_error"]["items"][0]["status"],
-            if transactional {
-                "rolled_back"
-            } else {
-                "applied"
-            }
-        );
-        let statements = observed["preview"]["items"][0]["statements"]
-            .as_array()
-            .unwrap();
-        assert_eq!(statements.len(), 1);
-        assert_eq!(statements[0]["role"], "check");
-        let text = statements[0]["text"].as_str().unwrap();
-        assert!(text.starts_with("SELECT 1 FROM "));
-        assert!(text.contains(&format!("`{}`", observed["target"].as_str().unwrap())));
-        assert_eq!(
-            statements[0]["parameters"].as_array().unwrap().len(),
-            if observed["view"] == true { 3 } else { 4 }
-        );
-        assert_eq!(
-            text.contains("FOR UPDATE"),
-            transactional && observed["view"] == false
-        );
-    }
 }
 
 #[tokio::test]
@@ -1864,5 +1880,96 @@ async fn releasing_call_result_still_drains_later_write() {
         .await
         .unwrap();
     f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn binary_zero_dates_are_never_reported_as_null() {
+    let mut f = Fixture::open().await;
+    let table = name("dp_zero_date");
+    f.sql("SET SESSION sql_mode = ''").await.unwrap();
+    f.sql(&format!(
+        "CREATE TABLE `{table}` (id INT PRIMARY KEY, d DATE NULL, dt DATETIME NULL)"
+    ))
+    .await
+    .unwrap();
+    f.sql(&format!(
+        "INSERT INTO `{table}` VALUES (1,NULL,NULL),(2,'0000-00-00','0000-00-00 00:00:00')"
+    ))
+    .await
+    .unwrap();
+    let query = |id: &str| json!({"text":format!("SELECT d,dt FROM `{table}` WHERE id = ?"),"parameters":[{"type":"integer","value":id}]});
+    let nulls = f.call("execution.run", query("1")).await.unwrap();
+    assert_eq!(f.rows(&nulls).await[0], vec![Value::Null, Value::Null]);
+    for column in ["d", "dt"] {
+        let error = f.call("execution.run", json!({"text":format!("SELECT `{column}` FROM `{table}` WHERE id = ?"),"parameters":[{"type":"integer","value":"2"}]})).await.unwrap_err();
+        assert!(!error.message.is_empty());
+        f.db.close().await.unwrap();
+        f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+            .await
+            .unwrap();
+    }
+    f.db.close().await.unwrap();
+    f.db = ProviderSession::connect(f.profile.clone(), f.secret.clone())
+        .await
+        .unwrap();
+    f.sql(&format!("DROP TABLE `{table}`")).await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "需要隔离 MySQL 5.7、8.0 或 8.4"]
+async fn live_recipes_share_result_budget_and_release_it() {
+    let mut f = Fixture::open().await;
+    let mut settings = f.store.settings().await.unwrap();
+    settings.limits.result_memory_bytes_per_client = 1_048_576;
+    f.store.set_settings(&settings).await.unwrap();
+    let owner = Uuid::new_v4();
+    let value = "x".repeat(32 * 1024);
+    let params = json!({"text":"SELECT 1 AS n WHERE ? = ?", "parameters":[{"type":"text","value":value},{"type":"text","value":value}]});
+    let mut ids = Vec::new();
+    for _ in 0..100 {
+        let task = f
+            .store
+            .create_task(owner, "fixture", "execution.run", json!({}), false)
+            .await
+            .unwrap();
+        match f
+            .db
+            .call(
+                "execution.run",
+                params.clone(),
+                &ExecutionSink::new(f.store.clone(), task.id),
+                &CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(result) => {
+                ids.push(serde_json::from_value::<Uuid>(result["results"][0].clone()).unwrap())
+            }
+            Err(error) => {
+                assert_eq!(error.code, "resource_limit");
+                break;
+            }
+        }
+    }
+    assert!(!ids.is_empty() && ids.len() < 100);
+    let id = ids.pop().unwrap();
+    f.store.release_result(id).await.unwrap();
+    f.db.release_result(id);
+    let task = f
+        .store
+        .create_task(owner, "fixture", "execution.run", json!({}), false)
+        .await
+        .unwrap();
+    f.db.call(
+        "execution.run",
+        params,
+        &ExecutionSink::new(f.store.clone(), task.id),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     f.close().await;
 }

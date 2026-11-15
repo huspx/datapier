@@ -217,7 +217,8 @@ impl Engine {
             .ok_or_else(|| denied("结果缺少访问证明"))?;
         let proof: AccessProof =
             serde_json::from_value(raw).map_err(|_| denied("结果访问证明无效"))?;
-        self.store.release_result(result_id).await?;
+        self.release_result_recipe(result_id, meta.execution_id)
+            .await?;
         let mut state = self.state.lock().unwrap();
         state.mcp.cursors.retain(|_, cursor| {
             !(cursor.owner == owner

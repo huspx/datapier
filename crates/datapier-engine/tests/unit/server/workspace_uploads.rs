@@ -194,6 +194,31 @@ async fn canonical_read_respects_small_complete_response_limits() {
 }
 
 #[tokio::test]
+async fn project_and_transfer_drafts_survive_chunked_workspace_save_and_reload() {
+    let (engine, root, owner) = fixture().await;
+    let draft = json!({
+        "view":"project", "fields":{"project-query-text":"用户编辑😀".repeat(30000),"transfer-file-0":"/local/input.csv"},
+        "project":{"root":"/local/project","manifest":{"name":"草稿"},"digests":{},"baseline_manifest":{"name":"基线"}},
+        "project_unsaved":true,"transfer_files":["/local/input.csv"],"project_section":"queries",
+        "transfer_files_count":1,"transfer_objects_count":2,"transfer_object_filters":[1,0],"transfer_project_mode":true
+    });
+    let state = json!({"tabs":[{"id":Uuid::new_v4(),"query":"SELECT 1","workbench_draft":draft}]});
+    let id = upload(&engine, owner, "workbench-draft", 0, &state, None).await;
+    commit(&engine, owner, &id).await.unwrap();
+    let canonical: Value =
+        serde_json::from_slice(&read_all(&engine, owner, &id, 1_048_576).await).unwrap();
+    assert_eq!(canonical["tabs"][0]["workbench_draft"], draft);
+    close(&engine, owner, &id).await;
+    let restored = engine
+        .store
+        .workspace_load_prepared("workbench-draft", 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(restored["state"]["tabs"][0]["workbench_draft"], draft);
+    cleanup(engine, root).await;
+}
+
+#[tokio::test]
 async fn large_edit_is_externalized_and_copy_restores_exact_value() {
     let (engine, root, owner) = fixture().await;
     let text = "user-edited-界".repeat(650_000);

@@ -115,6 +115,21 @@ impl App {
     }
 
     pub(super) fn dispatch_guarded_editor_message(&mut self, message: Msg, backend: &Backend) {
+        let message = match message {
+            Msg::Edit(name, from, to, text, cursor, len) => {
+                let Some(name) = self.resolve_project_editor(name) else {
+                    return;
+                };
+                Msg::Edit(name, from, to, text, cursor, len)
+            }
+            Msg::Undo(name) => {
+                let Some(name) = self.resolve_project_editor(name) else {
+                    return;
+                };
+                Msg::Undo(name)
+            }
+            message => message,
+        };
         let editing = match &message {
             Msg::Edit(name, from, to, text, ..) => {
                 (from != to || !text.is_empty()) && self.draft_input_field(name)
@@ -239,6 +254,7 @@ impl App {
             self.focus = field.into();
         } else if key == "query-editor" {
             self.focus = "query".into();
+            return Some(self.project_split_editor_key().unwrap_or(key));
         } else if key == "cell-editor" {
             self.focus = "cell".into();
         } else if key == "grid" {

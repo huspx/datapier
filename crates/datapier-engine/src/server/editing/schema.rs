@@ -176,6 +176,9 @@ impl Engine {
                 return Err(AppError::invalid("数据库目标不匹配"));
             }
         }
+        let operation = self
+            .operation_scope(&db, Some(&serde_json::to_value(&intent.target)?))
+            .await?;
         let previous_id: Option<Uuid> = optional(&params, "plan_id")?;
         let id = previous_id.unwrap_or_else(Uuid::new_v4);
         let gate = match previous_id {
@@ -305,6 +308,7 @@ impl Engine {
             gate: gate.clone(),
             execution: None,
             touched: Instant::now(),
+            _operation: Some(operation),
         };
         let mut response = summary(id, &draft);
         if serde_json::to_vec(&draft.plan)?.len() + 4096 <= settings.limits.response_bytes {

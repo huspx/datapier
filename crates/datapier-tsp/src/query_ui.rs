@@ -223,7 +223,9 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
     if app.task.is_none() {
         cancel = cancel.disabled(true);
     }
-    let enabled = app.session_id().is_some() && !app.operation_pending && app.task.is_none();
+    let enabled = (app.session_id().is_some() || app.project_layout_can_execute())
+        && !app.operation_pending
+        && app.task.is_none();
     if !enabled {
         selection = selection.disabled(true);
     }

@@ -613,14 +613,23 @@ function configRulesPreview() {
   ).join('');
   return `<p class="muted small" role="status">${
     h(
-      configRuleDirty()
-        ? configText('当前连接策略和权限：未保存', 'Current connection policy and permissions: unsaved')
-        : configText(
-          '当前连接策略和权限：无未保存修改',
-          'Current connection policy and permissions: no unsaved changes',
-        ),
+      c.policy !== c.savedPolicies[c.profile]
+        ? configText('连接审批策略：未保存', 'Connection approval policy: unsaved')
+        : configText('连接审批策略：无未保存修改', 'Connection approval policy: no unsaved changes'),
     )
-  }</p>${configRow(configText('连接审批策略', 'Connection approval policy'), configPolicySelect(c.policy, 'rule'))}${
+  }</p>${
+    configRow(configText('连接审批策略', 'Connection approval policy'), configPolicySelect(c.policy, 'rule'))
+  }<div class="config-inline"><button type="button" class="button" data-config-action="save-policy" ${
+    c.busy ? 'disabled' : ''
+  }>${
+    h(configText('保存连接审批策略示例', 'Save connection approval policy example'))
+  }</button></div><p class="muted small" role="status">${
+    h(
+      JSON.stringify(c.rules) !== JSON.stringify(c.savedRules[c.profile])
+        ? configText('连接权限：未保存', 'Connection permissions: unsaved')
+        : configText('连接权限：无未保存修改', 'Connection permissions: no unsaved changes'),
+    )
+  }</p>${
     c.draft.fineGrained
       ? `<div class="config-rule-list">${rows}</div>${
         redis ? '' : configRow(
@@ -650,7 +659,7 @@ function configRulesPreview() {
   }>${
     h(configText('模拟保存失败', 'Simulate save failure'))
   }</button><button type="button" class="button primary" data-config-action="save-rules" ${c.busy ? 'disabled' : ''}>${
-    h(configText('保存当前连接策略和权限示例', 'Save current connection policy and permissions example'))
+    h(configText('保存连接权限示例', 'Save connection permissions example'))
   }</button></div>`;
 }
 document.addEventListener('keydown', event => {
@@ -853,7 +862,7 @@ document.addEventListener('click', event => {
     c.rules[c.profile.endsWith('redis') ? '*' : c.scope] = c.level;
     c.ruleMessage = ['已修改本页示例，尚未保存。', 'Changed in this example; not yet saved.'];
     render();
-  } else if (action === 'save-rules' || action === 'save-error') {
+  } else if (action === 'save-rules' || action === 'save-policy' || action === 'save-error') {
     c.busy = true;
     c.ruleMessage = ['正在模拟保存…', 'Simulating save…'];
     render();
@@ -862,9 +871,11 @@ document.addEventListener('click', event => {
       if (action === 'save-error') {
         c.ruleMessage = ['模拟保存失败；更改仍在示例中。', 'Simulated save failure; example changes remain.'];
       } else {
-        c.savedRules[c.profile] = configCopy(c.rules);
-        c.savedPolicies[c.profile] = c.policy;
-        state.connectionApprovalPolicies[c.profile] = c.policy;
+        if (action === 'save-rules') c.savedRules[c.profile] = configCopy(c.rules);
+        if (action === 'save-policy') {
+          c.savedPolicies[c.profile] = c.policy;
+          state.connectionApprovalPolicies[c.profile] = c.policy;
+        }
         c.ruleDrafts[c.profile] = { rules: configCopy(c.rules), scope: c.scope, level: c.level, policy: c.policy };
         c.ruleMessage = ['已保存在本页示例中，未发送。', 'Saved in this page example; nothing was sent.'];
       }

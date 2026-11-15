@@ -19,6 +19,9 @@ mod approval;
 mod archery;
 mod controls;
 mod profile_form;
+mod project_layout;
+mod project_workbench;
+mod transfer_workbench;
 use controls::{button, choices, field, flat_action, icon_button, page_button};
 mod redis_detail;
 use redis_detail::{cli_panel, string_value};
@@ -300,6 +303,7 @@ pub fn stylesheet(app: &App) -> String {
         include_str!("styles/native-surfaces.css"),
         include_str!("styles/archery-forms.css"),
         include_str!("styles/advanced-editing.css"),
+        include_str!("styles/project-layout.css"),
     )
     .to_string();
     if let Some(g) = &app.grid {
@@ -468,6 +472,21 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         }
         content = content.child(triggers);
     }
+    if !matches!(
+        app.view.as_str(),
+        "transfer-workbench" | "project-workbench"
+    ) {
+        content = content.child(
+            html::div()
+                .class("draftbar")
+                .child(button("导入数据", "transfer-new:import"))
+                .child(button("导出数据", "transfer-new:export"))
+                .child(button("迁移到…", "transfer-new:copy"))
+                .child(button("导出 SQL", "transfer-new:sql_dump"))
+                .child(button("恢复 SQL", "transfer-new:sql_restore"))
+                .child(button("项目", "project-new")),
+        );
+    }
     if app.save_blocked {
         content = content.child(
             html::div()
@@ -488,7 +507,14 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             empty = empty.child(button("选择连接", "navigation-toggle"));
         }
         content = content.child(empty);
+    } else if app.view == "transfer-workbench" {
+        content = content.child(transfer_workbench::panel(app));
+    } else if app.view == "project-workbench" {
+        content = content.child(project_workbench::panel(app));
     } else {
+        let project_query =
+            app.project_layout_can_execute() && app.view == "query" && !app.browse_result;
+        let project_redis = project_query && app.project_layout_is_redis();
         let mut body = html::div().class(if redis {
             "detail-panel key-details"
         } else {
@@ -498,10 +524,27 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             if let Some(schema) = &app.advanced_schema {
                 body = body.child(schema.view());
             }
-        } else if !redis && (app.target.is_none() || (app.view == "query" && !app.browse_result)) {
-            body = body
-                .child(crate::query_ui::toolbar(app))
-                .child(crate::query_ui::panel(app));
+        } else if project_query
+            || (!redis && (app.target.is_none() || (app.view == "query" && !app.browse_result)))
+        {
+            if project_redis {
+                body = body.child(
+                    html::div().class("toolbar query-toolbar").child(
+                        ui::button(crate::i18n::tr("执行").into_owned())
+                            .disabled(app.operation_pending || app.task.is_some())
+                            .on_click(Msg::Action("run".into())),
+                    ),
+                );
+            } else if !redis {
+                body = body.child(crate::query_ui::toolbar(app));
+            }
+            body = if let Some(group) = crate::project_layout::active_group(app)
+                .filter(|_| app.view == "query" && !app.browse_result)
+            {
+                body.child(project_layout::editors(app, group))
+            } else {
+                body.child(crate::query_ui::panel(app))
+            };
         } else if redis && app.target.is_none() {
             let mut empty = html::div()
                 .class("empty-state")
@@ -601,7 +644,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                     body = body.child(schema_panel(app));
                 }
             }
-        } else if (redis && app.target.is_none())
+        } else if (redis && app.target.is_none() && !project_query)
             || (!redis && !app.browse_result && app.workbench.query_ui.results_hidden)
         {
         } else {
@@ -692,7 +735,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                 }
                 tools = tools.child(icon_button("repeat", "刷新", "browse"));
                 content = content.child(tools);
-            } else if !redis && app.workbench.query_ui.executed {
+            } else if (!redis || project_query) && app.workbench.query_ui.executed {
                 let mut result_tabs = html::div()
                     .class("result-tabs")
                     .child(html::span(crate::i18n::tr("结果").into_owned()).class("active"));
@@ -714,7 +757,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                     .child(result_tabs)
                     .child(row_search(app))
                     .child(icon_button("columns", "列配置", "overlay:columns"))
-                    .child(icon_button("download", "导出", "overlay:export"))
+                    .child(icon_button("download", "导出", "overlay:result-export"))
                     .child(icon_button("x", "关闭结果", "query-result-close"));
                 if let Some(info) = app
                     .grid

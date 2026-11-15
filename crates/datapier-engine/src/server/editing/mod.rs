@@ -53,6 +53,7 @@ struct SchemaDraft {
     gate: Arc<AsyncMutex<()>>,
     execution: Option<Uuid>,
     touched: Instant,
+    _operation: Option<super::operations::OperationGuard>,
 }
 
 struct ReplaceBinding {
@@ -66,6 +67,7 @@ struct ReplaceBinding {
     gate: Arc<AsyncMutex<()>>,
     execution: Option<Uuid>,
     touched: Instant,
+    _operation: Option<super::operations::OperationGuard>,
 }
 
 /// 外部编辑文件只接收经过基线与所有权检查的单值原字节。

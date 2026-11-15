@@ -363,6 +363,9 @@ impl Engine {
         copy_from: Option<&str>,
         memory_budget: usize,
     ) -> Result<(u64, Value)> {
+        let gate = self.state.lock().unwrap().operations.workspace_gate.clone();
+        let _workspace_guard = gate.lock().await;
+        let operation = self.reserve_workspace_drafts(owner, &state).await?;
         let gate = self.files_gate();
         let _file_guard = gate.lock().await;
         let old_files = self
@@ -379,6 +382,7 @@ impl Engine {
                 memory_budget,
             )
             .await?;
+        self.commit_workspace_drafts(owner, workspace.to_owned(), operation);
         // 文件状态只是重取提示，不能使已经提交的工作区因通知失败变成“保存失败”。
         let mut changed = old_files;
         match Store::edit_file_references(&canonical) {

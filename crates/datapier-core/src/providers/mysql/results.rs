@@ -15,6 +15,41 @@ pub(crate) fn columns(cols: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
         .collect()
 }
 
+/// SQLx 将二进制零日期视作 NULL；直接解码原始字节以区分协议 NULL。
+pub(crate) fn mysql_value_is_null(row: &MySqlRow, index: usize) -> Result<bool> {
+    let raw = row.try_get_raw(index)?;
+    if matches!(
+        row.columns()[index].type_info().name(),
+        "DATE" | "DATETIME" | "TIMESTAMP"
+    ) {
+        return match <&[u8] as sqlx::Decode<sqlx::MySql>>::decode(raw) {
+            Ok(bytes) => {
+                // 二进制协议将完整零日期编码为单字节 0；部分零日期也不能交给 chrono。
+                let binary_zero = bytes == [0]
+                    || (matches!(bytes.first(), Some(4 | 7 | 11))
+                        && bytes.len() >= 5
+                        && (bytes[1..3] == [0, 0] || bytes[3] == 0 || bytes[4] == 0));
+                let text_zero = bytes.len() >= 10
+                    && bytes[0].is_ascii_digit()
+                    && (bytes.starts_with(b"0000-")
+                        || &bytes[5..7] == b"00"
+                        || &bytes[8..10] == b"00");
+                if binary_zero || text_zero {
+                    Err(AppError::new(
+                        "unsupported_type",
+                        "MySQL 零日期无法无损表示，拒绝读取",
+                    ))
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(error) if error.is::<sqlx::error::UnexpectedNullError>() => Ok(true),
+            Err(error) => Err(AppError::new("database", error.to_string())),
+        };
+    }
+    Ok(raw.is_null())
+}
+
 // 按原生类型解码：大整数和 DECIMAL 用字符串保留精度，二进制用 Base64
 // 可逆传递；未知类型显式报错，不能退回可能有损的显示文本。
 pub(crate) fn decode_row(row: &MySqlRow) -> Result<Vec<Value>> {
@@ -22,7 +57,7 @@ pub(crate) fn decode_row(row: &MySqlRow) -> Result<Vec<Value>> {
         .iter()
         .enumerate()
         .map(|(i, col)| {
-            if row.try_get_raw(i)?.is_null() {
+            if mysql_value_is_null(row, i)? {
                 return Ok(Value::Null);
             }
             let ty = col.type_info().name();
@@ -101,12 +136,12 @@ pub(super) async fn execute_statement(
     if diagnostic && !parameters.is_empty() {
         return Err(AppError::invalid("诊断语句不支持绑定参数"));
     }
-    // 动态语句可能在结果集后继续写入；只有读完整个流才知道服务端已结束。
+    // 可能写入的语句只有读完整个流才知道服务端已结束，包括视图内函数。
     let local_error = |mut error: AppError| {
         error.details["result_stream_incomplete"] = json!(true);
-        if dynamic {
+        if may_write {
             AppError::unknown(format!(
-                "动态语句结果未读完，写入结果无法确认: {}",
+                "语句结果未读完，写入结果无法确认: {}",
                 error.message
             ))
             .with_details(json!({"local_error": error, "result_stream_incomplete": true}))
@@ -192,7 +227,10 @@ pub(super) async fn execute_statement(
                         match sink.append(id.unwrap(), std::mem::take(&mut rows)).await {
                             Ok(()) => {
                                 count += batch_size as u64;
-                                retaining = sink.wait_demand(id.unwrap(), count, cancel).await?;
+                                retaining = sink
+                                    .wait_demand(id.unwrap(), count, cancel)
+                                    .await
+                                    .map_err(local_error)?;
                             }
                             Err(error)
                                 if error.code == "resource_limit" || error.code == "not_found" =>

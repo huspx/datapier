@@ -55,6 +55,112 @@
   min-height: 0;
   overflow: hidden;
 }
+.transfer-panel, .project-panel {
+  overflow: hidden;
+}
+.transfer-summary, .project-summary {
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--l2);
+  color: var(--t1);
+}
+.transfer-tabs, .project-tabs {
+  display: flex;
+  flex: none;
+  gap: 12px;
+  border-bottom: 1px solid var(--l2);
+}
+.transfer-body, .project-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-content: start;
+  align-items: start;
+  gap: 12px 20px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.transfer-footer, .project-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--l2);
+}
+.project-error {
+  color: var(--bad);
+}
+.project-editor {
+  min-height: 120px;
+}
+.transfer-panel > strong, .project-panel > strong {
+  flex: none;
+  padding: 12px;
+  font-size: 15px;
+}
+.transfer-body > *, .project-body > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.transfer-body > .sf-field, .project-body > .sf-field {
+  grid-column: auto;
+}
+.transfer-body > .sf-button, .project-body > .sf-button {
+  justify-self: start;
+}
+.bp-small .transfer-body, .bp-small .project-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+.bp-small .transfer-panel .transfer-summary {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 4px 12px;
+}
+.bp-small .transfer-summary .advanced-fact {
+  padding: 4px 0;
+}
+.bp-small .transfer-panel > strong, .bp-small .project-panel > strong {
+  padding: 6px 12px;
+}
+.workbench-wide, .workbench-detail {
+  min-width: 0;
+  width: 100%;
+}
+.workbench-wide .sf-editor {
+  min-height: 120px;
+  max-height: 320px;
+}
+.workbench-detail {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--l2);
+}
+.workbench-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  white-space: normal;
+}
+.workbench-entry:hover, .workbench-entry:focus {
+  background: var(--tv-sel);
+}
+.workbench-entry .sf-icon {
+  flex: none;
+}
+.workbench-sample {
+  max-width: 100%;
+  overflow: auto;
+}
+.workbench-sample .cell {
+  flex: 1 0 160px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .resource-nav {
   display: flex;
   flex: none;

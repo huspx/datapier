@@ -356,10 +356,17 @@ function connectionCard(provider) {
   }<span class="connection-badge status-${status}" aria-hidden="true"></span></span><span class="connection-copy"><span class="connection-title"><span class="connection-name">${name}</span></span><span class="connection-sub">${address}</span></span></button>`;
 }
 function sidebar() {
+  const workbenches = `<button class="tree-line" data-workbench-open="exchange" title="${
+    az('数据交换与迁移', 'Data exchange and migration')
+  }" aria-label="${az('数据交换与迁移', 'Data exchange and migration')}">${icon('repeat')} <span>${
+    az('数据交换与迁移', 'Data exchange and migration')
+  }</span></button><button class="tree-line" data-workbench-open="project" title="${
+    az('项目', 'Projects')
+  }" aria-label="${az('项目', 'Projects')}">${icon('layers')} <span>${az('项目', 'Projects')}</span></button>`;
   return `<aside class="sidebar"><button class="brand brand-toggle" data-action="navigation-toggle" title="${
     state.compact ? t('expandSidebar') : t('collapseSidebar')
   }" aria-label="${state.compact ? t('expandSidebar') : t('collapseSidebar')}" aria-expanded="${!state
-    .compact}"><img class="brand-mark" src="assets/datapier.svg" alt="" aria-hidden="true" draggable="false"><span class="brand-name">Datapier</span></button><div class="sidebar-scroll"><div class="section-heading connections-head"><span class="connection-heading">${
+    .compact}"><img class="brand-mark" src="assets/datapier.svg" alt="" aria-hidden="true" draggable="false"><span class="brand-name">Datapier</span></button><div class="sidebar-scroll">${workbenches}<div class="section-heading connections-head"><span class="connection-heading">${
     t('connections')
   }</span><span class="spacer connection-heading"></span>${
     previewSource === 'archery'

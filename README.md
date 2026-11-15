@@ -2,7 +2,9 @@
 
 面向开发者与 AI agent 的多数据库工作台。统一连接、资源浏览、查询和数据编辑体验，保留不同数据库的数据模型与操作语义。
 
-当前开发版本为 **0.3.0**，在 MySQL／Redis 直连、Archery 只读来源、普通终端 TUI、Tern 工作台和 MCP stdio 基础上增加结构设计、批量替换与高级值编辑。最新正式发布版本为 0.2.0；本版已执行与未覆盖的验收见 [0.3.0 技术方案](docs/technical-design-0.3.0.md#132-本次完成状态)。
+当前版本 **0.4.0** 在 0.3.0 基础上增加数据交换、迁移、SQL 备份恢复与 Git 项目，提供 Tern 原生工作台、普通终端配置界面及 MCP stdio 接口。正式发布状态与可下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
+
+> 0.4.0 的原生运行证据来自 macOS arm64；其他五个目标保留实现与 CI 配置，构建、测试和打包结果须按对应提交的 workflow 核对，不能视为完整运行验收。历史 Archery 验证范围见[运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
 
 ## 当前开发功能
 
@@ -16,26 +18,30 @@
 - **高级值与文件**：Text／Hex／JSON／XML 编辑、校验与受控格式化，PNG／JPEG／GIF／WebP 首帧和 SVG 静态预览；单值按真实字节导入导出。GUI／终端外部编辑器使用 argv 启动，显式读取修改后回填草稿，数据库提交仍须另行确认。遗留编辑文件可在设置中发现、导出和清理。
 - **查询与命令**：执行全文、选区或当前 SQL，SQL 高亮、行号和逐语句执行，普通 `EXPLAIN FORMAT=JSON`、纯 Rust 选区格式化及撤销；首次执行前隐藏结果面板，保留执行状态、取消／停止等待、结果、错误、历史和查询文件。
 - **数据 grid**：MySQL 列宽按当前页内容与可用空间自适应，自动列宽上限 480px，原位编辑期间保持列宽；支持手动列宽、隐藏／冻结列、单格与 Shift 矩形选择、行号单选和 Shift 连选，以及按 UI 系统使用 Command／Ctrl 增选。支持单元格／矩形选区和选中行复制、MySQL 基表 INSERT 复制、原位文本编辑和长值／JSON／NULL 编辑，直接预览真实变更 SQL／Redis 命令、有序参数、撤销、丢弃及冲突反馈。
-- **数据交换**：单文件 CSV／JSON 导入导出、列映射与失败记录。查询结果仅保留在有界会话内存；安全只读来源导出时显式重新查询并流式写入，其他结果仅导出仍保留的数据并说明范围。
+- **数据交换与迁移**：多文件 CSV／类型化 JSON 导入导出，映射、转换与准备预览；MySQL 多表直接迁移支持库表列映射、条件及结构比较，Redis 迁移支持五种基础类型、前缀映射与绝对到期时间。任务按批流式处理，报告完成、失败和未发送等状态；不承诺跨 key 回滚或重启后自动续传。
+- **SQL 备份与恢复**：MySQL 逻辑导出／恢复支持表、数据、视图、触发器、存储过程、函数和事件，恢复前预览并确认；SQL 文件兼容范围及权限取决于对象与目标数据库，DDL 不承诺整批回滚。
+- **项目**：Git 可管理的项目目录保存逻辑连接、查询、布局与迁移预设；环境连接在本机绑定。项目可显式保存或导出归档，外部修改发生冲突时不会静默覆盖；凭据与本机绑定不进入归档。
 - **Archery 来源**：登录服务，批量选择 MySQL／Redis 实例与 DB；实例和数据库分组展示，配置与变更预览分步完成，表单适配窄屏。MySQL 浏览结构和只读查询，Redis 执行受控只读命令，查看平台查询历史及检查 MySQL 上线 SQL。结果可查看、复制并导出本次缓存的 CSV／JSON；平台限制和脱敏影响随结果说明。Archery 不支持数据库编辑、导入和工单执行，Redis 返回平台文本，SCAN 不代表全库结果。
 - **Archery 结果交互**：请求上限可选 100／500／1000，执行时来源和限制通过结果说明浮层查看；缓存结果支持每页 20／50／100 行及准确页码，翻页不重执行。关闭末标签仍保留当前连接和 DB。
 - **MCP 与普通终端**：`datapier tui` 在普通终端管理数据源、认证和设置；`datapier mcp` 提供 23 个 stdio tools。访问受保存的可见范围、连接模式及可选细粒度权限约束；危险操作需要审批，审批不能扩大权限。TSP 使用窗口内 toast 提醒，通过 MCP 待办入口处理审批和认证；系统通知与通知点击定位留待后续版本。
 - **实时分页**：MySQL 表和安全只读 SQL 默认每页 100 行，翻页重新读取；总数需显式统计。不能安全重放的语句只执行一次并分批读取，历史不保存结果行。
 
-从 0.1.x／0.2.0 升级前退出所有旧客户端和 Engine，并备份一致的数据目录。0.3.0 使用配置 schema 4 和 IPC v4，不能与旧版本混用；保留连接、权限、历史、工作区及凭据账户名，旧结果缓存不恢复。回退须先导出需要保留的编辑文件，再恢复升级前备份；详见[升级与文件持久化](docs/technical-design-0.3.0.md#93-配置-schema-4-与工作区)。
+升级前退出所有旧客户端和 Engine，并备份一致的数据目录。0.4.0 使用配置 schema 5 和 IPC v5；缺少必要确认表或约束的未发布早期 schema 5 会被拒绝，不能与旧版本混用。保留连接、权限、历史、工作区及凭据账户名，旧结果缓存不恢复。回退须先导出需要保留的文件，再恢复升级前备份；详见[本地持久化与升级](docs/technical-design-0.4.0.md#9-本地持久化与升级)。
 
 Archery SQL 检查取决于平台权限和配置；例如 v1.8.4 需管理员将账号 ID 加入 `api_user_whitelist` 并授予 SQL 提交权限。基础 Web 查询不要求这两项，详见[技术方案](docs/technical-design-0.1.1.md#65-mysql-上线-sql-检查)。
 
 直连 MySQL 和 Redis 按单节点设计。任意 SQL 结果及无法证明映射的视图仍只读；直连读写连接可显式执行写 SQL。Redis Cluster／Sentinel、分区管理、在线 schema 迁移编排、鼠标拖拽列宽、鼠标框选和连续虚拟滚动不在当前范围内。显式生成的媒体预览会交给 Tern blob 缓存；数据库原值与查询结果仍只保留在 Engine 有界内存。
 
+TLS 启用后校验证书链和主机身份。部分旧 MySQL 5.7／OpenSSL 构建虽列出 ECDHE 套件，实际无法协商；此时需修正服务端配置或使用具有可用套件的构建，客户端不会降低身份校验。当前 Oracle 与 Percona fixture 的具体范围见 [0.4.0 运行记录](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)。
+
 ## 安装与运行
 
-最新正式发布的版本为 0.2.0：从 [GitHub Releases](https://github.com/huspx/datapier/releases/tag/v0.2.0) 下载 `datapier-plugin-0.2.0.zip`，解压后在解压目录执行 `tern plugin install ./datapier`，然后在 Tern 命令面板选择 `New Datapier block`。该 plugin 自动下载并校验对应程序。
+从 [最新正式 Release](https://github.com/huspx/datapier/releases/latest) 下载该版本的 `datapier-plugin-<版本>.zip`，解压后在解压目录执行 `tern plugin install ./datapier`，然后在 Tern 命令面板选择 `New Datapier block`。该 plugin 自动下载并校验对应版本的程序；尚未公开的候选版本按[贡献指南](CONTRIBUTING.md#开发环境)构建和运行。
 
-0.3.0 尚未正式发布。取得与操作系统和架构匹配的候选二进制归档后，可手工解包直接运行，无须 Rust 或 Tern。以下以 Unix 的 tar.gz 为例，将归档和路径替换为实际位置；Windows 使用对应 zip 与 `datapier.exe`：
+需要独立运行时，取得与操作系统和架构匹配的二进制归档后，手工解包直接运行，无须 Rust 或 Tern。以下以已取得的 0.4.0 Unix tar.gz 归档为例，将归档和路径替换为实际位置；Windows 使用对应 zip 与 `datapier.exe`：
 
 ```sh
-tar -xzf /absolute/path/to/datapier-0.3.0-TARGET.tar.gz -C /absolute/path/to/install-directory
+tar -xzf /absolute/path/to/datapier-0.4.0-TARGET.tar.gz -C /absolute/path/to/install-directory
 /absolute/path/to/install-directory/datapier tui
 ```
 
@@ -63,6 +69,8 @@ tar -xzf /absolute/path/to/datapier-0.3.0-TARGET.tar.gz -C /absolute/path/to/ins
 ## 常用操作
 
 - **打开**：在 Tern 命令面板选择 `New Datapier block`；本地开发启动见贡献指南。
+- **迁移与恢复**：在 Tern 工作台选择数据交换或 SQL 备份恢复，配置来源、目标与映射，先准备并检查预览，再确认执行；完成后查看任务报告。失败或取消后先核对实际生效范围，再选择可续作的条目，不自动重放未知结果。
+- **项目共享**：创建项目后配置逻辑连接和查询，按环境绑定本机连接并显式保存；项目目录可交由 Git 管理，也可导出归档供其他工作区导入。外部文件变化触发冲突时先核对后再保存。
 - **右键菜单**：MySQL 直连连接行提供“新建数据库…”与“关闭连接”，并保留设置、复制名称和确认删除。新建数据库从服务器读取字符集及排序规则候选，随输入实时显示 DDL，仅需点击“执行”，取消直接关闭；连接关闭或只读时禁用建库。关闭连接先整体检查当前工作区所属标签的草稿与任务，等待相关会话关闭后移除全部所属 tab 并清空数据库树，保留配置和其他连接；再次点击连接行建立新连接及 tab。删除 MySQL 或 Redis 连接会先关闭其全部所属 tab 和已建立会话，再删除配置；失败保留配置，其他窗口占用时明确报错。数据库提供展开／折叠、刷新、复制名称和确认删除；表另有结构、DDL 和删除入口。库／表删除仅用于可写 MySQL，使用独立会话并保留停止等待入口。
 - **连接表单**：每次新建使用独立的空白表单；测试与保存为文字按钮。设置名称统一为“时区”“连接超时”“执行超时”，按数据库能力展示；当前 MySQL 时区默认 `+00:00`，留空使用服务器默认。两个超时字段按秒配置，留空继承全局值，收在默认折叠的“超时设置”中，位于“TLS 与证书”上方；校验失败自动展开并定位错误。SQL 传输和结果统一为 `utf8mb4`，不提供其他连接编码；数据库自身的字符集可在建库／表选项中设置。进入连接设置前先整体检查并关闭该连接在当前工作区的全部标签，等待会话关闭确认后打开表单；草稿或任务阻止整个关闭动作，其他连接标签保留。保存应用新配置，已有所属标签的重连重新加载权限及编辑基线；已关闭标签不自动重建。
 - **行操作与复制**：右击单元格可通过应用菜单“复制选中单元格”复制单格或矩形选区，底部 copy 图标也可复制；grid 不绑定 Ctrl+C 或 Command+C。复制会在后台完整读取大值，保留 TSV、NULL 和二进制语义。宿主自动附加的原生 `Copy` 只复制右击节点展示文字，不能读取应用选区或完整大值。右击已选行保留精确行集；复制选中行和两种 INSERT 包含隐藏列，生成列始终省略，第二种 INSERT 额外排除自增主键。编辑器有焦点时复制编辑文本。删除 N 行经确认后形成草稿，显式提交才写库；单元格详情从底部入口打开。
@@ -72,7 +80,7 @@ tar -xzf /absolute/path/to/datapier-0.3.0-TARGET.tar.gz -C /absolute/path/to/ins
   直连批次可跨 DB：记录保留批次开始的 DB，每项结果与复制日志标记对应命令执行时的 DB；失败时显示最后确认的命令 DB，连接失效时当前输入目标显示未知。
 - **退出**：点击侧栏底部退出入口或按 `Ctrl+Q`，保存工作区后返回 shell；待提交变更保留为草稿，保存失败时留在工作台。设置、快捷键帮助和退出在展开导航中显示左对齐的图标与文字，窄轨中图标居中。
 - **连接失败**：错误条提供“重试连接”和“连接设置”。MySQL 5.7 等实例启用 `require_secure_transport` 后，3159 错误另提供“启用 TLS”：打开并勾选连接表单，按证书配置填写 CA，保存后重新打开连接。表单测试失败保留输入，CA／身份校验失败保留原始原因。
-- **认证与写入**：首次打开 Archery 连接需要登录时，登录成功自动续接原连接请求一次；已失败的 SQL／Redis 命令需手动重试。MySQL 启用 TLS 时校验证书链和主机身份；结构化写入使用严格模式并检查字符列长度，避免静默截断。CALL 未消费终态时若本地缓存或解码失败，结果标为待确认并保留诊断。
+- **认证与写入**：首次打开 Archery 连接需要登录时，登录成功自动续接原连接请求一次；已失败的 SQL／Redis 命令需手动重试。MySQL 启用 TLS 时校验证书链和主机身份；结构化写入使用严格模式并检查字符列长度，避免静默截断。CALL 未消费终态时若结果处理或解码失败，结果标为待确认并保留诊断。
 - **SQL 选区与执行计划**：通过 Shift＋方向键／Home／End、全选维护应用自己的 UTF-16 选区；Command／Ctrl＋Enter 执行选区或当前语句，追加 Shift 执行全文。工具栏“查看执行计划”优先使用选区，否则使用当前语句，只发送普通 `EXPLAIN FORMAT=JSON`。宿主协议不报告可用于执行的鼠标拖选范围，查询高级操作使用键盘选区；表单和数据编辑保留 native editing。剪切等待宿主确认剪贴板写入后才删除文本。
 - **品牌入口**：应用侧栏显示自绘 Datapier SVG；Tern plugin 和命令面板使用内置 `database` 图标。
 - **快捷键**：点击设置与退出之间的键盘图标打开帮助，键位随 UI 平台显示 Command／Ctrl。完整绑定和系统辅助键适配边界见[设计说明](docs/ui-redesign.md#快捷键与系统适配)。macOS 标签关闭按钮在名称左侧，Windows／Linux 在右侧；网格撤销支持 Command／Ctrl+Z。
@@ -88,9 +96,9 @@ tar -xzf /absolute/path/to/datapier-0.3.0-TARGET.tar.gz -C /absolute/path/to/ins
 | Linux | x86-64、arm64 | GNU／glibc |
 | Windows | x86-64、arm64 | MSVC |
 
-六种组合作为实现与构建目标保留；本版实际构建与原生运行证据分别记录，不能用历史验收或 CI 编译代替运行验收。CI 使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
+六种组合作为实现与构建目标保留。0.4.0 的原生运行证据来自 macOS arm64；其他五目标的构建、默认测试、版本 smoke 与打包结果以对应提交的 CI 为准，实际运行未覆盖处单独说明。CI 配置使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
 
-当前开发验收基线为 **macOS arm64、Tern 0.9.18 与 tern-sdk 0.2.0**；本次不验证其他平台或 Tern 0.9.9。已实测 `tern --version` 为 `0.9.18 6f1fa0f`，具体候选运行范围以验收记录为准。直连数据库支持范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点，数据库服务可以运行在独立服务器上。本版证据见 [0.3.0 验收记录](docs/technical-design-0.3.0.md#132-本次完成状态)；0.1.x 文档保留各自历史运行结果。
+当前开发验收基线为 **macOS arm64、Tern 0.9.21 与 tern-sdk 0.2.0**；已实测 `tern --version` 为 `0.9.21 dbe0861`，本轮修复的运行结果以 [0.4.0 验收记录](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)收口为准，其他五个平台尚未运行。直连数据库支持范围为 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点，数据库服务可以运行在独立服务器上。0.3.0 和 0.1.x 文档保留各自历史运行结果。
 
 ## 架构设计
 
@@ -107,30 +115,30 @@ flowchart LR
     C --> S["SQLite 与系统凭据库"]
 ```
 
-Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持有连接和任务，界面通过本地 IPC 访问。macOS／Linux 使用 Unix domain socket，Windows 使用 Named Pipe。Tern 原生渲染 TSP 界面，Luau 负责启动和窗口入口。
+六个 crate 分别承担 CLI 分派（`datapier`）、数据库语义（`datapier-core`）、共享进程与 IPC（`datapier-engine`）、Tern 工作台（`datapier-tsp`）、普通终端配置（`datapier-tui`）和 MCP 适配（`datapier-mcp`）。macOS／Linux 使用 Unix domain socket，Windows 使用 Named Pipe；Tern 原生渲染 TSP 界面。
 
 主要技术栈为 Rust stable／edition 2024、Tokio、Serde、官方 `tern-sdk`、SQLx、redis-rs、SQLite、keyring、sqlparser-rs 和 sqlformat。原生格式化直接链接 Rust 库，不启动 Node、JavaScript runtime 或 WebView；数据库 provider 首期随 Engine 编译发布，PostgreSQL、MongoDB 属于后续扩展方向。
 
 数据处理遵循类型保真、增量读取和显式提交：大整数与精确小数保持精度，二进制可逆传输，Redis 修改默认保留 TTL；写入结果无法确认时记录待确认状态，不自动重放。
 
-任务状态由事件及时通知，结果数据通过分页读取；界面同时保留轮询核对遗漏。事件按客户端隔离，不携带 SQL、凭据或结果行。
+任务状态由事件及时通知，结果按需读取并保留有界会话内存，查询结果与编辑原值基线不落盘；历史不保存结果行。安全只读源的完整导出显式重查并流式写入文件，不能安全重放的结果只导出仍保留范围，不自动重放写操作。
 
 本地磁盘满导致最终任务记录无法保存时，Engine 在存活期间返回明确存储错误；可能已发送的写入进入待确认状态，需人工核对。该内存状态不保证跨 Engine 重启保留，重启后仍按已保存的发送阶段恢复。
 
-结果释放后不再提供对应内存数据；重启后历史结果不可恢复。改用会话密码时先清除旧系统凭据，删除失败会保留连接配置并报告错误。
+结果生命周期受所属会话和内存限额约束；关闭会话或重启后不恢复历史结果。改用会话密码时先清除旧系统凭据，删除失败会保留连接配置并报告错误。
 
 ## 版本路线
 
 | 版本 | 目标 |
 |---|---|
 | 0.1.0 | MySQL／Redis 基础数据库工作台 |
-| 0.1.1 | Archery 只读访问与 MySQL 上线 SQL 检查 |
-| 0.2.0 | MCP stdio 与审批、独立 TUI 数据源管理、实时分页与结果不落盘 |
-| 0.3.0 | 结构设计、批量修改、高级值与外部编辑器，当前开发版本 |
-| 0.4.0 | 数据交换、结构与数据迁移、SQL 备份恢复及 Git 项目，方案已编写，尚未实施 |
-| 0.5.0 | 分析展示、显示规则与数据库维护 |
+| 0.1.1 | Archery 只读访问与 MySQL 上线 SQL 检查，能力已纳入当前候选 |
+| 0.2.0 | MCP stdio、普通终端配置、实时分页与结果不落盘，能力已纳入当前候选 |
+| 0.3.0 | 结构设计、可更新视图、批量修改与高级值编辑，能力已纳入当前候选 |
+| 0.4.0 | 数据交换、结构与数据迁移、SQL 备份恢复及 Git 项目 |
+| 0.5.0 | 分析展示、显示规则与数据库维护，规划中 |
 
-后续版本尚未承诺发布日期。MCP 不属于 0.1.1，PostgreSQL／MongoDB 暂未绑定交付版本。
+后续版本尚未承诺发布日期；PostgreSQL／MongoDB 暂未绑定交付版本。
 
 ## 文档与开发
 
@@ -139,7 +147,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 - [0.1.1 技术方案](docs/technical-design-0.1.1.md)：Archery 来源、升级边界和当前验收记录。
 - [0.2.0 技术方案](docs/technical-design-0.2.0.md)：MCP 工具、独立配置、权限与审批、实时查询、升级设计及验收状态。
 - [0.3.0 技术方案](docs/technical-design-0.3.0.md)：结构设计、可更新视图、批量替换、高级值、外部编辑器及当前运行验收范围。
-- [0.4.0 技术方案](docs/technical-design-0.4.0.md)：多文件数据交换、MySQL 结构与数据迁移、SQL 逻辑导出恢复、Redis 类型与 TTL 迁移、Git 项目目录与归档，当前仅为实施前方案。
+- [0.4.0 技术方案](docs/technical-design-0.4.0.md)：数据交换、迁移、SQL 备份恢复及项目的设计与契约；实际验收按当前候选证据报告。
 - [UI 设计规范](docs/ui-guidelines.md)、[交互设计稿](docs/ui-redesign.html)及[设计说明](docs/ui-redesign.md)：通用视觉与组件约定、界面交互、文字约束和视觉对照要求。
 - [贡献指南](CONTRIBUTING.md)：文档职责、开发环境、编码与模块边界、隔离验证及 PR 说明。
 - [发布指南](RELEASING.md)：产品版本来源与派生、发布前检查、原生组包及人工发布核对。
@@ -148,7 +156,7 @@ Rust Core 负责资源、类型、执行、变更与数据库语义；Engine 持
 
 本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。
 
-本版已执行和未覆盖的验收见 [0.3.0 技术方案](docs/technical-design-0.3.0.md#132-本次完成状态)；0.2.0 的历史状态保留在[对应技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)。
+当前候选实际执行的检查、数据库与 Tern 运行范围见 [0.4.0 验收记录](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)。历史版本运行记录不能替代当前候选验证；发布门禁见[发布指南](RELEASING.md#发布前检查)。
 
 ## 许可证
 

@@ -4,9 +4,12 @@
 mod batch_delete;
 pub(crate) mod command;
 mod edit;
+pub mod migration;
 mod replace;
 mod transfer;
 mod values;
+
+pub use transfer::RedisTemporaryIdentity;
 
 use crate::{ExecutionSink, model::*};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -17,6 +20,12 @@ use serde_json::{Value as Json, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// 只有每条命令均可证明只读时返回 true。
+pub fn redis_commands_readonly(text: &str) -> Result<bool> {
+    let commands = command::parse_commands(text)?;
+    Ok(!commands.is_empty() && commands.iter().all(|args| command::read_command(args)))
+}
 
 /// 使用执行器同一解析器分析命令；不支持证明访问范围的命令会被拒绝。
 pub fn analyze_command(text: &str) -> Result<Json> {
@@ -218,20 +227,36 @@ struct Import {
     wrote: bool,
     valid: bool,
     count: u64,
+    watch_conn: Conn,
+    conflict: crate::model::transfer::ConflictPolicy,
+    artifact_id: Uuid,
 }
-fn import_cleanup_args(import: &Import) -> Vec<Vec<u8>> {
+fn import_cleanup_args_parts(
+    temp: &[u8],
+    kind: &str,
+    marker: &[u8],
+    pending: Option<&[u8]>,
+) -> Vec<Vec<u8>> {
     let script = format!(
-        "{IMPORT_OWNED}\nif owned(ARGV[2]) or (ARGV[3] ~= '' and owned(ARGV[3])) then return redis.call('DEL', KEYS[1]) end\nreturn 0"
+        "{IMPORT_OWNED}\nif redis.call('TYPE', KEYS[1]).ok == 'none' then return 0 end\nif owned(ARGV[2]) or (ARGV[3] ~= '' and owned(ARGV[3])) then redis.call('DEL', KEYS[1]); return 1 end\nreturn -1"
     );
     vec![
         b"EVAL".to_vec(),
         script.into_bytes(),
         b"1".to_vec(),
-        import.temp.clone(),
-        import.kind.as_bytes().to_vec(),
-        import.marker.clone(),
-        import.pending_marker.clone().unwrap_or_default(),
+        temp.to_vec(),
+        kind.as_bytes().to_vec(),
+        marker.to_vec(),
+        pending.unwrap_or_default().to_vec(),
     ]
+}
+fn import_cleanup_args(import: &Import) -> Vec<Vec<u8>> {
+    import_cleanup_args_parts(
+        &import.temp,
+        &import.kind,
+        &import.marker,
+        import.pending_marker.as_deref(),
+    )
 }
 // 原始字节用于去重，待输出的超量 SCAN 响应保留到下一逻辑批次。
 struct KeyScan {
@@ -463,6 +488,14 @@ impl RedisSession {
             )
             .await
             {
+                Ok(Ok(-1)) => {
+                    if failure.is_none() {
+                        failure = Some(AppError::new(
+                            "recovery_conflict",
+                            "Redis 临时对象归属不匹配",
+                        ));
+                    }
+                }
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
                     if failure.is_none() {
@@ -622,8 +655,6 @@ impl RedisSession {
             }
             "change.submit" => self.submit(&p, sink, cancel).await,
             "execution.run" => self.run(&p, sink, cancel).await,
-            "export.meta" => self.export_meta(&p).await,
-            "export.read" => self.export_read(&p).await,
             "import.begin" => self.import_begin(&p, sink).await,
             "import.append" => self.import_append(&p, sink).await,
             "import.finish" => self.import_finish(&p, sink).await,

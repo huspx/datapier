@@ -42,6 +42,7 @@ struct Session {
     reserved: usize,
     touched: Instant,
     previews: HashMap<Uuid, (u64, Vec<u8>)>,
+    _operation: Option<super::super::operations::OperationGuard>,
 }
 struct OwnedSession {
     owner: Uuid,
@@ -261,6 +262,11 @@ impl Engine {
         } else {
             params.get("target").cloned().unwrap_or(Value::Null)
         };
+        let operation = if requested_write {
+            Some(self.operation_scope(&db, Some(&target)).await?)
+        } else {
+            None
+        };
         if requested_write
             && task.context.as_ref().is_none_or(|ctx| {
                 !ctx.targets
@@ -442,6 +448,7 @@ impl Engine {
                 reserved,
                 touched: Instant::now(),
                 previews: HashMap::new(),
+                _operation: operation,
             },
         ))
     }

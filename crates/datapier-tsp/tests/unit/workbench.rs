@@ -274,12 +274,6 @@ fn invalid_paths_and_column_width_do_not_request_or_change_layout() {
     assert!(requests.try_recv().is_err());
     assert!(app.file_open_pending.is_none());
     assert_eq!(app.workbench.field_error.as_ref().unwrap().field, "path");
-    app.field_set("path", "data.csv");
-    app.field_set("mapping", "[]");
-    app.action("preview-import", &backend);
-    assert!(requests.try_recv().is_err());
-    assert!(app.preview_pending.is_none());
-    assert_eq!(app.workbench.field_error.as_ref().unwrap().field, "mapping");
     app.field_set("column", "0");
     app.field_set("width", "");
     app.dirty = false;

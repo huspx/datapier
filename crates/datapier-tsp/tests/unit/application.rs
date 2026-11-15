@@ -663,3 +663,125 @@ fn redis_history_preserves_input_until_task_finishes() {
     assert!(app.workbench.overlay.is_none());
     assert!(requests.try_recv().is_err());
 }
+
+fn mcp_settings_app() -> (
+    App,
+    Backend,
+    tokio::sync::mpsc::Receiver<crate::backend::Request>,
+) {
+    let (backend, requests, _) = Backend::scripted();
+    let mut app = App::new("mcp-drafts".into());
+    app.settings_loaded = true;
+    app.settings_load_fields();
+    for name in ["first", "second"] {
+        app.profile_form(None);
+        app.field_set("name", name);
+        app.profiles.push(app.form_profile().unwrap());
+    }
+    app.workbench.overlay = Some("settings".into());
+    (app, backend, requests)
+}
+
+#[test]
+fn connection_policy_saves_only_explicitly_and_preserves_permission_draft() {
+    let (mut app, backend, mut requests) = mcp_settings_app();
+    let id = app.profiles[0].id;
+    app.application_action(&format!("mcp-rules-load:{id}"), &backend);
+    let load = requests.try_recv().unwrap();
+    app.mcp_rules_response(
+        &load.tag,
+        &Ok(json!({"profile_id":id,"revision":1,"rules":[],"approval_policy":"dangerous"})),
+        &backend,
+    );
+    app.field_set("mcp-rule-scope", "fixture");
+    app.application_action("mcp-rules-level:read_write", &backend);
+    app.application_action("mcp-policy-set:off", &backend);
+    assert!(requests.try_recv().is_err());
+    assert!(app.modal_has_unsaved());
+    assert!(!app.settings_global_form_dirty());
+    app.application_action("mcp-policy-save", &backend);
+    let save = requests.try_recv().unwrap();
+    assert_eq!(save.method, "profile.approval.set");
+    assert_eq!(save.params["expected_revision"], 1);
+    assert_eq!(save.params["approval_policy"], "off");
+    app.mcp_rules_response(
+        &save.tag,
+        &Ok(json!({"profile":{"revision":2,"approval_policy":"off"}})),
+        &backend,
+    );
+    assert!(!app.mcp_policy_dirty());
+    assert!(app.mcp_rules_dirty());
+    assert_eq!(requests.try_recv().unwrap().method, "profile.list");
+    app.application_action("mcp-rules-save", &backend);
+    let save = requests.try_recv().unwrap();
+    assert_eq!(save.params["expected_revision"], 2);
+    assert_eq!(save.params["rules"][0]["scope_key"], "fixture");
+    assert_eq!(save.params["rules"][0]["level"], "read_write");
+    app.mcp_rules_response(&save.tag, &Ok(json!({"revision":3})), &backend);
+    assert!(!app.modal_has_unsaved());
+}
+
+#[test]
+fn cached_connection_policy_drafts_remain_dirty_and_discard_together() {
+    let (mut app, backend, mut requests) = mcp_settings_app();
+    let first = app.profiles[0].id;
+    let second = app.profiles[1].id;
+    app.application_action(&format!("mcp-rules-load:{first}"), &backend);
+    let load = requests.try_recv().unwrap();
+    app.mcp_rules_response(
+        &load.tag,
+        &Ok(json!({"profile_id":first,"revision":1,"rules":[],"approval_policy":"dangerous"})),
+        &backend,
+    );
+    app.application_action("mcp-policy-set:off", &backend);
+    app.application_action(&format!("mcp-rules-load:{second}"), &backend);
+    let load = requests.try_recv().unwrap();
+    app.mcp_rules_response(
+        &load.tag,
+        &Ok(json!({"profile_id":second,"revision":1,"rules":[],"approval_policy":"dangerous"})),
+        &backend,
+    );
+    assert!(!app.mcp_policy_dirty());
+    assert!(app.modal_has_unsaved());
+    app.application_action(&format!("mcp-rules-load:{first}"), &backend);
+    assert_eq!(app.field("mcp-rule-policy"), "off");
+    assert!(requests.try_recv().is_err());
+    app.settings_discard_form();
+    assert!(!app.modal_has_unsaved());
+    assert!(app.field("mcp-rule-profile").is_empty());
+}
+
+#[test]
+fn permission_conflicts_preserve_drafts_until_confirmed_reload() {
+    let (mut app, backend, mut requests) = mcp_settings_app();
+    let id = app.profiles[0].id;
+    app.application_action(&format!("mcp-rules-load:{id}"), &backend);
+    let load = requests.try_recv().unwrap();
+    app.mcp_rules_response(
+        &load.tag,
+        &Ok(json!({"profile_id":id,"revision":1,"rules":[],"approval_policy":"dangerous"})),
+        &backend,
+    );
+    app.application_action("mcp-policy-set:off", &backend);
+    app.application_action("mcp-policy-save", &backend);
+    let save = requests.try_recv().unwrap();
+    app.mcp_rules_response(
+        &save.tag,
+        &Err(AppError::conflict("changed externally")),
+        &backend,
+    );
+    assert_eq!(app.field("mcp-rule-policy"), "off");
+    assert!(app.mcp_policy_dirty());
+    app.application_action("mcp-rules-reload", &backend);
+    assert_eq!(app.field("mcp-rule-reload-confirm"), "true");
+    assert!(requests.try_recv().is_err());
+    app.application_action("mcp-rules-reload-confirm", &backend);
+    let load = requests.try_recv().unwrap();
+    app.mcp_rules_response(
+        &load.tag,
+        &Ok(json!({"profile_id":id,"revision":9,"rules":[],"approval_policy":"all_writes"})),
+        &backend,
+    );
+    assert_eq!(app.field("mcp-rule-policy"), "all_writes");
+    assert!(!app.modal_has_unsaved());
+}

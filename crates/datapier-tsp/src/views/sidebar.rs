@@ -1,4 +1,5 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 fn sidebar_action(icon: &str, label: &str, action: &str, compact: bool) -> Node<Msg> {
     flat_action(icon, label, action)
         .class(if compact {
@@ -57,6 +58,13 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
             .child(html::span(crate::i18n::tr("连接").into_owned()))
             .child(html::span("").class("spacer"));
     }
+    panel = panel.child(sidebar_action(
+        "repeat",
+        "数据交换与迁移",
+        "transfer-new:copy",
+        compact,
+    ));
+    panel = panel.child(sidebar_action("folder", "项目", "project-new", compact));
     panel = panel.child(connection_tools.child(icon_button("plus", "新建连接", "new-profile")));
     for (i, p) in app.profiles.iter().enumerate() {
         let active = app
@@ -154,6 +162,16 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                 )
                 .icon("copy"),
             );
+        for (action, label) in [
+            ("transfer-import", "导入数据"),
+            ("transfer-export", "导出数据"),
+            ("transfer-copy", "迁移到…"),
+        ] {
+            actions = actions.menu(
+                ui::MenuItem::new(action, crate::i18n::tr(label).into_owned())
+                    .disabled(p.is_archery()),
+            );
+        }
         if p.provider == datapier_core::model::ProviderKind::Mysql
             && matches!(
                 &p.connection,
@@ -192,6 +210,18 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                     Msg::Action(format!("profile-settings:{}", p.id)),
                 )
                 .on_action("profile-copy-name", Msg::CopyText(p.name.clone()))
+                .on_action(
+                    "transfer-import",
+                    Msg::Action(format!("transfer-context:import:{}::", p.id)),
+                )
+                .on_action(
+                    "transfer-export",
+                    Msg::Action(format!("transfer-context:export:{}::", p.id)),
+                )
+                .on_action(
+                    "transfer-copy",
+                    Msg::Action(format!("transfer-context:copy:{}::", p.id)),
+                )
                 .on_action(
                     "profile-create-database",
                     Msg::Action(format!("profile-create-database:{}", p.id)),
@@ -320,6 +350,18 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                         .as_ref()
                         .is_some_and(|profile| profile.is_archery())
                     {
+                        for (action, label, needs_write) in [
+                            ("transfer-import", "导入数据", true),
+                            ("transfer-export", "导出数据", false),
+                            ("transfer-copy", "迁移到…", false),
+                            ("transfer-dump", "导出 SQL", false),
+                            ("transfer-restore", "恢复 SQL", true),
+                        ] {
+                            database_menu = database_menu.menu(
+                                ui::MenuItem::new(action, crate::i18n::tr(label).into_owned())
+                                    .disabled(needs_write && !can_drop),
+                            );
+                        }
                         database_menu = database_menu.menu(ui::MenuEntry::Separator).menu(
                             ui::MenuItem::new("delete", crate::i18n::tr("删除数据库").into_owned())
                                 .icon("trash")
@@ -361,6 +403,61 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                 Msg::Action(format!("navigation-db-refresh:{}", database.name)),
                             )
                             .on_action("database-copy-name", Msg::CopyText(database.name.clone()))
+                            .on_action(
+                                "transfer-import",
+                                Msg::Action(format!(
+                                    "transfer-context:import:{}:{}:",
+                                    app.profile
+                                        .as_ref()
+                                        .map(|p| p.id.to_string())
+                                        .unwrap_or_default(),
+                                    URL_SAFE_NO_PAD.encode(&database.name)
+                                )),
+                            )
+                            .on_action(
+                                "transfer-export",
+                                Msg::Action(format!(
+                                    "transfer-context:export:{}:{}:",
+                                    app.profile
+                                        .as_ref()
+                                        .map(|p| p.id.to_string())
+                                        .unwrap_or_default(),
+                                    URL_SAFE_NO_PAD.encode(&database.name)
+                                )),
+                            )
+                            .on_action(
+                                "transfer-copy",
+                                Msg::Action(format!(
+                                    "transfer-context:copy:{}:{}:",
+                                    app.profile
+                                        .as_ref()
+                                        .map(|p| p.id.to_string())
+                                        .unwrap_or_default(),
+                                    URL_SAFE_NO_PAD.encode(&database.name)
+                                )),
+                            )
+                            .on_action(
+                                "transfer-dump",
+                                Msg::Action(format!(
+                                    "transfer-context:sql_dump:{}:{}:",
+                                    app.profile
+                                        .as_ref()
+                                        .map(|p| p.id.to_string())
+                                        .unwrap_or_default(),
+                                    URL_SAFE_NO_PAD.encode(&database.name)
+                                )),
+                            )
+                            .on_action(
+                                "transfer-restore",
+                                Msg::Action(format!(
+                                    "transfer-context:sql_restore:{}:{}:",
+                                    app.profile
+                                        .as_ref()
+                                        .map(|p| p.id.to_string())
+                                        .unwrap_or_default(),
+                                    URL_SAFE_NO_PAD.encode(&database.name)
+                                )),
+                            )
                             .on_action(
                                 "delete",
                                 Msg::Action(format!("navigation-drop-db:{}", database.name)),
@@ -462,6 +559,19 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                         .as_ref()
                                         .is_some_and(|profile| profile.is_archery())
                                 {
+                                    for (action, label, needs_write) in [
+                                        ("transfer-import", "导入数据", true),
+                                        ("transfer-export", "导出数据", false),
+                                        ("transfer-copy", "迁移到…", false),
+                                    ] {
+                                        menu = menu.menu(
+                                            ui::MenuItem::new(
+                                                action,
+                                                crate::i18n::tr(label).into_owned(),
+                                            )
+                                            .disabled(needs_write && !can_drop),
+                                        );
+                                    }
                                     menu = menu.menu(ui::MenuEntry::Separator).menu(
                                         ui::MenuItem::new(
                                             "delete",
@@ -492,6 +602,42 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                     .child(html::span(resource.name.clone()))
                                     .actions(menu)
                                     .on_action("open", Msg::Action(action.clone()))
+                                    .on_action(
+                                        "transfer-import",
+                                        Msg::Action(format!(
+                                            "transfer-context:import:{}:{}:{}",
+                                            app.profile
+                                                .as_ref()
+                                                .map(|p| p.id.to_string())
+                                                .unwrap_or_default(),
+                                            URL_SAFE_NO_PAD.encode(&database.name),
+                                            URL_SAFE_NO_PAD.encode(&resource.name)
+                                        )),
+                                    )
+                                    .on_action(
+                                        "transfer-export",
+                                        Msg::Action(format!(
+                                            "transfer-context:export:{}:{}:{}",
+                                            app.profile
+                                                .as_ref()
+                                                .map(|p| p.id.to_string())
+                                                .unwrap_or_default(),
+                                            URL_SAFE_NO_PAD.encode(&database.name),
+                                            URL_SAFE_NO_PAD.encode(&resource.name)
+                                        )),
+                                    )
+                                    .on_action(
+                                        "transfer-copy",
+                                        Msg::Action(format!(
+                                            "transfer-context:copy:{}:{}:{}",
+                                            app.profile
+                                                .as_ref()
+                                                .map(|p| p.id.to_string())
+                                                .unwrap_or_default(),
+                                            URL_SAFE_NO_PAD.encode(&database.name),
+                                            URL_SAFE_NO_PAD.encode(&resource.name)
+                                        )),
+                                    )
                                     .on_action(
                                         "structure",
                                         Msg::Action(format!(

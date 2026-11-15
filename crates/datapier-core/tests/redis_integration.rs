@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 struct Fixture {
     store: Store,
+    owner: Uuid,
     profile: Profile,
     client: Client,
     raw: MultiplexedConnection,
@@ -53,6 +54,7 @@ impl Fixture {
             .unwrap();
         Self {
             store,
+            owner: Uuid::new_v4(),
             profile,
             client,
             raw,
@@ -76,7 +78,7 @@ impl Fixture {
         let task = self
             .store
             .create_task(
-                Uuid::new_v4(),
+                self.owner,
                 "redis-integration",
                 "execution.start",
                 json!({}),
@@ -84,7 +86,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        ExecutionSink::new(self.store.clone(), task.id)
+        ExecutionSink::new(self.store.clone(), task.id).with_owner(self.owner)
     }
     async fn call(&mut self, method: &str, params: Json) -> Result<Json> {
         let sink = self.sink().await;
@@ -627,15 +629,23 @@ async fn import_replacement_never_mutates_or_deletes_external_key() {
                         .is_err()
                 ),
                 _ => {
-                    f.call("import.discard", json!({"token":token}))
-                        .await
-                        .unwrap();
+                    assert_eq!(
+                        f.call("import.discard", json!({"token":token}))
+                            .await
+                            .unwrap_err()
+                            .code,
+                        "recovery_conflict"
+                    );
                 }
             }
             if action != "discard" {
-                f.call("import.discard", json!({"token":token}))
-                    .await
-                    .unwrap();
+                assert_eq!(
+                    f.call("import.discard", json!({"token":token}))
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "recovery_conflict"
+                );
             }
             assert!(
                 f.call("import.discard", json!({"token":token}))
@@ -931,7 +941,7 @@ async fn import_close_preserves_replacement_and_cleans_owned_key() {
             }
         }
     }
-    session.close().await.unwrap();
+    assert_eq!(session.close().await.unwrap_err().code, "recovery_conflict");
     for key in replaced {
         let value: Vec<u8> = redis::cmd("GET")
             .arg(key)

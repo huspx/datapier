@@ -67,7 +67,7 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        4
+        crate::protocol::VERSION
     );
     protocol::write(
         &mut peer,

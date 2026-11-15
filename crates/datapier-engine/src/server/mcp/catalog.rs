@@ -83,7 +83,11 @@ impl Engine {
         out.insert(key.into(), Value::Array(page));
         out.insert("has_more".into(), json!(more));
         if out.contains_key("complete") {
-            out.insert("complete".into(), json!(!more));
+            let upstream_complete = out
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            out.insert("complete".into(), json!(upstream_complete && !more));
         }
         out.insert("next_cursor".into(), json!(next));
         Ok(Value::Object(out))
@@ -532,8 +536,18 @@ impl Engine {
         let Value::Array(mut items) = resources else {
             return Err(AppError::new("internal", "目录结果无效"));
         };
+        let mut complete = result
+            .get("complete")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         if let Some(kind) = params.get("kind").and_then(Value::as_str) {
-            items.retain(|item| item["kind"].as_str() == Some(kind));
+            items.retain(|item| match item["kind"].as_str() {
+                Some("unknown") | None => {
+                    complete = false;
+                    true
+                }
+                Some(actual) => actual == kind,
+            });
         }
         if let Some(pattern) = params.get("pattern").and_then(Value::as_str) {
             items.retain(|item| {
@@ -552,7 +566,7 @@ impl Engine {
             cursor.map_or(0, |c| c.start),
             items,
             "resources",
-            json!({"complete":true}),
+            json!({"complete":complete}),
         )
         .await
     }

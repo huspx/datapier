@@ -30,6 +30,7 @@ struct Fixture {
     expire_query: Arc<AtomicBool>,
     challenge_auth: Arc<AtomicBool>,
     large_resource: Arc<AtomicBool>,
+    many_resources: Arc<AtomicBool>,
     large_ddl: Arc<AtomicBool>,
     query_count: Arc<AtomicUsize>,
     fail_query_at: Arc<AtomicUsize>,
@@ -60,6 +61,7 @@ impl Fixture {
         let expire_query = Arc::new(AtomicBool::new(false));
         let challenge_auth = Arc::new(AtomicBool::new(false));
         let large_resource = Arc::new(AtomicBool::new(false));
+        let many_resources = Arc::new(AtomicBool::new(false));
         let large_ddl = Arc::new(AtomicBool::new(false));
         let query_count = Arc::new(AtomicUsize::new(0));
         let fail_query_at = Arc::new(AtomicUsize::new(0));
@@ -76,6 +78,7 @@ impl Fixture {
             let expire_query = expire_query.clone();
             let challenge_auth = challenge_auth.clone();
             let large_resource = large_resource.clone();
+            let many_resources = many_resources.clone();
             let large_ddl = large_ddl.clone();
             let query_count = query_count.clone();
             let fail_query_at = fail_query_at.clone();
@@ -94,6 +97,7 @@ impl Fixture {
                     let expire_query = expire_query.clone();
                     let challenge_auth = challenge_auth.clone();
                     let large_resource = large_resource.clone();
+                    let many_resources = many_resources.clone();
                     let large_ddl = large_ddl.clone();
                     let query_count = query_count.clone();
                     let fail_query_at = fail_query_at.clone();
@@ -166,6 +170,9 @@ impl Fixture {
                                 json!({"status":0,"data":["r".repeat(4 * 1024 * 1024)]})
                                     .to_string(),
                             )
+                        } else if resource && many_resources.load(Ordering::Acquire) {
+                            let names: Vec<_> = (0..24).map(|i| format!("table_{i:02}")).collect();
+                            Some(json!({"status":0,"data":names}).to_string())
                         } else {
                             None
                         };
@@ -278,6 +285,7 @@ impl Fixture {
             expire_query,
             challenge_auth,
             large_resource,
+            many_resources,
             large_ddl,
             query_count,
             fail_query_at,

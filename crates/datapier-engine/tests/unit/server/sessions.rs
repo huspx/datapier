@@ -78,7 +78,7 @@ async fn saturated_duplex_releases_lease_and_preserves_dispatch_gate() {
         .unwrap();
         assert_eq!(
             protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-            4
+            crate::protocol::VERSION
         );
         let mut tokens = Vec::new();
         for may_write in [false, true] {

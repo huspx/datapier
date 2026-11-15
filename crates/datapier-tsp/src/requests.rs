@@ -243,6 +243,9 @@ impl App {
         if self.approval_response(&response.tag, &response.result, backend) {
             return;
         }
+        if self.project_layout_response(&response, backend) {
+            return;
+        }
         if response.tag.starts_with("settings.") {
             self.settings_response(response, backend);
             return;
@@ -277,7 +280,10 @@ impl App {
             let old = self.active;
             let old_status = (index != old).then(|| self.status.clone());
             self.switch_tab(index);
-            if generation == self.generation {
+            if self.project_response(&tag, &response.result, backend)
+                || self.transfer_response(&tag, &response.result, backend)
+            {
+            } else if generation == self.generation {
                 if tag.strip_prefix("draft-scope/").is_some_and(|token| {
                     self.draft_scope_response(token, &response.result, backend)
                 }) || self.workspace_restore_response(&tag, &response.result, backend)
@@ -452,7 +458,6 @@ impl App {
                 | "execution.start"
                 | "archery.sql_check"
                 | "change.submit"
-                | "transfer.import"
                 | "transfer.export"
         );
         if long && (self.operation_pending || self.task.is_some()) {

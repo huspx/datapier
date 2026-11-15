@@ -669,6 +669,18 @@ impl App {
         {
             self.workbench.field_error = None;
         }
+        if name.starts_with("transfer-") {
+            self.workbench.transfer.invalidate();
+        }
+        if name.starts_with("project-") {
+            self.workbench.project.invalidate();
+            if name.contains("-query-") {
+                self.workbench.project.unsaved = true;
+            }
+            if name.ends_with("-group") {
+                self.workbench.project.bindings = None;
+            }
+        }
         if name == "row_search" {
             self.sync_grid_visible_rows();
         }
@@ -775,14 +787,18 @@ impl App {
                 profile_id: None,
                 id: Uuid::new_v4(),
                 layout: Vec::new(),
+                project_query: None,
+                project_columns: None,
                 browse: BrowseSettings::default(),
                 pending: Value::Null,
+                workbench_draft: Value::Null,
                 pending_live: false,
                 schema_draft: None,
                 replace_draft: None,
                 runtime: TabRuntime::default(),
             }],
             active: 0,
+            project_layout: Default::default(),
             fields,
             focus: "query".into(),
             profiles: vec![],

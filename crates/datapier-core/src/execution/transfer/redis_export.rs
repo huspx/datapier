@@ -1,4 +1,5 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 struct RedisExportWriter {
     out: BufWriter<File>,
@@ -90,185 +91,164 @@ async fn export_key(
     p: &mut Progress,
     writer: &mut RedisExportWriter,
 ) -> Result<()> {
-    let RedisExportWriter { out, csv, first } = writer;
-    ensure_not_cancelled(cancel)?;
+    use crate::providers::redis::migration::{RedisMigrationChunk, RedisMigrationSource};
     let key = target
         .key_b64
         .as_deref()
         .ok_or_else(|| AppError::invalid("Redis target 缺少 key_b64"))?;
-    let meta = session
-        .call("export.meta", json!({"target":target}), sink, cancel)
-        .await?;
-    let ty = meta
-        .get("type")
-        .and_then(Json::as_str)
-        .ok_or_else(|| AppError::invalid("Redis key 缺少类型"))?;
-    if !matches!(ty, "string" | "hash" | "list" | "set" | "zset") {
-        return Err(AppError::invalid(format!("不支持 Redis 类型 {ty}")));
-    }
-    // 导出绝对过期时间，导入时不会因传输耗时延长 key 生命周期。
-    let expiry = meta.get("expires_at_ms").cloned().unwrap_or(Json::Null);
-    let exp = expiry.as_str().unwrap_or("permanent");
-    if let Some(c) = csv.as_mut() {
-        c.write_record(["2", "key", key, ty, exp, "", "", "", "", "", ""])
-            .map_err(csv_error)?;
-        flush_csv(c, out, false)?;
-    } else {
-        if !*first {
-            out.write_all(b",")?;
-        }
-        *first = false;
-        write!(
-            out,
-            "{{\"key_b64\":{},\"type\":{},\"expires_at_ms\":{},\"rows\":[",
-            serde_json::to_string(key)?,
-            serde_json::to_string(ty)?,
-            expiry
-        )?;
-    }
-    if ty == "string" {
-        if let Some(c) = csv.as_mut() {
-            flush_csv(c, out, true)?;
-            let mut prefix = csv::Writer::from_writer(Vec::new());
-            prefix
-                .write_record(redis_csv_row(key, ty, &[Value::Bytes("AAAA".into())])?)
-                .map_err(csv_error)?;
-            prefix.flush()?;
-            let encoded = prefix.get_ref();
-            if !encoded.ends_with(b"AAAA,\n") {
-                return Err(AppError::new("csv", "Redis CSV 前缀无效"));
-            }
-            out.write_all(&encoded[..encoded.len() - 6])?;
-        } else {
-            out.write_all(b"[{\"type\":\"bytes\",\"value\":\"")?;
-        }
-        let mut cursor = None;
-        loop {
-            ensure_not_cancelled(cancel)?;
-            let page = session
-                .call(
-                    "export.read",
-                    json!({"target":target,"type":ty,"cursor":cursor}),
-                    sink,
-                    cancel,
-                )
-                .await?;
-            let rows: Vec<Vec<Value>> = serde_json::from_value(
-                page.get("rows")
-                    .cloned()
-                    .ok_or_else(|| AppError::invalid("Redis 导出缺少数据"))?,
-            )?;
-            let [Value::Bytes(chunk)] = rows
-                .first()
-                .map(Vec::as_slice)
-                .ok_or_else(|| AppError::invalid("Redis String 导出响应无效"))?
-            else {
-                return Err(AppError::invalid("Redis String 导出响应无效"));
-            };
-            valid_b64(chunk)?;
-            out.write_all(chunk.as_bytes())?;
-            cursor = page.get("next").and_then(Json::as_u64);
-            if cursor.is_none() {
-                break;
-            }
-        }
-        if csv.is_some() {
-            out.write_all(b",\n")?;
-        } else {
-            out.write_all(b"\"}]]}")?;
-        }
-        p.rows += 1;
-        p.keys += 1;
-        return Ok(());
-    }
-    let mut row_first = true;
-    let mut cursor = None;
-    let mut row_count = 0u64;
-    let mut seen = HashSet::new();
-    let mut seen_bytes = 0usize;
+    let key_bytes = STANDARD
+        .decode(key)
+        .map_err(|e| AppError::invalid(e.to_string()))?;
+    let ProviderSession::Redis(redis) = session else {
+        return Err(AppError::invalid("Redis 导出需要 Redis 连接"));
+    };
+    let mut source = RedisMigrationSource::new(redis).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    let producer = source.stream_export_key(key_bytes, tx, cancel);
+    let reservation = Uuid::new_v4();
     let budget = sink
         .store
         .settings()
         .await?
         .limits
         .result_memory_bytes_per_client as usize;
-    let reservation = Uuid::new_v4();
-    let scan: Result<()> = async {
-        loop {
-            ensure_not_cancelled(cancel)?;
-            let page = session
-                .call(
-                    "export.read",
-                    json!({"target":target,"type":ty,"cursor":cursor}),
-                    sink,
-                    cancel,
-                )
-                .await?;
-            let rows: Vec<Vec<Value>> = serde_json::from_value(
-                page.get("rows")
-                    .cloned()
-                    .ok_or_else(|| AppError::invalid("Redis 导出缺少数据"))?,
-            )?;
-            for row in rows {
-                if matches!(ty, "hash" | "set" | "zset") {
-                    let member = serde_json::to_vec(&row[0])?;
-                    if seen.contains(&member) {
-                        continue;
+    let consumer = async move {
+        let RedisExportWriter { out, csv, first } = writer;
+        let mut kind = String::new();
+        let mut row_first = true;
+        let mut count = 0u64;
+        let mut verified = false;
+        let mut seen = HashSet::new();
+        let mut seen_bytes = 0usize;
+        while let Some(event) = rx.recv().await {
+            match event {
+                RedisMigrationChunk::Begin {
+                    kind: value,
+                    expires_at_ms,
+                } => {
+                    kind = value;
+                    let expiry = expires_at_ms.map(|v| v.to_string());
+                    if let Some(c) = csv.as_mut() {
+                        c.write_record([
+                            "2",
+                            "key",
+                            key,
+                            &kind,
+                            expiry.as_deref().unwrap_or("permanent"),
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                        ])
+                        .map_err(csv_error)?;
+                        flush_csv(c, out, false)?;
+                    } else {
+                        if !*first {
+                            out.write_all(b",")?;
+                        }
+                        *first = false;
+                        write!(
+                            out,
+                            "{{\"key_b64\":{},\"type\":{},\"expires_at_ms\":{},\"rows\":[",
+                            serde_json::to_string(key)?,
+                            serde_json::to_string(&kind)?,
+                            serde_json::to_string(&expiry)?
+                        )?;
                     }
-                    seen_bytes = seen_bytes.saturating_add(member.len()).saturating_add(64);
-                    if seen_bytes > budget {
-                        return Err(AppError::new(
-                            "resource_limit",
-                            "Redis 导出扫描超过内存预算",
-                        ));
+                    if kind == "string" {
+                        if let Some(c) = csv.as_mut() {
+                            flush_csv(c, out, true)?;
+                            let mut prefix = csv::Writer::from_writer(Vec::new());
+                            prefix
+                                .write_record(redis_csv_row(
+                                    key,
+                                    &kind,
+                                    &[Value::Bytes("AAAA".into())],
+                                )?)
+                                .map_err(csv_error)?;
+                            prefix.flush()?;
+                            let encoded = prefix.get_ref();
+                            if !encoded.ends_with(b"AAAA,\n") {
+                                return Err(AppError::new("csv", "Redis CSV 前缀无效"));
+                            }
+                            out.write_all(&encoded[..encoded.len() - 6])?;
+                        } else {
+                            out.write_all(b"[{\"type\":\"bytes\",\"value\":\"")?;
+                        }
                     }
-                    sink.store
-                        .reserve_auxiliary(sink.execution_id, reservation, seen_bytes)
-                        .await?;
-                    seen.insert(member);
                 }
-                let row = full_row(sink, row).await?;
-                let fields = redis_csv_row(key, ty, &row)?;
-                if ty == "list" && fields[6].parse::<u64>().ok() != Some(row_count) {
-                    return Err(AppError::conflict("Redis List 索引不连续"));
+                RedisMigrationChunk::StringPart(bytes) => {
+                    if kind != "string" {
+                        return Err(AppError::invalid("Redis String 分块顺序错误"));
+                    }
+                    out.write_all(STANDARD.encode(bytes).as_bytes())?;
                 }
-                for value in &row {
-                    if let Value::Bytes(s) = value {
-                        valid_b64(s)?;
+                RedisMigrationChunk::Rows(rows) => {
+                    for row in rows {
+                        if matches!(kind.as_str(), "hash" | "set" | "zset") {
+                            let member = serde_json::to_vec(&row[0])?;
+                            if seen.contains(&member) {
+                                continue;
+                            }
+                            seen_bytes = seen_bytes.saturating_add(member.len()).saturating_add(64);
+                            if seen_bytes > budget {
+                                return Err(AppError::new(
+                                    "resource_limit",
+                                    "Redis 导出扫描超过内存预算",
+                                ));
+                            }
+                            sink.store
+                                .reserve_auxiliary(sink.execution_id, reservation, seen_bytes)
+                                .await?;
+                            seen.insert(member);
+                        }
+                        let fields = redis_csv_row(key, &kind, &row)?;
+                        if kind == "list" && fields[6].parse::<u64>().ok() != Some(count) {
+                            return Err(AppError::conflict("Redis List 索引不连续"));
+                        }
+                        if let Some(c) = csv.as_mut() {
+                            c.write_record(fields).map_err(csv_error)?;
+                            flush_csv(c, out, false)?;
+                        } else {
+                            if !row_first {
+                                out.write_all(b",")?;
+                            }
+                            serde_json::to_writer(&mut *out, &row)?;
+                            row_first = false;
+                        }
+                        count += 1;
                     }
                 }
-                if ty == "string" && row_count != 0 {
-                    return Err(AppError::conflict("Redis String 包含多行"));
+                RedisMigrationChunk::Verified => verified = true,
+                RedisMigrationChunk::Expired | RedisMigrationChunk::Missing => {
+                    return Err(AppError::conflict("Redis key 在导出期间消失或过期"));
                 }
-                if let Some(c) = csv.as_mut() {
-                    c.write_record(fields).map_err(csv_error)?;
-                    flush_csv(c, out, false)?;
-                } else {
-                    if !row_first {
-                        out.write_all(b",")?;
-                    }
-                    serde_json::to_writer(&mut *out, &row)?;
-                    row_first = false;
-                }
-                p.rows += 1;
-                row_count += 1;
-            }
-            cursor = page.get("next").and_then(Json::as_u64);
-            if cursor.is_none() {
-                break;
             }
         }
+        if !verified {
+            return Err(AppError::conflict("Redis 源未完成一致性校验"));
+        }
+        if kind == "string" {
+            if csv.is_some() {
+                out.write_all(b",\n")?;
+            } else {
+                out.write_all(b"\"}]")?;
+            }
+            count = 1;
+        } else if count == 0 {
+            return Err(AppError::conflict("Redis key 在导出期间消失或内容为空"));
+        }
+        if csv.is_none() {
+            out.write_all(b"]}")?;
+        }
+        p.rows += count;
+        p.keys += 1;
         Ok(())
-    }
-    .await;
+    };
+    let (read, written) = tokio::join!(producer, consumer);
     sink.store.release_auxiliary(reservation).await?;
-    scan?;
-    if row_count == 0 {
-        return Err(AppError::conflict("Redis key 在导出期间消失或内容为空"));
-    }
-    if csv.is_none() {
-        out.write_all(b"]}")?;
-    }
-    p.keys += 1;
-    Ok(())
+    written?;
+    read
 }

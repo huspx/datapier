@@ -53,11 +53,11 @@ pub(super) async fn import_redis_csv(
             if record.len() != REDIS_HEADER.len() {
                 return Err(AppError::invalid("Redis CSV 列数不匹配"));
             }
+            if &record[0] != "2" {
+                return Err(AppError::invalid("不支持的 Redis CSV 版本"));
+            }
             match &record[1] {
                 "key" => {
-                    if &record[0] != "2" {
-                        return Err(AppError::invalid("不支持的 Redis CSV 版本"));
-                    }
                     if let Some(key) = active.as_mut() {
                         finish_key(session, key, sink, cancel, p).await?;
                     }

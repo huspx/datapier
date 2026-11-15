@@ -11,7 +11,7 @@ use crate::{Msg, i18n::tr};
 use serde_json::Value;
 use tern_sdk::ui::{self, Node, html};
 
-fn fact(label: &str, value: impl Into<String>) -> Node<Msg> {
+pub(crate) fn fact(label: &str, value: impl Into<String>) -> Node<Msg> {
     html::div()
         .class("advanced-fact")
         .child(html::span(tr(label).into_owned()).class("advanced-fact-label"))
@@ -19,7 +19,7 @@ fn fact(label: &str, value: impl Into<String>) -> Node<Msg> {
         .into()
 }
 
-fn diagnostic(key: &str, value: &Value) -> Node<Msg> {
+pub(crate) fn diagnostic(key: &str, value: &Value) -> Node<Msg> {
     ui::tree()
         .item(
             ui::TreeItem::new(key, tr("完整诊断").into_owned())
@@ -32,12 +32,25 @@ fn diagnostic(key: &str, value: &Value) -> Node<Msg> {
         .into()
 }
 
-fn status(value: &str) -> String {
+pub(crate) fn status(value: &str) -> String {
     tr(match value {
         "ready" => "已就绪",
+        "preparing" => "准备中",
+        "invalid" => "需调整计划",
+        "invalidated" => "计划已失效",
+        "read_failed" => "读取失败",
+        "not_sent" => "未发送",
+        "sent" => "已发送",
+        "rolled_back" => "已回滚",
+        "skipped" => "已跳过",
         "complete" => "完整",
         "completed" | "succeeded" => "已完成",
         "applied" => "已生效",
+        "published" => "已保存",
+        "cleaned" => "已清理",
+        "cleanup_pending" => "待清理",
+        "orphaned" => "已遗留",
+        "owned" => "已领取",
         "incomplete" => "不完整",
         "pending" | "queued" | "running" | "cancelling" => "处理中",
         "failed" => "失败",

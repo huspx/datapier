@@ -589,7 +589,7 @@ async fn oversized_resource_rpc_keeps_ipc_connection_usable() {
     .unwrap();
     assert_eq!(
         ipc_reply(&mut peer, "open").await["result"]["protocol_version"],
-        4
+        crate::protocol::VERSION
     );
     protocol::write(&mut peer, &json!({"id":"auth","method":"archery.auth.begin","params":{"server_id":fixture.server.id,"expected_revision":1,"operation_id":Uuid::new_v4()}})).await.unwrap();
     let auth_reply = ipc_reply(&mut peer, "auth").await;

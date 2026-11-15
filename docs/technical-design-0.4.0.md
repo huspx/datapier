@@ -2,9 +2,9 @@
 
 ## 1. 状态、依据与已确认范围
 
-本文是本次需求讨论确认后的 **0.4.0 实施前设计**，不代表已经实现、编译、运行验收或发布。本次只编写方案和同步文档入口，不调整产品版本、依赖、数据库 migration 或功能代码。
+本文记录整合前置代码后的 **0.4.0 实现与发布准备**，产品版本为 0.4.0，包含六个 crate、IPC v5 和配置 schema 5；正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。具体契约以 Core 的 model／transfer 和 storage、Engine 的 transfer／project RPC 及 TSP 工作台实现为准。本文中的验收矩阵是覆盖目标，并不表示每项均已验证，实际证据见第 14 节。
 
-依据为 [产品规划](product-plan.md)、[贡献指南](../CONTRIBUTING.md)、[0.1.0](technical-design-0.1.0.md)、[0.1.1](technical-design-0.1.1.md)、[0.2.0](technical-design-0.2.0.md) 和 [0.3.0](technical-design-0.3.0.md) 技术方案。本方案基于 `feature/0.3.0` 文档提交 `f1976b1`，其前置 0.2.0 文档基线为 `f922e3933dc26b849cb6efdf6ed995ea5af5ed58`。0.2.0、0.3.0 正由其他线程实现；接口名称、schema 与模块落点须在接入前对照最终实现核对，不能把设计接口写成已有能力。
+依据为 [产品规划](product-plan.md)、[贡献指南](../CONTRIBUTING.md)及既有版本技术方案；0.3.0 已合入 main，本候选基于该实现维护 0.4.0 增量，正式发布状态与实际验收范围分别记录。
 
 ### 1.1 需求基线
 
@@ -81,9 +81,9 @@ flowchart LR
 
 复用 SQLx、redis-rs、Serde、csv、sha2、现有 tokenizer 与 sqlparser。SQL 恢复 reader 在 tokenizer 之上处理客户端分隔符和版本化注释；sqlparser 不被当作完整 MySQL 语法判定器。
 
-新增依赖限定为 `encoding_rs` 的严格流式转码，以及 `zip` 的项目归档读写；ZIP 首版使用 Stored，不开启加密和不需要的压缩后端。最终精确版本、MSRV、许可证、features 和六目标解析结果须在实施时以 registry 与 Cargo.lock 核对，本方案不伪造已完成依赖验证。`encoding_rs` 已核对存在 without-replacement 流式接口，不能使用自动替换错误字符的路径。
+实现使用 `encoding_rs` 严格流式转码和 `zip` 项目归档；依赖版本与 features 以 Cargo.lock 和各 crate 配置为准。
 
-宿主和平台先沿用 0.3.0：macOS arm64／Tern 0.9.9／tern-sdk 0.2.0 为原生交互验收基线；其余五个目标完成编译、默认测试与打包验证，运行状态单独报告。若前置版本实际升级基线，接入时统一更新，不能同时维护两套未验证契约。
+当前开发运行基线为 macOS arm64／Tern 0.9.21（实测 `0.9.21 dbe0861`）／tern-sdk 0.2.0；其他五个目标的 CI、打包及运行尚未验收，不能据此宣称六目标通过。
 
 ## 3. 迁移配置、计划与执行
 
@@ -93,11 +93,9 @@ flowchart LR
 |---|---|
 | `TransferSpec` | `version=1`、模式 import/export/copy/sql_dump/sql_restore、源与目标逻辑描述、按序输入、对象选择、映射、冲突／错误策略、读取一致性、输出及格式选项；只表达用户意图 |
 | `ResolvedTransfer` | 本机 profile ID／revision、源目标实际数据库身份、资源范围、能力与权限、文件身份、工作区和客户端归属；不进入共享项目 |
-| `TransferPlan` | ID、revision、完整性、选中步骤、有序依赖、schema 指纹、输入指纹、预览样本、诊断、破坏性项、digest 和失效时间 |
-| `PlanStep` | ordinal、对象／文件、阶段、动作、依赖、前置条件、实际 DDL 或参数化 DML 模板、策略及可确认边界 |
-| `DataChunk` | 内部所有权移动的类型化行／Redis 内容、来源定位和字节记账；不序列化进日志，不在 IPC 搬运整批数据 |
-| `TransferRun` | execution ID、冻结配置摘要、计划 digest、开始／结束时间、计数、当前步骤、输入与目标事实、终态 |
-| `StepOutcome` | 未发送／已发送／已生效／已回滚／失败／跳过／待确认，定位元数据、错误码、影响数及确认依据 |
+| `PreparedTransfer`／`TransferPlanItem` | 计划 ID、revision、digest、配置、选择的对象步骤、样本、诊断、输入与连接身份；人工续作另带 `retry_of` 和 `retry_states` |
+| 流式数据批次 | 内部传递类型化行／Redis 内容，运行期数据不写入执行日志 |
+| `TransferProgress`／`TransferStepOutcome` | 读写、跳过、失败、回滚及待确认计数、阶段、定位、摘要和单项状态；`checkpoint_ordinal` 标记已计入进度的步骤边界 |
 
 源和目标使用独立专属数据库会话，不接管查询 tab 的未提交事务、临时表或 WATCH。MySQL 同源实例的多个库可以共用一个源快照；不同源实例是不同快照，不能标为同一时刻。
 
@@ -107,7 +105,7 @@ flowchart LR
 
 准备阶段不写数据库。计划 ready 要求**元数据、映射、依赖、所选结构步骤及支持性检查完整**，不代表已经逐行验证全部数据。样本初始每对象 100 行，受总内存及页字节限制；明确显示抽样范围，转换错误仍可能在后续数据中出现。CSV／JSON 的数据读取不为了预览而扫描并保存全量输入。
 
-SQL 恢复另需完整输入扫描以发现不支持的语句并形成可重排的对象依赖；仅持久登记文件偏移、校验摘要和语句类别等输入索引，不保存解析后的行值。索引也是有配额、可取消、可清理的文件处理产物。
+SQL 恢复另需完整输入扫描以发现不支持的语句并形成可重排的对象依赖。输入索引持久化为数据目录 `transfer-index/` 下的独立元数据文件，只保存源文件及分块校验摘要、语句偏移、类别和必要结构上下文，不保存解析后的行值、完整 SQL／DDL 或原始 SET 语句。每次准备或执行的所有 SQL 输入共享 **32 MiB 内存索引预算和 64 MiB 索引文件预算**，增量计入容量，超限在数据库写入前返回 `resource_limit`；额度限制元数据，不限制通过回调消费的数据总字节数。文件以 `input_index` artifact 登记 task、客户端归属、文件身份、大小、SHA-256 和 revision，先登记再写入，封口后才进入 ready。执行仍重新预检输入与目标，不复用旧计划；Engine 重启后只能找回索引用于导出和安全清理，必须重新准备。
 
 意图、勾选、映射、路径或破坏性确认变化均推进计划 revision 并重算 digest。执行冻结 `plan_id + revision + digest`；重复确认只返回同一个 execution ID，不创建第二次写入。目标、配置、权限或输入发生变化使计划失效，要求重新准备。
 
@@ -117,7 +115,7 @@ provider 在拥有连接的 worker 中读取；内部有界通道向目标 write
 
 MySQL 源表使用一次流式 SELECT，不通过反复 OFFSET 拼接整个表；无主键表可读取并在“新增”策略下导入，不能因 grid 编辑要求可靠键而一概拒绝插入。过滤使用类型化条件树及绑定参数，字段和标识符从 catalog 取值，不接受任意脚本作为迁移过滤器。任意查询仍可沿既有显式导出路径生成数据文件后导入。
 
-初始上限：数据批次最多 500 行且应用保留数据不超过 1 MiB，内部通道最多 2 批；超宽单行走单项批次并计入客户端总预算。单值／原生 SQL 语句上限初始 16 MiB，超限明确失败，不把该上限解释为字段级网络流式能力。MySQL 包大小、Redis 原生响应解码及驱动临时分配仍是额外边界。
+初始上限：数据批次最多 500 行且应用保留数据不超过 1 MiB，内部通道最多 2 批；超宽单行走单项批次并计入客户端总预算。单值／原生 SQL 语句上限初始 16 MiB，超限明确失败，不把该上限解释为字段级网络流式能力。当前 MySQL 迁移单值检查按类型化 JSON 编码字节计量，因此原始 payload 的可用字节数还需扣除类型标签和转义开销；16 MiB 原始文本不保证可接受。MySQL 包大小、Redis 原生响应解码及驱动临时分配仍是额外边界。
 
 计划摘要初始上限 10000 个结构／对象步骤和 32 MiB，不限制一个已接受对象的数据总行数。每次 RPC 响应默认 1 MiB、IPC 帧 8 MiB，预览／报告分页，单次原始文件和值块最多 256 KiB。所有保留缓冲与前置版本客户端总预算共同记账；提高局部设置不能突破总预算。
 
@@ -125,7 +123,7 @@ MySQL 源表使用一次流式 SELECT，不通过反复 OFFSET 拼接整个表�
 
 ### 4.1 格式与解析
 
-保持 0.1.0 的 Direct MySQL／Redis `format/version=1` 类型化 JSON 和 CSV 编码契约，不重命名既有文件格式；Archery 查询结果格式仍是独立的 `datapier-query-result`，不能冒充可恢复数据库备份。
+Direct MySQL 类型化 JSON 沿用 `format/version=1` 与既有 CSV 编码；Redis 新旧文件交换通道均使用 JSON／CSV 版本 2 并拒绝版本 1。Archery 查询结果格式仍是独立的 `datapier-query-result`，不能冒充可恢复数据库备份。
 
 - MySQL 支持多个 CSV／JSON 对应一张表，或不同文件映射不同表；文件按用户可见顺序执行，相同目标共享已确认映射或逐文件覆盖。文件顺序会影响键冲突，预览明确列出。
 - Redis 使用已有包含 key、原生类型、完整内容和绝对到期时间的 CSV／JSON，不把普通表格 JSON 猜成 key 备份。
@@ -231,6 +229,8 @@ mysqldump --single-transaction --quick --hex-blob --routines --events --triggers
 
 恢复前按对象显示原 DEFINER 与目标映射；默认映射到目标当前账号，可显式保留原账号。保留 SQL SECURITY，说明 definer 改变会改变实际权限上下文。不同 MySQL 版本检查实际定义权限，不凭统一 SUPER 假设执行。
 
+SQL 恢复的对象输入用于名称映射，不作为文件过滤条件；未填写映射的对象保留原名并进入预览。预览中的 `object_scope` 项选择或排除整个对象及其结构、数据和收尾步骤，数据库上下文不能作为普通对象单独切换。选择纳入 revision／digest；执行重新扫描时保留已冻结的选择并复核完整输入与目标。被排除对象仍是选中对象的必要依赖时，在首次写入前阻断；全不选不执行库级变更。
+
 执行次序由依赖图生成：库／表与必要列索引 → 必要静态依赖对象 → 数据 → 延后外键／约束验证 → 视图和剩余存储对象 → 触发器 → 禁用状态的事件 → 读回。函数、视图、生成表达式之间有依赖时按实际图前移，不能使用固定类别顺序掩盖循环或缺失依赖。
 
 目标新建触发器在数据之后安装。若目标已有触发器，普通 INSERT／UPDATE 会触发它：预览必须列出并要求明确确认，不能声称“导入不会触发业务逻辑”，也不能自动 DROP 现有触发器。事件默认禁用；用户要启用时，在恢复完成后明确发起新的操作。
@@ -247,7 +247,7 @@ mysqldump --single-transaction --quick --hex-blob --routines --events --triggers
 
 SCAN 允许空批次和重复，cursor 为零才结束。直接迁移在逐 key 操作日志中写入源 key 的完整 SHA-256 摘要与目标摘要，并以唯一索引避免对同一源 key 重复执行；这属于写入发送去重元数据，不保存原始 key 或可还原编码，不能作为资源树或旧读取结果。日志读取分页、内存缓存有界；日志存储失败时停止发送，不退回无界 HashSet 或无去重执行。不同源身份映射到同一目标摘要时报告映射冲突，不由覆盖策略吞掉。此去重表只用于数据库 SCAN；文件中的重复 key 属于有序输入记录，按新增／跳过／覆盖策略处理，不因相同目标摘要被误判为映射冲突。
 
-源端在专属连接 WATCH 当前 key，然后读取类型、内容和绝对到期时间；大集合分块读取并增量写目标临时对象，读取结束通过受 WATCH 保护的只读 EXEC 校验源未发生变化，再允许发布。源变化、过期、类型变化或读取失败时丢弃本任务临时对象并报告，不能把混合版本集合当成完整 key。校验后的源仍可继续变化，跨实例不存在原子读写事务。
+源端在专属连接 WATCH 当前 key，然后读取类型、内容和绝对到期时间；大集合分块读取并增量写目标临时对象，读取结束通过受 WATCH 保护的只读 EXEC 校验源未发生变化，再允许发布。文件导出同样逐 key 检查读取一致性；源变化、过期、类型变化或读取失败时停止，不能把混合版本集合当成完整 key。校验后的源仍可继续变化，跨实例不存在原子读写事务。
 
 用可取得的服务端身份（如 Redis run_id）、连接目标及 DB 判定源目标关系，不能只按 profile UUID 判断不同实例。源目标可能同实例同 DB 时，只有能证明扫描源范围与写入目标范围不相交，或显式选定 key 与目标集合互不覆盖，才允许直接搬运；完全相同的源目标 key 不作为复制执行。无法证明、身份未知或映射循环要求用户改范围，或**显式选择文件中转**，不自动将源值落入隐藏文件。
 
@@ -270,6 +270,8 @@ SCAN 允许空批次和重复，cursor 为零才结束。直接迁移在逐 key 
 ### 7.3 绝对到期时间
 
 沿用 `expires_at_ms` 字符串或永久语义，Redis 6.2 通过固定只读脚本结合 TIME／PTTL，较新版本可用相应能力。目标以自身服务器 TIME 判断是否已经到期；已到期时跳过且不覆盖现有目标，永久保持永久。
+
+Hash 同时保留字段绝对期限：CSV 使用必填 `field_expires_at_ms` 列，类型化 JSON 的字段行必须含第三项；`-1` 表示永久字段。版本 1、缺列或缺字段期限的输入均拒绝，不能默认为永久。Redis 6.2／7.2 的字段期限为永久；有限字段期限导入需要 Redis 7.4 或更高版本。直接迁移及 CSV／JSON 往返不把字段期限重置为剩余时长。
 
 绝对期限在临时对象发布前设置，并在最终脚本再次核验；传输不重置为最初剩余 TTL。临时对象的清理期限与用户数据的最终期限分别管理。展示两端测得的服务器时间与采样误差，两端时钟不一致会改变实际剩余寿命，不能声称客户端已修正服务器时钟。
 
@@ -304,6 +306,8 @@ stateDiagram-v2
 
 显示已处理字节、已读取行／key、已确认写入／跳过／失败／待确认数、当前对象及阶段。文件总字节数可知；数据库总行／key 数默认未知，不自动 COUNT／DBSIZE 冒充精确目标数。只能在已知分母时显示准确百分比，否则显示累计与当前阶段。
 
+SQL 文件预检在 blocking worker 中执行，保持 Engine 心跳与 UI 可操作。恢复 INSERT 时按预检索引定位当前语句，复核所读完整块，并保留字符集、sql_mode、DELIMITER 与绝对字节／行位置；不对每条 INSERT 重扫整份输入。data 阶段的已处理字节按实际消费的 INSERT 区间累计，预检读取、数据消费和已确认写入分别统计，不把该计数解释为整个恢复任务的完成比例。
+
 报告可分页查看，并显式导出 JSON／CSV 到用户路径。默认报告只有定位与错误元数据；用户明确勾选包含失败输入记录时才导出仍可从原输入重新读取的记录内容，并复核输入指纹。不能在后台先保存所有失败行再称为普通日志。原始错误中若包含参数值，落盘前脱敏并保留错误码。
 
 ### 8.3 取消与离线
@@ -316,96 +320,27 @@ stateDiagram-v2
 
 “再次执行”创建新计划、新 execution ID 和新权限／基线检查，并关联原 run ID。文件输入未变时，可显式选择 `failed`、已确认 `rolled_back` 和 `not_sent` 的记录范围，并保持原输入顺序；已回滚不能被当成已完成而漏掉。MySQL 直接迁移旧快照消失后不能用旧行号／OFFSET 当断点，只能重新选择对象、可靠键条件或新范围，并说明读取的是当前数据。Redis 可重新选择范围，日志摘要用于核对已执行事实，不恢复源 key 结果集。
 
+`retry_states` 为空时选择 `failed`、`rolled_back`、`not_sent`；显式指定时只能从这三种状态中选择。SQL 批次的 `record_offsets` 按输入顺序记录每个元组的起始字节位置，配合 `item_states` 区分失败、回滚与未发送项，续作按这些定位选择子集，而不是重复执行整个失败批次。`sent`／`outcome_unknown` 不进入自动续作集合。
+
 待确认写入必须先人工核对，不能自动加入可重试范围。输入文件、过滤、映射、目标结构或策略改变后，原范围只作诊断，不能宣称无重复精确续传。重启保留配置、定位摘要和发送事实，不保留流、连接、事务、WATCH、旧结果或可直接执行的原数据块。
 
 ## 9. 本地持久化与升级
 
 ### 9.1 配置 schema 5
 
-目标从 0.3.0 的配置 schema 4 事务迁移到 5；旧版本依次执行既有迁移。保留 profiles、凭据追踪、授权／审批、历史／写入事实、设置和工作区。不创建新查询结果库。若前置实现调整 schema 编号，接入时整体顺延并同步文档，不能复用相同编号承载不同结构。
+配置由 schema 1–4 依次执行既有迁移至最终 schema 5。[`0005_config.sql`](../crates/datapier-core/migrations/0005_config.sql) 定义迁移预设、运行与步骤、key 摘要、资源登记、本机项目绑定及 `project_binding_confirmations` 确认元数据。资源状态包括 `cleaned`。
 
-新增表职责如下；完整约束和迁移验证须随实现交付，不能运行时临时补表：
-
-```sql
-CREATE TABLE transfer_presets (
-    id TEXT NOT NULL PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision > 0),
-    name TEXT NOT NULL,
-    spec_json TEXT NOT NULL CHECK (json_valid(spec_json)),
-    updated_at_ms INTEGER NOT NULL
-);
-CREATE TABLE transfer_runs (
-    id TEXT NOT NULL PRIMARY KEY,
-    execution_id TEXT NOT NULL UNIQUE,
-    workspace_id TEXT NOT NULL,
-    spec_digest TEXT NOT NULL,
-    context_json TEXT NOT NULL CHECK (json_valid(context_json)),
-    state TEXT NOT NULL CHECK (state IN (
-        'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'outcome_unknown'
-    )),
-    progress_json TEXT NOT NULL CHECK (json_valid(progress_json)),
-    retry_of TEXT,
-    revision INTEGER NOT NULL CHECK (revision > 0),
-    created_at_ms INTEGER NOT NULL,
-    finished_at_ms INTEGER
-);
-CREATE TABLE transfer_steps (
-    run_id TEXT NOT NULL REFERENCES transfer_runs(id) ON DELETE RESTRICT,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    locator_json TEXT NOT NULL CHECK (json_valid(locator_json)),
-    phase TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN (
-        'not_sent', 'sent', 'applied', 'rolled_back', 'failed', 'skipped', 'outcome_unknown'
-    )),
-    digest TEXT NOT NULL,
-    outcome_json TEXT NOT NULL CHECK (json_valid(outcome_json)),
-    PRIMARY KEY (run_id, ordinal)
-);
-CREATE TABLE transfer_key_ops (
-    run_id TEXT NOT NULL REFERENCES transfer_runs(id) ON DELETE RESTRICT,
-    source_digest TEXT NOT NULL,
-    target_digest TEXT NOT NULL,
-    step_ordinal INTEGER NOT NULL CHECK (step_ordinal >= 0),
-    PRIMARY KEY (run_id, source_digest),
-    UNIQUE (run_id, target_digest)
-);
-CREATE TABLE transfer_artifacts (
-    id TEXT NOT NULL PRIMARY KEY,
-    run_id TEXT,
-    owner_client_id TEXT,
-    kind TEXT NOT NULL CHECK (kind IN (
-        'input_index', 'export_partial', 'report', 'project_stage', 'redis_temporary'
-    )),
-    state TEXT NOT NULL CHECK (state IN (
-        'preparing', 'ready', 'published', 'cleanup_pending', 'outcome_unknown', 'recovery_conflict'
-    )),
-    identity_json TEXT NOT NULL CHECK (json_valid(identity_json)),
-    revision INTEGER NOT NULL CHECK (revision > 0)
-);
-CREATE TABLE project_bindings (
-    project_id TEXT NOT NULL,
-    binding_group TEXT NOT NULL,
-    connection_alias TEXT NOT NULL,
-    profile_id TEXT NOT NULL,
-    database_json TEXT NOT NULL CHECK (json_valid(database_json)),
-    revision INTEGER NOT NULL CHECK (revision > 0),
-    PRIMARY KEY (project_id, binding_group, connection_alias)
-);
-CREATE INDEX transfer_runs_workspace_created
-    ON transfer_runs(workspace_id, created_at_ms);
-CREATE INDEX transfer_steps_run_state ON transfer_steps(run_id, state, ordinal);
-CREATE INDEX transfer_artifacts_state ON transfer_artifacts(state);
-PRAGMA user_version = 5;
-```
+`record_offsets` 最多 500 项、严格递增，首尾分别与 `byte_start`／`byte_end` 对应。`checkpoint_ordinal` 是已计入进度的步骤边界，恢复进度时用于避免重复计数；未确认的发送事实仍须单独处理。
 
 JSON 字段不是任意 payload 通道：Store 用类型化白名单校验，拒绝原值、结果行、密码、token、Cookie、TOTP 和完整输入 SQL 数据正文。项目预设只保存用户输入的选择和映射；扫描出来的原始 key 列表不进入 spec。`transfer_key_ops` 只存操作摘要，不保存原始 key 或可还原编码，不提供结果读取接口。
 
-`transfer_runs.execution_id` 与前置版本持久执行事实绑定，不能级联到可独立清理的历史展示记录。transfer 日志与发送状态在同一 SQLite 事务提交；schema 接入时对照最终执行日志表建立关联，不在两个表之间先后写入却声称原子。JSON 业务结构、UUID、摘要长度、关系一致性还需 Store 校验。
+`transfer_runs.execution_id` 通过外键关联持久执行事实；JSON 业务结构、摘要与关系由 Store 校验。
 
 ### 9.2 资源、清理与恢复
 
-输入索引、partial 输出、项目 staging 与 Redis 临时对象都登记准确归属和 revision；只有属于本任务的未发布资源可清理，已发布用户文件不因任务历史清理被删除。记录不存在、路径变化、符号链接替换或所有权不符时拒绝删除并报告。
+输入索引、partial 输出、项目 staging 与 Redis 临时对象持久登记准确归属和 revision。索引 worker 收尾释放内存和文件句柄，封口后的元数据文件可经 artifact 接口显式导出或清理；失败／取消保留可核对的 partial，封口失败时保留 preparing 身份，由领取方重新核对当前摘要。task 或所属运行仍活跃时，客户端退出也不能领取或清理。只有属于本任务的未发布资源可清理，已发布用户文件不因任务历史清理被删除。记录不存在、路径变化、符号链接替换或所有权不符时拒绝删除并报告。
+
+Redis 导入临时 key 被外部替换时，`import.discard` 返回 `recovery_conflict` 并保留外部对象，不能将未删除的资源报告为清理成功。会话关闭仍尝试清理其余确属本会话的临时 key，再返回首个清理错误；冲突不能阻断其余安全清理。
 
 SQLite／磁盘满时停止新写入发送；已发送结果按既有 outcome_unknown 和内存诊断规则处理，不能因为无法保存日志就继续批量搬运。Redis 操作摘要日志大小随 key 数增长，属于执行元数据磁盘成本，运行前展示可用空间，运行中检查存储错误；不宣称固定磁盘开销。
 
@@ -413,7 +348,13 @@ Engine 重启将仍处于 sent 的步骤保守标为待确认、未发送步骤�
 
 遗留资源管理沿用 0.3.0 value.files.claim 的思路：当前同一 OS 用户的 TSP 可按 artifact ID 和 expected revision 显式领取，事务更新 owner_client_id 和 revision；原所有者仍活跃则 busy。领取只授予本地文件导出、项目发布恢复和安全清理权限，不恢复数据库会话、WATCH 或写入权限。Redis 临时对象核对／清理仍需重新取得对应数据库权限和验证所有权标记，领取本地登记本身不能授权发送数据库命令。
 
-schema 5／IPC v5 不向旧程序兼容。升级前备份一致数据目录；回退恢复升级前备份，先保留本版新增文件与日志，系统凭据不随 SQLite 回退。本文不执行数据库升级或发布操作。
+对于仍可能增长的 partial 文件，领取前先通过 `transfer.artifact.get` 查看当前文件身份和 SHA-256；原所有者活跃时拒绝。领取必须显式提交 `confirm_partial_sha256`，Engine 重新检查当前摘要，不一致返回 `recovery_conflict`；确认后才更新归属与资源状态。领取不把 partial 文件标为完整备份。
+
+提交后的冻结计划继续保留其登记和预算，终态日志独立保存。TSP 修改条件后再次准备时，先显式丢弃旧计划再申请新计划；Engine 拒绝丢弃仍在执行的计划，编辑新条件不取消旧任务。
+
+旧计划已过期或已被全局清理时，显式再次准备仍可继续：清理返回 `not_found` 只表示旧句柄不存在；其他清理错误保留错误并停止。计划的 `invalid` 显示“需调整计划”，与 TTL／配置变化导致的 `invalidated`“计划已失效”区分。
+
+schema 5／IPC v5 不向旧程序兼容。升级前备份一致数据目录；回退恢复升级前备份，先保留本版新增文件与日志，系统凭据不随 SQLite 回退。尚未发布的早期 schema 5 若缺少必要确认表或约束（包括 `input_index` 约束），打开时返回 `storage_version` 并保留原目录，需使用新目录；schema 1–4 依次迁移至最终 schema 5，不猜测或修补未知结构。
 
 ## 10. Git 项目目录与单文件交换
 
@@ -454,6 +395,8 @@ example-project/
 
 允许为开发／测试等保存本机绑定组。共享配置使用 alias；profile ID、实际目标库、环境绑定、绝对输入输出路径覆盖项存在本机工作区／project_bindings，不能回写 Git 项目。绑定修改推进本机 revision，使相关未执行计划失效；绑定不能改变数据库类型，也不能把 Archery 绑定成可写迁移目标。
 
+确认记录持久保存在本机，按项目 UUID、规范根目录及目录文件身份、绑定组和完整绑定 digest 关联。绑定修改使确认失效；归档导入新目录即使 UUID 相同也须重新确认。打开同一目录可复用仍匹配的确认，执行前重新核验，确认不替代正常权限和执行确认。
+
 项目数据文件仅保存相对路径或具名路径参数，不自动打包 CSV／JSON／SQL dump。项目外文件通过本机路径覆盖项明确选择。共享输出路径只是候选，执行前显示实际规范路径与源目标，不能打开项目就读取外部文件或写入默认生产库。
 
 ### 10.3 保存、打开与并发修改
@@ -464,7 +407,13 @@ example-project/
 
 Engine 记录打开时各受管理文件摘要，保存时与磁盘版本核对；外部编辑器／Git 切换／另一窗口改变文件则返回冲突，不覆盖。同项目的 Datapier 写入通过 OS 文件锁串行，锁及恢复文件不进归档。项目发布前为每个受影响文件登记旧／新摘要、可恢复的旧版文件、新文件及发布阶段，先发布正文和配置，再发布 manifest。目录内多文件替换不是跨平台原子事务，不能对不遵守该锁的外部程序承诺内容 CAS。
 
+项目正文通过 `project.file.read` 分段读取；保存使用 `project.save.upload.begin/chunk/cancel` 按文件和偏移分段上传，再准备保存。每块最多 256 KiB，上传受所有者、工作区、revision、顺序偏移及项目大小约束；取消或句柄过期释放上传资源。
+
+保存预览是一次性句柄，提交失败后也不能重复引用；UI 清除已消费句柄并保留本机 manifest／查询草稿，后续重新比较基线并准备。未保存正文不能因切换项目查询而被替换；先显式保存再切换。外部冲突不会自动接受新的磁盘基线或覆盖文件，仍需用户核对、合并并重新准备。
+
 发布中断后按逐文件摘要核对：当前内容仍为旧版时可继续发布，仍为本次新版且旧版完整保留时可回退；出现第三种内容、外部新增／删除或旧版无法取得时进入 `recovery_conflict`。保留 staging、原版和本机编辑，提供只读查看、导出及人工合并后重新准备保存；不强制先完成／回退才允许查看项目，也不覆盖用户后续 Git／编辑器改动。旧文件在受控临时位置保留至发布核对完成，遇到可能仍被外部编辑的文件保留冲突副本供人工处理，不能以清理为由丢失未合并内容。
+
+`project.stages.discover` 扫描保存与导入 stage，将未登记的遗留项登记为 artifact；随后通过资源列表、领取、恢复或清理接口处理。清理前核对归属、文件身份和状态，不能删除外部替换内容；发现过程受项目工作预算约束。
 
 UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选择共享的文本，保存过程登记可用于恢复本次用户写文件操作，不能借此备份数据库结果。
 
@@ -478,7 +427,7 @@ UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选
 
 ## 11. IPC v5、权限与所有权
 
-沿用 UDS／Named Pipe、8 MiB 帧、默认 1 MiB 业务响应、客户端归属、revision 和有界分页。以下方法是设计契约，实际命名在前置版本接入时统一，不暴露给 MCP 任意转发。
+沿用 UDS／Named Pipe、8 MiB 帧、客户端归属、revision 和有界分页。以下列出实现的方法族，不暴露给 MCP 任意转发。
 
 | 方法族 | 关键输入 | 返回与行为 |
 |---|---|---|
@@ -492,8 +441,10 @@ UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选
 | `transfer.retry.prepare` | 原 run ID、用户选定范围／新条件 | 新计划，拒绝自动包含待确认项，不恢复旧快照 |
 | `transfer.preset.list/save/delete` | workspace、spec、expected revision | 本机可复用配置，不自动执行 |
 | `transfer.artifact.list/get/claim/export/cleanup` | 登记 ID、expected revision、明确决定；导出另含用户路径 | 遗留资源可发现、领取、导出与安全清理；活跃所有者阻止领取，不授予数据库写权限 |
-| `project.open/preview` | 用户目录／manifest 路径 | 格式、文件清单、共享配置与绑定需求；不执行 |
-| `project.bindings.get/save` | project ID、alias、profile／DB、revision | 本机绑定，修改使相关计划失效 |
+| `project.create/open/close`、`project.file.read` | 用户目录、项目 ID／相对路径 | 创建、打开、关闭及有界读取项目文件；不自动执行 |
+| `project.save.upload.begin/chunk/cancel` | 项目 ID／上传 ID、revision、文件路径及偏移 | 分段上传项目正文，取消释放上传句柄 |
+| `project.stages.discover` | 当前客户端与工作区 | 发现并登记未登记的保存／导入 stage，后续通过 artifact 接口管理 |
+| `project.bindings.get/save/confirm` | project ID、绑定组、profile／DB、revision、确认信息 | 本机绑定及显式确认，修改使相关计划和确认失效 |
 | `project.save.prepare/commit` | project handle、文件摘要基线、用户选择、digest | 保存 diff／发布结果，外部变更冲突保护 |
 | `project.recovery.read/prepare/commit` | 已领取的 project_stage ID、revision、逐文件决定及新 digest | 读取中断状态和冲突副本，重新核对磁盘后完成、回退或准备人工合并后的新保存；不强制覆盖第三种内容 |
 | `project.import/export` | 用户路径、项目句柄／归档 | 文件任务及逐阶段结果，原子发布归档或新目录 |
@@ -518,9 +469,13 @@ UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选
 
 工作区菜单提供“打开项目”“保存项目”“导入项目归档”“导出项目归档”；项目标题展示名称及共享内容是否待保存。绑定页按 alias 显示本机连接和 DB，缺失／类型错误／只读目标逐项定位，不凭相同名称自动绑定。
 
+新增逻辑连接先显式保存项目，再读取所选本机绑定组的当前 revision，指定连接、库／DB 及具名路径覆盖后保存绑定。共享迁移配置只保存 alias、项目相对路径或 `${name}` 路径参数；准备时按所选绑定组解析，并显示实际源目标。保存共享配置只加入本机项目草稿，仍须预览差异并确认保存项目，归档也不包含本机连接 ID、数据库覆盖或绝对路径。
+
 保存预览按文件列差异，移除项目引用不自动删除外部数据文件。项目保存失败保留本机编辑，Git 外部变更提示重新加载或明确合并，不以覆盖按钮隐藏冲突。
 
-所有新界面沿用现有 Tern 公开语义控件、局部样式、分页器、UTF-16 编辑、Command／Ctrl 与简体中文／英文文案；不假设新拖拽／原生文件选择能力。HTML 设计与原生实现任务应在功能实施时同步，不在本次文档任务伪造已运行界面。
+工作区自动保存等待所有标签中的项目在途请求结束；工作区正在保存时，项目准备及确认保存提示等待并保留编辑内容，避免两者争抢共享内存预算。项目准备失败后的上传清理不覆盖原始错误；句柄已被准备阶段消费时，清理返回的 `not_found` 属于已释放状态。
+
+工作台使用 Tern 语义控件和具名字段，HTML 仅是示例，不能作为原生运行证据。
 
 ## 13. 实施顺序与完整交付
 
@@ -534,11 +489,39 @@ UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选
 | 6. 项目 | core/project 格式、engine 文件发布／绑定、TSP 项目入口 | Git 目录、跨机器绑定、预设、显式保存、外部冲突和归档实际往返 |
 | 7. 升级与完整回归 | migrations、各 crate tests、用户说明及安装验证 | 前置契约接入、旧数据保留、六目标构建与实际交互验收范围分别报告 |
 
-切片是实现依赖顺序，不是可缩减范围。每个新增模块随完整纵向路径接线；不能用空能力、返回模拟结果或未接入 UI 的底层函数声称交付。替换既有 transfer RPC／writer 时迁移所有调用方，保持已导出的 CSV／JSON 文件可读，不保留旧接口 shim。
+切片是实现依赖顺序，不是可缩减范围。每个新增模块随完整纵向路径接线；不能用空能力、返回模拟结果或未接入 UI 的底层函数声称交付。Redis 旧版文件不再作为可读兼容基线。
 
-本次文档阶段不修改 Cargo、版本、CHANGELOG、plugin、CI、数据库或 UI 实现。实施时才按贡献／发布指南同步用户能力描述、Changelog、实际版本及所需派生文件；方案不授权提交、推送、合并或发布。
+当前实现和覆盖范围以源码与第 14 节证据为准；候选状态不等于正式发布。
 
 ## 14. 验收矩阵与运行证据
+
+本轮 review 修复的实际复验环境为 **macOS arm64、Tern 0.9.21、tern-sdk 0.2.0**，使用独立数据目录和本机 Docker 隔离数据库：
+
+- **默认检查**：`cargo test --workspace --locked` 为 **745 passed、121 ignored**；最终 UI 调整后 TSP 测试为 **399 passed、1 ignored**。全 workspace Clippy（`-D warnings`）及末次 TSP 全 target 复验无警告，Rust 格式检查、dprint 和 debug 构建通过。`scripts/version.py --check-release` 返回 `0.4.0`；这些检查不代表正式发布或其他五目标已验收。
+- **真实数据库**：MySQL 8.4＋Redis 8.0、MySQL 8.0＋Redis 7.2 各执行 31 项迁移、文件交换和 Redis 回归，均通过；Redis 6.2 的 21 项回归以及 MySQL 5.7 组合的其余 10 项回归均通过。覆盖十万行 CSV／JSON 往返、unsigned／Decimal／二进制、零自增键、预算受限时保留此前提交、覆盖冲突批次回滚、SQL 对象选择和漂移、失败／回滚／未发送子集续作，以及五类型 key、WATCH、类型替换和绝对期限。最初启用 TLS 的 MySQL 5.7 fixture 因 SQLx 默认尝试 TLS 而握手失败；最终 10 项使用独立的 `mysql:5.7.42 --skip-ssl` fixture＋Redis 6.2，测试管理连接显式使用与非 TLS profile 相同的连接模式。该结果不证明原 TLS fixture 握手已修复，产品 TLS 校验和专属 TLS 回归要求保持不变。
+- **恢复辅助逻辑合并后复验**：在独立 MySQL 8.4／Redis 7.2 实例上执行 11 项迁移、SQL 恢复和报告回读测试，全部通过；覆盖十万行 CSV／JSON 往返、预算中止、覆盖冲突及子集重试、Redis 五类型、二进制 key 与绝对期限。
+- **真实 Engine 补充 smoke**：SQL 恢复分别读取语句自身的时区上下文，带外键的新表恢复后读回确认约束；准备和执行均遵守内存预算。接近单值编码上限的文本恢复成功，目标 `OCTET_LENGTH` 为 **16,777,152**；16 MiB 原始文本因编码后超限而明确失败，未写入该行，不能把前一数值描述为 16 MiB 原始文本已通过。
+- **边界路径补充**：真实数据库定点回归通过 SQL 子集续作、二进制零日期拒绝、间接写入视图不重放、live recipe 共享预算与释放、Hash 字段期限保留五条路径。大小写不敏感 MySQL 的同表自拷贝在准备阶段以 `invalid_input` 拒绝且未发送，源表仍为 1 行；迁移至另一表的对照准备成功。
+- **正常 Tern 窗口**：在含中文和空格的数据目录中从 shell 启动候选二进制，实际创建项目、编辑中文／emoji 查询、预览文件差异并确认保存，结果为 `published`，磁盘正文与输入一致。未保存编辑退出重启后保留，重新打开原目录须核对并确认磁盘基线。正常窗口的 window／pane bridge 实际启动 vi，保存后显式读取修改并加入草稿；Redis 读回证明提交前仍为原值、独立提交后字节与文件一致。已观察非编辑态 grid 的 Tab／Shift+Tab 相邻格选择、设置页从 MCP 按左方向键切至 Archery、Escape 关闭及正常退出。保存期间的实际 IPC 顺序为上传开始、分段、准备，工作区自动保存未插入其中。本记录不等同于正式发布包或 plugin 冷安装入口验收。
+- **布局与查询补充**：实际 Tern headless surface 验证本机绑定确认后执行项目查询，结果与真实 MySQL 读回一致；项目布局显示两个可独立编辑的查询分栏，退出再启动后无需重新应用布局，分栏顺序及未保存中文／emoji 正文保持。工作区只恢复编辑意图，不恢复运行中的数据库会话、执行授权或结果数据。
+- **最终 UI 布局**：真实 Tern headless 渲染验证迁移与项目工作台的原生 Tabs、固定操作区、窄屏滚动正文；检查 1280×800、760×450 和 UI 字体 28px 的离屏截图。短窗口移除重复全局入口栏，并将迁移来源／目标摘要并排显示。末次检查时 Mac 锁屏，未重新执行正常窗口完整交互；离屏布局结果不替代最终发布包及 plugin 冷安装验收。
+- **HTML 设计稿**：在真实浏览器打开唯一入口，实际点击数据交换、准备、危险项确认、执行状态预览、项目和本机绑定；准备后进入 Preview，确认后进入 Report，浏览器未报告脚本错误。示例明确标记未发送，不构成数据库执行证据。
+
+以下记录 **本轮 review 修复之前的历史迭代证据**，环境为 macOS arm64、Tern 0.9.12、Apple M3 Pro（12 核、36 GiB 内存），数据库使用本机 Docker 隔离实例并经 loopback 访问；这些数字与运行结果不代表本轮修复后通过。其他五目标尚未执行本候选 CI 或运行验证，正式发布要求见发布指南。
+
+- **检查与前置集成（历史迭代）**：当时工作树通过 rustfmt、`cargo fmt --all --check`、改动文件 dprint、Clippy（`-D warnings`）、workspace 默认测试 **526 passed、85 ignored**、debug 构建及 `aarch64-apple-darwin` release 构建。默认忽略项另按隔离环境执行：MySQL 文件／SQL 续作、十万行往返、Redis 五类型及字节进度报告、原有数据库边界、严格 TLS 与原生系统凭据；不把默认测试通过等同于这些真实回归。SQL 索引的小 INSERT、上下文累计、多文件共享预算、数据字节数大于索引额度、持久 writer 的短写／flush 失败／取消及 detached worker 退出屏障测试均通过；持久索引接入后又实际执行 SQL 批次续作和对象选择／漂移两项 MySQL 回归。原始 MySQL dump 改用 `.sql.fixture` 后字节保持一致；新数据目录真实启动当时的 schema 5、读取 profile／artifact 及最后客户端退出均通过。
+- **文件与直接迁移**：MySQL 5.7／8.0／8.4 九种同版本及双向跨版本直接迁移，覆盖 unsigned BIGINT、Decimal、二进制、JSON 大整数、中文／emoji、TIME；批次失败回滚和 failed／rolled_back／not_sent 子集续作；十万行 CSV／JSON 往返，以及各约 1 GiB CSV 导入、JSON 导出／导入并用真实 SQL 核对内容。新增 Engine 真实回归验证多文件 CSV／JSON 首错停止后，人工再次准备包含原文件未读取尾部及后续文件，并保留先前提交，最终目标行逐项核对。
+- **SQL 备份与恢复**：三版真实 mysqldump 各恢复 7 个对象（2 表、视图、触发器、过程、函数和事件），比对表内容并实际调用视图、过程、函数和触发器；SQL SECURITY 保留，事件恢复为禁用。合并后的完整库发现验证了权限足够时导出成功、可见范围外和元数据权限不足时在准备阶段拒绝；自身全对象导出恢复也已完成。增加索引预算后，用本地 release 再将 **2,148,317,014 字节 SQL** 恢复至隔离 MySQL 8.4 新目标，确认写入 **32,768 行、1 GiB payload**，失败／跳过／待确认均为 0。源／目标总字节数、ID 范围和纳入逐行 payload SHA-256 的有序摘要一致；该运行不构成吞吐承诺。
+- **Redis 跨版本**：本地 release 在隔离 Engine 中完成 Redis 6.2／7.2／8.0 九种同版本及双向跨版本迁移，每种组合各迁移 String、Hash、List、Set、ZSet，共核对 45 个目标 key。二进制 key／value、重复 List 和 score 与源一致；所有类型的绝对期限经服务端 TIME＋PTTL 核对，检查容差为 2 ms。逐项报告分页可读取；各组合仅清理自身 UUID 前缀。
+- **百万 Redis key**：本地 release 迭代完成 Redis 7.2 → 8.0 的 1,000,000 个 key 迁移，五种类型各 200,000 个，含二进制 key／value、重复 List、score，1,000 个 key 使用绝对过期时间，其余永久。准备 0.51 秒，迁移合计 3018.04 秒，采样峰值 Engine RSS 44,564,480 字节；written_keys 为 1,000,000，失败、跳过和待确认均为 0。源／目标分别逐 key 核对类型、内容和绝对期限，并扫描确认范围无额外 key；纳入类型、内容和期限的有序 SHA-256 摘要相同。同一私有 Engine 的 SQLite 元数据文件在该场景后为 2,316,849,152 字节，含此前 SQL 及短小回归，不含显式导出数据文件。运行期间 Tern 工作台仍能打开并操作，跨客户端任务读取及同库重叠提交被正确拒绝；测试后仅删除两端各 1,000,000 个自身前缀 key。该耗时和 RSS 是共享测试环境的单次观测，不是吞吐或应用保留内存预算承诺；不将该迭代的数值当作后续源码重新测得的性能。
+- **取消与资源恢复**：20 行多批次任务在首批确认 3 行后取消，终态为 cancelled，目标最终保留 3 行；运行中的 Redis writer 在客户端断开后仍禁止领取，延迟回复释放后正常收尾。527,400,143 字节 Redis JSON 在执行预扫描时取消，约 107 ms 后终止，读取／写入均为 0，目标 key 不存在且无活动 artifact。MySQL 取消回归先在 PROCESSLIST 观察到只读流式查询运行，再取消并取得错误 1317，之后同一连接 `SELECT 42` 成功。Redis 清理响应丢失后的 outcome_unknown、归属不匹配和同名用户 key 保护均有真实运行证据；已验证新客户端领取后再次导出报告与原文件字节一致。
+- **项目与原生交互**：Engine RPC 验证项目创建、绑定、保存、归档往返及外部修改冲突；Tern 原生 headless surface 实际操作了可滚动向导、含多行中文／emoji／NULL／Decimal 的 CSV 导入及连续准备、MySQL 5.7 → 8.4 结构差异选择和迁移、SQL 整对象子集恢复、2 GiB 输入预检取消、项目保存／绑定／归档。新增本机交互完整验证中文项目路径、查询与共享导出配置保存，alias＋`${backup}` 经本机绑定后导出真实 2 行 CSV；归档只含 manifest、查询和配置，未含连接 ID、目标库及绝对路径。外部改动使保存冲突后，查看／合并条目、显式接受新基线均保留本机正文，再次保存成功。未保存查询切换保护和过期计划再次准备已复验。截图仅作本地证据，不进入仓库。
+- **磁盘满与报告一致性**：20,000 行、2,128,905 字节 CSV 在首批生效后填满私有卷，得到真实 ENOSPC。持续心跳期间 Engine 存活，目标最终保持 1,500 行；两批 applied，第三批 500 行待确认。`transfer.run.get`、JSON／CSV 导出报告均显示 outcome_unknown、storage 错误及进度为持久化快照，不将旧计数当实时结果。释放空间后诊断仍可读，重启按持久发送事实恢复待确认范围。输出卷满场景以 10,000 行、每行 4,000 字节导出，最终文件未发布，3,371,008 字节 partial 登记为 cleanup_pending。人工续作仍受计划预算约束，旧计划未丢弃时明确 resource_limit，不会隐式重放待确认批次。
+- **持久输入索引**：将索引输出单独置于私有 HFS+ 卷，仅留 128 KiB，真实 SQL 准备得到 `No space left on device (os error 28)`，原生后续写入同样返回 errno 28；目标未发生数据库写入，131,072 字节 partial 登记为 cleanup_pending。Engine 重启后由新客户端领取、导出并核对 SHA-256，再安全清理。释放空间后，7,000 条语句生成 4,594,203 字节元数据索引，逐条检查源偏移、摘要且无 INSERT literal；实际恢复 7,000 行并逐行核对文本，失败／跳过／待确认均为 0。准备和执行索引均在再次重启后可领取及清理，执行索引正确关联 run ID。重新组包后的 macOS arm64 归档程序又完成 20 行中文／emoji SQL 恢复并逐行核对；实际 Tern surface 展示索引列表和身份详情，完成领取、确认清理，核对持久状态 cleaned 和原文件移除。
+- **TLS 与凭据**：MySQL 8.4／Redis 6.2 的可信 CA 与身份成功、错误 CA 和错误主机拒绝均通过；系统 Keychain 凭据经存储重开取回且不进入 SQLite。Percona Server **5.7.44-48（OpenSSL 1.1.1k）** 另通过要求 secure transport 的严格 TLS 回归。Oracle `mysql:5.7.42`／5.7.44（OpenSSL 1.0.2k）在本 fixture 中原生客户端及 OpenSSL 强制 ECDHE 都失败，仅 DHE 可用；不能把 Percona 证据写成 Oracle 5.7 TLS 通过，客户端没有为此降低校验。
+- **本机组包与安装器**：当前 macOS arm64 release 实际单目标组包；私有 HTTPS 源下载并核对归档及程序 SHA-256，第二次安装不再下载，篡改缓存及归档均明确拒绝。最新包的缓存程序在含中文／空格路径中以正确 shell 引号在实际 Tern surface 启动，看到查询、项目和数据交换控件。原生 desktop 的独立新窗口仅完成 plugin 命令注册和调度，私有 Tern fixture 的终端布局仍未完成，未据此宣称完整图形安装入口验收。
+
+上述历史迭代未覆盖其余五个平台的候选 CI／打包／运行及完整图形窗口冷启动安装入口；下列矩阵仍是完整覆盖目标，未逐项执行的场景不能从历史证据推断为本轮通过。正式发布仍受发布指南门禁约束。
 
 ### 14.1 核心验收
 
@@ -556,11 +539,11 @@ UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选
 | Redis 类型与期限 | 五类型、空字节／二进制 key、重复 List、score、永久／将过期／已过期；绝对期限不因搬运重置，过期跳过不覆盖目标 |
 | Redis 并发与范围 | 源 WATCH 变化、目标变化／淘汰、SCAN 空批／重复／新增 key、前缀碰撞、同实例重叠、临时对象被外部替换；不重复发布，不误删用户对象 |
 | 取消与未知写入 | 读取中取消、事务中失败、COMMIT／RENAME 回应丢失、客户端退出；真实已生效范围保留，待确认不自动重放 |
-| 磁盘与恢复 | 日志／输入索引／输出文件磁盘满、发布中断、输入文件被替换、Engine 重启和新客户端领取遗留资源；停止后续发送，资源可找回，活跃所有者不可被抢占，不恢复源数据缓存 |
+| 磁盘与恢复 | 日志／输出文件／输入索引磁盘满、索引内存及磁盘配额耗尽、发布中断、输入文件被替换、Engine 重启和新客户端领取遗留资源；停止后续发送，资源可找回，活跃所有者不可被抢占，不恢复源数据缓存 |
 | 项目 | Git 文件 diff 可读、查询与预设往返、新机器绑定、开发／测试绑定组、本机路径不外泄、共享项目显式保存；打开不执行 |
 | 项目异常 | 外部 Git／编辑器修改、双窗口保存、多文件发布中断后再次发生外部修改、恶意归档、超限、平台路径碰撞；进入可导出／合并的 recovery_conflict，不覆盖、不越界、不丢本机编辑 |
 | 权限与来源 | 源只读／目标只读、权限变更、Archery、MCP 直接调用内部方法；源目标独立校验，Archery 不迁移，MCP 不扩权 |
-| 前置回归 | 0.2.0 实时分页／内存／MCP、0.3.0 结构／视图／替换／单值文件、旧 CSV／JSON 往返；不重建查询结果库 |
+| 前置回归 | 0.2.0 实时分页／内存／MCP、0.3.0 结构／视图／替换／单值文件、MySQL 既有 CSV／JSON 和 Redis v2 CSV／JSON 往返及 Redis v1 拒绝；不重建查询结果库 |
 
 ### 14.2 大数据与平台
 
@@ -572,7 +555,7 @@ macOS arm64 上在实际 Tern 验证迁移、SQL 恢复、结构调整、项目�
 
 ### 14.3 实施后的检查命令
 
-下列是未来实现的验证要求，不代表本次已经执行：
+下列命令用于后续完整复验；具体结果以运行记录为准：
 
 ```sh
 cargo fmt --all --check
@@ -584,13 +567,13 @@ cargo test -p datapier-core --test databases --test mysql_edges --test redis_int
 
 新增真实迁移／恢复／项目测试沿各 crate `tests/`／`tests/unit/` 现有约定组织，不预先写不存在的测试命令。必须使用隔离测试实例和可公开 fixture，验证失败前后数据库及文件状态；测试不复制实现，不断言源码文本、转发关系或单纯非空。
 
-本次交付只执行 Markdown 链接／锚点、标题、表格／代码块及需求覆盖一致性检查，不启动数据库、不构建、不运行无关测试。这里没有 0.4.0 运行验收记录。
+本地候选的实际运行证据与未验证范围见本节开头；上述命令是复验入口，不能据此推断未执行的平台、故障场景或发布检查已经通过。
 
 ## 15. 风险与接入前核对
 
 | 风险 | 明确处理和完成条件 |
 |---|---|
-| 0.2.0／0.3.0 实现仍变化 | 接入前按最终协议、schema 和资源模型重核，统一迁移全部调用方，不能把本文路径当成已有源码 |
+| 前置版本契约演进 | 按已合入的 0.2.0／0.3.0 最终协议、schema 和资源模型核对；0.4.0 统一使用 IPC v5 与 schema 5，历史设计不能覆盖当前实现 |
 | 结构、存储程序及 mysqldump 语法复杂 | 全输入预检、未知项拒绝、真实三系列样本与全对象往返；不能靠 parser 接受就宣称服务端兼容 |
 | 跨实例没有分布式事务 | 源快照、目标批次、DDL 和 Redis 发布分别记账，失败报告不承诺整体回滚 |
 | 一致性读取与长事务成本 | 说明源端版本保留／服务端成本，支持取消，不自动锁库；外部 DDL／非事务表不能伪装为快照 |

@@ -552,9 +552,6 @@ impl App {
             self.workbench.overlay = Some("resource-drop".into());
             return true;
         }
-        if name.starts_with("navigation-drop-db:") || name.starts_with("navigation-drop-table:") {
-            return true;
-        }
-        false
+        name.starts_with("navigation-drop-db:") || name.starts_with("navigation-drop-table:")
     }
 }

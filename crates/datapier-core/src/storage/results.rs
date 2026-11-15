@@ -7,6 +7,7 @@ mod editing;
 pub(super) struct ResultStore {
     entries: HashMap<Uuid, MemoryResult>,
     auxiliary: HashMap<Uuid, (Uuid, usize)>,
+    retained: HashMap<Uuid, Arc<dyn Send + Sync>>,
     values: HashMap<Uuid, (Uuid, Vec<u8>)>,
     next_sequence: u64,
     activity: watch::Sender<u64>,
@@ -46,6 +47,7 @@ impl Default for ResultStore {
         Self {
             entries: HashMap::new(),
             auxiliary: HashMap::new(),
+            retained: HashMap::new(),
             values: HashMap::new(),
             next_sequence: 0,
             activity: watch::channel(0).0,
@@ -83,6 +85,7 @@ impl ResultStore {
             entry.notify.notify_waiters();
         }
         self.auxiliary.remove(&id);
+        self.retained.remove(&id);
         self.values.retain(|_, (result, _)| *result != id);
     }
 }
@@ -90,6 +93,13 @@ fn missing() -> AppError {
     AppError::new("not_found", "结果不存在或已释放")
 }
 impl Store {
+    /// 主动回收超过空闲期限的结果及其关联资源。
+    pub async fn expire_results(&self) -> Result<()> {
+        let idle = self.settings().await?.limits.result_idle_seconds;
+        self.results.lock().await.expire(Duration::from_secs(idle));
+        Ok(())
+    }
+
     pub async fn start_result(
         &self,
         execution_id: Uuid,
@@ -223,6 +233,7 @@ impl Store {
         result.meta.complete = true;
         result.touched = std::time::Instant::now();
         result.notify.notify_waiters();
+
         Ok(())
     }
     pub async fn update_result_summary(&self, id: Uuid, summary: Json) -> Result<()> {
@@ -544,7 +555,7 @@ impl Store {
         handle: Uuid,
         bytes: usize,
     ) -> Result<()> {
-        self.reserve_auxiliary_inner(execution_id, handle, bytes, false)
+        self.reserve_auxiliary_inner(execution_id, handle, bytes, false, None)
             .await
     }
     pub async fn reserve_result_auxiliary(
@@ -553,7 +564,18 @@ impl Store {
         handle: Uuid,
         bytes: usize,
     ) -> Result<()> {
-        self.reserve_auxiliary_inner(execution_id, handle, bytes, true)
+        self.reserve_auxiliary_inner(execution_id, handle, bytes, true, None)
+            .await
+    }
+    /// 原子预留结果预算并持有其关联资源，结果移除时一并释放。
+    pub(crate) async fn retain_result_auxiliary<T: Send + Sync + 'static>(
+        &self,
+        execution_id: Uuid,
+        handle: Uuid,
+        bytes: usize,
+        resource: Arc<T>,
+    ) -> Result<()> {
+        self.reserve_auxiliary_inner(execution_id, handle, bytes, true, Some(resource))
             .await
     }
     async fn reserve_auxiliary_inner(
@@ -562,6 +584,7 @@ impl Store {
         handle: Uuid,
         bytes: usize,
         result_required: bool,
+        resource: Option<Arc<dyn Send + Sync>>,
     ) -> Result<()> {
         let owner = self.task(execution_id).await?.owner;
         let budget = self.settings().await?.limits.result_memory_bytes_per_client;
@@ -597,10 +620,15 @@ impl Store {
             return Err(AppError::new("resource_limit", "客户端内存预算已用尽"));
         }
         state.auxiliary.insert(handle, (owner, bytes));
+        if let Some(resource) = resource {
+            state.retained.insert(handle, resource);
+        }
         Ok(())
     }
     pub async fn release_auxiliary(&self, handle: Uuid) -> Result<()> {
-        self.results.lock().await.auxiliary.remove(&handle);
+        let mut state = self.results.lock().await;
+        state.auxiliary.remove(&handle);
+        state.retained.remove(&handle);
         Ok(())
     }
     pub async fn release_execution_result_auxiliary(&self, execution_id: Uuid) {
@@ -613,6 +641,7 @@ impl Store {
             .collect();
         for id in ids {
             state.auxiliary.remove(&id);
+            state.retained.remove(&id);
         }
     }
     /// 计算缓存字段解码及编码的空间上界，不分配完整 JSON 树。

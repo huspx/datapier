@@ -353,7 +353,7 @@ impl Engine {
         };
         // 错误本身不能证明写入未发生；结合已持久化的 sent/may_write 判定是否需要人工核对。
         let record = self.store.task(id).await.ok();
-        let (state, summary, error) = match result {
+        let (mut state, mut summary, mut error) = match result {
             Ok(value) => {
                 let business = value
                     .get("state")
@@ -421,6 +421,33 @@ impl Engine {
                 )
             }
         };
+        // 资源目录可能包含 Redis 原始键、可逆编码和 TTL；持久摘要不保存响应内容。
+        if result.is_ok() && record.as_ref().is_some_and(|r| r.method == "resource.list") {
+            summary = json!({});
+        }
+        if record
+            .as_ref()
+            .is_some_and(|record| record.method.starts_with("transfer."))
+            && let Some(cause) = error.as_mut()
+        {
+            // 迁移逐批日志比任务级 sent 更精确；已确认回滚不能因早先批次发送过而变成待确认。
+            state = match summary.get("state").and_then(Value::as_str) {
+                Some("cancelled") => "cancelled",
+                Some("failed") => "failed",
+                Some("outcome_unknown") => "outcome_unknown",
+                _ => state,
+            };
+            // 数据库诊断可能回显重复键和输入 literal；持久任务只保留错误码及定位元数据。
+            let mut metadata = serde_json::Map::new();
+            for key in ["run_id", "state", "progress"] {
+                if let Some(value) = summary.get(key) {
+                    metadata.insert(key.to_owned(), value.clone());
+                }
+            }
+            summary = Value::Object(metadata);
+            cause.message = format!("数据交换操作失败（{}）", cause.code);
+            *cause.details = summary.clone();
+        }
         let mut summary = match summary {
             Value::Object(map) => Value::Object(map),
             Value::Null => json!({}),
@@ -563,6 +590,11 @@ impl Engine {
         } else {
             None
         };
+        let submitted_schema = if method == "schema.execute" {
+            Some(model::param::<Uuid>(&params, "plan_id")?)
+        } else {
+            None
+        };
         let replacement_target = params.get("target").cloned().unwrap_or(Value::Null);
         if db.profile.provider == model::ProviderKind::Redis
             && matches!(method, "execution.start" | "execution.run")
@@ -572,6 +604,45 @@ impl Engine {
                 return Err(AppError::invalid("请通过连接设置进行 Redis 认证"));
             }
         }
+        let ends_transaction =
+            matches!(method, "transaction.commit" | "transaction.rollback")
+                || (matches!(method, "execution.start" | "execution.run")
+                    && db.profile.provider == model::ProviderKind::Mysql
+                    && params
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .and_then(datapier_core::providers::mysql::transaction_control)
+                        .is_some_and(|control| {
+                            matches!(control,
+                        datapier_core::providers::mysql::TransactionControl::Commit
+                        | datapier_core::providers::mysql::TransactionControl::Rollback
+                        | datapier_core::providers::mysql::TransactionControl::AutocommitOn)
+                        }));
+        let operation = if ends_transaction {
+            None
+        } else if matches!(method, "execution.start" | "execution.run") {
+            let text: String = model::param(&params, "text")?;
+            let readonly = match db.profile.provider {
+                model::ProviderKind::Mysql => {
+                    datapier_core::providers::mysql::validate_readonly(&text).is_ok()
+                }
+                model::ProviderKind::Redis => {
+                    datapier_core::providers::redis::redis_commands_readonly(&text).unwrap_or(false)
+                }
+            };
+            if readonly {
+                None
+            } else {
+                Some(self.operation_scope_instance(&db).await?)
+            }
+        } else if matches!(
+            method,
+            "change.submit" | "schema.execute" | "replace.prepare" | "replace.submit"
+        ) {
+            Some(self.operation_scope(&db, params.get("target")).await?)
+        } else {
+            None
+        };
         db.profile.capabilities().ensure_method(method, &params)?;
         if let Some(connection) = db.profile.archery()
             && matches!(
@@ -737,6 +808,7 @@ impl Engine {
         let engine = self.clone();
         let method = method.to_owned();
         let future = async move {
+            let _operation = operation;
             let send_engine = Arc::downgrade(&engine);
             let send_db = db.clone();
             let sink = ExecutionSink::new(engine.store.clone(), id)
@@ -844,6 +916,10 @@ impl Engine {
             {
                 tracing::warn!("释放编辑执行预算失败: {error}");
             }
+            if let Some(id) = submitted_schema {
+                engine.editing_finish_schema(id);
+            }
+
             result
         };
         let task = tokio::spawn(future);

@@ -1,0 +1,27 @@
+.project-layout-splits {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 8px;
+  flex: 1;
+  min-height: 180px;
+  width: 100%;
+}
+.project-layout-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+}
+.project-layout-pane .sf-editor {
+  flex: 1;
+  min-height: 0;
+}
+.project-layout-pane.active {
+  border-color: var(--accent);
+}
+.project-layout-title {
+  text-align: left;
+}

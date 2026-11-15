@@ -2,6 +2,7 @@
 mod catalog;
 mod dependencies;
 mod plan;
+mod transfer;
 mod verify;
 use super::MysqlSession;
 use crate::model::{AppError, Result, schema::*};
@@ -15,6 +16,9 @@ use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use sqlx::{MySqlConnection, Row};
 use tokio_util::sync::CancellationToken;
+pub(crate) use transfer::{
+    plan_transfer, plan_transfer_with_definition, validate_restore_dependencies,
+};
 
 pub(super) fn fingerprint(ddl: &str, mode: &str) -> String {
     // 仅移除 CREATE TABLE 顶层选项的计数；字符串、标识符与列定义原样保留。
@@ -100,7 +104,7 @@ fn capabilities(version_str: &str) -> std::collections::BTreeMap<String, SchemaC
     .map(|(k, available)| (k.into(), capability(available, "当前服务端版本不支持")))
     .collect()
 }
-async fn describe_on(
+pub(super) async fn describe_on(
     conn: &mut MySqlConnection,
     target: ResourceTarget,
 ) -> Result<Option<SchemaSnapshot>> {
