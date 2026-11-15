@@ -46,8 +46,7 @@ async fn duplex_sessions_forward_only_owner_events_and_close() {
     ));
     drop(first);
     drop(second);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -132,8 +131,7 @@ async fn saturated_duplex_releases_lease_and_preserves_dispatch_gate() {
     other_client.close().await.unwrap();
     other_handler.await.unwrap();
     drop(other_client);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -207,8 +205,7 @@ async fn disconnect_cancels_profile_connection_waits_and_releases_profile_lock()
         "cancelled"
     );
     drop((first_socket, second_socket));
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -258,8 +255,7 @@ async fn disconnect_cancels_detached_profile_reads() {
         );
         drop(socket);
     }
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -356,8 +352,7 @@ async fn disconnect_finishes_running_profile_test_record() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].state, "cancelled");
     proxy.abort();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -450,9 +445,7 @@ async fn cancelled_profile_save_keeps_open_snapshot_consistent() {
         (name.as_str(), secret.as_deref()),
         ("new", Some("new-secret"))
     );
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -535,8 +528,7 @@ async fn schema_read_timeouts_release_the_owner_editing_gate() {
         assert_eq!(next.code, "handle_expired");
     }
     engine.disconnect(owner).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 fn mysql_mcp_profile(port: u16, timeout: u64) -> Profile {
@@ -679,9 +671,7 @@ fn mcp_ipc_reads_mysql_results_and_closes_locked_stream() {
         other_handler.await.unwrap();
         sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE `{table}`"))).execute(&mut direct).await.unwrap();
         drop(direct);
-        engine.store.pool.close().await;
-        drop(engine);
-        let _ = std::fs::remove_dir_all(root);
+        crate::server::tests::cleanup(engine, root).await;
     });
 }
 
@@ -838,9 +828,7 @@ async fn mcp_preflight_blackhole_obeys_deadline_and_disconnect() {
         other.close().await.unwrap();
         other_handler.await.unwrap();
         proxy.abort();
-        engine.store.pool.close().await;
-        drop(engine);
-        let _ = std::fs::remove_dir_all(root);
+        crate::server::tests::cleanup(engine, root).await;
     }
 }
 
@@ -1023,7 +1011,8 @@ async fn mcp_implicit_transaction_rechecks_original_database_after_use() {
         .await
         .unwrap();
     drop(observer);
+    drop(setup_sink);
     engine.store.pool.close().await;
     drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    std::fs::remove_dir_all(root).unwrap();
 }

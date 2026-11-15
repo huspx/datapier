@@ -241,7 +241,10 @@ pub(crate) fn plan_transfer_with_definition(
     mode: String,
 ) -> Result<(Vec<TransferPlanItem>, Option<TableDefinition>)> {
     let diagnostic = |reason: String| TransferPlanItem {
-        id: format!("schema:unknown:{:x}", Sha256::digest(reason.as_bytes())),
+        id: format!(
+            "schema:unknown:{:x}",
+            base16ct::HexDisplay(&Sha256::digest(reason.as_bytes()))
+        ),
         phase: "schema".into(),
         action: "unknown_attribute".into(),
         source: Some(object.source.clone()),
@@ -424,7 +427,7 @@ pub(crate) fn plan_transfer_with_definition(
             });
             if !existing_name {
                 let digest = Sha256::digest(serde_json::to_vec(&(&object.target, &*name))?);
-                *name = format!("dp_fk_{digest:x}")[..54].to_owned();
+                *name = format!("dp_fk_{:x}", base16ct::HexDisplay(&digest))[..54].to_owned();
             }
             *id = name.clone();
         }
@@ -523,7 +526,11 @@ pub(crate) fn plan_transfer_with_definition(
     for (index, (phase, step)) in steps.into_iter().enumerate() {
         let id = format!(
             "schema:{:x}",
-            Sha256::digest(serde_json::to_vec(&(&object.target, index, &step.sql))?)
+            base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&(
+                &object.target,
+                index,
+                &step.sql
+            ))?))
         );
         let precondition = match step.precondition {
             SchemaPrecondition::Absent => "absent".into(),

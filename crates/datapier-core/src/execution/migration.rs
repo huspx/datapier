@@ -60,7 +60,7 @@ pub fn digest<T: serde::Serialize>(value: &T) -> Result<String> {
     }
     let mut writer = HashWriter(Sha256::new());
     serde_json::to_writer(&mut writer, value)?;
-    Ok(format!("{:x}", writer.0.finalize()))
+    Ok(format!("{:x}", base16ct::HexDisplay(&writer.0.finalize())))
 }
 
 pub fn encoded_size<T: serde::Serialize>(value: &T) -> Result<usize> {

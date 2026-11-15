@@ -495,7 +495,7 @@ fn archery_snapshot(target: model::ResourceTarget, raw: Value) -> Result<Value> 
     let snapshot = SchemaSnapshot {
         target, server_version:String::new(), sql_mode:String::new(),
         definition:SchemaDefinition::Table(TableDefinition { columns,indexes:Vec::new(),constraints:Vec::new(),engine:old.engine,charset:None,collation:None,comment:String::new(),options:Vec::new() }),
-        fingerprint:format!("{:x}", Sha256::digest(old.ddl.as_bytes())), ddl:old.ddl,
+        fingerprint:format!("{:x}", base16ct::HexDisplay(&Sha256::digest(old.ddl.as_bytes()))), ddl:old.ddl,
         dependencies:Vec::new(), completeness:Completeness { state:CompletenessState::Incomplete,reasons:vec!["Archery 未提供可证明完整的结构上下文；可复制原 DDL 或独立草拟 SQL，不能据此重建现有对象".into()] },
         capabilities:Default::default(),
     };

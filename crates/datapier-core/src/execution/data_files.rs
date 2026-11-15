@@ -20,6 +20,29 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(windows)]
+type Metadata = cap_std::fs::Metadata;
+#[cfg(not(windows))]
+type Metadata = fs::Metadata;
+
+#[cfg(windows)]
+fn file_metadata(file: &File) -> io::Result<Metadata> {
+    Metadata::from_file(file)
+}
+#[cfg(not(windows))]
+fn file_metadata(file: &File) -> io::Result<Metadata> {
+    file.metadata()
+}
+
+#[cfg(windows)]
+fn path_metadata(path: &Path) -> io::Result<Metadata> {
+    file_metadata(&File::open(path)?)
+}
+#[cfg(not(windows))]
+fn path_metadata(path: &Path) -> io::Result<Metadata> {
+    fs::metadata(path)
+}
+
 const MAX_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 
 fn changed() -> AppError {
@@ -32,17 +55,9 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.dev() == b.dev() && a.ino() == b.ino()
 }
 #[cfg(windows)]
-fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    match (
-        a.volume_serial_number(),
-        a.file_index(),
-        b.volume_serial_number(),
-        b.file_index(),
-    ) {
-        (Some(av), Some(ai), Some(bv), Some(bi)) => av == bv && ai == bi,
-        _ => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
-    }
+fn same_file(a: &Metadata, b: &Metadata) -> bool {
+    use cap_fs_ext::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
 }
 #[cfg(not(any(unix, windows)))]
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
@@ -55,22 +70,20 @@ fn file_identity(meta: &fs::Metadata) -> Option<String> {
     Some(format!("unix:{}:{}", meta.dev(), meta.ino()))
 }
 #[cfg(windows)]
-fn file_identity(meta: &fs::Metadata) -> Option<String> {
-    use std::os::windows::fs::MetadataExt;
-    Some(format!(
-        "windows:{}:{}",
-        meta.volume_serial_number()?,
-        meta.file_index()?
-    ))
+fn file_identity(meta: &Metadata) -> Option<String> {
+    use cap_fs_ext::MetadataExt;
+    Some(format!("windows:{}:{}", meta.dev(), meta.ino()))
 }
 #[cfg(not(any(unix, windows)))]
 fn file_identity(_meta: &fs::Metadata) -> Option<String> {
     None
 }
 
-fn modified_ns(meta: &fs::Metadata) -> Option<String> {
-    meta.modified()
-        .ok()?
+fn modified_ns(meta: &Metadata) -> Option<String> {
+    let modified = meta.modified().ok()?;
+    #[cfg(windows)]
+    let modified = modified.into_std();
+    modified
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|n| n.as_nanos().to_string())
@@ -151,7 +164,7 @@ fn fingerprint_open_inner(
     }
     let path = fs::canonicalize(path)?;
     let mut file = File::open(&path)?;
-    let original = file.metadata()?;
+    let original = file_metadata(&file)?;
     if !original.is_file() {
         return Err(AppError::invalid("输入必须是普通文件"));
     }
@@ -193,13 +206,16 @@ fn fingerprint_open_inner(
             return Err(changed());
         }
         full.update(&buffer[..used]);
-        digests.push(format!("{:x}", Sha256::digest(&buffer[..used])));
+        digests.push(format!(
+            "{:x}",
+            base16ct::HexDisplay(&Sha256::digest(&buffer[..used]))
+        ));
         if let Some(report) = progress.as_mut() {
             report(bytes, original.len());
         }
     }
-    let current = fs::metadata(&path)?;
-    let after = file.metadata()?;
+    let current = path_metadata(&path)?;
+    let after = file_metadata(&file)?;
     if bytes != original.len()
         || after.len() != original.len()
         || !same_file(&original, &current)
@@ -210,7 +226,7 @@ fn fingerprint_open_inner(
     let fingerprint = InputFingerprint {
         path,
         bytes,
-        sha256: format!("{:x}", full.finalize()),
+        sha256: format!("{:x}", base16ct::HexDisplay(&full.finalize())),
         block_bytes,
         block_digests: digests,
         identity: file_identity(&original),
@@ -232,7 +248,7 @@ fn fingerprint_open_inner(
 pub struct VerifiedReader {
     file: File,
     fingerprint: InputFingerprint,
-    identity: fs::Metadata,
+    identity: Metadata,
     position: u64,
     block_number: Option<u64>,
     block: Vec<u8>,
@@ -248,7 +264,7 @@ impl VerifiedReader {
             return Err(AppError::invalid("输入文件校验索引无效"));
         }
         let file = File::open(&fingerprint.path)?;
-        let identity = file.metadata()?;
+        let identity = file_metadata(&file)?;
         if identity.len() != fingerprint.bytes {
             return Err(changed());
         }
@@ -280,8 +296,8 @@ impl VerifiedReader {
         if self.is_cancelled() {
             return Err(io::Error::other(AppError::cancelled()));
         }
-        let path = fs::metadata(&self.fingerprint.path)?;
-        let handle = self.file.metadata()?;
+        let path = path_metadata(&self.fingerprint.path)?;
+        let handle = file_metadata(&self.file)?;
         if !same_file(&self.identity, &path)
             || !same_file(&self.identity, &handle)
             || path.len() != self.fingerprint.bytes
@@ -301,7 +317,7 @@ impl VerifiedReader {
         self.file.seek(SeekFrom::Start(start))?;
         self.block.resize(size, 0);
         self.file.read_exact(&mut self.block)?;
-        let hash = format!("{:x}", Sha256::digest(&self.block));
+        let hash = format!("{:x}", base16ct::HexDisplay(&Sha256::digest(&self.block)));
         if self.fingerprint.block_digests.get(number as usize) != Some(&hash) {
             return Err(io::Error::other(changed()));
         }
@@ -360,8 +376,8 @@ pub fn output_snapshot(path: &Path, with_sha256: bool) -> Result<OutputSnapshot>
     }
     let canonical_path = fs::canonicalize(path)?;
     let mut file = File::open(path)?;
-    let before = file.metadata()?;
-    if !before.is_file() || !same_file(&before, &fs::metadata(path)?) {
+    let before = file_metadata(&file)?;
+    if !before.is_file() || !same_file(&before, &path_metadata(path)?) {
         return Err(AppError::conflict("输出文件已被替换"));
     }
     let sha256 = if with_sha256 {
@@ -374,13 +390,13 @@ pub fn output_snapshot(path: &Path, with_sha256: bool) -> Result<OutputSnapshot>
             }
             digest.update(&buffer[..count]);
         }
-        Some(format!("{:x}", digest.finalize()))
+        Some(format!("{:x}", base16ct::HexDisplay(&digest.finalize())))
     } else {
         None
     };
-    let after = file.metadata()?;
+    let after = file_metadata(&file)?;
     if !same_file(&before, &after)
-        || !same_file(&before, &fs::metadata(path)?)
+        || !same_file(&before, &path_metadata(path)?)
         || before.len() != after.len()
         || modified_ns(&before) != modified_ns(&after)
     {
@@ -460,8 +476,8 @@ impl AtomicOutput {
     pub fn snapshot(&mut self, with_sha256: bool) -> Result<OutputSnapshot> {
         let file = self.file.as_mut().expect("输出文件已关闭");
         file.flush()?;
-        let handle = file.metadata()?;
-        if !same_file(&handle, &fs::metadata(&self.partial)?) {
+        let handle = file_metadata(file)?;
+        if !same_file(&handle, &path_metadata(&self.partial)?) {
             return Err(AppError::conflict("输出临时文件已被替换"));
         }
         output_snapshot(&self.partial, with_sha256)
@@ -471,11 +487,11 @@ impl AtomicOutput {
         let prepare = (|| -> Result<_> {
             file.flush()?;
             file.sync_all()?;
-            let handle = file.metadata()?;
+            let handle = file_metadata(&file)?;
             if fs::symlink_metadata(&self.partial)?
                 .file_type()
                 .is_symlink()
-                || !same_file(&handle, &fs::metadata(&self.partial)?)
+                || !same_file(&handle, &path_metadata(&self.partial)?)
             {
                 return Err(AppError::conflict("输出临时文件已被替换"));
             }
@@ -497,13 +513,13 @@ impl AtomicOutput {
             publication_error(error, state)
         })?;
         let cleanup = (|| -> Result<()> {
-            if !same_file(&handle, &fs::metadata(&self.destination)?) {
+            if !same_file(&handle, &path_metadata(&self.destination)?) {
                 return Err(AppError::conflict("输出发布时文件身份发生变化"));
             }
             if fs::symlink_metadata(&self.partial)?
                 .file_type()
                 .is_symlink()
-                || !same_file(&handle, &fs::metadata(&self.partial)?)
+                || !same_file(&handle, &path_metadata(&self.partial)?)
             {
                 return Err(AppError::conflict("输出临时文件在发布期间被替换"));
             }

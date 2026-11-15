@@ -29,8 +29,7 @@ async fn credential_read_failure_releases_controller_for_another_client() {
         .retain(|id| *id != fixture.server.id);
     let auth = login(&engine, second, &fixture).await;
     assert_eq!(auth["state"], "ready");
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -82,8 +81,7 @@ async fn credential_failure_in_candidate_preserves_shared_ready_session() {
         .await
         .unwrap();
     assert_eq!(resumed["state"], "ready");
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -108,8 +106,7 @@ async fn failed_first_auth_releases_wizard_for_another_owner() {
     );
     let auth = login(&engine, other, &fixture).await;
     engine.dispatch(other, "archery.server.save", json!({"auth_id":auth["auth_id"],"server":fixture.server,"expected_revision":0,"password_update":{"kind":"replace","value":"good","persist":false}})).await.unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -149,8 +146,7 @@ async fn cancelled_first_auth_releases_wizard_for_another_owner() {
     fixture.release.add_permits(1);
     let auth = login(&engine, other, &fixture).await;
     engine.dispatch(other, "archery.server.save", json!({"auth_id":auth["auth_id"],"server":fixture.server,"expected_revision":0,"password_update":{"kind":"replace","value":"good","persist":false}})).await.unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -233,8 +229,7 @@ async fn candidate_failure_and_name_only_save_preserve_shared_login() {
             .await
             .is_ok()
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -289,8 +284,7 @@ async fn candidate_save_binds_verified_password_and_preserves_shared_slot() {
             .is_ok()
     );
     assert!(first["auth_id"].is_string());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -335,8 +329,7 @@ async fn saved_server_handles_share_ready_slot_without_another_login() {
             .await
             .is_ok()
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -385,6 +378,5 @@ async fn cancelled_before_start_never_sends_http_or_changes_auth_generation() {
         .await
         .unwrap();
     assert_eq!(still["auth_generation"], auth["auth_generation"]);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

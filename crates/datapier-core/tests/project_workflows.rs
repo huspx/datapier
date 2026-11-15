@@ -27,7 +27,13 @@ impl Workspace {
 }
 impl Drop for Workspace {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if std::thread::panicking() {
+                eprintln!("failed to remove {}: {error}", self.0.display());
+            } else {
+                panic!("failed to remove {}: {error}", self.0.display());
+            }
+        }
     }
 }
 

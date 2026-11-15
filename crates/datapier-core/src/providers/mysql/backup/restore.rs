@@ -846,7 +846,10 @@ impl MysqlSession {
                     let triggers: Vec<String> = sqlx::query_scalar("SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME").bind(db).bind(&object.target.name).fetch_all(&mut conn).await?;
                     entry.precondition = Some(format!(
                         "{:x}",
-                        Sha256::digest(serde_json::to_vec(&(&source.index.sha256, &triggers))?)
+                        base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&(
+                            &source.index.sha256,
+                            &triggers
+                        ))?))
                     ));
                     if !triggers.is_empty() {
                         entry.destructive = true;
@@ -1013,8 +1016,10 @@ impl MysqlSession {
                         let existing = super::string_at(&row, index, "目标对象定义")?;
                         drop_item.id.push_str(":drop");
                         drop_item.destructive = true;
-                        drop_item.precondition =
-                            Some(format!("{:x}", Sha256::digest(existing.as_bytes())));
+                        drop_item.precondition = Some(format!(
+                            "{:x}",
+                            base16ct::HexDisplay(&Sha256::digest(existing.as_bytes()))
+                        ));
                         drop_item
                             .notes
                             .push("DROP 和 CREATE 分别隐式提交，失败不会自动恢复原定义".into());
@@ -1508,7 +1513,10 @@ impl MysqlSession {
                                 byte_end: Some(statement.end),
                                 ..Default::default()
                             },
-                            format!("{:x}", Sha256::digest(sql.as_bytes())),
+                            format!(
+                                "{:x}",
+                                base16ct::HexDisplay(&Sha256::digest(sql.as_bytes()))
+                            ),
                         )
                         .await?;
                     if let Err(error) = ticket.sink.mark_sent(true).await {
@@ -1619,7 +1627,10 @@ impl MysqlSession {
                     let phase = if entry.action == "create_table" {
                         "schema:create_table".to_owned()
                     } else {
-                        format!("schema:{:x}", Sha256::digest(entry.id.as_bytes()))
+                        format!(
+                            "schema:{:x}",
+                            base16ct::HexDisplay(&Sha256::digest(entry.id.as_bytes()))
+                        )
                     };
                     if prior_skip(journal, input, statement.start, &phase).await? {
                         continue;
@@ -1635,7 +1646,10 @@ impl MysqlSession {
                         .begin(
                             &phase,
                             locator,
-                            format!("{:x}", Sha256::digest(entry.id.as_bytes())),
+                            format!(
+                                "{:x}",
+                                base16ct::HexDisplay(&Sha256::digest(entry.id.as_bytes()))
+                            ),
                         )
                         .await?;
                     let result = self
@@ -1689,7 +1703,10 @@ impl MysqlSession {
                             .fetch_one(&mut conn)
                             .await?;
                         let ddl = super::string_at(&row, index, "目标对象定义")?;
-                        let current = format!("{:x}", Sha256::digest(ddl.as_bytes()));
+                        let current = format!(
+                            "{:x}",
+                            base16ct::HexDisplay(&Sha256::digest(ddl.as_bytes()))
+                        );
                         if entry.precondition.as_deref() != Some(current.as_str()) {
                             return Err(AppError::conflict("目标对象定义已变化，请重新准备"));
                         }
@@ -1729,7 +1746,10 @@ impl MysqlSession {
                         .begin(
                             &phase,
                             locator,
-                            format!("{:x}", Sha256::digest(sql.as_bytes())),
+                            format!(
+                                "{:x}",
+                                base16ct::HexDisplay(&Sha256::digest(sql.as_bytes()))
+                            ),
                         )
                         .await?;
                     ticket.sink.mark_sent(true).await?;
@@ -1858,7 +1878,10 @@ impl MysqlSession {
                     byte_end: Some(statement.end),
                     ..Default::default()
                 },
-                format!("{:x}", Sha256::digest(sql.as_bytes())),
+                format!(
+                    "{:x}",
+                    base16ct::HexDisplay(&Sha256::digest(sql.as_bytes()))
+                ),
             )
             .await?;
         if let Err(error) = ticket.sink.mark_sent(true).await {
@@ -1943,7 +1966,10 @@ impl MysqlSession {
         let triggers: Vec<String> = sqlx::query_scalar("SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME").bind(db).bind(&object.target.name).fetch_all(&mut conn).await?;
         let fingerprint = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&(&source.index.sha256, &triggers))?)
+            base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&(
+                &source.index.sha256,
+                &triggers
+            ))?))
         );
         if entry.precondition.as_deref() != Some(fingerprint.as_str()) {
             return Err(AppError::conflict("目标触发器清单已变化，请重新准备"));

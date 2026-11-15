@@ -75,7 +75,7 @@ pub(super) fn fingerprint(ddl: &str, mode: &str) -> String {
     }
     hash.update(b"\0");
     hash.update(mode.as_bytes());
-    format!("{:x}", hash.finalize())
+    format!("{:x}", base16ct::HexDisplay(&hash.finalize()))
 }
 fn capability(available: bool, reason: &str) -> SchemaCapability {
     SchemaCapability {
@@ -344,7 +344,9 @@ pub(super) async fn describe_on(
     let context = serde_json::to_string(&(&definition, &dependencies))?;
     let fingerprint = format!(
         "{:x}",
-        Sha256::digest(format!("{}\0{}", fingerprint(&ddl, &sql_mode), context).as_bytes())
+        base16ct::HexDisplay(&Sha256::digest(
+            format!("{}\0{}", fingerprint(&ddl, &sql_mode), context).as_bytes()
+        ))
     );
     Ok(Some(SchemaSnapshot {
         target,

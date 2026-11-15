@@ -79,9 +79,9 @@ flowchart LR
 
 ### 2.2 依赖与实施基线
 
-复用 SQLx、redis-rs、Serde、csv、sha2、现有 tokenizer 与 sqlparser。SQL 恢复 reader 在 tokenizer 之上处理客户端分隔符和版本化注释；sqlparser 不被当作完整 MySQL 语法判定器。
+复用 SQLx、redis-rs、Serde、csv、sha2 0.11.1、现有 tokenizer 与 sqlparser 0.64.0。摘要显示使用 base16ct 1.0.0，不改变既有哈希算法、十六进制格式及持久化标识。SQL 恢复 reader 在 tokenizer 之上处理客户端分隔符和版本化注释；sqlparser 不被当作完整 MySQL 语法判定器。
 
-实现使用 `encoding_rs` 严格流式转码和 `zip` 项目归档；依赖版本与 features 以 Cargo.lock 和各 crate 配置为准。
+实现使用 `encoding_rs = 0.8.44` 严格流式转码和 `zip = 9.6.0` 项目归档；依赖版本与 features 以 Cargo.lock 和各 crate 配置为准。源码构建最低使用 Rust 1.100.0，CI 固定相同版本；其余当前依赖与格式化插件基线见[贡献指南](../CONTRIBUTING.md#开发环境)。
 
 当前开发运行基线为 macOS arm64／Tern 0.9.21（实测 `0.9.21 dbe0861`）／tern-sdk 0.2.0；其他五个目标的 CI、打包及运行尚未验收，不能据此宣称六目标通过。
 
@@ -495,9 +495,15 @@ UI 工作区不保存 Git 工作树副本；查询文件正文是用户明确选
 
 ## 14. 验收矩阵与运行证据
 
-本轮 review 修复的实际复验环境为 **macOS arm64、Tern 0.9.21、tern-sdk 0.2.0**，使用独立数据目录和本机 Docker 隔离数据库：
+当前依赖升级后的实际复验环境为 **Rust 1.100.0、macOS arm64、Tern 0.9.21、tern-sdk 0.2.0**，使用独立数据目录和本机 Docker 隔离数据库；此前候选证据另列，不能代替升级后复验：
 
-- **默认检查**：`cargo test --workspace --locked` 为 **745 passed、121 ignored**；最终 UI 调整后 TSP 测试为 **399 passed、1 ignored**。全 workspace Clippy（`-D warnings`）及末次 TSP 全 target 复验无警告，Rust 格式检查、dprint 和 debug 构建通过。`scripts/version.py --check-release` 返回 `0.4.0`；这些检查不代表正式发布或其他五目标已验收。
+- **默认检查**：英文语言环境下 `cargo test --workspace --locked` 为 **752 passed、121 ignored**，包括长查询超时下 Engine 及时释放目录的回归；全 workspace Clippy（`-D warnings`）、Rust 格式检查、升级后的 dprint 插件检查与 debug 构建通过。发布脚本 **25 项测试通过**，`scripts/version.py --check-release` 返回 `0.4.0`；6 份当前文档的 **110 个相对链接与锚点**检查通过。Windows 使用稳定的句柄元数据 API，保存协同回归按请求和草稿状态验证；六目标 CI 结果仍须关联本轮修复提交核对。
+- **升级后真实数据库**：独立 MySQL 8.4／Redis 7.2 上 **15 项测试通过**，覆盖十万行 CSV／JSON 往返、预算中止、覆盖冲突和子集重试、SQL 恢复选择及漂移、Redis 五类型与期限、MySQL 结构创建／元数据锁、视图写入映射和实时分页。
+- **升级后 CLI／MCP**：真实候选程序返回 `datapier 0.4.0`，四个子命令帮助入口通过；隔离数据目录下完成 rmcp 3.10.0 的 stdio 初始化、协议版本协商及 23 个工具发现。
+- **六目标 CI**：默认测试、release 构建、CLI smoke 和单目标打包以 [PR #7](https://github.com/huspx/datapier/pull/7) 最终提交关联的 workflow 为准。Windows 的文件与项目目录身份检查均改用稳定句柄 API，保留原有身份格式；项目目录及 stage 条目额外拒绝 reparse point 或类型替换。目录清理先结束后台任务并释放所有存储副本；查询超时监视任务在等待期间只保留弱引用，不因已完成查询继续占用 Engine 和数据目录。
+
+### 依赖升级前的候选证据
+
 - **真实数据库**：MySQL 8.4＋Redis 8.0、MySQL 8.0＋Redis 7.2 各执行 31 项迁移、文件交换和 Redis 回归，均通过；Redis 6.2 的 21 项回归以及 MySQL 5.7 组合的其余 10 项回归均通过。覆盖十万行 CSV／JSON 往返、unsigned／Decimal／二进制、零自增键、预算受限时保留此前提交、覆盖冲突批次回滚、SQL 对象选择和漂移、失败／回滚／未发送子集续作，以及五类型 key、WATCH、类型替换和绝对期限。最初启用 TLS 的 MySQL 5.7 fixture 因 SQLx 默认尝试 TLS 而握手失败；最终 10 项使用独立的 `mysql:5.7.42 --skip-ssl` fixture＋Redis 6.2，测试管理连接显式使用与非 TLS profile 相同的连接模式。该结果不证明原 TLS fixture 握手已修复，产品 TLS 校验和专属 TLS 回归要求保持不变。
 - **恢复辅助逻辑合并后复验**：在独立 MySQL 8.4／Redis 7.2 实例上执行 11 项迁移、SQL 恢复和报告回读测试，全部通过；覆盖十万行 CSV／JSON 往返、预算中止、覆盖冲突及子集重试、Redis 五类型、二进制 key 与绝对期限。
 - **真实 Engine 补充 smoke**：SQL 恢复分别读取语句自身的时区上下文，带外键的新表恢复后读回确认约束；准备和执行均遵守内存预算。接近单值编码上限的文本恢复成功，目标 `OCTET_LENGTH` 为 **16,777,152**；16 MiB 原始文本因编码后超限而明确失败，未写入该行，不能把前一数值描述为 16 MiB 原始文本已通过。

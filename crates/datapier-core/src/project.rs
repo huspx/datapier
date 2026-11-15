@@ -28,7 +28,7 @@ fn conflict(message: impl Into<String>) -> AppError {
     AppError::new("recovery_conflict", message)
 }
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", base16ct::HexDisplay(&Sha256::digest(bytes)))
 }
 fn zip_error(e: zip::result::ZipError) -> AppError {
     invalid(format!("ZIP: {e}"))

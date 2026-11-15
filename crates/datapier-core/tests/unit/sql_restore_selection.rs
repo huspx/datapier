@@ -216,7 +216,9 @@ async fn multiple_restore_inputs_share_index_budget() {
     .err()
     .unwrap();
     assert_eq!(error.code, "resource_limit");
+    drop(sink);
     store.pool.close().await;
+    drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
 

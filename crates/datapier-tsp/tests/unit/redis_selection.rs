@@ -209,8 +209,10 @@ async fn ui_open_request_is_accepted_by_real_redis_provider() {
         .await
         .unwrap();
     drop(provider);
+    drop(sink);
+    store.pool.close().await;
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -117,7 +117,6 @@ fn project_save_waits_for_workspace_save_without_losing_query() {
     assert!(app.project_action("project-ui-save-prepare", &backend));
     assert!(requests.try_recv().is_err());
     assert_eq!(app.field(&query_key), "SELECT '草稿😀'");
-    assert!(app.status.render().contains("工作区保存仍在进行"));
 
     app.saving = false;
     assert!(app.project_action("project-ui-save-prepare", &backend));

@@ -39,8 +39,14 @@ fn key_locator(
     record: Option<u64>,
 ) -> TransferLocator {
     TransferLocator {
-        source_digest: Some(format!("{:x}", Sha256::digest(source))),
-        target_digest: Some(format!("{:x}", Sha256::digest(target))),
+        source_digest: Some(format!(
+            "{:x}",
+            base16ct::HexDisplay(&Sha256::digest(source))
+        )),
+        target_digest: Some(format!(
+            "{:x}",
+            base16ct::HexDisplay(&Sha256::digest(target))
+        )),
         input,
         first_record: record,
         last_record: record,
@@ -532,7 +538,7 @@ async fn import_files(
                         if current.is_some() { return Err(AppError::invalid("Redis 输入 key 尚未结束")); }
                         let key = decode(&key_b64)?;
                         let mapped = map_key(&spec.redis, &key)?;
-                        let ticket = journal.begin("redis_import", key_locator(&key, &mapped, Some(input_index), Some(record)), format!("{:x}", Sha256::digest(&key))).await?;
+                        let ticket = journal.begin("redis_import", key_locator(&key, &mapped, Some(input_index), Some(record)), format!("{:x}", base16ct::HexDisplay(&Sha256::digest(&key)))).await?;
                         journal.progress.current_object = ticket.locator().source_digest.clone();
                         journal.progress.phase = "redis_import".into();
                         let begin = target.call("import.begin", json!({"target":resource(&mapped),"type":kind,"expires_at_ms":expires_at_ms,"conflict_policy":spec.options.conflict}), &ticket.sink, cancel).await;

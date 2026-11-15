@@ -412,7 +412,9 @@ impl Engine {
         let original_kind = buffer.kind();
         let digest = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&(&target, &baseline, &value))?)
+            base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&(
+                &target, &baseline, &value
+            ))?))
         );
         let buffer_charge = buffer.len().unwrap_or(0).saturating_mul(2);
         let reserved = json_memory(&provider_params)

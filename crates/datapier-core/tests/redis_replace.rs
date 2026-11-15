@@ -553,6 +553,7 @@ async fn missing_eval_permission_never_falls_back_to_unwatched_writes() {
         .query_async(&mut f.conn)
         .await
         .unwrap();
+    drop(sink);
     f.close().await;
 }
 
@@ -681,6 +682,7 @@ async fn unreadable_field_expiry_rejects_prepare_before_any_write() {
         .query_async(&mut f.conn)
         .await
         .unwrap();
+    drop(sink);
     f.close().await;
 }
 

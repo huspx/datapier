@@ -119,7 +119,7 @@ fn index_options(
 }
 
 pub(super) fn table_options(options: sqlparser::ast::CreateTableOptions) -> Result<Vec<String>> {
-    use sqlparser::ast::{CreateTableOptions, SqlOption};
+    use sqlparser::ast::{CreateTableOptions, ObjectNamePart, SqlOption};
     let values = match options {
         CreateTableOptions::None => return Ok(Vec::new()),
         CreateTableOptions::Plain(values) => values,
@@ -141,7 +141,7 @@ pub(super) fn table_options(options: sqlparser::ast::CreateTableOptions) -> Resu
                     "COMMENT",
                 ]
                 .iter()
-                .any(|v| key.value.eq_ignore_ascii_case(v)) => {}
+                .any(|v| matches!(key.0.as_slice(), [ObjectNamePart::Identifier(id)] if id.value.eq_ignore_ascii_case(v))) => {}
             // sqlparser 表示 MySQL 的 ENGINE=InnoDB 为具名列表，实际引擎已从元数据读取。
             SqlOption::NamedParenthesizedList(value)
                 if value.key.value.eq_ignore_ascii_case("ENGINE")
@@ -153,6 +153,7 @@ pub(super) fn table_options(options: sqlparser::ast::CreateTableOptions) -> Resu
     }
     Ok(preserved)
 }
+
 // CREATE TABLE 的省略项由目标数据库或显式字符集决定，而非连接默认值。
 pub(super) async fn creation_defaults(
     conn: &mut MySqlConnection,
@@ -548,3 +549,6 @@ pub(super) async fn read_table(
         Completeness { state, reasons },
     ))
 }
+#[cfg(test)]
+#[path = "../../../../tests/unit/mysql/schema_catalog.rs"]
+mod option_tests;

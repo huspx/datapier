@@ -465,14 +465,14 @@ fn output_path(
     // 固定序号与哈希避免文件名碰撞、路径穿越及平台保留名称。
     let hash = format!(
         "{:x}",
-        Sha256::digest(
+        base16ct::HexDisplay(&Sha256::digest(
             format!(
                 "{}\0{}",
                 object.source.database.as_deref().unwrap_or(""),
                 object.source.name
             )
             .as_bytes()
-        )
+        ))
     );
     let extension = match format {
         TransferFormat::Csv => "csv",

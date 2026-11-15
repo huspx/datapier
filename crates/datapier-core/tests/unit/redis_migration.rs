@@ -144,6 +144,8 @@ async fn watch_rejects_source_and_target_changes() {
         .await
         .unwrap();
     session.close().await.unwrap();
+    drop(sink);
     store.pool.close().await;
+    drop(store);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

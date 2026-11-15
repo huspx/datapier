@@ -10,9 +10,7 @@ async fn fixture() -> (Arc<Engine>, PathBuf, Uuid) {
 }
 
 async fn cleanup(engine: Arc<Engine>, root: PathBuf) {
-    engine.store.pool.close().await;
-    drop(engine);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 async fn begin(

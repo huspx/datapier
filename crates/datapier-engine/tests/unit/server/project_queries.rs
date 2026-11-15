@@ -224,7 +224,5 @@ async fn query_resolution_requires_confirmed_directory_and_preserves_text() {
             .code,
         "project_conflict"
     );
-    engine.store.pool.close().await;
-    drop(engine);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }

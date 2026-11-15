@@ -239,7 +239,6 @@ async fn mysql_multifile_csv_json_retry_preserves_commits_and_includes_unread_ta
     .execute(&pool)
     .await;
     pool.close().await;
-    engine.store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    crate::server::tests::cleanup(engine, root).await;
     outcome.unwrap();
 }

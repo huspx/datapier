@@ -117,7 +117,7 @@ flowchart LR
 
 六个 crate 分别承担 CLI 分派（`datapier`）、数据库语义（`datapier-core`）、共享进程与 IPC（`datapier-engine`）、Tern 工作台（`datapier-tsp`）、普通终端配置（`datapier-tui`）和 MCP 适配（`datapier-mcp`）。macOS／Linux 使用 Unix domain socket，Windows 使用 Named Pipe；Tern 原生渲染 TSP 界面。
 
-主要技术栈为 Rust stable／edition 2024、Tokio、Serde、官方 `tern-sdk`、SQLx、redis-rs、SQLite、keyring、sqlparser-rs 和 sqlformat。原生格式化直接链接 Rust 库，不启动 Node、JavaScript runtime 或 WebView；数据库 provider 首期随 Engine 编译发布，PostgreSQL、MongoDB 属于后续扩展方向。
+主要技术栈为 Rust 1.100.0／edition 2024、Tokio、Serde、官方 `tern-sdk`、SQLx、redis-rs、SQLite、keyring、sqlparser-rs 和 sqlformat；当前依赖版本与工具要求见[贡献指南](CONTRIBUTING.md#开发环境)。原生格式化直接链接 Rust 库，不启动 Node、JavaScript runtime 或 WebView；数据库 provider 首期随 Engine 编译发布，PostgreSQL、MongoDB 属于后续扩展方向。
 
 数据处理遵循类型保真、增量读取和显式提交：大整数与精确小数保持精度，二进制可逆传输，Redis 修改默认保留 TTL；写入结果无法确认时记录待确认状态，不自动重放。
 

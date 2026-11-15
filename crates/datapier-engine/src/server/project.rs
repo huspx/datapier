@@ -348,7 +348,37 @@ fn change_summaries(preview: &ProjectSavePreview) -> Vec<Value> {
     preview.changes.iter().map(|c| json!({"path":c.path,"old_digest":c.old_digest,"new_digest":c.new_digest,"old_bytes":c.old_content.as_ref().map(String::len),"new_bytes":c.new_content.as_ref().map(String::len)})).collect()
 }
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", base16ct::HexDisplay(&Sha256::digest(bytes)))
+}
+
+#[cfg(windows)]
+fn windows_entry_identity(path: &Path, directory: bool) -> std::io::Result<String> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        GetFileInformationByHandle,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: file 在调用期间持有有效句柄，information 是大小和对齐正确的可写缓冲区。
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: API 成功时已完整初始化 BY_HANDLE_FILE_INFORMATION。
+    let information = unsafe { information.assume_init() };
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
+    {
+        return Err(std::io::Error::other("项目路径类型或身份已变化"));
+    }
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok(format!("{}:{index}", information.dwVolumeSerialNumber))
 }
 
 // 目录被删除并在同一路径重建时不能继承旧目录的授权。
@@ -363,25 +393,17 @@ fn binding_root_identity(root: &str) -> Result<String> {
         format!("{}:{}", metadata.dev(), metadata.ino())
     };
     #[cfg(windows)]
-    let identity = {
-        use std::os::windows::fs::MetadataExt;
-        format!(
-            "{}:{}",
-            metadata
-                .volume_serial_number()
-                .ok_or_else(|| AppError::new("binding_required", "无法读取项目目录身份"))?,
-            metadata
-                .file_index()
-                .ok_or_else(|| AppError::new("binding_required", "无法读取项目目录身份"))?
-        )
-    };
+    let identity = windows_entry_identity(Path::new(root), true)
+        .map_err(|error| AppError::new("binding_required", error.to_string()))?;
     #[cfg(not(any(unix, windows)))]
     return Err(AppError::new("unsupported", "本平台无法确认项目目录身份"));
     #[cfg(any(unix, windows))]
     Ok(format!("{root}\0{identity}"))
 }
 
-fn stage_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
+fn stage_entry_identity(path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
+    #[cfg(not(windows))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -389,12 +411,7 @@ fn stage_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        Some(format!(
-            "{}:{}",
-            metadata.volume_serial_number()?,
-            metadata.file_index()?
-        ))
+        windows_entry_identity(path, metadata.is_dir()).ok()
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -437,7 +454,7 @@ fn current_digest(root: &Path, relative: &str) -> Result<Option<String>> {
         }
         sha.update(&buffer[..n]);
     }
-    Ok(Some(format!("{:x}", sha.finalize())))
+    Ok(Some(format!("{:x}", base16ct::HexDisplay(&sha.finalize()))))
 }
 fn artifact_view(artifact: &TransferArtifact) -> Value {
     json!({"id":artifact.id,"run_id":artifact.run_id,"owner_client_id":artifact.owner_client_id,"kind":artifact.kind,"state":artifact.state,"revision":artifact.revision,"identity":{"task_id":artifact.identity.task_id,"path":artifact.identity.path,"canonical_path":artifact.identity.canonical_path,"file_id":artifact.identity.file_id,"size":artifact.identity.size,"sha256":artifact.identity.sha256,"kind":artifact.identity.kind,"export_name":artifact.identity.export_name,"media_type":artifact.identity.media_type}})
@@ -2200,9 +2217,10 @@ impl Engine {
                         let mut entries = Vec::new();
                         for entry in std::fs::read_dir(path)? {
                             let entry = entry?;
-                            let meta = std::fs::symlink_metadata(entry.path())?;
+                            let entry_path = entry.path();
+                            let meta = std::fs::symlink_metadata(&entry_path)?;
                             let kind = if meta.file_type().is_symlink() { "symlink" } else if meta.is_file() { "file" } else if meta.is_dir() { "directory" } else { "other" };
-                            entries.push(json!({"path":entry.file_name().to_string_lossy(),"type":kind,"size":meta.len(),"file_id":stage_entry_identity(&meta)}));
+                            entries.push(json!({"path":entry.file_name().to_string_lossy(),"type":kind,"size":meta.len(),"file_id":stage_entry_identity(&entry_path, &meta)}));
                         }
                         entries.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
                         Ok((entries, Some(identity), journal_digest))
@@ -2850,3 +2868,7 @@ impl Engine {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "../../tests/unit/server/project_identity.rs"]
+mod windows_identity_tests;

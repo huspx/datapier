@@ -499,6 +499,7 @@ async fn expiration_invalidates_watch_and_read_only_rejects_writes() {
         .unwrap();
     assert_eq!(exists, 0);
     session.close().await.unwrap();
+    drop(sink);
     f.close().await;
 }
 
@@ -530,6 +531,7 @@ async fn export_does_not_publish_when_scan_exceeds_memory_budget() {
     .await;
     assert_eq!(result.unwrap_err().code, "resource_limit");
     assert!(!path.exists(), "受限导出不能发布为完整文件");
+    drop(sink);
     f.close().await;
 }
 
@@ -745,6 +747,7 @@ async fn import_rename_acl_denial_preserves_owned_expiring_staging_key() {
         .await
         .unwrap();
     let _ = session.close().await;
+    drop(sink);
     f.close().await;
 }
 
@@ -958,6 +961,7 @@ async fn import_close_preserves_replacement_and_cleans_owned_key() {
             .unwrap();
         assert_eq!(exists, 0);
     }
+    drop(sink);
     f.close().await;
 }
 
@@ -1291,6 +1295,7 @@ async fn batch_delete_rejects_invalid_targets_and_read_only() {
         .unwrap_err();
     assert_eq!(err.code, "permission_denied");
     session.close().await.unwrap();
+    drop(sink);
     f.close().await;
 }
 
@@ -1417,6 +1422,7 @@ async fn cancelled_read_discards_connection_and_next_read_reconnects() {
         .await
         .unwrap();
     assert_eq!(rows, vec![vec![binary(b"alive")]]);
+    drop(sink);
     f.close().await;
 }
 
@@ -1471,6 +1477,7 @@ async fn database_discovery_does_not_change_command_database_or_transaction() {
     assert_eq!(result["source"], "manual_override");
     assert_eq!(result["databases"], json!(["0", "1", "2"]));
     manual.close().await.unwrap();
+    drop(sink);
     f.close().await;
 }
 

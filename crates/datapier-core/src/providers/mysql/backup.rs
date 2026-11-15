@@ -63,7 +63,10 @@ fn object_fingerprint(object: &DumpObject) -> Result<String> {
         &object.default_charset,
         &object.default_collation,
     ))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(bytes))
+    ))
 }
 fn hex(s: &str) -> String {
     use std::fmt::Write as _;
@@ -525,10 +528,7 @@ impl MysqlSession {
                 .begin(
                     "sql_dump_publish",
                     crate::model::transfer::TransferLocator::default(),
-                    format!(
-                        "{:x}",
-                        Sha256::digest(destination.to_string_lossy().as_bytes())
-                    ),
+                    format!("{:x}", base16ct::HexDisplay(&Sha256::digest(destination.to_string_lossy().as_bytes()))),
                 )
                 .await?;
             if let Err(error) = ticket.sink.mark_sent(true).await {

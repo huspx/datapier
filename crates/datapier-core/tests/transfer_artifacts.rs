@@ -105,5 +105,6 @@ async fn redis_cleanup_confirmation_requires_exact_unknown_artifact_ownership() 
         "outcome_unknown"
     );
     store.pool.close().await;
+    drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }

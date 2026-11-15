@@ -3,8 +3,8 @@ use crate::model::{AppError, ResourceTarget, Result, schema::*};
 use sqlparser::{
     ast::{
         ColumnOption, CommentDef, CreateTableOptions, Expr, FunctionArg, FunctionArgExpr,
-        FunctionArguments, GeneratedExpressionMode, IndexColumn, IndexOption, ObjectNamePart,
-        SqlOption, Statement, TableConstraint, Value,
+        FunctionArguments, GeneratedExpressionMode, IndexColumn, IndexOption, ObjectName,
+        ObjectNamePart, OrderBySort, SqlOption, Statement, TableConstraint, Value,
     },
     dialect::MySqlDialect,
     parser::Parser,
@@ -20,17 +20,22 @@ fn name_parts(name: &sqlparser::ast::ObjectName) -> Option<Vec<String>> {
         .collect()
 }
 
+fn option_key_is(key: &ObjectName, name: &str) -> bool {
+    matches!(key.0.as_slice(), [ObjectNamePart::Identifier(id)] if id.value.eq_ignore_ascii_case(name))
+}
+
 fn index_parts(columns: Vec<IndexColumn>, reasons: &mut Vec<String>) -> Vec<IndexPart> {
     columns
         .into_iter()
         .map(|part| {
             if part.operator_class.is_some()
                 || part.column.options.nulls_first.is_some()
+                || matches!(part.column.options.sort, Some(OrderBySort::Using(_)))
                 || part.column.with_fill.is_some()
             {
                 reasons.push(format!("索引列含无法表达的属性: {part}"));
             }
-            let descending = part.column.options.asc == Some(false);
+            let descending = matches!(part.column.options.sort, Some(OrderBySort::Desc));
             let expr = part.column.expr;
             let prefix = if let Expr::Function(f) = &expr {
                 if let (Some(names), FunctionArguments::List(args)) = (name_parts(&f.name), &f.args)
@@ -263,7 +268,7 @@ pub(super) fn parse_ddl(
         || table.external
         || table.partition_by.is_some()
         || table.cluster_by.is_some()
-        || table.without_rowid
+        || !table.sqlite_table_options.options.is_empty()
         || table.comment.is_some()
     {
         reasons.push("表包含无法完整表达的创建属性".into());
@@ -521,7 +526,7 @@ pub(super) fn parse_ddl(
                     options.push(option.to_string());
                 }
             }
-            SqlOption::KeyValue { key, value } if key.value.eq_ignore_ascii_case("ENGINE") => {
+            SqlOption::KeyValue { key, value } if option_key_is(key, "ENGINE") => {
                 if let Some(v) = option_value(value) {
                     engine = v;
                 } else {
@@ -537,7 +542,7 @@ pub(super) fn parse_ddl(
                     "DEFAULT CHARACTER SET",
                 ]
                 .iter()
-                .any(|s| key.value.eq_ignore_ascii_case(s)) =>
+                .any(|s| option_key_is(key, s)) =>
             {
                 if let Some(v) = option_value(value) {
                     charset = Some(v);
@@ -549,7 +554,7 @@ pub(super) fn parse_ddl(
             SqlOption::KeyValue { key, value }
                 if ["COLLATE", "DEFAULT COLLATE"]
                     .iter()
-                    .any(|s| key.value.eq_ignore_ascii_case(s)) =>
+                    .any(|s| option_key_is(key, s)) =>
             {
                 if let Some(v) = option_value(value) {
                     collation = Some(v);
@@ -561,7 +566,7 @@ pub(super) fn parse_ddl(
             SqlOption::Comment(CommentDef::WithEq(v) | CommentDef::WithoutEq(v)) => {
                 comment = v.clone()
             }
-            SqlOption::KeyValue { key, value } if key.value.eq_ignore_ascii_case("COMMENT") => {
+            SqlOption::KeyValue { key, value } if option_key_is(key, "COMMENT") => {
                 if let Some(v) = option_value(value) {
                     comment = v;
                 } else {
@@ -569,8 +574,7 @@ pub(super) fn parse_ddl(
                     options.push(option.to_string());
                 }
             }
-            SqlOption::KeyValue { key, .. } if key.value.eq_ignore_ascii_case("AUTO_INCREMENT") => {
-            }
+            SqlOption::KeyValue { key, .. } if option_key_is(key, "AUTO_INCREMENT") => {}
             _ => {
                 reasons.push(format!("未识别表选项: {option}"));
                 options.push(option.to_string());
@@ -632,5 +636,34 @@ mod tests {
         };
         assert!(table.constraints.iter().any(|constraint| matches!(constraint, ConstraintDefinition::ForeignKey { name, referenced_database, referenced_table, .. } if name == "fk_parent" && referenced_database == "db" && referenced_table == "parent")));
         assert!(table.constraints.iter().any(|constraint| matches!(constraint, ConstraintDefinition::Check { name, enforced: true, .. } if name == "ck_id")));
+    }
+
+    #[test]
+    fn table_option_keys_must_be_single_identifiers() {
+        use sqlparser::ast::Ident;
+        let single = ObjectName::from(Ident::new("engine"));
+        let qualified = ObjectName::from(vec![Ident::new("x"), Ident::new("ENGINE")]);
+        assert!(option_key_is(&single, "ENGINE"));
+        assert!(!option_key_is(&qualified, "ENGINE"));
+    }
+
+    #[test]
+    fn preserves_index_direction_and_table_options() {
+        let target = ResourceTarget {
+            database: Some("db".into()),
+            name: "t".into(),
+            kind: "table".into(),
+            key_b64: None,
+        };
+        let snapshot = parse_ddl(target, "CREATE TABLE t (a int, b int, KEY idx (a ASC, b DESC)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=5", "").unwrap();
+        assert_eq!(snapshot.completeness.state, CompletenessState::Incomplete);
+        let SchemaDefinition::Table(table) = snapshot.definition else {
+            panic!("expected table")
+        };
+        assert_eq!(table.engine, "InnoDB");
+        assert_eq!(table.charset.as_deref(), Some("utf8mb4"));
+        assert!(table.options.is_empty());
+        assert!(!table.indexes[0].parts[0].descending);
+        assert!(table.indexes[0].parts[1].descending);
     }
 }

@@ -146,6 +146,11 @@ struct Engine {
     store: Store,
     state: Mutex<State>,
     send_gate: Arc<AsyncMutex<()>>,
+    // 测试清理等待最后一个 Arc 释放；发送端须置于末尾，先析构 Store 和 State。
+    #[cfg(test)]
+    destroyed: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(test)]
+    _destroyed_signal: Option<tokio::sync::oneshot::Sender<()>>,
 }
 fn serialize<T: serde::Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
@@ -270,6 +275,10 @@ pub async fn run(root: PathBuf) -> Result<()> {
             transfers: Default::default(),
             operations: Default::default(),
         }),
+        #[cfg(test)]
+        destroyed: Mutex::new(None),
+        #[cfg(test)]
+        _destroyed_signal: None,
     });
     let descriptor = root.join("engine.json");
     std::fs::write(

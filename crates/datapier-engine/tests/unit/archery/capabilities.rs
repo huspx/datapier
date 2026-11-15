@@ -62,8 +62,7 @@ async fn info_keeps_observed_capabilities_and_local_rejection_does_not_revoke_qu
         .unwrap();
     assert_eq!(retained["auth_generation"], auth["auth_generation"]);
     engine.disconnect(owner).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -151,8 +150,7 @@ async fn mcp_catalog_preserves_unknown_incomplete_and_local_continuation() {
     mcp.close().await.unwrap();
     handler.await.unwrap();
     engine.disconnect(controller).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -171,6 +169,7 @@ async fn cancellation_after_validated_response_preserves_remote_completion() {
     let terminal = engine.task(task.id).await.unwrap();
     assert_eq!(terminal.state, "wait_stopped");
     assert_eq!(terminal.summary["remote_completion"], "completed");
+    drop(sink);
     // 开始后续请求必须重新变为未知，不能沿用上一条 SQL 的完成状态。
     let next = engine
         .store
@@ -185,8 +184,8 @@ async fn cancellation_after_validated_response_preserves_remote_completion() {
         engine.task(next.id).await.unwrap().summary["remote_completion"],
         "unknown"
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    drop(sink);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -238,6 +237,5 @@ async fn generic_profile_save_rejects_archery_changes_without_mutation() {
             .revision,
         revision
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

@@ -84,8 +84,7 @@ async fn sql_batch_prevalidates_all_and_stops_after_failure_or_cancel() {
     assert_eq!(stopped["state"], "wait_stopped");
     assert_eq!(fixture.query_count.load(Ordering::Acquire), 4);
     fixture.release.add_permits(1);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -124,16 +123,16 @@ async fn sql_size_statement_count_and_limit_boundaries_precede_http() {
         );
     }
     assert_eq!(fixture.query_count.load(Ordering::Acquire), 101);
-    let requests = fixture.requests.lock().unwrap();
-    assert!(
-        requests
-            .iter()
-            .any(|request| request.starts_with("POST /prefix/query/ ")
-                && request.contains("limit_num=10000"))
-    );
-    drop(requests);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.starts_with("POST /prefix/query/ ")
+                    && request.contains("limit_num=10000"))
+        );
+    }
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -215,8 +214,7 @@ async fn manual_otp_requires_client_handle_and_controller_token() {
             .await
             .is_ok()
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -275,8 +273,7 @@ async fn concurrent_verify_is_busy_and_sends_one_otp_request() {
             .count(),
         1
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -329,8 +326,7 @@ async fn closing_and_cancelling_blocked_verify_leave_engine_responsive() {
     .await
     .unwrap()
     .unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -377,8 +373,7 @@ async fn oversized_server_info_does_not_commit_save() {
             .unwrap(),
         secret
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -451,8 +446,7 @@ async fn oversized_deleted_response_preserves_server_profiles_and_credentials() 
             .unwrap(),
         totp
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -488,8 +482,7 @@ async fn execution_registration_waits_for_server_gate() {
         terminal_task(&engine, owner, &started["task_id"]).await["state"],
         "succeeded"
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -555,8 +548,7 @@ async fn automatic_otp_authenticates_and_saves_independent_credentials() {
             .unwrap()
             .is_none()
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 async fn ipc_reply(peer: &mut tokio::io::DuplexStream, id: &str) -> Value {
@@ -637,6 +629,5 @@ async fn oversized_resource_rpc_keeps_ipc_connection_usable() {
         true
     );
     handler.await.unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

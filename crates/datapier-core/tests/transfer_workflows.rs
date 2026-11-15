@@ -532,7 +532,8 @@ async fn mysql_overwrite_secondary_unique_conflict_rolls_back_batch_and_can_run_
     }
     pool.close().await;
     store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
     outcome.unwrap();
 }
 
@@ -997,7 +998,8 @@ async fn mysql_sql_restore_object_selection_and_drift() {
     }
     pool.close().await;
     store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
     outcome.unwrap();
 }
 
@@ -1116,7 +1118,8 @@ async fn mysql_import_overwrite_with_only_existing_ids_skips_without_changes() {
     .await;
     pool.close().await;
     store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
     outcome.unwrap();
 }
 
@@ -1237,6 +1240,7 @@ async fn redis_overwrite_replaces_type_and_preserves_absolute_expiry() {
         .query_async(&mut conn)
         .await;
     store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
     outcome.unwrap();
 }

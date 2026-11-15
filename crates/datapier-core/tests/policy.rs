@@ -34,6 +34,32 @@ fn read_scope_and_replayability() {
 }
 
 #[test]
+fn in_predicates_preserve_scope_and_replay_checks() {
+    let access = analyze_mysql(
+        "SELECT id FROM a.items WHERE id IN (SELECT id FROM b.items)",
+        &context(),
+    )
+    .unwrap();
+    assert_eq!(
+        access.read_databases.into_iter().collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert!(access.replayable);
+    assert!(
+        !analyze_mysql("SELECT 1 IN (RAND(), 2)", &context())
+            .unwrap()
+            .replayable
+    );
+    for sql in [
+        "SELECT secret() IN (1, 2)",
+        "SELECT 1 IN (secret(), 2)",
+        "SELECT 1 IN (SELECT secret() FROM b.items)",
+    ] {
+        assert!(analyze_mysql(sql, &context()).is_err(), "{sql}");
+    }
+}
+
+#[test]
 fn cte_scope_does_not_hide_qualified_or_forward_tables() {
     let access = analyze_mysql(
         "WITH t AS (SELECT * FROM source.base) SELECT * FROM t JOIN other.t ON 1=1",

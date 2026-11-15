@@ -212,5 +212,6 @@ async fn sql_batch_prior_states_follow_each_offset_and_legacy_locator() {
         None
     );
     store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
 }

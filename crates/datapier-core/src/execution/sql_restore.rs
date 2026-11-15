@@ -3002,7 +3002,7 @@ fn inspect_inner(
         return Err(AppError::conflict("SQL 输入在预检期间发生变化"));
     }
     if let Some((_, expected)) = footer_start
-        && format!("{:x}", prefix.finalize()) != expected
+        && format!("{:x}", base16ct::HexDisplay(&prefix.finalize())) != expected
     {
         return Err(AppError::invalid("SQL 完成标记摘要不匹配"));
     }
@@ -3031,7 +3031,7 @@ fn inspect_inner(
     }
     Ok(SqlIndex {
         statements,
-        sha256: format!("{:x}", full.finalize()),
+        sha256: format!("{:x}", base16ct::HexDisplay(&full.finalize())),
         bytes,
         datapier_format,
         declared_objects: declared,

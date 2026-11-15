@@ -157,11 +157,13 @@ function xpExchangeBody() {
     return `<h3>${xpLabel('来源与目标', 'Source and target')}</h3><div class="xp-grid"><label class="xp-field"><span>${
       xpLabel('操作', 'Operation')
     }</span><select data-xp-mode>${
-      [['import', '导入', 'Import'], ['export', '导出', 'Export'], ['copy', '直接迁移', 'Direct copy'], [
-        'sql_dump',
-        'SQL 导出',
-        'SQL dump',
-      ], ['sql_restore', 'SQL 恢复', 'SQL restore']].map(([v, a, b]) =>
+      [
+        ['import', '导入', 'Import'],
+        ['export', '导出', 'Export'],
+        ['copy', '直接迁移', 'Direct copy'],
+        ['sql_dump', 'SQL 导出', 'SQL dump'],
+        ['sql_restore', 'SQL 恢复', 'SQL restore'],
+      ].map(([v, a, b]) =>
         `<option value="${v}"${xp.mode === v ? ' selected' : ''}${!mysql && v.startsWith('sql_') ? ' disabled' : ''}>${
           xpLabel(a, b)
         }</option>`
@@ -222,17 +224,17 @@ function xpExchangeBody() {
   }
   if (xp.section === 'policy') {
     return `<h3>${xpLabel('策略与格式', 'Policy and format')}</h3><div class="xp-grid">${
-      xpSelect('range', '范围', 'Range', [['all', '全部', 'All'], ['selected', '已选择', 'Selected'], [
-        'filtered',
-        '筛选结果',
-        'Filtered',
-      ]])
+      xpSelect('range', '范围', 'Range', [
+        ['all', '全部', 'All'],
+        ['selected', '已选择', 'Selected'],
+        ['filtered', '筛选结果', 'Filtered'],
+      ])
     }${xpField('recordRanges', '续作记录区间（首尾均包含）', 'Continuation record ranges (inclusive)')}${
-      xpSelect('conflict', '冲突处理', 'Conflict policy', [['stop', '停止', 'Stop'], ['skip', '跳过', 'Skip'], [
-        'replace',
-        '替换（危险）',
-        'Replace (dangerous)',
-      ]])
+      xpSelect('conflict', '冲突处理', 'Conflict policy', [
+        ['stop', '停止', 'Stop'],
+        ['skip', '跳过', 'Skip'],
+        ['replace', '替换（危险）', 'Replace (dangerous)'],
+      ])
     }${
       csv
         ? `${xpField('delimiter', '分隔符（单个 ASCII 字符）', 'Delimiter (one ASCII character)')}${

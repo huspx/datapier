@@ -766,41 +766,49 @@ impl Engine {
             limits.query_timeout_seconds,
         ));
         tokio::spawn(async move {
-            if let Some(engine) = timeout_engine.upgrade() {
-                let mut activity = engine.store.subscribe_result_activity().await;
-                let mut deadline = tokio::time::Instant::now() + timeout_duration;
-                let mut previous_waiting = false;
-                let mut completed_waits = 0;
-                loop {
-                    // 先确认通知版本，再读取状态，避免查询与睡眠之间漏掉状态变化。
-                    activity.borrow_and_update();
-                    let (waiting, completed) = engine.store.execution_wait_state(id).await;
-                    if !waiting && (previous_waiting || completed != completed_waits) {
-                        deadline = tokio::time::Instant::now() + timeout_duration;
-                    }
-                    previous_waiting = waiting;
-                    completed_waits = completed;
-                    if !engine.state.lock().unwrap().tasks.contains_key(&id) {
-                        break;
-                    }
-                    tokio::select! {
-                        changed = activity.changed() => { if changed.is_err() { break; } }
-                        _ = tokio::time::sleep_until(deadline), if !waiting => {
+            let Some(engine) = timeout_engine.upgrade() else {
+                return;
+            };
+            let mut activity = engine.store.subscribe_result_activity().await;
+            drop(engine);
+            let mut deadline = tokio::time::Instant::now() + timeout_duration;
+            let mut previous_waiting = false;
+            let mut completed_waits = 0;
+            loop {
+                // 先确认通知版本，再读取状态，避免查询与睡眠之间漏掉状态变化。
+                activity.borrow_and_update();
+                let Some(engine) = timeout_engine.upgrade() else {
+                    break;
+                };
+                let (waiting, completed) = engine.store.execution_wait_state(id).await;
+                if !waiting && (previous_waiting || completed != completed_waits) {
+                    deadline = tokio::time::Instant::now() + timeout_duration;
+                }
+                previous_waiting = waiting;
+                completed_waits = completed;
+                if !engine.state.lock().unwrap().tasks.contains_key(&id) {
+                    break;
+                }
+                // 空闲等待不能让监视器成为 Engine 的最后一个强引用。
+                drop(engine);
+                tokio::select! {
+                    changed = activity.changed() => { if changed.is_err() { break; } }
+                    _ = tokio::time::sleep_until(deadline), if !waiting => {
+                        let Some(engine) = timeout_engine.upgrade() else { break; };
+                        let (now_waiting, now_completed) = engine.store.execution_wait_state(id).await;
+                        if now_waiting || now_completed != completed_waits { continue; }
+                        let running = engine.state.lock().unwrap().tasks.get(&id)
+                            .map(|task| (task.cancel.clone(), task.transition.clone()));
+                        if let Some((cancel, transition)) = running {
+                            let _guard = transition.lock().await;
                             let (now_waiting, now_completed) = engine.store.execution_wait_state(id).await;
                             if now_waiting || now_completed != completed_waits { continue; }
-                            let running = engine.state.lock().unwrap().tasks.get(&id)
-                                .map(|task| (task.cancel.clone(), task.transition.clone()));
-                            if let Some((cancel, transition)) = running {
-                                let _guard = transition.lock().await;
-                                let (now_waiting, now_completed) = engine.store.execution_wait_state(id).await;
-                                if now_waiting || now_completed != completed_waits { continue; }
-                                if engine.state.lock().unwrap().tasks.contains_key(&id) {
-                                    // 已发送写入只发取消信号；provider 继续等待协议尾部并判定终态。
-                                    cancel.cancel();
-                                }
+                            if engine.state.lock().unwrap().tasks.contains_key(&id) {
+                                // 已发送写入只发取消信号；provider 继续等待协议尾部并判定终态。
+                                cancel.cancel();
                             }
-                            break;
                         }
+                        break;
                     }
                 }
             }

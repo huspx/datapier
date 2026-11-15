@@ -129,9 +129,8 @@ async fn stale_profile_rejects_new_requests_and_close_releases_only_its_results(
         )
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    drop(sink);
+    crate::server::tests::cleanup(engine, root).await;
 }
 #[tokio::test]
 #[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
@@ -224,9 +223,7 @@ async fn mcp_rollback_uses_current_authorized_profile_revision() {
         )
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -268,9 +265,7 @@ async fn redis_auth_is_rejected_before_any_task_is_persisted() {
         .dispatch(owner, "connection.close", json!({"session_id":session}))
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -428,9 +423,8 @@ async fn redis_select_changes_command_task_db_but_not_browser_db() {
         .dispatch(owner, "connection.close", json!({"session_id":session}))
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    drop(sink);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 async fn redis_assert_get(
@@ -538,9 +532,7 @@ async fn redis_transaction_select_tracks_only_successful_exec() {
         .dispatch(owner, "connection.close", json!({"session_id":session}))
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -655,9 +647,7 @@ async fn redis_first_command_connect_cancels_before_proxy_releases() {
     assert_eq!(task.state, "cancelled");
     assert!(!task.sent);
     proxy.abort();
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -749,7 +739,5 @@ async fn redis_cancelled_reads_release_both_client_sessions() {
     .expect("取消必须及时释放读取");
     // 已在暂停窗口内证明读取取消和关闭完成；等待注入的全局暂停到期，避免污染后续用例。
     tokio::time::sleep_until(resume_at).await;
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }

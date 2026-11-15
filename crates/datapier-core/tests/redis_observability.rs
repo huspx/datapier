@@ -110,7 +110,13 @@ async fn redis_skip_reasons_and_progress_survive_report_readback() {
         assert_eq!(progress.skipped, 1);
         assert_eq!(
             progress.current_object.as_deref(),
-            Some(format!("{:x}", Sha256::digest(source.as_bytes())).as_str())
+            Some(
+                format!(
+                    "{:x}",
+                    base16ct::HexDisplay(&Sha256::digest(source.as_bytes()))
+                )
+                .as_str()
+            )
         );
         let items = store.transfer_items(task.id, None, 10).await.unwrap();
         assert_eq!(items[0].error_code.as_deref(), Some("redis_target_exists"));
@@ -265,6 +271,7 @@ async fn redis_skip_reasons_and_progress_survive_report_readback() {
         .query_async(&mut conn)
         .await;
     store.pool.close().await;
-    let _ = tokio::fs::remove_dir_all(root).await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
     outcome.unwrap();
 }

@@ -33,7 +33,7 @@ pub(super) fn schema_fingerprint(schema: &TableSchema) -> Result<String> {
     );
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&fields)?)
+        base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&fields)?))
     ))
 }
 

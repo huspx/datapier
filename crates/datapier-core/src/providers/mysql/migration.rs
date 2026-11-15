@@ -75,7 +75,7 @@ fn hash(ddl: &str, mode: &str) -> String {
     };
     format!(
         "{:x}",
-        Sha256::digest(format!("{normalized}\0{mode}").as_bytes())
+        base16ct::HexDisplay(&Sha256::digest(format!("{normalized}\0{mode}").as_bytes()))
     )
 }
 async fn fingerprint(conn: &mut MySqlConnection, target: &ResourceTarget) -> Result<String> {
@@ -1215,7 +1215,7 @@ fn schema_item(
         hash.update((value.len() as u64).to_be_bytes());
         hash.update(value.as_bytes());
     }
-    let id = format!("schema:{:x}", hash.finalize());
+    let id = format!("schema:{:x}", base16ct::HexDisplay(&hash.finalize()));
     let selected = object.selected_schema_items.contains(&id);
     TransferPlanItem {
         id,

@@ -41,6 +41,57 @@ fn refuses_replaced_path_and_existing_output() {
     fs::remove_file(partial).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_file_identity_detects_same_size_and_time_replacements() {
+    let path = path();
+    fs::write(&path, b"original").unwrap();
+    let (fingerprint, mut reader) = fingerprint_open(&path, 4, 1024).unwrap();
+    let identity = fingerprint.identity.as_deref().unwrap();
+    let parts: Vec<_> = identity.split(':').collect();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0], "windows");
+    assert!(parts[1].parse::<u32>().is_ok());
+    assert!(parts[2].parse::<u64>().is_ok());
+
+    let replacement = path.with_extension("replacement");
+    fs::write(&replacement, b"original").unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert!(reader.read(&mut [0]).is_err());
+    assert!(VerifiedReader::open(&fingerprint).is_err());
+    fs::remove_file(&path).unwrap();
+
+    let mut output = AtomicOutput::create(&path).unwrap();
+    output.write_all(b"original").unwrap();
+    let snapshot = output.snapshot(false).unwrap();
+    assert!(snapshot.file_id.as_deref().unwrap().starts_with("windows:"));
+    let partial = output.partial_path().to_owned();
+    fs::write(&replacement, b"original").unwrap();
+    let modified = fs::metadata(&partial).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::remove_file(&partial).unwrap();
+    fs::rename(&replacement, &partial).unwrap();
+    assert!(output.snapshot(false).is_err());
+    assert_eq!(
+        publication_state(&output.publish().unwrap_err()),
+        PublicationState::NotPublished
+    );
+    fs::remove_file(partial).unwrap();
+}
+
 #[test]
 fn utf16_split_blocks_preserve_quoted_newlines_and_offsets() {
     use crate::model::{ProviderKind, Value, transfer::TransferInput};

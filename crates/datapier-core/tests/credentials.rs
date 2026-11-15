@@ -66,7 +66,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
     let secret = Uuid::new_v4().to_string();
     let account = format!(
         "{:x}:{}",
-        Sha256::digest(store.root.to_string_lossy().as_bytes()),
+        base16ct::HexDisplay(&Sha256::digest(store.root.to_string_lossy().as_bytes())),
         profile.id
     );
     let entry = keyring::v1::Entry::new("io.datapier.credentials", &account).unwrap();

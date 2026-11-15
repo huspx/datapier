@@ -6,7 +6,7 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 
 当前 0.4.0 实现支持 **MySQL 与 Redis** 直连及 Archery 只读来源，提供 Rust TSP／Tern 工作台、普通终端 TUI 和 MCP stdio；共享 Engine 独立于界面。数据库采用内置 provider 扩展，PostgreSQL、MongoDB 为后续方向。正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准，当前版本契约见 [0.4.0 技术方案](technical-design-0.4.0.md)。
 
-目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**。当前候选运行证据来自 macOS arm64；其他五目标的候选 CI 和运行尚未执行，历史运行记录不能代替本候选验证。
+目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**。当前候选原生运行证据来自 macOS arm64；六目标构建、默认测试和打包结果须按对应提交的 CI 核对，其他五目标尚无完整运行验收，历史记录不能代替本候选验证。
 
 核心使用场景：
 
@@ -28,13 +28,13 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 | 业务内核与 Engine | Rust、Tokio、Serde | 连接、provider、执行任务、结果、变更、持久化与生命周期 |
 | 内部通信 | macOS／Linux 使用 Unix domain socket，Windows 使用字节模式 Named Pipe；共用长度分帧的 JSON 消息 | UI／MCP 到 Engine 的请求、响应和任务事件；支持协议版本握手 |
 | MySQL | SQLx 0.9，启用 MySQL、BigDecimal、JSON 与 TLS 支持 | 动态 SQL、元数据、事务和结果流 |
-| Redis | redis-rs 1.8，启用 Tokio 与 TLS 支持 | 命令、游标扫描、类型化数据操作 |
+| Redis | redis-rs 1.8.2，启用 Tokio 与 TLS 支持 | 命令、游标扫描、类型化数据操作 |
 | 内部存储 | SQLite，通过 SQLx 访问 | 连接配置、工作区、草稿、查询历史和执行记录；不作为首批外部数据库入口 |
 | 凭据存储 | keyring 4.2，启用 `v1`；macOS Keychain、Windows Credential Manager、Linux Secret Service | 密码等秘密数据，与普通配置分离；凭据服务不可用时仅会话内保存 |
-| SQL 辅助 | sqlparser-rs、sqlformat、数据库元数据 | 语句定位、基础诊断、补全与原生选区格式化；保留 token 语义，实际执行以数据库反馈为准 |
-| Agent 接入 | 官方 Rust MCP SDK rmcp 3.9.0、stdio | 23 个 tools、结构化结果与能力协商后的用户确认；不提供远程 transport |
+| SQL 辅助 | sqlparser-rs 0.64.0、sqlformat 0.5.0、数据库元数据 | 语句定位、基础诊断、补全与原生选区格式化；保留 token 语义，实际执行以数据库反馈为准 |
+| Agent 接入 | 官方 Rust MCP SDK rmcp 3.10.0、stdio | 23 个 tools、结构化结果与能力协商后的用户确认；不提供远程 transport |
 
-Rust 使用 stable toolchain、edition 2024；TSP SDK 在 workspace 精确固定为 `0.2.0`，依赖由 `Cargo.lock` 锁定。界面使用 Tern 公开语义控件，表单与主操作保留明确层级；导航行、标签、grid 和状态入口按唯一 HTML 设计使用局部样式，不维护旧 SDK 兼容层。IPC 编解码和会话层共用异步字节流接口，平台实现负责连接建立、端点命名、访问权限、实例锁及进程启动／退出；业务逻辑不按 OS 分叉。
+Rust 最低使用 1.100.0 稳定工具链、edition 2024，CI 固定 Rust 1.100.0；TSP SDK 在 workspace 精确固定为 `0.2.0`，依赖由 `Cargo.lock` 锁定，当前版本说明见[贡献指南](../CONTRIBUTING.md#开发环境)。界面使用 Tern 公开语义控件，表单与主操作保留明确层级；导航行、标签、grid 和状态入口按唯一 HTML 设计使用局部样式，不维护旧 SDK 兼容层。IPC 编解码和会话层共用异步字节流接口，平台实现负责连接建立、端点命名、访问权限、实例锁及进程启动／退出；业务逻辑不按 OS 分叉。
 
 ### 2.2 组件与进程边界
 

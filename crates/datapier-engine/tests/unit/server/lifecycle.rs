@@ -21,8 +21,7 @@ async fn idle_deadline_does_not_wait_for_running_write() {
         assert!(state.stop_if_idle());
         assert!(!state.accepting);
     }
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -70,12 +69,12 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
         true
     );
     handler.await.unwrap();
-    let state = engine.state.lock().unwrap();
-    assert!(state.clients.is_empty());
-    assert!(state.idle > idle);
-    drop(state);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    {
+        let state = engine.state.lock().unwrap();
+        assert!(state.clients.is_empty());
+        assert!(state.idle > idle);
+    }
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -138,8 +137,7 @@ async fn window_bridge_requires_binding_and_does_not_keep_engine_alive() {
         false
     );
     engine.disconnect(bridge).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -181,8 +179,7 @@ async fn disconnect_cancels_reads_and_unsent_work_but_waits_for_sent_writes() {
         !entries[2].is_cancelled(),
         "sent write must be allowed to reach a final outcome"
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -224,8 +221,7 @@ async fn disconnect_and_write_dispatch_obey_the_same_gate() {
     assert!(engine.store.task(after.id).await.unwrap().may_write);
     drop(sink_before);
     drop(sink_after);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -275,8 +271,8 @@ async fn transfer_send_rechecks_owner_during_disconnect_cleanup() {
     assert_eq!(sink.mark_sent(true).await.unwrap_err().code, "disconnected");
     drop(guard);
     closing.await.unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    drop(sink);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -301,8 +297,7 @@ async fn resource_list_response_is_not_persisted_in_summary() {
             && !text.contains("ttl")
     );
     assert_eq!(response["resources"][0]["ttl"], 37);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -488,8 +483,7 @@ async fn transfer_read_reports_unpersisted_completion_and_recovers_sent_step() {
             .state,
         TransferStepState::OutcomeUnknown
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -650,9 +644,7 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
             assert_eq!(record["state"], expected);
         }
     }
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -698,9 +690,7 @@ async fn history_pages_cover_all_matching_executions() {
     assert_eq!(filtered["offset"], 0);
     assert_eq!(filtered["limit"], 20);
     assert_eq!(filtered["items"][0]["text"], "SELECT 500 needle");
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -766,8 +756,7 @@ async fn state_events_are_isolated_ordered_and_stop_on_disconnect() {
         Err(broadcast::error::TryRecvError::Empty)
     ));
     engine.disconnect(other).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -827,6 +816,5 @@ async fn workspace_activation_requires_saved_target_and_matching_context() {
         "copy"
     );
     engine.disconnect(owner).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

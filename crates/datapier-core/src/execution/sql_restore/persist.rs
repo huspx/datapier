@@ -348,12 +348,18 @@ mod tests {
         assert_eq!(value["source_bytes"], SQL.len() as u64);
         assert_eq!(
             value["source_sha256"],
-            format!("{:x}", Sha256::digest(SQL.as_bytes()))
+            format!(
+                "{:x}",
+                base16ct::HexDisplay(&Sha256::digest(SQL.as_bytes()))
+            )
         );
         assert_eq!(value["block_bytes"], BLOCK as u64);
         assert_eq!(
             value["block_sha256"][0],
-            format!("{:x}", Sha256::digest(SQL.as_bytes()))
+            format!(
+                "{:x}",
+                base16ct::HexDisplay(&Sha256::digest(SQL.as_bytes()))
+            )
         );
         let statements = value["statements"].as_array().unwrap();
         let insert = statements.iter().find(|s| s["kind"] == "insert").unwrap();

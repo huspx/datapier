@@ -1320,7 +1320,7 @@ async fn cancellation_during_last_insert_rolls_back_transaction() {
     let signal = cancel.clone();
     let store = f.store.clone();
     let task_id = task.id;
-    tokio::spawn(async move {
+    let watcher = tokio::spawn(async move {
         while !store.task(task_id).await.unwrap().sent {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1335,6 +1335,7 @@ async fn cancellation_during_last_insert_rolls_back_transaction() {
         )
         .await
         .unwrap_err();
+    watcher.await.unwrap();
     assert_eq!(error.code, "cancelled");
     assert_eq!(error.details["items"][0]["status"], "rolled_back");
     let result = f

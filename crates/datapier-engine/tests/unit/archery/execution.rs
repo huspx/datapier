@@ -85,6 +85,44 @@ async fn query_uses_explicit_selected_database_and_cancelled_sent_wait_is_termin
         "wait_stopped"
     );
     fixture.release.add_permits(1);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
+async fn completed_query_does_not_keep_engine_alive_until_timeout() {
+    let (engine, root, owner, fixture, auth) = setup().await;
+    let mut settings = engine.store.settings().await.unwrap();
+    settings.limits.query_timeout_seconds = 3600;
+    engine.store.set_settings(&settings).await.unwrap();
+    let profile = profile(fixture.server.id, 7, "one");
+    save(&engine, owner, &fixture, &auth, vec![profile.clone()])
+        .await
+        .unwrap();
+    let opened = engine
+        .dispatch(
+            owner,
+            "connection.open",
+            json!({"profile_id":profile.id,"database":"db_a"}),
+        )
+        .await
+        .unwrap();
+    fixture.block_query.store(true, Ordering::Release);
+    let started = engine
+        .dispatch(
+            owner,
+            "execution.start",
+            json!({"session_id":opened["session_id"],"database":"db_a","text":"SELECT 1"}),
+        )
+        .await
+        .unwrap();
+    fixture.wait().await;
+    fixture.release.add_permits(1);
+    let terminal = terminal_task(&engine, owner, &started["task_id"]).await;
+    assert_eq!(terminal["state"], "succeeded", "{terminal}");
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        crate::server::tests::cleanup(engine, root),
+    )
+    .await
+    .expect("completed query must not keep the Engine alive until its timeout");
 }

@@ -156,6 +156,7 @@ async fn cancelling_query_waiting_for_service_permit_remains_unsent() {
         handle.await.unwrap().unwrap();
     }
     fixture.abort();
+    store.pool.close().await;
     drop(store);
-    let _ = tokio::fs::remove_dir_all(root).await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
 }

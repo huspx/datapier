@@ -354,12 +354,13 @@ async fn shutdown_waits_for_detached_index_writer_to_close() {
     ready.await.unwrap();
     outer.abort();
     assert!(outer.await.unwrap_err().is_cancelled());
-    let drained = store.wait_input_index_workers();
-    tokio::pin!(drained);
-    assert!(futures_util::poll!(&mut drained).is_pending());
-    release.send(()).unwrap();
-    drained.await;
+    {
+        let drained = store.wait_input_index_workers();
+        tokio::pin!(drained);
+        assert!(futures_util::poll!(&mut drained).is_pending());
+        release.send(()).unwrap();
+        drained.await;
+    }
     assert_eq!(std::fs::read(path).unwrap(), b"{\"complete\":true}");
-    store.pool.close().await;
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    cleanup(store).await;
 }

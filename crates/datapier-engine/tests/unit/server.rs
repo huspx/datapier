@@ -29,15 +29,34 @@ pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
         transfers: Default::default(),
         operations: Default::default(),
     };
+    let (destroyed_signal, destroyed) = tokio::sync::oneshot::channel();
     (
         Arc::new(Engine {
             id: Uuid::new_v4(),
             store,
             state: Mutex::new(state),
             send_gate: Arc::new(AsyncMutex::new(())),
+            destroyed: Mutex::new(Some(destroyed)),
+            _destroyed_signal: Some(destroyed_signal),
         }),
         root,
     )
+}
+
+pub(in crate::server) async fn shutdown(engine: Arc<Engine>) {
+    let destroyed = engine.destroyed.lock().unwrap().take().unwrap();
+    engine.store.wait_input_index_workers().await;
+    engine.store.pool.close().await;
+    drop(engine);
+    tokio::time::timeout(Duration::from_secs(60), destroyed)
+        .await
+        .expect("Engine owners did not finish during cleanup")
+        .expect_err("Engine destruction signal must be dropped");
+}
+
+pub(in crate::server) async fn cleanup(engine: Arc<Engine>, root: PathBuf) {
+    shutdown(engine).await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
 #[path = "server/lifecycle.rs"]
@@ -73,9 +92,7 @@ async fn schema_conflict_and_cancelled_results_keep_their_task_terminal_state() 
         assert_eq!(recorded.summary["steps"][0]["state"], "not_sent");
         assert_eq!(recorded.error.unwrap().code, business);
     }
-    engine.store.pool.close().await;
-    drop(engine);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -96,9 +113,7 @@ async fn redis_partial_failure_preserves_item_details() {
     assert_eq!(result.state, "failed");
     assert_eq!(result.summary["items"][1]["value_may_have_changed"], true);
     assert_eq!(result.error.unwrap().code, "partial_failure");
-    engine.store.pool.close().await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -243,6 +258,5 @@ async fn input_index_task_guards_claim_and_file_identity() {
         .await
         .unwrap();
     assert!(!ready_path.exists());
-    engine.store.pool.close().await;
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
