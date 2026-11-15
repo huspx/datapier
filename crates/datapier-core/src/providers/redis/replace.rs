@@ -335,7 +335,7 @@ impl ReplacePlan {
             hash.update((item.after.len() as u64).to_be_bytes());
             hash.update(&item.after);
         }
-        format!("{:x}", hash.finalize())
+        format!("{:x}", base16ct::HexDisplay(&hash.finalize()))
     }
 
     // 按实际 Vec/String 容量计入保留结构；临时扫描去重表在准备结束时释放。

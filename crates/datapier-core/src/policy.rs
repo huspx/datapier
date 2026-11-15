@@ -5,7 +5,7 @@ use crate::model::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use sqlparser::{
     ast::{
-        AlterTableOperation, AssignmentTarget, ColumnOption, Expr, FromTable, ObjectName,
+        AlterTableOperation, AssignmentTarget, ColumnOption, Expr, FromTable, InTarget, ObjectName,
         ObjectNamePart, ObjectType, Query, Select, SetExpr, Statement, TableConstraint,
         TableFactor, TableObject, Use, Visit, Visitor,
     },
@@ -606,8 +606,11 @@ impl Visitor for Analyzer<'_> {
             | Expr::IsNotUnknown(_)
             | Expr::IsDistinctFrom(_, _)
             | Expr::IsNotDistinctFrom(_, _)
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
+            | Expr::In {
+                target: InTarget::List(_) | InTarget::Subquery(_),
+                global: false,
+                ..
+            }
             | Expr::Between { .. }
             | Expr::Like { .. }
             | Expr::RLike { .. }

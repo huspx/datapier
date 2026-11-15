@@ -279,7 +279,7 @@ pub(super) async fn resolve(
     if !insert {
         reasons.push("视图包含表达式、重复映射或缺少必填基表列，不能插入");
     }
-    let fingerprint = format!("{:x}", fingerprint.finalize());
+    let fingerprint = format!("{:x}", base16ct::HexDisplay(&fingerprint.finalize()));
     schema.details["view_mapping"] = json!({"columns":mapped,"required_insert_columns":required_insert_columns,"insert":insert,"update":keyed,"delete":keyed,"reasons":reasons,"writable":writable,"fingerprint":fingerprint});
     Ok(ViewMapping {
         schema,

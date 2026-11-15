@@ -1,0 +1,19 @@
+-- MySQL dump 8.0: application schema with routines and data
+/*!40101 SET NAMES utf8mb4 */;
+CREATE DATABASE IF NOT EXISTS `app`;
+USE `app`;
+CREATE TABLE `items` (`id` bigint NOT NULL, `label` varchar(255), `payload` varbinary(16), PRIMARY KEY (`id`)) ENGINE=InnoDB;
+LOCK TABLES `items` WRITE;
+/*!40000 ALTER TABLE `items` DISABLE KEYS */;
+INSERT INTO `items` VALUES (1,'alpha; beta',X'00FF'),(2,'quote\'s',NULL);
+INSERT INTO `items` (`id`,`label`,`payload`) VALUES (3,'explicit',X'AB');
+/*!40000 ALTER TABLE `items` ENABLE KEYS */;
+UNLOCK TABLES;
+ALTER DATABASE `app` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+DELIMITER ;;
+/*!50003 CREATE TRIGGER `items_before_insert` BEFORE INSERT ON `items` FOR EACH ROW BEGIN SET NEW.label = NEW.label; END */;;
+CREATE PROCEDURE `p_items`() BEGIN SELECT 'inside;procedure'; END;;
+CREATE FUNCTION `f_one`() RETURNS INT DETERMINISTIC BEGIN RETURN 1; END;;
+CREATE EVENT `e_items` ON SCHEDULE EVERY 1 DAY DISABLE DO BEGIN SELECT 1; END;;
+DELIMITER ;
+ALTER DATABASE `app` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;

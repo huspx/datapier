@@ -108,7 +108,7 @@ enum FieldExpiryIntent {
 
 fn field_expiry_intent(change: &Json) -> Result<FieldExpiryIntent> {
     let preserve = match change.get("preserve_field_ttl") {
-        None => change.get("field_expires_at_ms").is_some(),
+        None => true,
         Some(Json::Bool(v)) => *v,
         _ => return Err(AppError::invalid("preserve_field_ttl 必须是布尔值")),
     };
@@ -210,6 +210,11 @@ async fn freeze_field_expiries(
             )
             .await?;
             if exists != 1 {
+                if change.get("preserve_field_ttl").is_none()
+                    && change.get("field_expires_at_ms").is_none()
+                {
+                    return Ok(None);
+                }
                 return Err(AppError::conflict("Hash 字段不存在或已过期"));
             }
             let frozen = if edit.field_expiry_supported == Some(true) {
@@ -243,12 +248,18 @@ async fn freeze_field_expiries(
             {
                 return Err(AppError::conflict("字段期限与编辑基线不一致"));
             }
-            Ok(frozen)
+            Ok(Some(frozen))
         }
         .await;
         match result {
-            Ok(frozen) => {
+            Ok(Some(frozen)) => {
                 edit.field_expiries.insert(name, frozen);
+            }
+            Ok(None) => {
+                edit.field_store
+                    .reserve_auxiliary_for_owner(edit.field_owner, edit.field_handle, previous)
+                    .await?;
+                edit.field_budget = previous;
             }
             Err(error) => {
                 edit.field_store
@@ -268,10 +279,10 @@ fn hash_set_command(edit: &Edit, key: Vec<u8>, change: &Json) -> Result<Vec<Vec<
     if matches!(field_expiry_intent(change)?, FieldExpiryIntent::Ordinary) {
         return Ok(vec![b"HSET".to_vec(), key, name, value]);
     }
-    let expiry = edit
-        .field_expiries
-        .get(&name)
-        .ok_or_else(|| AppError::conflict("字段期限尚未冻结"))?;
+    let Some(expiry) = edit.field_expiries.get(&name) else {
+        // 没有显式期限意图的新字段保持永久。
+        return Ok(vec![b"HSET".to_vec(), key, name, value]);
+    };
     let expected = expiry.map_or_else(|| "-1".to_owned(), |n| n.to_string());
     Ok(vec![
         b"EVAL".to_vec(),

@@ -110,9 +110,37 @@ impl App {
         Value::Object(values).to_string()
     }
 
-    pub(super) fn settings_form_dirty(&self) -> bool {
+    pub(super) fn settings_global_form_dirty(&self) -> bool {
         self.settings_loaded
             && self.settings_form_snapshot() != self.field("settings-form-snapshot")
+    }
+
+    pub(super) fn mcp_policy_dirty(&self) -> bool {
+        !self.field("mcp-rule-policy-baseline").is_empty()
+            && self.field("mcp-rule-policy") != self.field("mcp-rule-policy-baseline")
+    }
+
+    pub(super) fn mcp_rules_dirty(&self) -> bool {
+        self.field("mcp-rule-data") != self.field("mcp-rule-baseline")
+            || self.mcp_policy_dirty()
+            || self.fields.iter().any(|(name, field)| {
+                let Some(cached) = name.strip_prefix("mcp-rule-cache-") else {
+                    return false;
+                };
+                let (id, baseline) = if let Some(id) = cached.strip_suffix("-data") {
+                    (id, "baseline")
+                } else if let Some(id) = cached.strip_suffix("-policy") {
+                    (id, "policy-baseline")
+                } else {
+                    return false;
+                };
+                id != self.field("mcp-rule-profile")
+                    && field.text != self.field(&format!("mcp-rule-cache-{id}-{baseline}"))
+            })
+    }
+
+    pub(super) fn settings_form_dirty(&self) -> bool {
+        self.settings_global_form_dirty() || self.mcp_rules_dirty()
     }
 
     pub(super) fn settings_discard_form(&mut self) {
@@ -126,6 +154,7 @@ impl App {
             }
         }
         self.field_set("settings-reload-confirm", "false");
+        self.fields.retain(|name, _| !name.starts_with("mcp-rule-"));
     }
 
     fn settings_load_fields(&mut self) {
@@ -209,23 +238,45 @@ impl App {
         self.field_set("mcp-rule-pending", "");
         match result {
             Ok(value) if operation == "mcp-rules-get" => {
-                self.field_set("mcp-rule-data", value.to_string());
-                self.field_set("mcp-rule-baseline", value.to_string());
+                let mut data = value.clone();
+                if let Some(data) = data.as_object_mut() {
+                    data.remove("approval_policy");
+                }
+                self.field_set("mcp-rule-data", data.to_string());
+                self.field_set("mcp-rule-baseline", data.to_string());
+                if let Some(policy) = value["approval_policy"].as_str() {
+                    self.field_set("mcp-rule-policy", policy);
+                    self.field_set("mcp-rule-policy-baseline", policy);
+                }
             }
             Ok(value) if operation == "mcp-rules-set" || operation == "mcp-policy-set" => {
-                if let Some(policy) = value["profile"]["approval_policy"].as_str() {
-                    self.field_set("mcp-rule-policy", policy);
+                // 两类修改共享 profile revision；只采用本次 CAS 返回的 revision，
+                // 不再重读并静默覆盖另一个范围的未保存草稿。
+                let revision = if operation == "mcp-policy-set" {
+                    &value["profile"]["revision"]
+                } else {
+                    &value["revision"]
+                };
+                for name in ["mcp-rule-data", "mcp-rule-baseline"] {
+                    if let Ok(mut data) = serde_json::from_str::<Value>(self.field(name)) {
+                        data["revision"] = revision.clone();
+                        self.field_set(name, data.to_string());
+                    }
                 }
-                self.mcp_rules_request(
-                    backend,
-                    "mcp-rules-get",
-                    "profile.rules.get",
-                    json!({"profile_id":id}),
-                    &format!("mcp-rules-load:{id}"),
-                );
+                if operation == "mcp-rules-set" {
+                    self.field_set("mcp-rule-baseline", self.field("mcp-rule-data").to_owned());
+                } else if let Some(policy) = value["profile"]["approval_policy"].as_str() {
+                    self.field_set("mcp-rule-policy", policy);
+                    self.field_set("mcp-rule-policy-baseline", policy);
+                }
                 self.request(backend, "profile.list", "profile.list", json!({}));
             }
-            Err(error) => self.field_set("mcp-rule-error", error.to_string()),
+            Err(error) => {
+                self.field_set("mcp-rule-error", error.to_string());
+                if error.code == "conflict" {
+                    self.field_set("mcp-rule-retry", "mcp-rules-reload");
+                }
+            }
             _ => {}
         }
     }
@@ -287,7 +338,7 @@ impl App {
                 return;
             }
             // 后台刷新不得给未保存草稿换用更新后的 revision；否则整份旧表单会覆盖另一窗口的修改。
-            if self.field("settings-reload") != "true" && self.settings_form_dirty() {
+            if self.field("settings-reload") != "true" && self.settings_global_form_dirty() {
                 return;
             }
             false
@@ -597,7 +648,7 @@ impl App {
                 }
                 let previous = self.field("mcp-rule-profile").to_owned();
                 if !previous.is_empty() && previous != id {
-                    for name in ["data", "scope", "baseline"] {
+                    for name in ["data", "scope", "baseline", "policy", "policy-baseline"] {
                         let value = self.field(&format!("mcp-rule-{name}")).to_owned();
                         self.field_set(&format!("mcp-rule-cache-{previous}-{name}"), value);
                     }
@@ -605,9 +656,13 @@ impl App {
                 if previous != id {
                     self.field_set("mcp-rule-profile", id);
                     self.field_set("mcp-rule-policy", policy);
+                    self.field_set(
+                        "mcp-rule-policy-baseline",
+                        self.field("mcp-rule-policy").to_owned(),
+                    );
                     let cached = self.field(&format!("mcp-rule-cache-{id}-data")).to_owned();
                     if !cached.is_empty() {
-                        for name in ["data", "scope", "baseline"] {
+                        for name in ["data", "scope", "baseline", "policy", "policy-baseline"] {
                             let value = self
                                 .field(&format!("mcp-rule-cache-{id}-{name}"))
                                 .to_owned();
@@ -616,6 +671,7 @@ impl App {
                         return true;
                     }
                     self.field_set("mcp-rule-data", "");
+                    self.field_set("mcp-rule-baseline", "");
                     self.field_set("mcp-rule-scope", "");
                 } else if !self.field("mcp-rule-data").is_empty() {
                     return true;
@@ -673,15 +729,48 @@ impl App {
         }
         if let Some(policy) = name.strip_prefix("mcp-policy-set:") {
             self.workbench.generic_select = None;
-            if self.field("mcp-rule-data") != self.field("mcp-rule-baseline") {
-                return true;
-            }
             if self.field("mcp-rule-pending").is_empty()
                 && matches!(policy, "off" | "dangerous" | "all_writes")
+                && !self.field("mcp-rule-data").is_empty()
             {
+                self.field_set("mcp-rule-policy", policy);
+            }
+            return true;
+        }
+        if name == "mcp-policy-save" {
+            if self.field("mcp-rule-pending").is_empty() && self.mcp_policy_dirty() {
                 let id = self.field("mcp-rule-profile").to_owned();
+                let policy = self.field("mcp-rule-policy").to_owned();
                 if let Ok(data) = serde_json::from_str::<Value>(self.field("mcp-rule-data")) {
                     self.mcp_rules_request(backend, "mcp-policy-set", "profile.approval.set", json!({"profile_id":id,"expected_revision":data["revision"],"approval_policy":policy}), name);
+                }
+            }
+            return true;
+        }
+        if name == "mcp-rules-reload-cancel" {
+            self.field_set("mcp-rule-reload-confirm", "false");
+            return true;
+        }
+        if name == "mcp-rules-reload" || name == "mcp-rules-reload-confirm" {
+            if !self.field("mcp-rule-pending").is_empty() {
+                return true;
+            }
+            if name == "mcp-rules-reload"
+                && (self.field("mcp-rule-data") != self.field("mcp-rule-baseline")
+                    || self.mcp_policy_dirty())
+            {
+                self.field_set("mcp-rule-reload-confirm", "true");
+            } else {
+                self.field_set("mcp-rule-reload-confirm", "false");
+                let id = self.field("mcp-rule-profile").to_owned();
+                if Uuid::parse_str(&id).is_ok() {
+                    self.mcp_rules_request(
+                        backend,
+                        "mcp-rules-get",
+                        "profile.rules.get",
+                        json!({"profile_id":id}),
+                        name,
+                    );
                 }
             }
             return true;
@@ -699,7 +788,7 @@ impl App {
             self.field_set("settings-reload-confirm", "false");
             return true;
         }
-        if name == "settings-reload" && self.settings_form_dirty() {
+        if name == "settings-reload" && self.settings_global_form_dirty() {
             self.field_set("settings-reload-confirm", "true");
             return true;
         }
@@ -994,6 +1083,9 @@ impl App {
         }
         if self.has_live_drafts() {
             self.status = i18n::UiMessage::key("请先提交或丢弃待提交变更与粘贴预览");
+            return;
+        }
+        if self.project_layout_execute_text(&text, backend) {
             return;
         }
         let Some(session) = self.session_id() else {

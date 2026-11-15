@@ -193,6 +193,49 @@ fn stateless_ranges_and_nested_callable_safety() {
 }
 
 #[test]
+fn readonly_in_predicates_check_nested_expressions() {
+    for sql in [
+        "SELECT 1 IN (1, ABS(2))",
+        "SELECT 1 NOT IN (SELECT id FROM t)",
+    ] {
+        assert!(validate_readonly(sql).is_ok(), "{sql}");
+    }
+    for sql in [
+        "SELECT SLEEP(1) IN (1, 2)",
+        "SELECT 1 IN (1, SLEEP(2))",
+        "SELECT 1 IN (SELECT SLEEP(1) FROM t)",
+        "SELECT 1 IN (SELECT id FROM t FOR UPDATE)",
+    ] {
+        assert!(validate_readonly(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn readonly_rejects_non_mysql_in_targets() {
+    use sqlparser::ast::Ident;
+    let ident = || Expr::Identifier(Ident::new("x"));
+    for (target, global) in [
+        (InTarget::Unnest(Box::new(ident())), false),
+        (
+            InTarget::Table {
+                name: ObjectName::from(Ident::new("t")),
+                args: None,
+            },
+            false,
+        ),
+        (InTarget::List(vec![ident()]), true),
+    ] {
+        let expr = Expr::In {
+            expr: Box::new(ident()),
+            target,
+            negated: false,
+            global,
+        };
+        assert!(expr.visit(&mut ReadonlyVisitor).is_break());
+    }
+}
+
+#[test]
 fn readonly_rejects_mode_sensitive_function_spacing() {
     for sql in [
         "SELECT COUNT (1)",

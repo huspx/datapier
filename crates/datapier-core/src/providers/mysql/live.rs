@@ -27,6 +27,63 @@ pub(super) struct Recipe {
 }
 
 impl Recipe {
+    fn memory_bytes(&self) -> usize {
+        fn json_heap(value: &Json) -> usize {
+            match value {
+                Json::String(s) => s.capacity(),
+                Json::Array(items) => items
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Json>())
+                    .saturating_add(items.iter().map(json_heap).sum::<usize>()),
+                Json::Object(items) => items
+                    .iter()
+                    .map(|(key, value)| {
+                        key.capacity()
+                            .saturating_add(std::mem::size_of::<(String, Json)>() + 64)
+                            .saturating_add(json_heap(value))
+                    })
+                    .sum(),
+                _ => 0,
+            }
+        }
+        let mut bytes = std::mem::size_of::<Self>() + 128 + self.sql.capacity();
+        bytes = bytes.saturating_add(
+            self.bindings
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Json>()),
+        );
+        bytes = bytes.saturating_add(self.bindings.iter().map(json_heap).sum::<usize>());
+        if let Some(columns) = &self.source_columns {
+            bytes = bytes.saturating_add(
+                columns
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Column>()),
+            );
+            for column in columns {
+                bytes = bytes.saturating_add(column.name.capacity() + column.type_name.capacity());
+                bytes =
+                    bytes.saturating_add(column.default_value.as_ref().map_or(0, String::capacity));
+                bytes = bytes.saturating_add(column.comment.as_ref().map_or(0, String::capacity));
+            }
+        }
+        if let Some((database, mode)) = &self.context {
+            bytes = bytes
+                .saturating_add(database.as_ref().map_or(0, String::capacity) + mode.capacity());
+        }
+        if let Some((objects, context)) = &self.proof {
+            bytes = bytes.saturating_add(
+                objects
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crate::policy::ObjectAccess>()),
+            );
+            for object in objects {
+                bytes = bytes.saturating_add(object.database.capacity() + object.name.capacity());
+            }
+            bytes = bytes.saturating_add(context.database.as_ref().map_or(0, String::capacity));
+        }
+        bytes
+    }
+
     pub(super) fn arguments(&self) -> Result<MySqlArguments> {
         let mut args = MySqlArguments::default();
         for value in &self.bindings {
@@ -305,16 +362,33 @@ pub(super) async fn start(
         .result_memory_bytes_per_client;
     let (meta, rows, more) = fetch_page(s, &recipe, 0, size, budget, cancel).await?;
     let id = sink.start(meta, "rows").await?;
-    let count = rows.len();
-    if !rows.is_empty() {
-        sink.append(id, rows).await?;
+    // recipe 与结果使用同一预算和生命周期；先预留，失败时不保留不可消费的结果。
+    let recipe = std::sync::Arc::new(recipe);
+    if let Err(error) = sink
+        .store
+        .retain_result_auxiliary(sink.execution_id, id, recipe.memory_bytes(), recipe.clone())
+        .await
+    {
+        sink.store.release_result(id).await?;
+        return Err(error);
     }
-    sink.finish(
-        id,
-        json!({"retrieval_mode":"live_page","has_more":more,"page_start":0,"total_rows":null}),
-    )
-    .await?;
-    s.recipes.insert(id, recipe);
+    let count = rows.len();
+    let completed = async {
+        if !rows.is_empty() {
+            sink.append(id, rows).await?;
+        }
+        sink.finish(
+            id,
+            json!({"retrieval_mode":"live_page","has_more":more,"page_start":0,"total_rows":null}),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = completed {
+        sink.store.release_result(id).await?;
+        return Err(error);
+    }
+    s.recipes.insert(id, std::sync::Arc::downgrade(&recipe));
     Ok(json!({"results":[id],"row_count":count}))
 }
 
@@ -328,7 +402,7 @@ pub(super) async fn read(
     let recipe = s
         .recipes
         .get(&id)
-        .cloned()
+        .and_then(std::sync::Weak::upgrade)
         .ok_or_else(|| AppError::new("not_found", "结果不属于当前会话或已过期"))?;
     // 已释放的结果不能通过保留的 recipe 复活。
     sink.store.result_meta(id).await?;
@@ -375,7 +449,7 @@ pub(super) async fn count(
     let recipe = s
         .recipes
         .get(&id)
-        .cloned()
+        .and_then(std::sync::Weak::upgrade)
         .ok_or_else(|| AppError::new("not_found", "结果不属于当前会话或已过期"))?;
     checked_context(s, &recipe, cancel).await?;
     if let Some((objects, context)) = &recipe.proof

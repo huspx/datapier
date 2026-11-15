@@ -54,6 +54,8 @@ impl App {
             profile_id: self.profile.as_ref().map(|p| p.id),
             id: Uuid::new_v4(),
             layout: Vec::new(),
+            project_query: None,
+            project_columns: None,
             browse: BrowseSettings {
                 database,
                 redis_db,
@@ -62,6 +64,7 @@ impl App {
             schema_draft: None,
             replace_draft: None,
             pending: Value::Null,
+            workbench_draft: Value::Null,
             pending_live: false,
             runtime: TabRuntime::default(),
         });
@@ -121,10 +124,14 @@ impl App {
                     self.has_live_drafts()
                         || self.workbench.inline.is_some()
                         || self.workbench.draft_scope_pending.is_some()
-                        || !self.workbench.draft_scope_recovery.is_empty(),
+                        || !self.workbench.draft_scope_recovery.is_empty()
+                        || self.workbench.project.unsaved
+                        || self.workbench.project.project.is_some(),
                     self.task.is_some()
                         || self.operation_pending
                         || self.workbench.cli_running
+                        || self.workbench.transfer.busy()
+                        || self.workbench.project.is_pending()
                         || self.workbench.connecting,
                 )
             } else {
@@ -137,10 +144,14 @@ impl App {
                         || self.redis_key_delete_tab_pending(tab.id)
                         || state.workbench.inline.is_some()
                         || state.workbench.draft_scope_pending.is_some()
-                        || !state.workbench.draft_scope_recovery.is_empty(),
+                        || !state.workbench.draft_scope_recovery.is_empty()
+                        || state.workbench.project.unsaved
+                        || state.workbench.project.project.is_some(),
                     state.task.is_some()
                         || state.operation_pending
                         || state.workbench.cli_running
+                        || state.workbench.transfer.busy()
+                        || state.workbench.project.is_pending()
                         || state.workbench.connecting,
                 )
             };

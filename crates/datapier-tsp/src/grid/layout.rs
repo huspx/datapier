@@ -120,6 +120,16 @@ impl GridState {
             .filter_map(|(i, s)| (!s.hidden).then_some(i))
             .collect()
     }
+    pub(crate) fn project_visibility_changed(&mut self) {
+        self.fitted_width = None;
+        if self
+            .focus
+            .is_some_and(|cell| self.settings[cell.column].hidden)
+        {
+            self.focus = self.first_cell();
+            self.anchor = self.focus;
+        }
+    }
     pub fn frozen_offset(&self, column: usize) -> Option<u32> {
         let setting = self.settings.get(column)?;
         if setting.hidden || !setting.frozen {

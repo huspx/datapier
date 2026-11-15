@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 struct Fixture {
     store: Store,
+    owner: Uuid,
     profile: Profile,
     client: Client,
     raw: MultiplexedConnection,
@@ -53,6 +54,7 @@ impl Fixture {
             .unwrap();
         Self {
             store,
+            owner: Uuid::new_v4(),
             profile,
             client,
             raw,
@@ -76,7 +78,7 @@ impl Fixture {
         let task = self
             .store
             .create_task(
-                Uuid::new_v4(),
+                self.owner,
                 "redis-integration",
                 "execution.start",
                 json!({}),
@@ -84,7 +86,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        ExecutionSink::new(self.store.clone(), task.id)
+        ExecutionSink::new(self.store.clone(), task.id).with_owner(self.owner)
     }
     async fn call(&mut self, method: &str, params: Json) -> Result<Json> {
         let sink = self.sink().await;
@@ -497,6 +499,7 @@ async fn expiration_invalidates_watch_and_read_only_rejects_writes() {
         .unwrap();
     assert_eq!(exists, 0);
     session.close().await.unwrap();
+    drop(sink);
     f.close().await;
 }
 
@@ -528,6 +531,7 @@ async fn export_does_not_publish_when_scan_exceeds_memory_budget() {
     .await;
     assert_eq!(result.unwrap_err().code, "resource_limit");
     assert!(!path.exists(), "受限导出不能发布为完整文件");
+    drop(sink);
     f.close().await;
 }
 
@@ -627,15 +631,23 @@ async fn import_replacement_never_mutates_or_deletes_external_key() {
                         .is_err()
                 ),
                 _ => {
-                    f.call("import.discard", json!({"token":token}))
-                        .await
-                        .unwrap();
+                    assert_eq!(
+                        f.call("import.discard", json!({"token":token}))
+                            .await
+                            .unwrap_err()
+                            .code,
+                        "recovery_conflict"
+                    );
                 }
             }
             if action != "discard" {
-                f.call("import.discard", json!({"token":token}))
-                    .await
-                    .unwrap();
+                assert_eq!(
+                    f.call("import.discard", json!({"token":token}))
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "recovery_conflict"
+                );
             }
             assert!(
                 f.call("import.discard", json!({"token":token}))
@@ -735,6 +747,7 @@ async fn import_rename_acl_denial_preserves_owned_expiring_staging_key() {
         .await
         .unwrap();
     let _ = session.close().await;
+    drop(sink);
     f.close().await;
 }
 
@@ -931,7 +944,7 @@ async fn import_close_preserves_replacement_and_cleans_owned_key() {
             }
         }
     }
-    session.close().await.unwrap();
+    assert_eq!(session.close().await.unwrap_err().code, "recovery_conflict");
     for key in replaced {
         let value: Vec<u8> = redis::cmd("GET")
             .arg(key)
@@ -948,6 +961,7 @@ async fn import_close_preserves_replacement_and_cleans_owned_key() {
             .unwrap();
         assert_eq!(exists, 0);
     }
+    drop(sink);
     f.close().await;
 }
 
@@ -1281,6 +1295,7 @@ async fn batch_delete_rejects_invalid_targets_and_read_only() {
         .unwrap_err();
     assert_eq!(err.code, "permission_denied");
     session.close().await.unwrap();
+    drop(sink);
     f.close().await;
 }
 
@@ -1407,6 +1422,7 @@ async fn cancelled_read_discards_connection_and_next_read_reconnects() {
         .await
         .unwrap();
     assert_eq!(rows, vec![vec![binary(b"alive")]]);
+    drop(sink);
     f.close().await;
 }
 
@@ -1461,6 +1477,7 @@ async fn database_discovery_does_not_change_command_database_or_transaction() {
     assert_eq!(result["source"], "manual_override");
     assert_eq!(result["databases"], json!(["0", "1", "2"]));
     manual.close().await.unwrap();
+    drop(sink);
     f.close().await;
 }
 

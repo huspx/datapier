@@ -355,49 +355,110 @@ async fn mysql_decimal_baselines_match_zero_and_small_values_on_tables_and_views
 #[ignore = "需要隔离的 MySQL，验证真实 KILL QUERY"]
 async fn mysql_cancel_does_not_kill_the_next_query() {
     let (store, profile, secret) = context(ProviderKind::Mysql).await;
-    let mut db = ProviderSession::connect(profile, secret).await.unwrap();
-    execute(
-        &mut db,
-        &store,
-        "CREATE TEMPORARY TABLE dp_cancel (value INT); INSERT INTO dp_cancel VALUES (1)",
-    )
-    .await
-    .unwrap();
-    // SLEEP 等未知函数按潜在写入处理；使用可证明只读的慢聚合验证 KILL 路径。
-    let mut insert = String::with_capacity(32 + 4 * 511);
-    insert.push_str("INSERT INTO dp_cancel VALUES (1)");
-    for _ in 1..511 {
-        insert.push_str(",(1)");
-    }
-    execute(&mut db, &store, &insert).await.unwrap();
-    // MySQL 临时表不能重复打开，使用独立副本构造慢查询。
-    execute(&mut db, &store, "CREATE TEMPORARY TABLE dp_cancel_b LIKE dp_cancel; INSERT INTO dp_cancel_b SELECT value FROM dp_cancel; CREATE TEMPORARY TABLE dp_cancel_c LIKE dp_cancel; INSERT INTO dp_cancel_c SELECT value FROM dp_cancel")
-        .await
-        .unwrap();
-    let cancel = CancellationToken::new();
-    let signal = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        signal.cancel();
-    });
-    let interrupted = db
-        .call(
-            "execution.run",
-            json!({"text":"SELECT COUNT(*) FROM dp_cancel a CROSS JOIN dp_cancel_b b CROSS JOIN dp_cancel_c c WHERE ABS(a.value + b.value + c.value) > 0; SELECT 0"}),
-            &sink(&store).await,
-            &cancel,
+    let direct = profile.direct().unwrap();
+    let observer = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::mysql::MySqlConnectOptions::new()
+                .host(&direct.host)
+                .port(direct.port)
+                .username(&direct.username)
+                .password(secret.as_deref().unwrap())
+                .database("datapier_fixture"),
         )
         .await
-        .unwrap_err();
-    assert!(
-        matches!(interrupted.code.as_str(), "cancelled" | "outcome_unknown"),
-        "{interrupted}"
+        .unwrap();
+    let mut db = ProviderSession::connect(profile, secret).await.unwrap();
+    let fixture = format!("cancel_fixture_{}", Uuid::new_v4().simple());
+
+    // MySQL 不允许在同一查询中多次引用同一个临时表。
+    for index in 0..10 {
+        execute(
+            &mut db,
+            &store,
+            &format!("CREATE TEMPORARY TABLE {fixture}_{index} (n INT NOT NULL)"),
+        )
+        .await
+        .unwrap();
+        execute(
+            &mut db,
+            &store,
+            &format!(
+                "INSERT INTO {fixture}_{index} VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    // 聚合每个组合中的各列，避免 COUNT(*) 被直接按表行数计算。
+    let tables = (0..10)
+        .map(|index| format!("{fixture}_{index} AS t{index}"))
+        .collect::<Vec<_>>()
+        .join(" CROSS JOIN ");
+    let terms = (0..10)
+        .map(|index| format!("t{index}.n"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let query = format!("SELECT SUM({terms}) FROM {tables}");
+    datapier_core::providers::mysql::validate_readonly(&query).unwrap();
+    // 多语句跳过 live 分页分支，进入提供 KILL QUERY 的流式执行路径。
+    let script = format!("{query}; SELECT 1");
+
+    let cancel = CancellationToken::new();
+    let transition = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let execution_sink = sink(&store)
+        .await
+        .with_dispatch_control(transition.clone(), cancel.clone());
+    let execution_id = execution_sink.execution_id;
+    let observe_and_cancel = async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                // 观察服务端进程需要直接连接；普通会话策略禁止访问系统元数据。
+                let process: Option<u64> = sqlx::query_scalar(
+                    "SELECT ID FROM information_schema.PROCESSLIST WHERE INFO = ? LIMIT 1",
+                )
+                .bind(&query)
+                .fetch_optional(&observer)
+                .await
+                .unwrap();
+                if let Some(id) = process {
+                    break id;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let _guard = transition.lock().await;
+        let task = store.task(execution_id).await.unwrap();
+        cancel.cancel();
+        (observed, task)
+    };
+    let run = db.call(
+        "execution.run",
+        json!({"text": script}),
+        &execution_sink,
+        &cancel,
     );
+    let (interrupted, (observed, task)) = tokio::join!(
+        tokio::time::timeout(std::time::Duration::from_secs(20), run),
+        observe_and_cancel,
+    );
+    assert!(
+        observed.is_ok(),
+        "未在服务端观察到目标查询运行: {interrupted:?}"
+    );
+    assert!(task.sent && !task.may_write, "{task:?}");
+    let interrupted = interrupted.expect("取消后的查询未及时结束").unwrap_err();
+    assert_eq!(interrupted.code, "cancelled", "{interrupted}");
+    assert_eq!(interrupted.details["mysql_errno"], 1317, "{interrupted}");
     let after = execute(&mut db, &store, "SELECT 42 AS alive")
         .await
         .unwrap();
     assert_eq!(result_rows(&store, &after).await[0][0].text(), "42");
     db.close().await.unwrap();
+    observer.close().await;
+    drop(execution_sink);
     clean(store).await;
 }
 

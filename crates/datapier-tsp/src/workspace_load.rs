@@ -247,20 +247,70 @@ impl App {
         let state = if value.as_object().is_some_and(|v| v.is_empty()) {
             None
         } else {
-            Some(serde_json::from_value::<Workspace>(value)?)
+            let mut state = serde_json::from_value::<Workspace>(value)?;
+            for tab in &mut state.tabs {
+                let draft = &tab.workbench_draft;
+                if let Some(fields) = draft["fields"].as_object() {
+                    let project_prefix = format!("project-{}-", tab.id);
+                    let transfer_prefix = format!("transfer-{}-", tab.id);
+                    for (name, value) in fields {
+                        if (name.starts_with(&project_prefix) || name.starts_with(&transfer_prefix))
+                            && let Some(text) = value.as_str()
+                        {
+                            self.fields.insert(name.clone(), Editor::new(text));
+                        }
+                    }
+                }
+                let workbench = &mut tab.runtime.workbench;
+                workbench.project.restored = draft.get("project").filter(|v| !v.is_null()).cloned();
+                workbench.project.unsaved = draft["project_unsaved"].as_bool().unwrap_or(false);
+                workbench.project.transfer_files =
+                    serde_json::from_value(draft["transfer_files"].clone()).unwrap_or_default();
+                workbench.project.section =
+                    draft["project_section"].as_str().unwrap_or("").to_owned();
+                workbench.transfer.files =
+                    draft["transfer_files_count"].as_u64().unwrap_or(0) as usize;
+                workbench.transfer.objects =
+                    draft["transfer_objects_count"].as_u64().unwrap_or(0) as usize;
+                workbench.transfer.object_filters =
+                    serde_json::from_value(draft["transfer_object_filters"].clone())
+                        .unwrap_or_default();
+                workbench.transfer.stage =
+                    draft["transfer_stage"].as_str().unwrap_or("").to_owned();
+                workbench.transfer.project_mode =
+                    draft["transfer_project_mode"].as_bool().unwrap_or(false);
+                if let Some(view) = draft["view"].as_str()
+                    && matches!(view, "project-workbench" | "transfer-workbench")
+                {
+                    tab.runtime.view = view.to_owned();
+                }
+            }
+            Some(state)
         };
         self.revision = revision;
         if let Some(state) = state {
             if self.dirty {
                 self.tabs.extend(state.tabs);
+                self.project_layout.groups.extend(state.project_splits);
                 self.migrate_cli_queries();
             } else {
                 self.navigation.expanded = state.navigation_expanded;
                 self.empty_context = state.empty_context;
                 self.tabs = state.tabs;
+                self.project_layout.groups = state.project_splits;
                 self.active = state.active.min(self.tabs.len().saturating_sub(1));
                 self.migrate_cli_queries();
                 if !self.tabs.is_empty() {
+                    if matches!(
+                        self.tabs[self.active].runtime.view.as_str(),
+                        "project-workbench" | "transfer-workbench"
+                    ) {
+                        std::mem::swap(
+                            &mut self.workbench,
+                            &mut self.tabs[self.active].runtime.workbench,
+                        );
+                        std::mem::swap(&mut self.view, &mut self.tabs[self.active].runtime.view);
+                    }
                     self.restore_browse();
                     self.profile = self.tabs[self.active]
                         .profile_id

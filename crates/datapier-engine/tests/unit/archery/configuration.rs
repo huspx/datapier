@@ -45,8 +45,7 @@ async fn batch_failure_is_atomic_and_fixed_ids_allow_outcome_reconciliation() {
     assert_eq!(after.len(), 2);
     assert!(after.iter().any(|p| p.id == one.id));
     assert!(after.iter().any(|p| p.id == two.id));
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -77,8 +76,7 @@ async fn batch_rechecks_full_baseline_and_local_changes_need_no_discovery() {
     let result = engine.dispatch(owner, "archery.profile.apply_batch", json!({"server_id":fixture.server.id,"expected_server_revision":1,"expected_profiles":[renamed],"desired_profiles":[]})).await.unwrap();
     assert_eq!(result["profiles"], json!([]));
     assert!(engine.store.archery_server(fixture.server.id).await.is_ok());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -163,8 +161,7 @@ async fn server_delete_checks_profile_set_and_removes_profiles_and_credentials()
             .unwrap()
             .is_none()
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -178,8 +175,7 @@ async fn duplicate_fixed_profile_ids_return_without_deadlock_and_write_nothing()
     .await;
     assert!(result.expect("duplicate IDs must not deadlock").is_err());
     assert!(engine.store.profiles().await.unwrap().is_empty());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -247,6 +243,5 @@ async fn service_and_profile_changes_cannot_race_open_registration() {
         )
         .await
         .unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

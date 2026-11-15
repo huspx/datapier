@@ -234,7 +234,7 @@ impl ReplacePlan {
                 &(item.id, &item.change, item.matches, item.excluded),
             )?;
         }
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(format!("{:x}", base16ct::HexDisplay(&hash.finalize())))
     }
     fn summary(&self, id: Uuid) -> Result<Json> {
         let digest = self.digest()?;
@@ -575,7 +575,11 @@ pub(super) async fn prepare(
     add_filters(&mut sql, &mut args, &schema, filters, &mut has_where)?;
     let selection_digest = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&(&spec, filters, params.get("keys")))?)
+        base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&(
+            &spec,
+            filters,
+            params.get("keys")
+        ))?))
     );
     let mut plan = ReplacePlan {
         schema,

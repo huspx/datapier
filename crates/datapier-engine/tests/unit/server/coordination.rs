@@ -73,8 +73,7 @@ async fn profile_gate_and_dirty_checks_cover_other_sessions() {
     );
     engine.editing_forget_scopes(owner);
     assert!(engine.editing_check_dirty(profile, None).is_ok());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 #[tokio::test]
 async fn other_clients_receive_scoped_invalidation_without_sql() {
@@ -98,6 +97,5 @@ async fn other_clients_receive_scoped_invalidation_without_sql() {
     assert!(!event.payload.to_string().contains("secret"));
     engine.disconnect(first).await;
     engine.disconnect(second).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

@@ -9,6 +9,7 @@ mod profiles;
 mod results;
 mod retired_cache;
 mod tasks;
+pub mod transfer;
 
 use crate::model::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -40,6 +41,7 @@ pub struct Store {
     archery_totp_secrets: Arc<RwLock<HashMap<Uuid, (String, CredentialMode)>>>,
     results: Arc<Mutex<results::ResultStore>>,
     profile_gate: Arc<Mutex<()>>,
+    input_index_workers: Arc<RwLock<()>>,
 }
 
 impl Store {
@@ -62,6 +64,7 @@ impl Store {
             secrets: Arc::new(RwLock::new(HashMap::new())),
             results: Arc::new(Mutex::new(results::ResultStore::default())),
             profile_gate: Arc::new(Mutex::new(())),
+            input_index_workers: Arc::new(RwLock::new(())),
         };
         let validated: Result<()> = async {
             store.profiles().await?;
@@ -80,6 +83,15 @@ impl Store {
             return Err(error);
         }
         Ok(store)
+    }
+
+    pub(crate) async fn input_index_work(&self) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        self.input_index_workers.clone().read_owned().await
+    }
+
+    /// 退出前等待真实 blocking 索引 worker 关闭文件，不能仅等待外层 future 被 abort。
+    pub async fn wait_input_index_workers(&self) {
+        drop(self.input_index_workers.write().await);
     }
 
     /// 读取应用全局设置；无效的持久化值会返回错误。

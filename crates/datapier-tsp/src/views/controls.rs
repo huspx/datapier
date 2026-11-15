@@ -15,6 +15,14 @@ pub(super) fn button(label: &str, action: &str) -> Node<Msg> {
     let variant = match action {
         "run" | "save-profile" | "submit" | "redis-submit" | "redis-stage" | "import"
         | "set-cell" | "file-save" | "column-width" | "paste-confirm" => ui::ButtonVariant::Primary,
+        "project-ui-save-prepare"
+        | "project-ui-save-commit"
+        | "project-ui-bindings-save"
+        | "project-ui-recovery-commit"
+        | "transfer-ui-retry" => ui::ButtonVariant::Primary,
+        "project-ui-artifact-cleanup-confirm"
+        | "project-ui-close-confirm"
+        | "transfer-ui-preset-delete" => ui::ButtonVariant::Danger,
         "discard"
         | "redis-op:delete_key"
         | "redis-op:hash_delete"
@@ -176,7 +184,20 @@ fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node
             | "external_args"
             | "mapping"
             | "binary_columns"
-    ) {
+    ) || (name.starts_with("project-") && name.ends_with("-query-text"))
+        || (name.starts_with("transfer-")
+            && [
+                "-file-columns-",
+                "-file-binary-columns-",
+                "-file-mapping-",
+                "-file-types-",
+                "-object-mapping-",
+                "-object-types-",
+                "-definer-map",
+            ]
+            .iter()
+            .any(|part| name.contains(part)))
+    {
         control
             .child(
                 ui::editor()
@@ -184,7 +205,13 @@ fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node
                     .readonly(
                         app.connection_form_busy()
                             || (name == "cli_text"
-                                && (app.workbench.cli_running || app.operation_pending)),
+                                && (app.workbench.cli_running || app.operation_pending))
+                            || (name.starts_with("transfer-")
+                                && (app.workbench.transfer.pending.is_some()
+                                    || app.workbench.transfer.queued_prepare.is_some()))
+                            || (name.starts_with("project-")
+                                && (app.workbench.project.is_pending()
+                                    || app.workbench.project.file_loading)),
                     )
                     .key(format!("input-{name}"))
                     .text(display)
@@ -207,7 +234,11 @@ fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node
                     .readonly(
                         app.connection_form_busy()
                             || (name == "mcp-rule-scope"
-                                && !app.field("mcp-rule-pending").is_empty()),
+                                && !app.field("mcp-rule-pending").is_empty())
+                            || (name.starts_with("transfer-")
+                                && (app.workbench.transfer.pending.is_some()
+                                    || app.workbench.transfer.queued_prepare.is_some()))
+                            || (name.starts_with("project-") && app.workbench.project.is_pending()),
                     )
                     .secret(matches!(
                         name,
@@ -241,7 +272,13 @@ pub(super) fn choices(
         .key(format!("input-{field_name}"))
         .aria(label.clone())
         .value(app.field(&field_name).to_owned())
-        .disabled(app.connection_form_busy())
+        .disabled(
+            app.connection_form_busy()
+                || (field_name.starts_with("transfer-")
+                    && (app.workbench.transfer.pending.is_some()
+                        || app.workbench.transfer.queued_prepare.is_some()))
+                || (field_name.starts_with("project-") && app.workbench.project.is_pending()),
+        )
         .open(open)
         .on_toggle(move |collapsed| {
             Msg::Action(format!("select-open:{select_key}:{}", !collapsed))

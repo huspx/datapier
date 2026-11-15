@@ -101,4 +101,7 @@ async fn live_pages_and_explicit_count_keep_original_session_and_limit() {
     assert_eq!(end["rows"].as_array().unwrap().len(), 0);
     call(&mut db, &store, "transaction.rollback", json!({})).await;
     db.close().await.unwrap();
+    store.pool.close().await;
+    drop(store);
+    tokio::fs::remove_dir_all(root).await.unwrap();
 }

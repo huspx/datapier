@@ -789,7 +789,10 @@ pub fn build_plan(intent: &SchemaEditIntent) -> Result<SchemaPlan> {
         steps,
         plan_digest: String::new(),
     };
-    plan.plan_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&plan)?));
+    plan.plan_digest = format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&plan)?))
+    );
     Ok(plan)
 }
 

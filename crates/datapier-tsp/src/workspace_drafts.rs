@@ -223,6 +223,9 @@ impl App {
                 || self.operation_pending
                 || self.restore_rows.is_some()
                 || self.file_open_pending.is_some()
+                || self.workbench.project.project.is_some()
+                || self.workbench.project.is_pending()
+                || self.workbench.transfer.busy()
                 || self.workbench.inline.is_some(),
         ) || self.tabs.iter().enumerate().any(|(index, tab)| {
             if index == self.active {
@@ -238,6 +241,9 @@ impl App {
                     || state.operation_pending
                     || state.restore_rows.is_some()
                     || state.file_open_pending.is_some()
+                    || state.workbench.project.project.is_some()
+                    || state.workbench.project.is_pending()
+                    || state.workbench.transfer.busy()
                     || state.workbench.inline.is_some(),
             )
         })

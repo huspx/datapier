@@ -121,6 +121,7 @@ impl Engine {
             .capabilities()
             .ensure_method("change.preview", &params)?;
         let cancel = self.editing_cancel(owner)?;
+        let _operation = self.operation_scope(&db, params.get("target")).await?;
         let mut budgets = self.prepare_change_value_sources(&db, &mut params).await?;
         let result = async {
             let gate = (db.profile.provider == model::ProviderKind::Mysql && !db.profile.is_archery()).then(|| self.editing_gate(db.profile.id));

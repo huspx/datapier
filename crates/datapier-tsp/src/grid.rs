@@ -114,7 +114,7 @@ pub struct ChangeValueSource {
     pub column: String,
 }
 
-type UndoCell = (
+type UndoCellChange = (
     Cell,
     Option<Value>,
     Option<EditFileRef>,
@@ -139,7 +139,7 @@ pub struct GridState {
     edits: BTreeMap<Cell, Value>,
     edit_files: BTreeMap<Cell, EditFileRef>,
     value_sources: BTreeMap<Cell, ValueSource>,
-    undo: Vec<Vec<UndoCell>>,
+    undo: Vec<Vec<UndoCellChange>>,
     natural_widths: Vec<u16>,
     fitted_width: Option<(u32, bool)>,
 }

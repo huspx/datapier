@@ -23,11 +23,14 @@ fn second_tab(app: &mut App) {
         profile_id: None,
         id: Uuid::new_v4(),
         layout: Vec::new(),
+        project_query: None,
+        project_columns: None,
         browse: BrowseSettings::default(),
-        pending: Value::Null,
-        pending_live: false,
         schema_draft: None,
         replace_draft: None,
+        workbench_draft: Value::Null,
+        pending: Value::Null,
+        pending_live: false,
         runtime: TabRuntime::default(),
     });
 }

@@ -118,9 +118,7 @@ async fn imported_value_remains_stageable_after_idle_sweep() {
         .dispatch(owner, "connection.close", json!({"session_id":session}))
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    crate::server::tests::cleanup(engine, root).await;
     let staged = staged.expect("刚导入的值必须可继续暂存");
     let typed: TypedValue = serde_json::from_value(staged["value"].clone()).unwrap();
     assert_eq!(value::to_bytes(&typed).unwrap().1.unwrap(), b"edited");
@@ -276,7 +274,5 @@ async fn value_pages_obey_response_budget_and_schema_invalidation_preserves_edit
         .dispatch(owner, "connection.close", json!({"session_id":session}))
         .await
         .unwrap();
-    engine.store.pool.close().await;
-    drop(engine);
-    tokio::fs::remove_dir_all(root).await.unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }

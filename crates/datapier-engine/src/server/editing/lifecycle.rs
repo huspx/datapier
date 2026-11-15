@@ -2,6 +2,12 @@
 use super::*;
 
 impl Engine {
+    pub(in crate::server) fn editing_finish_schema(&self, id: Uuid) {
+        if let Some(plan) = self.state.lock().unwrap().editing.schemas.get_mut(&id) {
+            plan._operation.take();
+        }
+    }
+
     pub(in crate::server) async fn editing_disconnect(&self, owner: Uuid) -> Result<()> {
         let mut failure = self.disconnect_workspace_uploads(owner).await.err();
         self.editing_forget_scopes(owner);

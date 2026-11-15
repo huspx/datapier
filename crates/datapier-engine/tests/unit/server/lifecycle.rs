@@ -21,8 +21,7 @@ async fn idle_deadline_does_not_wait_for_running_write() {
         assert!(state.stop_if_idle());
         assert!(!state.accepting);
     }
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -56,7 +55,7 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        4
+        crate::protocol::VERSION
     );
     assert!(engine.state.lock().unwrap().clients.contains(&owner));
     protocol::write(
@@ -70,12 +69,12 @@ async fn invalid_handshake_does_not_extend_idle_lifetime() {
         true
     );
     handler.await.unwrap();
-    let state = engine.state.lock().unwrap();
-    assert!(state.clients.is_empty());
-    assert!(state.idle > idle);
-    drop(state);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    {
+        let state = engine.state.lock().unwrap();
+        assert!(state.clients.is_empty());
+        assert!(state.idle > idle);
+    }
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -138,8 +137,7 @@ async fn window_bridge_requires_binding_and_does_not_keep_engine_alive() {
         false
     );
     engine.disconnect(bridge).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -181,8 +179,7 @@ async fn disconnect_cancels_reads_and_unsent_work_but_waits_for_sent_writes() {
         !entries[2].is_cancelled(),
         "sent write must be allowed to reach a final outcome"
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -224,8 +221,269 @@ async fn disconnect_and_write_dispatch_obey_the_same_gate() {
     assert!(engine.store.task(after.id).await.unwrap().may_write);
     drop(sink_before);
     drop(sink_after);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
+async fn transfer_send_rechecks_owner_during_disconnect_cleanup() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    assert!(engine.register(owner));
+    let task = engine
+        .store
+        .create_task(owner, "workspace", "transfer.submit", json!({}), false)
+        .await
+        .unwrap();
+    engine.store.mark_sent(task.id, true).await.unwrap();
+    let sink = engine.transfer_sink(
+        owner,
+        task.id,
+        Arc::new(AsyncMutex::new(())),
+        CancellationToken::new(),
+        vec![],
+    );
+    let blocker = engine
+        .store
+        .create_task(owner, "workspace", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let transition = Arc::new(AsyncMutex::new(()));
+    let guard = transition.lock().await;
+    engine.state.lock().unwrap().tasks.insert(
+        blocker.id,
+        Running {
+            owner,
+            session_id: Uuid::nil(),
+            cancel: CancellationToken::new(),
+            transition: transition.clone(),
+            abort: None,
+            started: None,
+        },
+    );
+    let closing = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.disconnect(owner).await }
+    });
+    while engine.state.lock().unwrap().clients.contains(&owner) {
+        tokio::task::yield_now().await;
+    }
+    assert!(!closing.is_finished());
+    assert_eq!(sink.mark_sent(true).await.unwrap_err().code, "disconnected");
+    drop(guard);
+    closing.await.unwrap();
+    drop(sink);
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
+async fn resource_list_response_is_not_persisted_in_summary() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    let task = engine
+        .store
+        .create_task(owner, "workspace", "resource.list", json!({}), false)
+        .await
+        .unwrap();
+    let response = json!({"resources":[{"key":"private-key","key_b64":"cHJpdmF0ZS1rZXk=","ttl":37}],"complete":true});
+    engine
+        .finish_task(owner, task.id, &Ok(response.clone()), None)
+        .await;
+    let stored = engine.store.task(task.id).await.unwrap();
+    assert_eq!(stored.state, "succeeded");
+    let text = stored.summary.to_string();
+    assert!(
+        !text.contains("private-key")
+            && !text.contains("cHJpdmF0ZS1rZXk=")
+            && !text.contains("ttl")
+    );
+    assert_eq!(response["resources"][0]["ttl"], 37);
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
+async fn transfer_read_reports_unpersisted_completion_and_recovers_sent_step() {
+    use datapier_core::{
+        model::transfer::{TransferLocator, TransferStepOutcome, TransferStepState},
+        storage::transfer::TransferRunContext,
+    };
+    use sqlx::Executor;
+
+    let (mut engine, root) = engine().await;
+    engine.store.pool.close().await;
+    let options = sqlx::sqlite::SqliteConnectOptions::new().filename(root.join("datapier.sqlite3"));
+    let connection = sqlx::ConnectOptions::connect(&options).await.unwrap();
+    Arc::get_mut(&mut engine).unwrap().store.pool =
+        datapier_core::storage::FixedPool::new(vec![connection]);
+    let owner = Uuid::new_v4();
+    assert!(engine.register(owner));
+    let task = engine
+        .store
+        .create_task(owner, "full", "transfer.submit", json!({}), false)
+        .await
+        .unwrap();
+    engine
+        .store
+        .transfer_create_run(
+            task.id,
+            task.id,
+            "full",
+            &"a".repeat(64),
+            &TransferRunContext::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    engine
+        .store
+        .update_task(task.id, "running", json!({}), None)
+        .await
+        .unwrap();
+    let step = TransferStepOutcome {
+        ordinal: 0,
+        locator: TransferLocator {
+            first_record: Some(1),
+            last_record: Some(500),
+            ..Default::default()
+        },
+        phase: "data".into(),
+        state: TransferStepState::NotSent,
+        digest: "b".repeat(64),
+        affected: 0,
+        error_code: None,
+        database_code: None,
+        item_states: Vec::new(),
+        error_record: None,
+    };
+    engine
+        .store
+        .transfer_put_step(task.id, &step)
+        .await
+        .unwrap();
+    engine
+        .store
+        .transfer_mark_sent(task.id, task.id, 0, true)
+        .await
+        .unwrap();
+    (&mut *engine.store.pool.acquire().await.unwrap())
+        .execute("PRAGMA max_page_count=1")
+        .await
+        .unwrap();
+    let result = Err(AppError::new("database", "写入失败").with_details(json!({
+        "state":"outcome_unknown", "progress":{"padding":"x".repeat(131072)}
+    })));
+    engine.finish_task(owner, task.id, &result, None).await;
+
+    let read = engine
+        .dispatch(owner, "transfer.run.get", json!({"run_id":task.id}))
+        .await
+        .unwrap();
+    assert_eq!(read["state"], "outcome_unknown");
+    assert_eq!(read["error"]["code"], "storage");
+    assert_eq!(
+        read["error"]["details"]["persistence_error"]["database_code"],
+        "13"
+    );
+    assert_eq!(read["progress_is_persisted_snapshot"], true);
+    assert_eq!(
+        engine.store.transfer_run(task.id).await.unwrap().state,
+        "running"
+    );
+
+    (&mut *engine.store.pool.acquire().await.unwrap())
+        .execute("PRAGMA max_page_count=1073741823")
+        .await
+        .unwrap();
+    let read_after_space = engine
+        .dispatch(owner, "transfer.run.get", json!({"run_id":task.id}))
+        .await
+        .unwrap();
+    assert_eq!(read_after_space["state"], "outcome_unknown");
+    assert_eq!(read_after_space["error"]["code"], "storage");
+    for format in ["json", "csv"] {
+        let path = root.join(format!("full-report.{format}"));
+        engine
+            .dispatch(
+                owner,
+                "transfer.report.export",
+                json!({"run_id":task.id,"path":path,"format":format}),
+            )
+            .await
+            .unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let report_run: Value = if format == "json" {
+            serde_json::from_str::<Value>(&contents).unwrap()["run"].clone()
+        } else {
+            let row = contents.lines().nth(1).unwrap();
+            let payload = row
+                .strip_prefix("run,\"")
+                .unwrap()
+                .strip_suffix('"')
+                .unwrap();
+            serde_json::from_str(&payload.replace("\"\"", "\"")).unwrap()
+        };
+        assert_eq!(report_run["state"], "outcome_unknown");
+        assert_eq!(report_run["error"]["code"], "storage");
+        assert_eq!(
+            report_run["error"]["details"]["persistence_error"]["database_code"],
+            "13"
+        );
+        assert_eq!(report_run["progress_is_persisted_snapshot"], true);
+    }
+    let retry = engine
+        .dispatch(owner, "transfer.retry.prepare", json!({"run_id":task.id}))
+        .await
+        .unwrap_err();
+    assert_eq!(retry.code, "invalid_input"); // 已越过 busy，仍必须提供有效 spec。
+    let unknown_retry = engine
+        .dispatch(
+            owner,
+            "transfer.retry.prepare",
+            json!({"run_id":task.id,"states":["outcome_unknown"]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unknown_retry.code, "invalid_input");
+    let sent_only = engine
+        .dispatch(
+            owner,
+            "transfer.retry.prepare",
+            json!({"run_id":task.id,"states":["not_sent"],"spec":{
+                "mode":"copy","provider":"mysql",
+                "source":{"profile_id":Uuid::new_v4()},
+                "destination":{"profile_id":Uuid::new_v4()}
+            }}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(sent_only.code, "invalid_input");
+    assert_eq!(sent_only.message, "原任务没有选定的可续作范围");
+    let other = Uuid::new_v4();
+    assert!(engine.register(other));
+    let denied = engine
+        .dispatch(other, "transfer.retry.prepare", json!({"run_id":task.id}))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, "forbidden");
+    // 重启丢弃内存副本后只依据已落盘的发送阶段恢复，不能声称回滚。
+    engine.store.recover_tasks().await.unwrap();
+    engine.store.transfer_recover().await.unwrap();
+    engine.state.lock().unwrap().unpersisted.clear();
+    let recovered = engine
+        .dispatch(owner, "transfer.run.get", json!({"run_id":task.id}))
+        .await
+        .unwrap();
+    assert_eq!(recovered["state"], "outcome_unknown");
+    assert_eq!(recovered["progress"]["outcome_unknown"], 500);
+    assert_eq!(
+        engine
+            .store
+            .transfer_items(task.id, None, 10)
+            .await
+            .unwrap()[0]
+            .state,
+        TransferStepState::OutcomeUnknown
+    );
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -386,9 +644,7 @@ async fn sqlite_full_does_not_leave_completed_tasks_running() {
             assert_eq!(record["state"], expected);
         }
     }
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -434,9 +690,7 @@ async fn history_pages_cover_all_matching_executions() {
     assert_eq!(filtered["offset"], 0);
     assert_eq!(filtered["limit"], 20);
     assert_eq!(filtered["items"][0]["text"], "SELECT 500 needle");
-    engine.store.pool.close().await;
-    drop(engine);
-    std::fs::remove_dir_all(root).unwrap();
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -502,8 +756,7 @@ async fn state_events_are_isolated_ordered_and_stop_on_disconnect() {
         Err(broadcast::error::TryRecvError::Empty)
     ));
     engine.disconnect(other).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -563,6 +816,5 @@ async fn workspace_activation_requires_saved_target_and_matching_context() {
         "copy"
     );
     engine.disconnect(owner).await;
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

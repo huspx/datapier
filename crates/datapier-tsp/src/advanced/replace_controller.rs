@@ -154,7 +154,7 @@ impl App {
         )
         .map_err(|e| i18n::UiMessage::raw(e.to_string()))?;
         Ok(ReplaceTarget::Mysql {
-            target,
+            target: Box::new(target),
             selected_keys,
             page_keys,
             filters,

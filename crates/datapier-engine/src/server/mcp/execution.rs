@@ -196,7 +196,10 @@ impl Engine {
                 owner,
                 session_id,
                 profile_id: profile.id,
-                digest: format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?)),
+                digest: format!(
+                    "{:x}",
+                    base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&request)?))
+                ),
                 request,
                 profile_revision: profile.revision,
                 policy_revision: settings.revision,

@@ -948,11 +948,23 @@ fn change_preview_rejects_changed_drafts_but_accepts_current_response() {
     app.routed_response(
         Response {
             tag: fresh.tag,
-            result: Ok(json!({"provider":"redis","transactional":true,"offset":0,"next_offset":null,"items":[]})),
+            result: Ok(json!({"provider":"redis","transactional":true,"offset":0,"next_offset":20,"items":[]})),
         },
         &backend,
     );
     assert!(app.change_preview_value().is_some());
+    app.action("change-preview-next", &backend);
+    let page = requests.try_recv().unwrap();
+    assert_eq!(page.params["offset"], 20);
+    app.routed_response(
+        Response {
+            tag: page.tag,
+            result: Ok(json!({"provider":"redis","transactional":true,"offset":20,"next_offset":null,"items":[]})),
+        },
+        &backend,
+    );
+    app.action("change-preview-prev", &backend);
+    assert_eq!(requests.try_recv().unwrap().params["offset"], 0);
 }
 
 #[test]

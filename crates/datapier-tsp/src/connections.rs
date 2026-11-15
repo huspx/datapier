@@ -107,7 +107,6 @@ impl App {
                 return;
             }
             self.field_set("profile_revision", profile.revision.to_string());
-
             self.field_set("name", profile.name.clone());
             let Ok(direct) = profile.direct() else {
                 self.workbench.profile_error =

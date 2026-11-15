@@ -112,6 +112,63 @@ async fn rows(store: &Store, response: &Json) -> Vec<Vec<Value>> {
     }
     all
 }
+
+#[tokio::test]
+#[ignore = "需要显式配置隔离 MySQL"]
+async fn mysql_migration_preserves_explicit_zero_autoincrement_key() {
+    use datapier_core::{execution::migration, model::transfer::TransferSpec};
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let root = (*store.root).clone();
+    let direct = profile.direct().unwrap();
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .ssl_mode(sqlx::mysql::MySqlSslMode::Disabled)
+                .host(&direct.host)
+                .port(direct.port)
+                .username(&direct.username)
+                .password(secret.as_deref().unwrap())
+                .database("datapier_fixture"),
+        )
+        .await
+        .unwrap();
+    store.save_profile(&profile, secret, false).await.unwrap();
+    let target = format!("dp_auto_zero_{}", Uuid::new_v4().simple());
+    let input = root.join("zero.csv");
+    std::fs::write(&input, "id\n0\n2\n").unwrap();
+    let result = AssertUnwindSafe(async {
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TABLE `{target}` (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB")))
+            .execute(&pool).await.unwrap();
+        let spec: TransferSpec = serde_json::from_value(json!({
+            "mode":"import", "provider":"mysql",
+            "destination":{"profile_id":profile.id,"database":"datapier_fixture"},
+            "inputs":[{"path":input,"format":"csv","target":{"database":"datapier_fixture","name":target,"kind":"table"}}],
+            "options":{"include_schema":false,"include_data":true}
+        })).unwrap();
+        let cancel = CancellationToken::new();
+        let prepared = migration::prepare(&sink(&store, "transfer.prepare", &profile).await, spec, &cancel).await.unwrap();
+        let owner = Uuid::new_v4();
+        let task = store.create_task(owner, "zero-fixture", "transfer.submit", json!({}), true).await.unwrap();
+        let sink = ExecutionSink::new(store.clone(), task.id).with_owner(owner);
+        let progress = migration::execute(&prepared, &sink, task.id, "zero-fixture", None, &[], &cancel).await.unwrap();
+        assert_eq!(progress.written_rows, 2);
+        let ids: Vec<i32> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT id FROM `{target}` ORDER BY id")))
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(ids, vec![0, 2]);
+    }).catch_unwind().await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS `{target}`"
+    )))
+    .execute(&pool)
+    .await;
+    pool.close().await;
+    store.pool.close().await;
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+    result.unwrap();
+}
 fn mysql_target(name: &str) -> ResourceTarget {
     ResourceTarget {
         database: Some("datapier_fixture".into()),
@@ -337,14 +394,17 @@ async fn redis_rows(
     rows
 }
 async fn absolute_expiry(
-    session: &mut ProviderSession,
-    store: &Store,
+    conn: &mut redis::aio::MultiplexedConnection,
     target: &ResourceTarget,
 ) -> i64 {
-    let meta = call(session, store, "export.meta", json!({"target":target}))
+    let key = STANDARD.decode(target.key_b64.as_ref().unwrap()).unwrap();
+    redis::cmd("EVAL")
+        .arg("local t=redis.call('TIME'); local ttl=redis.call('PTTL',KEYS[1]); if ttl<0 then return ttl end; return t[1]*1000+math.floor(t[2]/1000)+ttl")
+        .arg(1)
+        .arg(key)
+        .query_async(conn)
         .await
-        .unwrap();
-    meta["expires_at_ms"].as_str().unwrap().parse().unwrap()
+        .unwrap()
 }
 async fn redis_delete(conn: &mut redis::aio::MultiplexedConnection, keys: &[Vec<u8>]) {
     let _: i64 = redis::cmd("DEL").arg(keys).query_async(conn).await.unwrap();
@@ -474,7 +534,7 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
         let mut expiry = Vec::new();
         for target in &targets {
             original.push(redis_rows(&mut session, &store, target).await);
-            expiry.push(absolute_expiry(&mut session, &store, target).await);
+            expiry.push(absolute_expiry(&mut conn, target).await);
         }
         let json_path = root.join("redis.json");
         let csv_path = root.join("redis.csv");
@@ -516,7 +576,7 @@ async fn redis_five_types_binary_keys_and_absolute_expiry_round_trip() {
                     redis_rows(&mut session, &store, target).await,
                     original[index]
                 );
-                let restored = absolute_expiry(&mut session, &store, target).await;
+                let restored = absolute_expiry(&mut conn, target).await;
                 assert!(
                     (restored - expiry[index]).abs() <= 10,
                     "absolute TTL changed: {restored} vs {}",

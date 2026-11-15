@@ -24,7 +24,7 @@ impl Store {
     fn archery_account(&self, id: Uuid, totp: bool) -> String {
         let digest = Sha256::digest(self.root.to_string_lossy().as_bytes());
         let suffix = if totp { ":totp" } else { "" };
-        format!("{:x}:archery:{id}{suffix}", digest)
+        format!("{:x}:archery:{id}{suffix}", base16ct::HexDisplay(&digest))
     }
 
     pub async fn archery_servers(&self) -> Result<Vec<ArcheryServerInfo>> {

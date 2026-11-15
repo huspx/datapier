@@ -297,7 +297,7 @@ async fn client_rejects_v1_engine_and_sends_no_business_request() {
     let server = tokio::spawn(async move {
         let open = protocol::read(&mut peer).await.unwrap();
         assert_eq!(open["method"], "session.open");
-        assert_eq!(open["params"]["protocol_version"], 4);
+        assert_eq!(open["params"]["protocol_version"], 5);
         protocol::write(
             &mut peer,
             &json!({"id":open["id"],"result":{"protocol_version":1}}),

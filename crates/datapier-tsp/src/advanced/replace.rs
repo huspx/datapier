@@ -33,7 +33,7 @@ fn scope_summary(items: &[Value]) -> String {
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub(crate) enum ReplaceTarget {
     Mysql {
-        target: Value,
+        target: Box<Value>,
         selected_keys: Vec<Value>,
         page_keys: Vec<Value>,
         filters: Vec<Value>,

@@ -52,6 +52,11 @@ async fn verify_structure(conn: &mut SqliteConnection, version: i64) -> Result<(
             .execute(&mut reference)
             .await?;
     }
+    if version >= 5 {
+        sqlx::raw_sql(include_str!("../../migrations/0005_config.sql"))
+            .execute(&mut reference)
+            .await?;
+    }
     let query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
     let expected = sqlx::query(query).fetch_all(&mut reference).await?;
     let actual = sqlx::query(query).fetch_all(&mut *conn).await?;
@@ -104,6 +109,73 @@ fn convert_direct(row: &sqlx::sqlite::SqliteRow) -> Result<String> {
     }
     profile.validate().map_err(|_| invalid_schema())?;
     Ok(serde_json::to_string(&payload)?)
+}
+
+// 按读取接口使用的类型解析元数据，不规范化或改写已有记录。
+async fn verify_transfer_metadata(conn: &mut SqliteConnection) -> Result<()> {
+    fn json_field<T: serde::de::DeserializeOwned>(
+        row: &sqlx::sqlite::SqliteRow,
+        name: &str,
+    ) -> Result<()> {
+        let value: &str = row.try_get(name).map_err(|_| invalid_schema())?;
+        serde_json::from_str::<T>(value).map_err(|_| invalid_schema())?;
+        Ok(())
+    }
+    fn id_field(row: &sqlx::sqlite::SqliteRow, name: &str, optional: bool) -> Result<()> {
+        let value: Option<&str> = row.try_get(name).map_err(|_| invalid_schema())?;
+        match value {
+            Some(value) => {
+                Uuid::parse_str(value).map_err(|_| invalid_schema())?;
+            }
+            None if optional => (),
+            None => return Err(invalid_schema()),
+        }
+        Ok(())
+    }
+
+    for row in sqlx::query("SELECT id,spec_json FROM transfer_presets")
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        id_field(&row, "id", false)?;
+        json_field::<crate::model::transfer::TransferSpec>(&row, "spec_json")?;
+    }
+    for row in
+        sqlx::query("SELECT id,execution_id,retry_of,context_json,progress_json FROM transfer_runs")
+            .fetch_all(&mut *conn)
+            .await?
+    {
+        id_field(&row, "id", false)?;
+        id_field(&row, "execution_id", false)?;
+        id_field(&row, "retry_of", true)?;
+        json_field::<super::transfer::TransferRunContext>(&row, "context_json")?;
+        json_field::<crate::model::transfer::TransferProgress>(&row, "progress_json")?;
+    }
+    for row in sqlx::query("SELECT locator_json,outcome_json FROM transfer_steps")
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        json_field::<crate::model::transfer::TransferLocator>(&row, "locator_json")?;
+        json_field::<crate::model::transfer::TransferStepOutcome>(&row, "outcome_json")?;
+    }
+    for row in sqlx::query("SELECT id,run_id,owner_client_id,identity_json FROM transfer_artifacts")
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        id_field(&row, "id", false)?;
+        id_field(&row, "run_id", true)?;
+        id_field(&row, "owner_client_id", true)?;
+        json_field::<super::transfer::ArtifactIdentity>(&row, "identity_json")?;
+    }
+    for row in sqlx::query("SELECT project_id,profile_id,database_json FROM project_bindings")
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        id_field(&row, "project_id", false)?;
+        id_field(&row, "profile_id", false)?;
+        json_field::<super::transfer::BindingOverrides>(&row, "database_json")?;
+    }
+    Ok(())
 }
 
 async fn verify_data(conn: &mut SqliteConnection, version: i64) -> Result<()> {
@@ -217,6 +289,20 @@ async fn verify_data(conn: &mut SqliteConnection, version: i64) -> Result<()> {
             super::edit_files::decode_record(row).map_err(|_| invalid_schema())?;
         }
     }
+    if version >= 5 {
+        verify_transfer_metadata(conn).await?;
+    }
+    if version >= 5 {
+        for row in sqlx::query("SELECT project_id,root,binding_group,binding_digest FROM project_binding_confirmations").fetch_all(&mut *conn).await? {
+            let id: &str = row.try_get("project_id").map_err(|_| invalid_schema())?;
+            let root: &str = row.try_get("root").map_err(|_| invalid_schema())?;
+            let group: &str = row.try_get("binding_group").map_err(|_| invalid_schema())?;
+            let digest: &str = row.try_get("binding_digest").map_err(|_| invalid_schema())?;
+            if Uuid::parse_str(id).is_err() || root.is_empty() || group.is_empty() || digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(invalid_schema());
+            }
+        }
+    }
     if !sqlx::query("PRAGMA foreign_key_check")
         .fetch_all(&mut *conn)
         .await?
@@ -242,7 +328,7 @@ async fn preflight_connection(conn: &mut SqliteConnection) -> Result<i64> {
                 return Err(invalid_schema());
             }
         }
-        1..=4 => {
+        1..=5 => {
             verify_structure(conn, version).await?;
             verify_data(conn, version).await?;
         }
@@ -257,10 +343,7 @@ pub(super) async fn preflight_config(conn: &mut SqliteConnection) -> Result<()> 
 }
 
 pub(super) async fn migrate_config(conn: &mut SqliteConnection) -> Result<()> {
-    let version = preflight_connection(conn).await?;
-    if version == 4 {
-        return Ok(());
-    }
+    // 版本及内容在迁移事务内检查，避免检查后数据库发生变化。
     sqlx::query("PRAGMA foreign_keys=OFF")
         .execute(&mut *conn)
         .await?;
@@ -272,6 +355,11 @@ pub(super) async fn migrate_config(conn: &mut SqliteConnection) -> Result<()> {
     }
     let result: Result<()> = async {
         let mut tx = conn.begin().await?;
+        let version = preflight_connection(&mut tx).await?;
+        if version == 5 {
+            tx.commit().await?;
+            return Ok(());
+        }
         if version == 0 {
             sqlx::raw_sql(include_str!("../../migrations/0001_config.sql"))
                 .execute(&mut *tx)
@@ -297,12 +385,19 @@ pub(super) async fn migrate_config(conn: &mut SqliteConnection) -> Result<()> {
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::raw_sql(include_str!("../../migrations/0004_config.sql"))
-            .execute(&mut *tx)
-            .await?;
-        verify_structure(&mut tx, 4).await?;
-        verify_data(&mut tx, 4).await?;
-        sqlx::query("PRAGMA user_version=4")
+        if version < 4 {
+            sqlx::raw_sql(include_str!("../../migrations/0004_config.sql"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        if version < 5 {
+            sqlx::raw_sql(include_str!("../../migrations/0005_config.sql"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        verify_structure(&mut tx, 5).await?;
+        verify_data(&mut tx, 5).await?;
+        sqlx::query("PRAGMA user_version=5")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

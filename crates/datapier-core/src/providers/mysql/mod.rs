@@ -1,9 +1,12 @@
 //! MySQL 会话和查询执行；结果处理、目录浏览及行变更由子模块负责。
 
+pub mod backup;
 mod catalog;
 mod changes;
 mod errors;
 mod live;
+pub mod migration;
+
 mod replace;
 mod results;
 pub mod schema;
@@ -39,7 +42,7 @@ pub struct MysqlSession {
     has_index_expression: bool,
     edits: HashMap<Uuid, changes::EditToken>,
     replace_plans: HashMap<Uuid, replace::ReplacePlan>,
-    recipes: HashMap<Uuid, live::Recipe>,
+    recipes: HashMap<Uuid, std::sync::Weak<live::Recipe>>,
     transaction: Option<bool>,
 }
 
@@ -123,6 +126,14 @@ impl MysqlSession {
         self.replace_plans.clear();
         self.recipes.clear();
     }
+    /// 删除已释放结果的查询索引。
+    pub fn release_result(&mut self, id: Uuid) {
+        self.recipes.remove(&id);
+    }
+    /// 周期性删除已被结果存储释放的弱索引。
+    pub fn prune_results(&mut self) {
+        self.recipes.retain(|_, recipe| recipe.strong_count() != 0);
+    }
     /// 返回编辑令牌绑定的绝对目标。
     pub fn draft_target(&self, token: Uuid) -> Result<&ResourceTarget> {
         self.edits
@@ -168,7 +179,7 @@ impl MysqlSession {
         let recipe = self
             .recipes
             .get(&id)
-            .cloned()
+            .and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::new("not_found", "结果不属于当前会话或已过期"))?;
         if !recipe.independent {
             return Err(AppError::new(
@@ -196,7 +207,7 @@ impl MysqlSession {
         let recipe = self
             .recipes
             .get(&id)
-            .cloned()
+            .and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::new("not_found", "结果不属于当前会话或已过期"))?;
         if recipe.independent {
             return Err(AppError::new("unsupported", "表浏览应使用独立连接导出"));
@@ -215,7 +226,7 @@ impl MysqlSession {
             return Err(AppError::new("conflict", "查询依赖已变化，请重新执行"));
         }
         let args = recipe.arguments()?;
-        Ok((self.connection()?, recipe.sql, args))
+        Ok((self.connection()?, recipe.sql.clone(), args))
     }
     /// 结果流未消费至协议终态时禁止继续复用物理连接。
     pub fn invalidate_connection(&mut self) {
@@ -474,8 +485,9 @@ impl MysqlSession {
                     Some((statement, "not_executed")),
                 ));
             }
-            let may_write = !readonly
-                && !(transaction_control && self.profile.access_mode == AccessMode::ReadOnly);
+            // 读写连接的表层 SELECT 可能经视图或存储函数产生写入；只有已证明
+            // 可重放的查询才走上面的只读路径，单次执行必须保守标记。
+            let may_write = self.profile.access_mode != AccessMode::ReadOnly;
             let mut sent = false;
             match self
                 .run_statement(statement, may_write, sink, cancel, &parameters, &mut sent)

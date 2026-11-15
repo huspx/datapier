@@ -232,6 +232,7 @@ function render() {
   };
   if (previewSource === 'archery') {
     renderArchery();
+    renderExchangeProject();
     renderMcpPreview();
     restoreDialogScroll();
     syncDialogFocus();
@@ -271,6 +272,7 @@ function render() {
       }</button>`
       : ''
   }</footer></main>${overlay()}${archeryWizard()}${archeryDialogs()}${menu()}`;
+  renderExchangeProject();
   renderMcpPreview();
   restoreDialogScroll();
   syncMysqlTree();

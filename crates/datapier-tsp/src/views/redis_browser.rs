@@ -1,4 +1,5 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 fn redis_key_row(
     app: &App,
     i: usize,
@@ -33,6 +34,19 @@ fn redis_key_row(
             )
             .icon("copy"),
         );
+    actions = actions
+        .menu(ui::MenuItem::new(
+            "transfer-export",
+            crate::i18n::tr("导出数据").into_owned(),
+        ))
+        .menu(ui::MenuItem::new(
+            "transfer-copy",
+            crate::i18n::tr("迁移到…").into_owned(),
+        ));
+    actions = actions.menu(
+        ui::MenuItem::new("transfer-import", crate::i18n::tr("导入数据").into_owned())
+            .disabled(!writable(app)),
+    );
     actions = actions.menu(
         ui::MenuItem::new("delete", crate::i18n::tr("删除选中 key").into_owned())
             .icon("trash")
@@ -59,6 +73,36 @@ fn redis_key_row(
         )
         .on_click(Msg::Action(format!("redis-key-click:{identity}")))
         .actions(actions)
+        .on_action(
+            "transfer-import",
+            Msg::Action(format!(
+                "transfer-redis:import:{}:{}",
+                r.key_b64
+                    .clone()
+                    .unwrap_or_else(|| STANDARD.encode(r.name.as_bytes())),
+                app.current_redis_db()
+            )),
+        )
+        .on_action(
+            "transfer-export",
+            Msg::Action(format!(
+                "transfer-redis:export:{}:{}",
+                r.key_b64
+                    .clone()
+                    .unwrap_or_else(|| STANDARD.encode(r.name.as_bytes())),
+                app.current_redis_db()
+            )),
+        )
+        .on_action(
+            "transfer-copy",
+            Msg::Action(format!(
+                "transfer-redis:copy:{}:{}",
+                r.key_b64
+                    .clone()
+                    .unwrap_or_else(|| STANDARD.encode(r.name.as_bytes())),
+                app.current_redis_db()
+            )),
+        )
         .on_action(
             "open",
             Msg::Action(format!("redis-key-menu:{identity}:open")),

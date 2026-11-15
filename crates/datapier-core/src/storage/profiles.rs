@@ -215,6 +215,6 @@ impl Store {
 
     fn credential_account(&self, id: Uuid) -> String {
         let digest = Sha256::digest(self.root.to_string_lossy().as_bytes());
-        format!("{:x}:{id}", digest)
+        format!("{:x}:{id}", base16ct::HexDisplay(&digest))
     }
 }

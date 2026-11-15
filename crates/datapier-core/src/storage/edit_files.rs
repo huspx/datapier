@@ -84,12 +84,14 @@ struct EditPath {
 
 fn open_directory(parent: &Dir, name: &str, create: bool) -> Result<Dir> {
     if create {
-        let mut builder = cap_std::fs::DirBuilder::new();
+        let builder = cap_std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use cap_std::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         match parent.create_dir_with(name, &builder) {
             Ok(()) => (),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),

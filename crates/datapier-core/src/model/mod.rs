@@ -2,8 +2,10 @@
 
 pub mod editing;
 pub mod preview;
+pub mod project;
 pub mod replace;
 pub mod schema;
+pub mod transfer;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};

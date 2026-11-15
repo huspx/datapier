@@ -3,6 +3,26 @@
 use super::*;
 
 impl Engine {
+    pub(super) async fn release_result_recipe(
+        &self,
+        result_id: Uuid,
+        execution_id: Uuid,
+    ) -> Result<()> {
+        let db = {
+            let state = self.state.lock().unwrap();
+            state
+                .result_sessions
+                .get(&execution_id)
+                .and_then(|session| state.databases.get(session))
+                .cloned()
+        };
+        self.store.release_result(result_id).await?;
+        if let Some(db) = db {
+            db.session.lock().await.release_result(result_id);
+        }
+        Ok(())
+    }
+
     pub(super) async fn can_observe_task(
         &self,
         owner: Uuid,

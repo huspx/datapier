@@ -16,7 +16,13 @@ fn env(name: &str) -> String {
 struct TempStore(std::path::PathBuf);
 impl Drop for TempStore {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            if std::thread::panicking() {
+                eprintln!("failed to remove {}: {error}", self.0.display());
+            } else {
+                panic!("failed to remove {}: {error}", self.0.display());
+            }
+        }
     }
 }
 

@@ -30,10 +30,14 @@ mod archery;
 mod discovery;
 mod editing;
 mod mcp;
+mod operations;
+mod project;
+
 mod results;
 mod rpc;
 mod session;
 mod tasks;
+mod transfer;
 mod workspaces;
 #[cfg(test)]
 use datapier_core::model::AccessMode;
@@ -119,6 +123,9 @@ struct State {
     archery: archery::ArcheryState,
     editing: editing::EditingState,
     workspace_uploads: workspaces::WorkspaceUploadState,
+    projects: project::ProjectState,
+    transfers: transfer::TransferState,
+    operations: Arc<operations::OperationRegistry>,
 }
 impl State {
     fn stop_if_idle(&mut self) -> bool {
@@ -139,6 +146,11 @@ struct Engine {
     store: Store,
     state: Mutex<State>,
     send_gate: Arc<AsyncMutex<()>>,
+    // 测试清理等待最后一个 Arc 释放；发送端须置于末尾，先析构 Store 和 State。
+    #[cfg(test)]
+    destroyed: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(test)]
+    _destroyed_signal: Option<tokio::sync::oneshot::Sender<()>>,
 }
 fn serialize<T: serde::Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
@@ -232,6 +244,8 @@ pub async fn run(root: PathBuf) -> Result<()> {
     let mut listener = platform::Listener::bind(&endpoint)?;
     let store = Store::open(&root).await?;
     store.recover_tasks().await?;
+    store.transfer_recover().await?;
+
     store.recover_edit_files().await?;
     let engine = Arc::new(Engine {
         id: Uuid::new_v4(),
@@ -257,7 +271,14 @@ pub async fn run(root: PathBuf) -> Result<()> {
             archery: archery::ArcheryState::default(),
             editing: editing::EditingState::default(),
             workspace_uploads: Default::default(),
+            projects: Default::default(),
+            transfers: Default::default(),
+            operations: Default::default(),
         }),
+        #[cfg(test)]
+        destroyed: Mutex::new(None),
+        #[cfg(test)]
+        _destroyed_signal: None,
     });
     let descriptor = root.join("engine.json");
     std::fs::write(
@@ -294,6 +315,14 @@ pub async fn run(root: PathBuf) -> Result<()> {
                 if editing_cleanup.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
                     let engine = engine.clone();
                     editing_cleanup = Some(tokio::spawn(async move {
+                        if let Err(error) = engine.store.expire_results().await { tracing::warn!("结果过期回收失败: {error}"); }
+                        // 忙会话稍后再处理，不阻塞事务或接入。
+                        let databases: Vec<_> = engine.state.lock().unwrap().databases.values().cloned().collect();
+                        for db in databases {
+                            if let Ok(mut session) = db.session.try_lock() {
+                                session.prune_results();
+                            }
+                        }
                         if let Err(error) = engine.editing_sweep().await { tracing::warn!("编辑会话回收失败: {error}"); }
                     }));
                 }
@@ -327,8 +356,11 @@ pub async fn run(root: PathBuf) -> Result<()> {
         }
     })
     .await;
+    // Blocking index workers must close their files before recovery and lock release.
+    engine.store.wait_input_index_workers().await;
     // 无人计时同时是已发送写入的宽限期；到期中断后按持久化阶段记录待确认结果。
     engine.store.recover_tasks().await?;
+    engine.store.transfer_recover().await?;
     let _ = std::fs::remove_file(descriptor);
     #[cfg(unix)]
     {
@@ -407,10 +439,13 @@ impl Engine {
         cancel: CancellationToken,
         transition: Arc<AsyncMutex<()>>,
     ) {
-        // 与 ExecutionSink::mark_sent 共用同一门：取消必须发生在发送前，或明确属于读操作。
+        // 单次写入取消只允许发生在发送前；分批迁移由自身 journal 在批次边界停止。
+        // 迁移任务的 sent 单调置真，不能据此拒绝停止后续尚未发送的批次。
         let _guard = transition.lock().await;
         match self.store.task(id).await {
-            Ok(task) if !task.sent || !task.may_write => cancel.cancel(),
+            Ok(task) if task.method == "transfer.submit" || !task.sent || !task.may_write => {
+                cancel.cancel()
+            }
             Ok(_) => (),
             Err(error) => tracing::error!("读取任务发送阶段失败，保留任务等待最终结果: {error}"),
         }
@@ -455,6 +490,9 @@ impl Engine {
                 cancel.cancel();
             }
             state.event_senders.remove(&owner);
+            state.transfers.remove_owner(owner);
+            state.projects.remove_owner(owner);
+            state.operations.remove_owner(owner);
             let dbs = state
                 .databases
                 .iter()

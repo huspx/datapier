@@ -197,6 +197,9 @@ impl App {
         }
     }
     pub(super) fn response(&mut self, response: Response, backend: &Backend) {
+        if self.project_layout_response(&response, backend) {
+            return;
+        }
         if response.tag.starts_with("workspace.load/")
             || response.tag.starts_with("workspace.load.read/")
             || response.tag == "workspace.load.cleanup"
@@ -208,9 +211,21 @@ impl App {
         if response.tag == "archery-release" {
             return;
         }
-        // 窗口租约续期的成功回执不能覆盖用户正在查看的执行状态。
-        if matches!(response.tag.as_str(), "window.bind" | "window.active")
-            && response.result.is_ok()
+        // prepare 会消费上传句柄；失败后的兜底清理可能返回 not_found，不能覆盖保存原因。
+        if response.tag == "project.upload.cleanup"
+            && (response.result.is_ok()
+                || response
+                    .result
+                    .as_ref()
+                    .is_err_and(|error| error.code == "not_found"))
+        {
+            return;
+        }
+        // 内部成功回执不能覆盖用户正在查看的执行状态或详情；失败仍走错误反馈。
+        if matches!(
+            response.tag.as_str(),
+            "window.bind" | "window.active" | "workspace.cleanup"
+        ) && response.result.is_ok()
         {
             return;
         }
@@ -272,6 +287,7 @@ impl App {
                 }
                 self.status = i18n::UiMessage::raw(e.to_string());
                 if response.tag == "connection.open" {
+                    self.project_layout_connection_failed();
                     self.workbench.connecting = false;
                     self.workbench.connection_error = Some(self.status.render().into_owned());
                     self.workbench.connection_tls_required = e.code == "tls_required";
@@ -312,7 +328,6 @@ impl App {
                         | "archery.sql_check"
                         | "resource.browse"
                         | "change.submit"
-                        | "transfer.import"
                         | "transfer.export"
                 ) {
                     self.operation_pending = false;
@@ -499,8 +514,10 @@ impl App {
                             self.refresh_query_mode(backend);
                             self.navigation_load_tree(backend, false);
                         }
+                        self.project_layout_connected(backend);
                     }
                     Err(e) => {
+                        self.project_layout_connection_failed();
                         let error = format!("数据库会话缺少有效连接信息: {e}");
                         self.workbench.connection_error = Some(error.clone());
                         self.status = i18n::UiMessage::raw(error);
@@ -733,7 +750,7 @@ impl App {
                 self.action("describe", backend);
             }
             "execution.start" | "archery.sql_check" | "resource.browse" | "change.submit"
-            | "transfer.import" | "transfer.export" => {
+            | "transfer.export" => {
                 self.operation_pending = false;
                 self.large = None;
                 let Some(task) = value.get("task_id").and_then(Value::as_str) else {
@@ -1021,6 +1038,7 @@ impl App {
                     if self.tabs[self.active].layout.len() == g.settings.len() {
                         g.settings = self.tabs[self.active].layout.clone();
                     }
+                    self.apply_project_columns(&mut g);
                     self.grid = Some(g);
                 }
                 Err(e) => {

@@ -66,7 +66,7 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
     let secret = Uuid::new_v4().to_string();
     let account = format!(
         "{:x}:{}",
-        Sha256::digest(store.root.to_string_lossy().as_bytes()),
+        base16ct::HexDisplay(&Sha256::digest(store.root.to_string_lossy().as_bytes())),
         profile.id
     );
     let entry = keyring::v1::Entry::new("io.datapier.credentials", &account).unwrap();
@@ -96,10 +96,10 @@ async fn credentials_survive_store_reopen_without_entering_sqlite() {
         // 未提供新密码时只更新配置，省略 save_secret 不应清除既有凭据。
         assert!(reopened.save_profile(&profile, None, false).await.unwrap());
         assert_eq!(entry.get_secret().unwrap(), secret.as_bytes());
-        let profile = reopened.profile(profile.id).await.unwrap();
+        let current = reopened.profile(profile.id).await.unwrap();
         assert!(
             !reopened
-                .save_profile(&profile, Some("session-only".into()), false)
+                .save_profile(&current, Some("session-only".into()), false)
                 .await
                 .unwrap()
         );

@@ -72,7 +72,7 @@ impl MysqlSession {
         let ddl_fingerprint = super::schema::fingerprint(&schema.ddl, &sql_mode);
         let fingerprint = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&(
+            base16ct::HexDisplay(&Sha256::digest(serde_json::to_vec(&(
                 &schema.target,
                 &schema.columns,
                 &schema.keys,
@@ -81,7 +81,7 @@ impl MysqlSession {
                 &view_fingerprint,
                 &sql_mode,
                 ddl_fingerprint
-            ))?)
+            ))?))
         );
         let key: BTreeMap<_, _> = names
             .iter()

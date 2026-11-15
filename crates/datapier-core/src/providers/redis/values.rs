@@ -16,8 +16,7 @@ elseif role == 'hash_value' and kind == 'hash' then
   if redis.call('HSTRLEN', KEYS[1], identity) > limit then return redis.error_reply('value exceeds budget') end
   result = redis.call('HGET', KEYS[1], identity)
   if result then
-    local major = tonumber(ARGV[5])
-    if major >= 8 then
+    if ARGV[5] == '1' then
       local expiry = redis.pcall('HPEXPIRETIME', KEYS[1], 'FIELDS', 1, identity)
       if type(expiry) ~= 'table' or type(expiry[1]) ~= 'number' or expiry[1] < -1 then
         return redis.error_reply('cannot read field expiration')
@@ -185,17 +184,11 @@ async fn snapshot(
     if edit.result_id != result_id {
         return Err(AppError::invalid("结果与编辑令牌不匹配"));
     }
-    let major = if role == "hash_value" {
+    let field_expiry_supported = if role == "hash_value" {
         let info: String = query(&mut edit.conn, &args(&["INFO", "server"])).await?;
-        info.lines()
-            .find_map(|line| {
-                line.strip_prefix("redis_version:")
-                    .and_then(|v| v.split('.').next())
-                    .and_then(|v| v.parse::<u32>().ok())
-            })
-            .ok_or_else(|| AppError::new("database", "无法确定 Redis 版本以保护字段过期时间"))?
+        transfer::supports_field_expiry(&info)?
     } else {
-        0
+        false
     };
     let (raw, field_expiry, score): (Option<Vec<u8>>, i64, Option<String>) = query(
         &mut edit.conn,
@@ -208,7 +201,11 @@ async fn snapshot(
             role.as_bytes().to_vec(),
             identity,
             limit.to_string().into_bytes(),
-            major.to_string().into_bytes(),
+            if field_expiry_supported {
+                b"1".to_vec()
+            } else {
+                b"0".to_vec()
+            },
         ],
     )
     .await?;

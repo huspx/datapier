@@ -958,6 +958,29 @@ const t = (key, values = {}) => {
     : message;
 };
 function translatePreview() {
+  const workbenchLabels = {
+    'exchange-sources': ['数据交换 · 来源与目标', 'Exchange · source and target'],
+    'exchange-objects': ['数据交换 · 对象与映射', 'Exchange · objects and mappings'],
+    'exchange-policy': ['数据交换 · 策略', 'Exchange · policy'],
+    'exchange-preview': ['数据交换 · 准备预览', 'Exchange · prepared preview'],
+    'exchange-running': ['数据交换 · 运行中', 'Exchange · running'],
+    'exchange-cancelled': ['数据交换 · 取消与部分生效', 'Exchange · cancelled and partially applied'],
+    'exchange-unknown': ['数据交换 · 结果未知', 'Exchange · outcome unknown'],
+    'exchange-failed': ['数据交换 · 失败与续作', 'Exchange · failure and continuation'],
+    'exchange-readonly': ['数据交换 · 只读', 'Exchange · read-only'],
+    'exchange-loading': ['数据交换 · 加载中', 'Exchange · loading'],
+    'exchange-empty': ['数据交换 · 空状态', 'Exchange · empty'],
+    'project-overview': ['项目 · 概览', 'Project · overview'],
+    'project-bindings': ['项目 · 本机绑定', 'Project · local bindings'],
+    'project-queries': ['项目 · 查询', 'Project · queries'],
+    'project-transfers': ['项目 · 迁移配置', 'Project · transfers'],
+    'project-save': ['项目 · 保存差异', 'Project · save changes'],
+    'project-conflict': ['项目 · 外部冲突', 'Project · external conflict'],
+    'project-recovery': ['项目 · 遗留资源', 'Project · leftover resources'],
+    'project-loading': ['项目 · 加载中', 'Project · loading'],
+    'project-empty': ['项目 · 空状态', 'Project · empty'],
+    'project-readonly': ['项目 · 只读', 'Project · read-only'],
+  };
   document.documentElement.lang = language;
   document.title = t('documentTitle');
   document.querySelector('.preview strong .muted').textContent = '/ '
@@ -972,7 +995,9 @@ function translatePreview() {
     const archeryLabel = archeryPreviewLabels[option.value];
     const mcpLabel = mcpPreviewLabels[option.value];
     const resultLabel = resultPreviewLabels[option.value];
-    option.textContent = mcpLabel
+    option.textContent = workbenchLabels[option.value]
+      ? workbenchLabels[option.value][language === 'zh-CN' ? 0 : 1]
+      : mcpLabel
       ? mcpLabel[language === 'zh-CN' ? 0 : 1]
       : archeryLabel
       ? archeryLabel[language === 'zh-CN' ? 0 : 1]

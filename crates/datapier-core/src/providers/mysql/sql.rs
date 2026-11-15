@@ -1,7 +1,7 @@
 use crate::model::{AppError, Result};
 use sqlparser::{
     ast::{
-        Expr, ObjectName, ObjectNamePart, Query, Select, SetExpr, ShowCreateObject,
+        Expr, InTarget, ObjectName, ObjectNamePart, Query, Select, SetExpr, ShowCreateObject,
         ShowStatementFilter, ShowStatementFilterPosition, ShowStatementOptions, Statement,
         TableFactor, Visit, Visitor,
     },
@@ -469,7 +469,7 @@ pub(super) fn readonly(input: &str) -> bool {
     if !stateless_lexically_safe(input) || !unambiguous_calls(input) {
         return false;
     }
-    // sqlparser 0.62 尚不解析 MySQL SHOW INDEX；仅允许受控表名形式。
+    // sqlparser 0.64 仍不专门解析 MySQL SHOW INDEX；仅允许受控表名形式。
     if let Some((show, rest)) = take_word(input.trim_start())
         && show.eq_ignore_ascii_case("SHOW")
         && let Some((index, rest)) = take_word(rest.trim_start())
@@ -608,8 +608,11 @@ impl Visitor for ReadonlyVisitor {
             | Expr::IsNotUnknown(_)
             | Expr::IsDistinctFrom(_, _)
             | Expr::IsNotDistinctFrom(_, _)
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
+            | Expr::In {
+                target: InTarget::List(_) | InTarget::Subquery(_),
+                global: false,
+                ..
+            }
             | Expr::Between { .. }
             | Expr::Like { .. }
             | Expr::RLike { .. }

@@ -4,7 +4,7 @@ use super::*;
 fn transfer_close_keeps_input_until_explicit_discard() {
     let (backend, _, _) = Backend::scripted();
     let mut app = App::new("modal-close".into());
-    app.action("overlay:export", &backend);
+    app.action("overlay:result-export", &backend);
     app.field_set("path", "/tmp/report.csv");
     app.action("overlay-close", &backend);
     assert!(app.workbench.overlay_close_confirm);
@@ -24,7 +24,7 @@ fn quit_requires_discarding_or_closing_dirty_modal() {
     let (backend, _, _) = Backend::scripted();
     let mut app = App::new("modal-quit".into());
     app.workspace_loaded = true;
-    app.action("overlay:export", &backend);
+    app.action("overlay:result-export", &backend);
     app.field_set("path", "/tmp/report.csv");
     assert!(!app.request_quit(&backend));
     assert!(app.workbench.overlay_close_confirm);
@@ -46,7 +46,7 @@ fn quit_selects_background_tab_with_dirty_modal() {
     let mut other = app.tabs[0].clone();
     other.id = Uuid::new_v4();
     app.tabs.push(other);
-    app.action("overlay:export", &backend);
+    app.action("overlay:result-export", &backend);
     app.field_set("path", "/tmp/report.csv");
     app.switch_tab(1);
     assert!(!app.request_quit(&backend));

@@ -717,6 +717,10 @@ impl App {
         let active = self.active;
         for index in std::iter::once(active).chain((0..self.tabs.len()).filter(|&i| i != active)) {
             self.switch_tab(index);
+            if self.workbench.project.is_pending() || self.workbench.transfer.busy() {
+                self.status = i18n::UiMessage::key("请等待或取消该 tab 的任务后再关闭");
+                return false;
+            }
             if self.workbench.overlay.is_some() {
                 if !self.workbench.overlay_close_confirm
                     && !self.advanced_value.confirm_close
@@ -764,7 +768,6 @@ impl App {
         self.switch_tab(active);
         result
     }
-
     // 没有可靠键或已登记文件时不能把行号当作身份写入工作区。
     fn workspace_draft_check(&self) -> Result<()> {
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -1034,6 +1037,8 @@ impl App {
                         profile_id: tab.profile_id,
                         id: tab.id,
                         layout: tab.layout.clone(),
+                        project_query: tab.project_query.clone(),
+                        project_columns: tab.project_columns.clone(),
                         browse: tab.browse.clone(),
                         schema_draft: self
                             .advanced_schema_draft(index)
@@ -1067,12 +1072,38 @@ impl App {
                             }
                             pending
                         }),
+                        workbench_draft: {
+                            let (workbench, view) = if index == self.active {
+                                (&self.workbench, &self.view)
+                            } else {
+                                (&tab.runtime.workbench, &tab.runtime.view)
+                            };
+                            let project = &workbench.project;
+                            let saved_project = project.project.as_ref().map(|p| json!({
+                                "root": p["root"], "manifest": p["manifest"], "digests": p["digests"], "baseline_manifest": project.baseline_manifest
+                            })).or_else(|| project.restored.clone());
+                            let project_prefix = format!("project-{}-", tab.id);
+                            let transfer_prefix = format!("transfer-{}-", tab.id);
+                            let fields: serde_json::Map<String, Value> = self.fields.iter()
+                                .filter(|(key, _)| key.starts_with(&project_prefix) || key.starts_with(&transfer_prefix))
+                                // 授权确认属于一次预览，不能随草稿恢复。
+                                .map(|(key, editor)| (key.clone(), if key.strip_prefix(&transfer_prefix) == Some("triggers-confirmed") { json!("false") } else { json!(editor.text) }))
+                                .collect();
+                            json!({"view":view,"fields":fields,"project":saved_project,
+                                "project_unsaved":project.unsaved,"transfer_files":project.transfer_files,
+                                "project_section":project.section,"transfer_files_count":workbench.transfer.files,
+                                "transfer_objects_count":workbench.transfer.objects,
+                                "transfer_stage":workbench.transfer.stage,
+                                "transfer_object_filters":workbench.transfer.object_filters,
+                                "transfer_project_mode":workbench.transfer.project_mode})
+                        },
                         pending_live: tab.pending_live,
                         runtime: TabRuntime::default(),
                     }
                 })
                 .collect(),
             active: self.active,
+            project_splits: self.project_layout.groups.clone(),
             pending: Value::Null,
             navigation_expanded: self.navigation.expanded,
             empty_context: if self.tabs.is_empty() {
@@ -1294,6 +1325,14 @@ impl App {
 
     pub(super) fn save_workspace(&mut self, backend: &Backend) {
         if !self.workspace_loaded || self.saving || self.save_blocked || !self.dirty {
+            return;
+        }
+        // 工作区序列化临时占用剩余额度；项目请求结束后再保存，避免抢占其准备预算。
+        if self.workbench.project.is_pending()
+            || self.tabs.iter().enumerate().any(|(index, tab)| {
+                index != self.active && tab.runtime.workbench.project.is_pending()
+            })
+        {
             return;
         }
         if let Err(error) = self.workspace_draft_scopes_check() {
@@ -1551,6 +1590,11 @@ impl App {
     }
     /// 用户切换需同时恢复键盘路由与宿主字段；后台临时 switch_tab 不触碰焦点。
     pub(super) fn focus_current_tab(&mut self) {
+        if let Some(key) = self.project_split_editor_key() {
+            self.focus = "query".into();
+            self.workbench.focus_request = Some(key);
+            return;
+        }
         let (focus, key) = if self.is_redis() && self.workbench.cli && self.target.is_none() {
             ("cli_text", "input-cli_text")
         } else if !self.is_redis() && self.target.is_none() {

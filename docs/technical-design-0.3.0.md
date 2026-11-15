@@ -2,7 +2,7 @@
 
 ## 1. 状态、依据与交付范围
 
-本文定义已确认需求对应的 **0.3.0 实施方案**，并在第 13.2 节记录当前实现与运行证据。功能代码、依赖、配置 schema 4 和 IPC v4 已接入；本机验证不代表六目标原生验收或正式发布。
+本文定义已确认需求对应的 **0.3.0 实施方案**，并在第 13.2 节记录该版本历史迭代的实现与运行证据。功能代码、依赖、配置 schema 4 和 IPC v4 为当时的基线；当前 0.4.0 候选使用 schema 5／IPC v5，见 [0.4.0 技术方案](technical-design-0.4.0.md)。历史本机验证不代表当前候选或六目标原生验收。
 
 设计依据为 [产品规划](product-plan.md)、[贡献指南](../CONTRIBUTING.md)、[0.1.0 技术方案](technical-design-0.1.0.md)、[0.1.1 技术方案](technical-design-0.1.1.md) 和 [0.2.0 技术方案](technical-design-0.2.0.md)。设计起点为 `feature/0.2.0` 的 `f922e3933dc26b849cb6efdf6ed995ea5af5ed58`；实施先接入该分支工作区，现已变基至合入 0.2.0 最终实现的 `main`（`1df742d`）。上游查询、授权、通知及 UI 修正与本版结构、替换和值编辑合并；历史测试结论不自动继承。
 
@@ -21,7 +21,7 @@
 | MCP | 沿用 0.2.0 的工具和 SQL／命令执行，不增加结构化变更、文件或进程启动工具 |
 | Archery | 保持只读，支持适用的值预览、结构 SQL 草拟、复制及已有 MySQL SQL 检查，不增加工单提交与执行 |
 
-数据库沿用 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点及已适配 Archery 来源。保留 macOS、Linux GNU、Windows MSVC 的 x86-64／arm64 六目标实现。本次实施仅验收 **macOS arm64、Tern 0.9.18 与 tern-sdk 0.2.0**；不要求本次验证 Tern 0.9.9 或其他平台。已实测 `tern --version` 为 `0.9.18 6f1fa0f`，不能据此认定候选运行验收完成。其他平台历史证据不作为本次门禁，正式发布仍按发布指南另行核对。
+数据库沿用 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点及已适配 Archery 来源。保留 macOS、Linux GNU、Windows MSVC 的 x86-64／arm64 六目标实现。0.3.0 历史迭代使用 **macOS arm64、Tern 0.9.18 与 tern-sdk 0.2.0**，当时实测 `tern --version` 为 `0.9.18 6f1fa0f`；这不是当前候选运行证据。当前开发基线见 [0.4.0 技术方案](technical-design-0.4.0.md#14-验收矩阵与运行证据)，正式发布仍按发布指南另行核对。
 
 ### 1.2 边界
 
@@ -542,9 +542,9 @@ MySQL `autocommit=0` 的隐式事务同样累计 MCP 已发送操作的授权范
 
 ### 13.2 本次完成状态
 
-本轮为 review 修复后的 macOS arm64 开发候选，使用 Tern 0.9.18、tern-sdk 0.2.0 与官方 SQLx 0.9。完成原生复验的 `target/debug/datapier` SHA-256 为 `70e6f26b13d7e71846b7d4764def9095307b5361fa115171611fa001a96b5375`，实际 plugin 缓存程序与其一致。以下仅记录当前代码实际完成的检查；修复前的正常 Tern 窗口证据移入 13.3，不能代替本候选复验。
+本节记录 0.3.0 review 修复后的历史 macOS arm64 开发候选，使用 Tern 0.9.18、tern-sdk 0.2.0 与官方 SQLx 0.9。完成当时原生复验的 `target/debug/datapier` SHA-256 为 `70e6f26b13d7e71846b7d4764def9095307b5361fa115171611fa001a96b5375`，实际 plugin 缓存程序与其一致。以下结果不代表当前 0.4.0 修复后通过；更早的正常 Tern 窗口证据保留在 13.3。
 
-| 范围 | 当前实际结果 |
+| 范围 | 当时实际结果 |
 |---|---|
 | 构建与默认回归 | 开发构建、Rust 格式检查、Clippy `--workspace --all-targets --locked -- -D warnings` 通过；workspace 默认测试 **619 passed／110 ignored** |
 | 真实 Core／Engine 生命周期 | MySQL 8.4 与 Redis 8.0 隔离实例下，Core 库内专项 **6 项**、Engine 库内专项 **14 项**通过；包含普通 MCP 查询与结果消费、2 MiB worker、流式关闭释放锁、授权预检 deadline／失联 EOF，以及跨库隐式事务撤权后的 COMMIT／BEGIN 拒绝 |

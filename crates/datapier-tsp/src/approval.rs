@@ -222,8 +222,7 @@ impl App {
             return true;
         }
         if let Some(id) = name.strip_prefix("approval-observe-task:") {
-            if Uuid::parse_str(id).is_ok() {
-                self.approvals.observe_task_pending = None;
+            if Uuid::parse_str(id).is_ok() && self.approvals.observe_task_pending.is_none() {
                 self.approvals.observed_task_id = Some(id.to_owned());
                 self.approvals.observed_task = None;
                 self.approvals.observed_result = None;
@@ -247,8 +246,8 @@ impl App {
                 .as_ref()
                 .and_then(|v| v["results"].as_array())
                 .is_some_and(|results| results.iter().any(|value| value.as_str() == Some(id)))
+                && self.approvals.observe_page_pending.is_none()
             {
-                self.approvals.observe_page_pending = None;
                 self.approvals.observed_result = Some(id.to_owned());
                 self.approvals.observed_page = None;
                 self.approvals.observed_history.clear();

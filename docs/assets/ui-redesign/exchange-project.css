@@ -1,0 +1,173 @@
+/* 功能样式局限在预览工作台，沿用外壳的主题变量。 */
+.xp-workbench {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--panel);
+  color: var(--fg);
+}
+.xp-workbench [role="alertdialog"] {
+  flex: 0 1 auto;
+  overflow: auto;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+.xp-workbench [role="alertdialog"] p {
+  margin: 0 0 8px;
+}
+.xp-table pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.xp-header, .xp-summary, .xp-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.xp-header > div {
+  flex: 1;
+  min-width: 0;
+}
+.xp-header h2 {
+  font-size: 15px;
+  margin: 0;
+}
+.xp-header p {
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+.xp-summary {
+  background: var(--card);
+  overflow-wrap: anywhere;
+}
+.xp-summary span:nth-child(2) {
+  flex: 1;
+  min-width: 140px;
+}
+.xp-tabs {
+  display: flex;
+  overflow-x: auto;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+}
+.xp-tabs button {
+  flex: 0 0 auto;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 10px;
+}
+.xp-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--fg);
+}
+.xp-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  overflow-wrap: anywhere;
+}
+.xp-body h3 {
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.xp-body h4 {
+  margin: 16px 0 8px;
+}
+.xp-body p {
+  line-height: 1.5;
+}
+.xp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.xp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.xp-field input, .xp-field select, .xp-field textarea {
+  width: 100%;
+  min-width: 0;
+}
+.xp-field textarea {
+  resize: vertical;
+  font-family: var(--mono);
+}
+.xp-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 8px 0;
+}
+.xp-choice input {
+  flex: 0 0 auto;
+}
+.xp-table {
+  overflow: auto;
+  max-width: 100%;
+  border: 1px solid var(--border);
+}
+.xp-table table {
+  border-collapse: collapse;
+  min-width: 100%;
+  text-align: left;
+}
+.xp-table th, .xp-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.xp-body details {
+  margin: 12px 0;
+}
+.xp-footer {
+  border-bottom: 0;
+  border-top: 1px solid var(--border);
+  justify-content: space-between;
+}
+.xp-footer > span {
+  flex: 1;
+  min-width: 130px;
+  overflow-wrap: anywhere;
+}
+.xp-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+@media (max-width: 760px) {
+  .xp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .xp-header, .xp-summary, .xp-footer {
+    padding: 8px 10px;
+  }
+}
+@media (max-height: 500px) {
+  .xp-header, .xp-summary, .xp-footer {
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+}
+.compact .sidebar-scroll > .section-heading:not(.connections-head),
+.compact [data-workbench-open] > span {
+  display: none;
+}
+.compact [data-workbench-open] {
+  width: 44px;
+  padding: 6px 8px;
+  justify-content: center;
+}

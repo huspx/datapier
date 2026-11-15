@@ -8,6 +8,7 @@ pub use redis::redis_contains_auth;
 use serde_json::Value as Json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// 一个数据库会话；枚举分派保留各 provider 的独立连接与操作语义。
 pub enum ProviderSession {
@@ -53,6 +54,18 @@ impl ProviderSession {
     pub fn invalidate_editing_metadata(&mut self) {
         if let Self::Mysql(session) = self {
             session.invalidate_editing_metadata();
+        }
+    }
+    /// 删除已释放结果的 provider 索引。
+    pub fn release_result(&mut self, id: Uuid) {
+        if let Self::Mysql(session) = self {
+            session.release_result(id);
+        }
+    }
+    /// 周期性清理已过期的 provider 结果索引。
+    pub fn prune_results(&mut self) {
+        if let Self::Mysql(session) = self {
+            session.prune_results();
         }
     }
     /// 在当前会话上执行 provider 方法；取消信号不保证服务端操作已撤销。

@@ -237,7 +237,6 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
         "resource.browse" => "浏览资源",
         "execution.start" | "execution.run" => "执行查询",
         "change.submit" => "提交变更",
-        "transfer.import" => "导入",
         "archery.sql_check" => "检查上线 SQL",
         "transfer.export" => "导出",
         _ => method,
@@ -455,6 +454,16 @@ pub(super) fn diagnostic_task(app: &App, value: &Value) -> Node<Msg> {
                 .child(html::strong(crate::i18n::tr("结果集").into_owned()))
                 .child(rows),
         );
+    }
+    if let Some(run_id) = value
+        .get("summary")
+        .and_then(|s| s.get("run_id"))
+        .and_then(Value::as_str)
+    {
+        section = section.child(button(
+            "打开迁移报告",
+            &format!("transfer-report-open:{run_id}"),
+        ));
     }
     let mut execution = html::div()
         .class("task-section")

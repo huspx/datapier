@@ -51,8 +51,7 @@ async fn result_pages_require_the_owner_and_obey_byte_limits() {
         assert_eq!(page["next"].as_u64(), Some(start));
     }
     assert_eq!(start, 45);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -92,8 +91,7 @@ async fn terminal_states_keep_real_start_and_monotonic_elapsed() {
         assert_eq!(task.started_at, Some(123.5));
         assert!(task.elapsed_ms.unwrap() >= 25);
     }
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -153,8 +151,7 @@ async fn cancelled_sent_batch_requires_complete_confirmed_rollback() {
         engine.finish_task(owner, task.id, &result, None).await;
         assert_eq!(engine.store.task(task.id).await.unwrap().state, expected);
     }
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -204,8 +201,7 @@ async fn release_invalidates_result_and_is_not_available_to_other_clients() {
             .code,
         "not_found"
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -258,6 +254,5 @@ async fn settings_are_shared_and_reject_unknown_language() {
             .unwrap()["language"],
         "zh-CN"
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

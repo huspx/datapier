@@ -14,8 +14,7 @@ async fn oversized_batch_response_leaves_frozen_baseline_unchanged() {
     let profiles = engine.store.profiles().await.unwrap();
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].name, original.name);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -67,7 +66,7 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
     .unwrap();
     assert_eq!(
         protocol::read(&mut peer).await.unwrap()["result"]["protocol_version"],
-        4
+        crate::protocol::VERSION
     );
     protocol::write(
         &mut peer,
@@ -97,8 +96,7 @@ async fn oversized_archery_profile_list_returns_bounded_error() {
         true
     );
     handler.await.unwrap();
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -193,8 +191,7 @@ async fn server_handoff_survives_last_owner_disconnect() {
             "completed handoff must permit idle shutdown"
         );
         drop(writer);
-        drop(engine);
-        let _ = std::fs::remove_dir_all(root);
+        crate::server::tests::cleanup(engine, root).await;
     }
 }
 
@@ -245,20 +242,20 @@ async fn sql_check_paginates_large_platform_details() {
     }
     assert_eq!(rows, 80);
     assert!(pages > 1);
-    let requests = fixture.requests.lock().unwrap();
-    assert!(
-        requests
-            .iter()
-            .any(|request| request.starts_with("POST /prefix/api/v1/workflow/sqlcheck/ "))
-    );
-    assert!(
-        !requests
-            .iter()
-            .any(|request| request.starts_with("POST /prefix/query/ "))
-    );
-    drop(requests);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.starts_with("POST /prefix/api/v1/workflow/sqlcheck/ "))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.starts_with("POST /prefix/query/ "))
+        );
+    }
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -321,7 +318,7 @@ async fn retained_export_survives_switch_and_auth_expiry_but_not_restart() {
     let interrupted = engine.store.create_task(owner, "restart", "execution.start", json!({"_task_context":{"connection":"one","provider":"mysql","source":"archery","database":"db_a","targets":[]}}), false).await.unwrap();
     engine.store.mark_sent(interrupted.id, false).await.unwrap();
     engine.disconnect(owner).await;
-    drop(engine);
+    crate::server::tests::shutdown(engine).await;
     let reopened = Store::open(&root).await.unwrap();
     reopened.recover_tasks().await.unwrap();
     let recovered = reopened.task(interrupted.id).await.unwrap();
@@ -337,8 +334,9 @@ async fn retained_export_survives_switch_and_auth_expiry_but_not_restart() {
         "not_found"
     );
     assert_eq!(fixture.count(), before);
+    reopened.pool.close().await;
     drop(reopened);
-    let _ = std::fs::remove_dir_all(root);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -378,8 +376,7 @@ async fn direct_only_profile_list_keeps_existing_response_limit() {
         result["profiles"][0]["name"].as_str().unwrap().len(),
         5 * 1024 * 1024
     );
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 async fn queued_profile_handoff_survives_disconnect() {
@@ -422,8 +419,7 @@ async fn queued_profile_handoff_survives_disconnect() {
     let saved = engine.store.profiles().await.unwrap();
     assert!(saved.iter().any(|profile| profile.id == profile_id));
     assert!(engine.state.lock().unwrap().stop_if_idle());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }
 
 #[tokio::test]
@@ -484,6 +480,5 @@ async fn queued_profile_delete_survives_owner_disconnect() {
     outcome.unwrap();
     assert!(engine.store.profiles().await.unwrap().is_empty());
     assert!(engine.state.lock().unwrap().stop_if_idle());
-    drop(engine);
-    let _ = std::fs::remove_dir_all(root);
+    crate::server::tests::cleanup(engine, root).await;
 }

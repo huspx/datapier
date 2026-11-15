@@ -1,7 +1,7 @@
 //! CSV／版本化 JSON 的文件导入、导出和有限样本预览。
 //! 结果按页读取、导入按批提交；失败报告保留已完成进度，不暗示跨批回滚。
 
-mod export;
+pub(crate) mod export;
 mod json;
 mod mysql_import;
 mod preview;
@@ -514,7 +514,7 @@ async fn insert_batch(
         }
     }
 }
-fn unescape(s: &str) -> Result<String> {
+pub(crate) fn unescape(s: &str) -> Result<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -525,7 +525,7 @@ fn unescape(s: &str) -> Result<String> {
     }
     Ok(out)
 }
-fn csv_typed(s: String, col: &Column, binary: bool) -> Result<Value> {
+pub(crate) fn csv_typed(s: String, col: &Column, binary: bool) -> Result<Value> {
     let ty = col.type_name.to_ascii_uppercase();
     let base = ty
         .split(|c: char| c == '(' || c.is_ascii_whitespace())

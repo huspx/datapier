@@ -36,15 +36,15 @@
     "**/*-lock.json"
   ],
   "plugins": [
-    "npm:@dprint/typescript@0.96.1",
-    "npm:@dprint/json@0.25.2",
-    "npm:@dprint/toml@0.9.0",
+    "npm:@dprint/typescript@0.101.0",
+    "npm:@dprint/json@0.26.0",
+    "npm:@dprint/toml@0.10.0",
     "npm:dprint-plugin-markup@0.27.6",
-    "npm:dprint-plugin-malva@0.16.0",
+    "npm:dprint-plugin-malva@0.16.1",
     "npm:dprint-plugin-yaml@0.6.0",
-    "npm:@dprint/sql@0.4.1",
-    "npm:@dprint/shfmt@0.1.2",
-    "npm:@dprint/stylua@0.1.0",
-    "npm:@dprint/ruff@0.11.3"
+    "npm:@dprint/sql@0.5.0",
+    "npm:@dprint/shfmt@0.2.0",
+    "npm:@dprint/stylua@0.2.0",
+    "npm:@dprint/ruff@0.12.2"
   ]
 }

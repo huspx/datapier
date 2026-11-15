@@ -1,6 +1,9 @@
 //! 执行结果、发送阶段控制和数据交换。
 
+pub mod data_files;
+pub mod migration;
 pub mod replace;
+pub mod sql_restore;
 pub mod transfer;
 use crate::{Result, Store, model::*};
 use serde_json::Value as Json;
@@ -23,7 +26,10 @@ pub struct ExecutionSink {
     cancel: CancellationToken,
     profile: Option<(Uuid, u64, Arc<Mutex<()>>)>,
     profile_dispatched: Arc<AtomicBool>,
+    transfer_profiles: Vec<(Uuid, u64, Arc<Mutex<()>>)>,
     send_gate: Option<SendGate>,
+    transfer_step: Option<(Uuid, u64)>,
+    owner: Option<Uuid>,
 }
 impl ExecutionSink {
     pub fn new(store: Store, execution_id: Uuid) -> Self {
@@ -34,7 +40,10 @@ impl ExecutionSink {
             cancel: CancellationToken::new(),
             profile: None,
             profile_dispatched: Arc::new(AtomicBool::new(false)),
+            transfer_profiles: Vec::new(),
             send_gate: None,
+            transfer_step: None,
+            owner: None,
         }
     }
     /// 设置与取消方共享的状态转换锁和取消信号。
@@ -52,6 +61,11 @@ impl ExecutionSink {
         self.profile = Some((id, revision, lock));
         self
     }
+    /// 迁移在每个发送边界检查全部冻结配置，避免长事务占用配置门。
+    pub fn with_transfer_profiles(mut self, profiles: Vec<(Uuid, u64, Arc<Mutex<()>>)>) -> Self {
+        self.transfer_profiles = profiles;
+        self
+    }
     /// 与会话关闭共享发送门，并在门内校验会话归属。
     pub fn with_send_gate(
         mut self,
@@ -60,6 +74,59 @@ impl ExecutionSink {
     ) -> Self {
         self.send_gate = Some((gate, check));
         self
+    }
+    /// 绑定迁移步骤，使发送事实和逐项日志在同一持久化事务中提交。
+    pub fn with_transfer_step(mut self, run_id: Uuid, ordinal: u64) -> Self {
+        self.transfer_step = Some((run_id, ordinal));
+        self
+    }
+    pub fn with_owner(mut self, owner: Uuid) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+    async fn transfer_owner(&self) -> Result<Uuid> {
+        match self.owner {
+            Some(owner) => Ok(owner),
+            None => Ok(self.store.task(self.execution_id).await?.owner),
+        }
+    }
+    /// 临时资源在首次远端创建之前登记；登记失败时调用方不能发送创建命令。
+    pub async fn register_transfer_artifact(&self, kind: &str, identity: Json) -> Result<Uuid> {
+        self.store
+            .transfer_register_artifact(
+                self.transfer_owner().await?,
+                self.transfer_step.map(|step| step.0),
+                kind,
+                &identity,
+            )
+            .await
+    }
+    /// 标记轮换先更新候选身份，确保响应丢失后仍可验证临时对象归属。
+    pub async fn update_transfer_artifact(&self, id: Uuid, identity: Json) -> Result<()> {
+        let current = self.store.transfer_artifact(id).await?;
+        self.store
+            .transfer_update_artifact(
+                id,
+                self.transfer_owner().await?,
+                Some(current.revision),
+                "ready",
+                Some(&identity),
+            )
+            .await?;
+        Ok(())
+    }
+    pub async fn finish_transfer_artifact(&self, id: Uuid, state: &str) -> Result<()> {
+        let current = self.store.transfer_artifact(id).await?;
+        self.store
+            .transfer_update_artifact(
+                id,
+                self.transfer_owner().await?,
+                Some(current.revision),
+                state,
+                None,
+            )
+            .await?;
+        Ok(())
     }
     /// 创建尚未完成的结果并返回其 ID。
     pub async fn start(&self, columns: Vec<Column>, kind: &str) -> Result<Uuid> {
@@ -106,6 +173,17 @@ impl ExecutionSink {
             }
             _ => None,
         };
+        let mut _transfer_guards = Vec::with_capacity(self.transfer_profiles.len());
+        for (id, revision, lock) in &self.transfer_profiles {
+            let guard = lock.lock().await;
+            if self.store.profile(*id).await?.revision != *revision {
+                return Err(AppError::new(
+                    "invalidated",
+                    "连接设置已变化，请重新准备迁移",
+                ));
+            }
+            _transfer_guards.push(guard);
+        }
         let _send_guard = match &self.send_gate {
             Some((gate, check)) => {
                 let guard = gate.lock().await;
@@ -115,7 +193,13 @@ impl ExecutionSink {
             None => None,
         };
         ensure_not_cancelled(&self.cancel)?;
-        self.store.mark_sent(self.execution_id, may_write).await?;
+        if let Some((run_id, ordinal)) = self.transfer_step {
+            self.store
+                .transfer_mark_sent(self.execution_id, run_id, ordinal, may_write)
+                .await?;
+        } else {
+            self.store.mark_sent(self.execution_id, may_write).await?;
+        }
         self.profile_dispatched.store(true, Ordering::Release);
         Ok(())
     }

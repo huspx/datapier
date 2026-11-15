@@ -250,7 +250,12 @@ async fn hash_field_updates_and_renames_preserve_expiry() {
         .query_async(&mut f.conn)
         .await
         .unwrap();
-    f.submit(&t, json!([{"operation":"hash_set","field":bytes("old"),"value":bytes("updated"),"preserve_field_ttl":true}])).await.unwrap();
+    f.submit(
+        &t,
+        json!([{"operation":"hash_set","field":bytes("old"),"value":bytes("updated")}]),
+    )
+    .await
+    .unwrap();
     f.submit(&t, json!([{"operation":"hash_replace_field","field":bytes("old"),"new_field":bytes("new"),"value":bytes("renamed")}])).await.unwrap();
     let actual: Vec<i64> = redis::cmd("HPEXPIRETIME")
         .arg(&t.name)
@@ -274,6 +279,23 @@ async fn hash_field_updates_and_renames_preserve_expiry() {
         .await
         .unwrap();
     assert_eq!(value, "renamed");
+    f.submit(
+        &t,
+        json!([{"operation":"hash_set","field":bytes("added"),"value":bytes("v")}]),
+    )
+    .await
+    .unwrap();
+    f.submit(&t, json!([{"operation":"hash_set","field":bytes("new"),"value":bytes("cleared"),"preserve_field_ttl":false}])).await.unwrap();
+    let deadlines: Vec<i64> = redis::cmd("HPEXPIRETIME")
+        .arg(&t.name)
+        .arg("FIELDS")
+        .arg(2)
+        .arg("added")
+        .arg("new")
+        .query_async(&mut f.conn)
+        .await
+        .unwrap();
+    assert_eq!(deadlines, vec![-1, -1]);
     f.close().await;
 }
 

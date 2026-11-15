@@ -22,6 +22,111 @@ fn quit_keeps_drafts_when_workspace_save_fails() {
 }
 
 #[test]
+fn workspace_cleanup_ack_preserves_feedback_but_reports_failures() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("cleanup-feedback".into());
+    app.status = "查询已完成".into();
+    app.detail = "当前查询的执行详情".into();
+    app.routed_response(
+        Response {
+            tag: "workspace.cleanup".into(),
+            result: Ok(json!({"closed":true})),
+        },
+        &backend,
+    );
+    assert_eq!(app.status.render(), "查询已完成");
+    assert_eq!(app.detail, "当前查询的执行详情");
+    app.routed_response(
+        Response {
+            tag: "workspace.cleanup".into(),
+            result: Err(AppError::new("io", "工作区清理失败")),
+        },
+        &backend,
+    );
+    assert!(app.status.render().contains("工作区清理失败"));
+}
+
+#[test]
+fn project_upload_cleanup_preserves_save_failure() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("project-save-feedback".into());
+    app.status = "resource_limit: 客户端内存预算已用尽".into();
+    app.detail = "待保存查询的详情".into();
+    for result in [
+        Ok(json!({"cancelled":true})),
+        Err(AppError::new("not_found", "上传不存在或已过期")),
+    ] {
+        app.routed_response(
+            Response {
+                tag: "project.upload.cleanup".into(),
+                result,
+            },
+            &backend,
+        );
+        assert_eq!(app.status.render(), "resource_limit: 客户端内存预算已用尽");
+        assert_eq!(app.detail, "待保存查询的详情");
+    }
+    app.routed_response(
+        Response {
+            tag: "project.upload.cleanup".into(),
+            result: Err(AppError::new("io", "上传清理失败")),
+        },
+        &backend,
+    );
+    assert!(app.status.render().contains("上传清理失败"));
+}
+
+#[test]
+fn autosave_waits_for_active_and_background_project_requests() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-autosave".into());
+    app.workspace_loaded = true;
+    app.dirty = true;
+    app.workbench.project.project = Some(json!({"project_id":Uuid::new_v4(),"manifest":{}}));
+    assert!(app.project_action("project-ui-save-prepare", &backend));
+    let upload = requests.try_recv().unwrap();
+    app.save_workspace(&backend);
+    assert!(requests.try_recv().is_err());
+    assert!(app.dirty && !app.saving && !app.save_blocked);
+
+    app.create_query_tab();
+    app.save_workspace(&backend);
+    assert!(requests.try_recv().is_err());
+    assert!(app.dirty && !app.saving && !app.save_blocked);
+
+    app.routed_response(
+        Response {
+            tag: upload.tag,
+            result: Err(AppError::new("resource_limit", "准备失败")),
+        },
+        &backend,
+    );
+    app.save_workspace(&backend);
+    assert_eq!(requests.try_recv().unwrap().method, "workspace.save.begin");
+    assert!(app.saving);
+}
+
+#[test]
+fn project_save_waits_for_workspace_save_without_losing_query() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("workspace-project-save".into());
+    let query_key = app.project_key("query-text");
+    app.field_set(&query_key, "SELECT '草稿😀'");
+    app.workbench.project.project = Some(json!({"project_id":Uuid::new_v4(),"manifest":{}}));
+    app.saving = true;
+    assert!(app.project_action("project-ui-save-prepare", &backend));
+    assert!(requests.try_recv().is_err());
+    assert_eq!(app.field(&query_key), "SELECT '草稿😀'");
+
+    app.saving = false;
+    assert!(app.project_action("project-ui-save-prepare", &backend));
+    assert_eq!(
+        requests.try_recv().unwrap().method,
+        "project.save.upload.begin"
+    );
+}
+
+#[test]
 fn saved_grid_edit_disappears_from_snapshot_after_undo() {
     let mut app = App::new("test".into());
     let mut grid = editable_grid();

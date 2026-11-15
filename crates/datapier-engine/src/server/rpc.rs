@@ -44,7 +44,7 @@ impl Engine {
         self: &Arc<Self>,
         owner: Uuid,
         method: &str,
-        params: Value,
+        mut params: Value,
         internal: bool,
     ) -> Result<Value> {
         self.active(owner)?;
@@ -81,6 +81,28 @@ impl Engine {
                 _ => (),
             }
         }
+        if method.starts_with("project.") || method.starts_with("transfer.") {
+            if context.kind != model::ClientKind::Tsp {
+                return Err(AppError::new(
+                    "permission_denied",
+                    "数据交换与项目操作仅供 TSP 工作台使用",
+                ));
+            }
+            if let Some(workspace) = params.get("workspace_id") {
+                if workspace.as_str() != Some(context.workspace.as_str()) {
+                    return Err(AppError::new(
+                        "permission_denied",
+                        "请求不属于当前客户端工作区",
+                    ));
+                }
+            } else {
+                params
+                    .as_object_mut()
+                    .ok_or_else(|| AppError::invalid("请求参数必须是对象"))?
+                    .insert("workspace_id".into(), json!(context.workspace));
+            }
+        }
+
         let owner_cancel = self
             .state
             .lock()
@@ -221,9 +243,11 @@ impl Engine {
             "database.list" => self.discover_databases(owner, &params).await,
             "profile.rules.get" => {
                 let id: Uuid = model::param(&params, "profile_id")?;
+                let lock = self.profile_lock(id);
+                let _guard = lock.lock().await;
                 let profile = self.store.profile(id).await?;
                 Ok(
-                    json!({"profile_id":id,"revision":profile.revision,"rules":self.store.mcp_rules(id).await?}),
+                    json!({"profile_id":id,"revision":profile.revision,"rules":self.store.mcp_rules(id).await?,"approval_policy":profile.approval_policy}),
                 )
             }
             "profile.rules.set" => {
@@ -240,6 +264,20 @@ impl Engine {
             "cache.retired.clear" => {
                 let expected: Value = model::param(&params, "expected_preview")?;
                 self.store.clear_retired_cache(&expected).await
+            }
+            method
+                if method.starts_with("project.") || method.starts_with("transfer.artifact.") =>
+            {
+                self.project_rpc(owner, method, params).await
+            }
+            method
+                if method.starts_with("transfer.")
+                    && !matches!(
+                        method,
+                        "transfer.export" | "transfer.import" | "transfer.preview"
+                    ) =>
+            {
+                self.transfer_rpc(owner, method, params).await
             }
             method if method.starts_with("archery.") => {
                 self.archery_rpc(owner, method, params).await
@@ -810,7 +848,7 @@ impl Engine {
                 if self.store.task(meta.execution_id).await?.owner != owner {
                     return Err(AppError::new("permission_denied", "观察者不能释放结果"));
                 }
-                self.store.release_result(id).await?;
+                self.release_result_recipe(id, meta.execution_id).await?;
                 Ok(json!({"released":true}))
             }
             "file.open" => {

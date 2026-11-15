@@ -176,10 +176,10 @@ function connectionFormBody() {
 function connectionTimeouts(form) {
   if (form.provider !== 'mysql') return '';
   return `<details class="wide"><summary>${az('超时设置', 'Timeout settings')}</summary><div class="fields">${
-    [['mysqlConnectTimeout', az('连接超时（秒，留空继承全局）', 'Connect timeout (seconds; empty inherits global)')], [
-      'mysqlQueryTimeout',
-      az('执行超时（秒，留空继承全局）', 'Execution timeout (seconds; empty inherits global)'),
-    ]]
+    [
+      ['mysqlConnectTimeout', az('连接超时（秒，留空继承全局）', 'Connect timeout (seconds; empty inherits global)')],
+      ['mysqlQueryTimeout', az('执行超时（秒，留空继承全局）', 'Execution timeout (seconds; empty inherits global)')],
+    ]
       .map(([key, label]) =>
         `<label>${h(label)}<input type="number" min="1" max="86400" step="1" data-connection-field="${key}" value="${
           h(form[key])
@@ -272,12 +272,13 @@ function viewResourcePreview() {
     `<p class="archery-note">${
       az('只读示例数据；未连接数据库或发送请求。', 'Read-only example data; no database connection or request is made.')
     }</p><h3>${az('结构', 'Structure')}</h3><div class="table-wrap">${
-      simpleTable([t('field'), t('type'), 'NULL', az('注释', 'Comment')], [[
-        'status',
-        'VARCHAR(32)',
-        az('是', 'Yes'),
-        az('未提供', 'Not provided'),
-      ], ['order_count', 'BIGINT', az('否', 'No'), az('未提供', 'Not provided')]])
+      simpleTable(
+        [t('field'), t('type'), 'NULL', az('注释', 'Comment')],
+        [
+          ['status', 'VARCHAR(32)', az('是', 'Yes'), az('未提供', 'Not provided')],
+          ['order_count', 'BIGINT', az('否', 'No'), az('未提供', 'Not provided')],
+        ],
+      )
     }</div><h3>${az('数据', 'Data')}</h3><div class="table-wrap">${
       simpleTable(['status', 'order_count'], [['active', '3'], ['complete', '8']])
     }</div>`,
@@ -356,10 +357,17 @@ function connectionCard(provider) {
   }<span class="connection-badge status-${status}" aria-hidden="true"></span></span><span class="connection-copy"><span class="connection-title"><span class="connection-name">${name}</span></span><span class="connection-sub">${address}</span></span></button>`;
 }
 function sidebar() {
+  const workbenches = `<button class="tree-line" data-workbench-open="exchange" title="${
+    az('数据交换与迁移', 'Data exchange and migration')
+  }" aria-label="${az('数据交换与迁移', 'Data exchange and migration')}">${icon('repeat')} <span>${
+    az('数据交换与迁移', 'Data exchange and migration')
+  }</span></button><button class="tree-line" data-workbench-open="project" title="${
+    az('项目', 'Projects')
+  }" aria-label="${az('项目', 'Projects')}">${icon('layers')} <span>${az('项目', 'Projects')}</span></button>`;
   return `<aside class="sidebar"><button class="brand brand-toggle" data-action="navigation-toggle" title="${
     state.compact ? t('expandSidebar') : t('collapseSidebar')
   }" aria-label="${state.compact ? t('expandSidebar') : t('collapseSidebar')}" aria-expanded="${!state
-    .compact}"><img class="brand-mark" src="assets/datapier.svg" alt="" aria-hidden="true" draggable="false"><span class="brand-name">Datapier</span></button><div class="sidebar-scroll"><div class="section-heading connections-head"><span class="connection-heading">${
+    .compact}"><img class="brand-mark" src="assets/datapier.svg" alt="" aria-hidden="true" draggable="false"><span class="brand-name">Datapier</span></button><div class="sidebar-scroll">${workbenches}<div class="section-heading connections-head"><span class="connection-heading">${
     t('connections')
   }</span><span class="spacer connection-heading"></span>${
     previewSource === 'archery'

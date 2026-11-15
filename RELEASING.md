@@ -2,7 +2,7 @@
 
 ## 当前发布方式与边界
 
-最新正式稳定版为 [0.2.0](https://github.com/huspx/datapier/releases/tag/v0.2.0)，于 2026-11-07 发布。历史版本 0.1.0 于 2026-11-01 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。正式分发入口为 [GitHub Releases](https://github.com/huspx/datapier/releases)。`.github/workflows/native-release.yml` 在目标为 `main` 的 pull request、`main` 的 push 和手动触发时执行格式检查与六目标原生构建、测试、smoke 和单目标打包。PR 与非 main 手动运行仅保留 runner 内临时文件；main push 或 main 手动运行将打包结果直接上传版本草稿 Release，汇总后补齐 plugin 包和校验清单。全部路径均不上传 Actions artifact，不占用其产物保留空间。普通工作分支和 tag 的 push 不自动触发；草稿不会自动发布，也不设为 latest。
+[0.3.0](https://github.com/huspx/datapier/releases/tag/v0.3.0) 于 2026-11-14（UTC）正式发布；各版本的当前发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。历史版本 0.1.0 于 2026-11-01 正式公开，tag `v0.1.0` 对应提交 `fadaec502e4926f32c7d5aa0ef752f0c335a07a9`。`.github/workflows/native-release.yml` 在目标为 `main` 的 pull request、`main` 的 push 和手动触发时执行格式检查与六目标原生构建、测试、smoke 和单目标打包。PR 与非 main 手动运行仅保留 runner 内临时文件；main push 或 main 手动运行将打包结果直接上传版本草稿 Release，汇总后补齐 plugin 包和校验清单。全部路径均不上传 Actions artifact，不占用其产物保留空间。普通工作分支和 tag 的 push 不自动触发；草稿不会自动发布，也不设为 latest。
 
 [技术方案第 11 节](docs/technical-design-0.1.0.md#11-实现与运行记录)汇总既有 macOS arm64 运行证据和未验收范围；其余五个目标尚未完成完整原生验收。0.1.0 经维护者明确接受已披露的验收范围后公开，例外与限制保留在对应 Release 说明中；该次授权不代表其余平台已验收，也不自动放宽后续版本的发布要求。六目标产物、组包及候选版本运行结果均须按发布前检查核实。
 
@@ -12,7 +12,7 @@
 
 ## 版本号与关联文件
 
-根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前开发版本为 `0.3.0`，不代表已正式发布。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本；修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本，不手工编辑锁文件。组包当前支持无前导零的三段数字版本，不支持预发布后缀。
+根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前本地候选版本为 `0.4.0`，不代表已正式发布。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本；修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本，不手工编辑锁文件。组包当前支持无前导零的三段数字版本，不支持预发布后缀。
 
 修改根版本后，先同步源码 plugin，再更新 CHANGELOG 对应版本章节并运行只读发布检查。源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。PR 与 main 的 CI 均执行同一检查，草稿准备、上传和汇总入口也会在访问 GitHub 前检查；plugin 版本不一致、CHANGELOG 首个章节不匹配根版本、版本章节重复或当前章节缺少实际变更条目时失败。检查不会修改文件，也不查询或推断线上发布状态。
 
@@ -39,24 +39,34 @@ python3 scripts/version.py --check-release
 
 根目录 [CHANGELOG.md](CHANGELOG.md) 由贡献者人工维护，记录变更内容；文档职责与分类口径见[贡献指南的文档职责与阅读顺序](CONTRIBUTING.md#文档职责与阅读顺序)。新功能尚未发布期间的内部修正不逐条记入“修复”。工作流只维护草稿中的构建身份和完成状态，保留人工说明，不自动生成正式发布说明或回写发布状态。版本章节存在、CI 成功、tag 或 Release 草稿存在，都不等于正式发布完成。
 
-- 日常变更直接记入根产品版本对应的章节，例如 `## 0.2.0`；当前版本必须是首个二级章节，至少包含一条实际变更，不再使用独立的 Unreleased 暂存章节。版本号提升时新增下一版本章节，既有历史章节保留。
+- 日常变更直接记入根产品版本对应的章节，例如 `## 0.4.0`；当前版本必须是首个二级章节，至少包含一条实际变更，不再使用独立的 Unreleased 暂存章节。版本号提升时新增下一版本章节，既有历史章节保留。
 - 发布准备 PR 核对该版本内容，并同步版本号、安装器和组包配置。版本章节是该提交的内容快照，不加“待发布／已发布”标记，也不预填实际发布日期。
 - 维护者在 GitHub 发布草稿时改变实际发布状态：`draft=true` 为草稿，`draft=false` 且 `prerelease=true` 为预发布，`draft=false` 且 `prerelease=false` 为正式公开；实际发布时间使用 `published_at`。CHANGELOG 不回写状态，资源完整性、摘要及安装验证仍须另行核对。
 - 构建或上传失败时保留草稿和诊断，不声称组包完成。需要重跑时选择整个工作流，使六目标使用同一个新的 attempt；旧 attempt 或其他提交的任务不能向当前草稿续传。源码改变时重新完成构建和验证，不混用不同提交的资源，不移动已经公开的版本 tag。
 - 发布成功后不再自动提交一次“改为已发布”的 CHANGELOG 更新，不改写已验证 tag；发布时间、正式下载验证和验收范围写入 GitHub Release 说明。开始下一轮开发时提升根产品版本并新增对应 CHANGELOG 章节；保留已发布的历史内容。
 
-维护者结合变更记录和 [0.3.0 技术方案验收记录](docs/technical-design-0.3.0.md#132-本次完成状态)人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。历史版本记录不替代本版本证据。
+维护者结合变更记录与该版本真实验收记录人工整理发布说明：列出功能与兼容性变化、支持范围、已知限制、各平台的实际 OS／glibc、Tern、数据库版本及验证结果，并说明未执行的检查。历史版本证据不能代替本候选验收。
 
 ## 发布前检查
 
-按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)和[0.3.0 验收要求](docs/technical-design-0.3.0.md#131-必须观察的行为)完成适用检查，并回归既有 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)，记录实际命令和结果。本轮 0.3.0 实施验收仅覆盖 macOS arm64、Tern 0.9.18；其他五个原生目标及六目标 CI 不作为本轮门禁，六目标实现与现有分发构建流程保留。后续按现有流程发布完整六目标附件时，仍须执行对应构建、组包与资源核对。编译、默认测试和版本 smoke 不等于原生运行或端到端验收；默认测试不包含默认忽略的真实数据库专项。
+按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)完成适用检查，记录实际命令和结果。0.4.0 的现有原生运行证据来自 macOS arm64，六目标 CI 的构建与打包结果须按最终候选提交核对。必要的真实数据库、TSP、TLS、凭据及安装检查须针对候选提交核实；默认测试不包含默认忽略的真实数据库专项，构建结果与实际运行记录分别报告。
 
 - 使用隔离的真实 MySQL 5.7／8.0／8.4 和 Redis 6.2／7.2／8.0 单节点，按实际版本验证连接、查询、编辑提交、导入导出、只读、并发冲突与取消；覆盖大整数、精确小数、NULL、二进制、普通空结果、多结果、写入断连不重放、Redis List 重复值、WATCH 与 TTL。数据库测试只创建并清理自身隔离资源，不使用生产数据或真实凭据作为样本。
 - 在实际 Tern 中验证完整交互，包括中文／emoji、选区、分页、大字段、草稿恢复、两个 UI、十万行全量导出及百万 key 增量扫描；观察 IPC、客户端退出及 Engine 收尾的进程和资源状态。验证 TLS 成功连接及错误 CA／身份拒绝、系统凭据存取和凭据服务不可用时的行为，确保日志、配置、导出和运行描述不含秘密。
-- 在目标平台分别验证独立二进制解包、普通终端 TUI、MCP stdio 客户端和 Tern 工作台，以及安装、IPC 权限、系统凭据和退出恢复；记录实际系统、Tern、数据库与依赖版本。Linux 还需核对 Secret Service，Windows 核对 Named Pipe 当前用户权限、拒绝远程客户端、ConPTY／OSC 877、文件锁和 `.exe` 路径。
-- 核对 README 的安装、功能和平台描述与实际结果一致，保留 [MIT License](LICENSE) 及第三方分发要求。0.1.0 的 MySQL／Redis 单节点范围及不支持项目以 [README](README.md) 和[技术方案](docs/technical-design-0.1.0.md#1-目标与范围)为准，不以配置或单一平台结果扩大支持声明。
+- 在 macOS arm64 验证干净安装、下载与 SHA-256 校验、缓存复用、启动、IPC 权限、Keychain 和退出恢复，记录系统、Tern、数据库及依赖版本。其他平台分别核对 Secret Service、Windows Named Pipe 当前用户权限及拒绝远程客户端、ConPTY／OSC 877、文件锁和 `.exe` 路径等相关实现及适用运行范围；不得将未执行的检查写为通过。
+- 核对 README 的安装、功能和平台描述与实际结果一致，保留 [MIT License](LICENSE) 及第三方分发要求。MySQL／Redis 单节点范围及不支持项目以 [README](README.md) 为准，不以配置或单一平台结果扩大支持声明。
 
-本轮要求的 macOS arm64 运行验收与构建结果应能关联具体候选二进制、构建产物和环境；其余五个平台的未执行项不作为本轮验收阻塞。详细场景见 [0.3.0 技术方案第 13 节](docs/technical-design-0.3.0.md#13-验收与证据)，通知验收覆盖窗口 toast、审批／认证待办、单一控制者及离线路由；系统通知与通知点击定位列入后续规划。正式发布时仍须按实际分发范围核对资源；发布前对候选包和隔离下载源的安装验证，不能写成正式下载地址已可用。
+本轮要求的 macOS arm64 运行验收与构建结果应能关联具体候选二进制、构建产物和环境；其余五个平台的未执行项不作为本轮验收阻塞。详细场景见 [0.4.0 验收矩阵](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)及既有版本技术方案，通知验收沿用窗口 toast、审批／认证待办、单一控制者及离线路由；系统通知与通知点击定位列入后续规划。正式发布时仍须按实际分发范围核对资源；发布前对候选包和隔离下载源的安装验证，不能写成正式下载地址已可用。
+
+### 0.4.0 发布准备核对
+
+当前源码、plugin 与 CHANGELOG 的版本均为 `0.4.0`，IPC v5／配置 schema 5 的升级与回退要求见 [README](README.md) 和[技术方案第 9 节](docs/technical-design-0.4.0.md#9-本地持久化与升级)。本地检查与真实运行证据见[技术方案第 14 节](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)；正式发布前仍需完成以下核对：
+
+| 环节 | 当前证据与待完成项 |
+|---|---|
+| 最终提交与六目标 CI | 本地检查不能代替 PR 和合并后 main 的 workflow。核对最终 SHA、run ID 与 attempt 对应的结果，七个附件必须来自同一次最终构建。 |
+| macOS arm64 候选包与安装 | 已有数据库、正常 Tern 窗口及最终 UI 离屏布局证据；既有组包和安装器结果属于历史迭代。对最终 release 归档重新验证独立运行、plugin 冷安装、校验、缓存与正常窗口入口，不能以 debug 构建或 headless 布局代替。 |
+| 公开资源与正式安装 | 草稿附件不是公开下载地址。发布后核对 `v0.4.0`、实际提交、七个附件和 digest，再从正式下载地址验证安装；未执行前不记为通过。 |
 
 ## PR 与合并
 
@@ -64,7 +74,7 @@ python3 scripts/version.py --check-release
 
 ## tag 与目标提交
 
-Release 名称统一为 `Datapier <Version>`，tag 保持 `v<Version>`，例如名称 `Datapier 0.2.0`、tag `v0.2.0`。草稿绑定本次构建的完整提交 SHA；准备、上传和汇总阶段不创建或推送 Git tag。下一次 main 构建可将同一版本草稿刷新至新的完整 SHA，并重新生成附件。若同名 Git tag 已存在，必须解析至本次提交，否则工作流拒绝继续。
+Release 名称统一为 `Datapier <Version>`，tag 保持 `v<Version>`，例如名称 `Datapier 0.4.0`、tag `v0.4.0`。草稿绑定本次构建的完整提交 SHA；准备、上传和汇总阶段不创建或推送 Git tag。下一次 main 构建可将同一版本草稿刷新至新的完整 SHA，并重新生成附件。若同名 Git tag 已存在，必须解析至本次提交，否则工作流拒绝继续。
 
 正式发布时，先冻结已经完成构建、组包和运行验收的候选提交，核对草稿 `target_commitish`、构建标记中的 SHA 与附件来源一致。获得正式发布授权后，为这个完整 SHA 创建并推送 `v<Version>` tag，再在 GitHub 编辑该草稿，选择这个已存在的 tag 后发布；已有 tag 则直接核对其解析后的提交。不得以发布时的最新 main 代替候选 SHA，也不移动已经公开的 tag。`v` 前缀来自组包脚本生成的下载地址 `https://github.com/<owner>/<repo>/releases/download/v<version>`，Git tag、Release 标签、plugin 内下载地址和资源必须一致。
 
@@ -81,7 +91,7 @@ Release 名称统一为 `Datapier <Version>`，tag 保持 `v<Version>`，例如�
 | windows-2022 | x86_64-pc-windows-msvc |
 | windows-11-arm | aarch64-pc-windows-msvc |
 
-独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。每个 native job 检出代码、设置 stable Rust 和对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档随 runner 清理，不上传 Actions artifact 或 Release 资源。
+独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。format 与 native job 均显式使用 Rust 1.100.0；每个 native job 检出代码、安装对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档随 runner 清理，不上传 Actions artifact 或 Release 资源。
 
 main 的 `prepare-release` 在格式检查成功后创建或刷新 `Datapier <Version>` 草稿，tag 为 `v<Version>`，清理该版本的六个目标归档和 plugin 包，保留人工附加附件；六个 `native-release` job 各上传一个目标归档。所有目标成功后，`bundle` 从相同草稿鉴权下载六个归档，验证资源及 GitHub 提供的可用 SHA-256，生成内嵌归档与程序摘要的 `datapier-plugin-<version>.zip` 并上传，最后标记构建完成，Release 仍保持草稿。流程生成六个归档和一个 plugin 包，共七个附件；人工附加附件不计入此集合，失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
 

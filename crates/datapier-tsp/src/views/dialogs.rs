@@ -1058,7 +1058,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 let focused = app.focus == key;
                 tabs = tabs.child(
                     html::button(crate::i18n::tr(label).into_owned())
-                        .key(key)
+                        .key(key.clone())
                         .class(match (selected, focused) {
                             (true, true) => "mcp-tab active focused",
                             (true, false) => "mcp-tab active",
@@ -1067,6 +1067,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         })
                         .attr("role", "tab")
                         .attr("aria-selected", selected)
+                        .on_focus(Msg::Focus(key))
                         .on_click(Msg::Action(format!("settings-tab:{tab}"))),
                 );
             }
@@ -1607,6 +1608,26 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .variant(ui::FieldVariant::Row)
                         .child(selector),
                 );
+                rules = rules.child(page_button(
+                    "repeat",
+                    "重新加载连接权限和策略",
+                    "mcp-rules-reload",
+                    !busy,
+                ));
+                if app.field("mcp-rule-reload-confirm") == "true" {
+                    rules = rules
+                        .child(
+                            html::p(
+                                crate::i18n::tr(
+                                    "重新加载将丢弃此连接未保存的权限和审批策略，是否继续？",
+                                )
+                                .into_owned(),
+                            )
+                            .class("form-submit-error"),
+                        )
+                        .child(button("丢弃并重新加载", "mcp-rules-reload-confirm"))
+                        .child(button("取消", "mcp-rules-reload-cancel"));
+                }
                 if busy {
                     rules = rules.child(
                         html::p(crate::i18n::tr("正在处理权限…").into_owned()).class("muted"),
@@ -1626,9 +1647,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     let mut profile_policies = ui::select()
                         .aria(crate::i18n::tr("连接审批策略").into_owned())
                         .value(app.field("mcp-rule-policy"))
-                        .disabled(
-                            busy || app.field("mcp-rule-data") != app.field("mcp-rule-baseline"),
-                        )
+                        .disabled(busy)
                         .open(app.workbench.generic_select.as_deref() == Some("mcp-profile-policy"))
                         .on_toggle(|collapsed| {
                             Msg::Action(format!("select-open:mcp-profile-policy:{}", !collapsed))
@@ -1654,15 +1673,24 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                             .variant(ui::FieldVariant::Row)
                             .child(profile_policies),
                     );
-                    rules = rules.child(
-                        html::p(
-                            crate::i18n::tr(
-                                "连接审批策略更改后立即单独保存；请先保存连接权限草稿。",
+                    rules = rules
+                        .child(
+                            html::p(
+                                crate::i18n::tr(if app.mcp_policy_dirty() {
+                                    "连接审批策略有未保存修改"
+                                } else {
+                                    "连接审批策略已保存"
+                                })
+                                .into_owned(),
                             )
-                            .into_owned(),
+                            .class("muted"),
                         )
-                        .class("muted"),
-                    );
+                        .child(page_button(
+                            "check",
+                            "保存连接审批策略",
+                            "mcp-policy-save",
+                            !busy && app.mcp_policy_dirty(),
+                        ));
                     rules = rules.child(
                         html::p(
                             crate::i18n::tr(if busy {

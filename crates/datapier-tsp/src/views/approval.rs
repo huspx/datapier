@@ -156,6 +156,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 })
                 .attr("role", "tab")
                 .attr("aria-selected", state.tab == tab)
+                .on_focus(Msg::Focus(action.into()))
                 .on_click(Msg::Action(action.into())),
         );
     }
