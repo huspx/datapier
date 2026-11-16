@@ -38,6 +38,8 @@ TLS 启用后校验证书链和主机身份。部分旧 MySQL 5.7／OpenSSL 构�
 
 从 [最新正式 Release](https://github.com/huspx/datapier/releases/latest) 下载该版本的 `datapier-plugin-<版本>.zip`，解压后在解压目录执行 `tern plugin install ./datapier`，然后在 Tern 命令面板选择 `New Datapier block`。该 plugin 自动下载并校验对应版本的程序；尚未公开的候选版本按[贡献指南](CONTRIBUTING.md#开发环境)构建和运行。
 
+plugin 当前不检查新版本，Tern 也不自动升级 plugin。更新时先退出 Datapier 客户端与 Engine、备份数据目录，再下载并解压目标 Release 的 plugin 包，执行 `tern plugin install /absolute/path/to/datapier --force`；随后启动时会准备并校验该 plugin 对应的程序。`reload` 只重载本地文件，开发用 linked 目录也不会被 `--force` 替换，详见[插件更新](RELEASING.md#插件更新)。
+
 需要独立运行时，取得与操作系统和架构匹配的二进制归档后，手工解包直接运行，无须 Rust 或 Tern。以下以已取得的 0.4.0 Unix tar.gz 归档为例，将归档和路径替换为实际位置；Windows 使用对应 zip 与 `datapier.exe`：
 
 ```sh
@@ -136,7 +138,7 @@ flowchart LR
 | 0.2.0 | MCP stdio、普通终端配置、实时分页与结果不落盘，能力已纳入当前候选 |
 | 0.3.0 | 结构设计、可更新视图、批量修改与高级值编辑，能力已纳入当前候选 |
 | 0.4.0 | 数据交换、结构与数据迁移、SQL 备份恢复及 Git 项目 |
-| 0.5.0 | 分析展示、显示规则与数据库维护，规划中 |
+| 0.5.0 | SQL 上下文补全、Tern MCP 自动注册、本机项目／环境与 MCP 资源推荐、plugin 检查更新及可选自动更新，包含全部 16 项 Tern 集成与工作台优化；方案已整理，尚未实现 |
 
 后续版本尚未承诺发布日期；PostgreSQL／MongoDB 暂未绑定交付版本。
 
@@ -148,6 +150,7 @@ flowchart LR
 - [0.2.0 技术方案](docs/technical-design-0.2.0.md)：MCP 工具、独立配置、权限与审批、实时查询、升级设计及验收状态。
 - [0.3.0 技术方案](docs/technical-design-0.3.0.md)：结构设计、可更新视图、批量替换、高级值、外部编辑器及当前运行验收范围。
 - [0.4.0 技术方案](docs/technical-design-0.4.0.md)：数据交换、迁移、SQL 备份恢复及项目的设计与契约；实际验收按当前候选证据报告。
+- [0.5.0 技术方案](docs/technical-design-0.5.0.md)：SQL 上下文补全、Tern MCP 自动注册、本机项目／环境与仓库资源推荐、plugin 自动更新，以及全部 Tern 优化的范围、契约、实施计划与验收目标。自动更新默认检查并提示，自动下载和退出后自动应用为可选设置；功能尚未实现。
 - [UI 设计规范](docs/ui-guidelines.md)、[交互设计稿](docs/ui-redesign.html)及[设计说明](docs/ui-redesign.md)：通用视觉与组件约定、界面交互、文字约束和视觉对照要求。
 - [贡献指南](CONTRIBUTING.md)：文档职责、开发环境、编码与模块边界、隔离验证及 PR 说明。
 - [发布指南](RELEASING.md)：产品版本来源与派生、发布前检查、原生组包及人工发布核对。

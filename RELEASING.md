@@ -118,6 +118,22 @@ python3 scripts/assemble-release.py --artifacts dist --repository "$repository"
 
 独立运行无需 plugin：将对应目标归档手工解包，直接运行 `datapier tui` 或作为 MCP stdio 程序使用；Tern 工作台运行 `datapier tsp`。用户示例见 [README](README.md#安装与运行)。候选包与正式线上附件的可用性应分别核实。
 
+### 插件更新
+
+当前 plugin 只安装并校验其 `plugin.toml` 声明的固定版本，不查询最新 Release，也不自动升级。Tern 官方[版本管理说明](https://docs.stencil.so/tern/guides/distribution.md#versioning)明确表示宿主不比较 plugin 版本，没有 update 命令；`tern plugin reload datapier` 只重载现有文件。
+
+更新前退出所有 Datapier TSP／TUI／MCP 客户端与 Engine，并备份一致的数据目录。取得目标正式 Release 的 `datapier-plugin-<version>.zip`，解压后用其中的 `datapier/` 目录替换已安装副本：
+
+```sh
+tern plugin install /absolute/path/to/unpacked/datapier --force
+tern plugin list --json
+```
+
+安装替换会触发 plugin 重载，随后首次启动会按该包内的版本、下载地址与摘要准备对应二进制。应核对 plugin 状态、程序版本与实际启动；替换成功不等于数据库或 MCP 已完成运行验收。不能只改下载 URL 或程序文件而保留旧 plugin 的版本及校验清单，也不将缺少发布清单的源码目录当成正式升级包。
+
+`--force` 不替换 linked 开发目录；开发模式通过更新显式链接的源码、构建匹配版本的程序并重载验证，不能当成正式 Release 自动升级。0.5.0 已将 plugin 检查更新与自动更新纳入交付范围：默认自动检查并提示，自动下载及退出后自动应用为可选设置且默认关闭；完整校验配套包，在旧客户端与 Engine 安全退出并完成一致备份后切换，保留旧包和失败恢复路径，再更新受管 MCP 路径。该功能尚未实现，当前仍按上述手工方式更新；设计与验收目标见[0.5.0 方案第 5.5 节](docs/technical-design-0.5.0.md#55-plugin-版本检查与自动更新边界)。
+
+
 ## 实际发布与发布后核对
 
 main 工作流完成后，维护者按以下步骤发布同一个草稿：
