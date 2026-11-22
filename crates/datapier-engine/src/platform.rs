@@ -458,9 +458,25 @@ impl Listener {
 }
 #[cfg(windows)]
 pub async fn connect(name: &str) -> Result<Stream> {
-    Ok(Box::new(
-        tokio::net::windows::named_pipe::ClientOptions::new().open(name)?,
-    ))
+    use std::time::Duration;
+    use tokio::{net::windows::named_pipe::ClientOptions, time};
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    let options = ClientOptions::new();
+    let deadline = time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match options.open(name) {
+            Ok(stream) => return Ok(Box::new(stream)),
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                    && time::Instant::now() < deadline =>
+            {
+                // 并发客户端可能先占用当前实例，等待监听端接入后创建下一实例。
+                time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
