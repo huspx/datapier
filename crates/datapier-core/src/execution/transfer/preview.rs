@@ -103,7 +103,7 @@ pub async fn preview(
             preview_mysql_json(session, &params, &target, sink, cancel, file).await?
         }
         (ProviderKind::Redis, "csv") => preview_redis_csv(&target, cancel, file)?,
-        (ProviderKind::Redis, _) => preview_redis_json(&target, sink, cancel, file)?,
+        (ProviderKind::Redis, _) => preview_redis_json(&target, cancel, file)?,
     };
     Ok(
         json!({"columns":result.columns,"rows":result.rows,"target":target,"format":fmt,"provider":provider,"sample_complete":result.complete,"errors":result.errors}),
@@ -198,7 +198,7 @@ async fn preview_mysql_json(
     cancel: &CancellationToken,
     file: File,
 ) -> Result<Preview> {
-    let doc = json_document(file, &sink.store.root, "rows", cancel)?;
+    let doc = json_document(file, "rows", cancel, PREVIEW_BYTES)?;
     let source = doc
         .columns
         .ok_or_else(|| AppError::invalid("JSON 缺少列定义"))?;
@@ -209,7 +209,7 @@ async fn preview_mysql_json(
         &schema(session, target, sink, cancel).await?,
     )?;
     let mut preview = Preview::new(projection.columns.clone());
-    let mut r = doc.data.reader()?;
+    let mut r = doc.data.reader(PREVIEW_BYTES);
     r.expect(b'[')?;
     let mut first = true;
     let mut record_no = 0;
@@ -383,12 +383,11 @@ fn preview_redis_csv(
 }
 fn preview_redis_json(
     target: &ResourceTarget,
-    sink: &ExecutionSink,
     cancel: &CancellationToken,
     file: File,
 ) -> Result<Preview> {
-    let doc = json_document(file, &sink.store.root, "records", cancel)?;
-    let mut r = doc.data.reader()?;
+    let doc = json_document(file, "records", cancel, PREVIEW_BYTES)?;
+    let mut r = doc.data.reader(PREVIEW_BYTES);
     r.expect(b'[')?;
     let mut preview = Preview::new(redis_preview_columns());
     let mut first = true;
@@ -407,13 +406,13 @@ fn preview_redis_json(
             );
             break;
         }
-        let parsed: Result<(String, String, Json, JsonSpool)> = (|| {
+        let parsed: Result<(String, String, Json, JsonRange)> = (|| {
             r.expect(b'{')?;
             let mut fields_first = true;
             let mut key: Option<String> = None;
             let mut kind: Option<String> = None;
             let mut expiry: Option<Json> = None;
-            let mut rows: Option<JsonSpool> = None;
+            let mut rows: Option<JsonRange> = None;
             while let Some(field) = r.object_next(&mut fields_first)? {
                 ensure_not_cancelled(cancel)?;
                 match field.as_str() {
@@ -422,9 +421,7 @@ fn preview_redis_json(
                     "expires_at_ms" if expiry.is_none() => {
                         expiry = Some(preview_json_value(&mut r, cancel)?)
                     }
-                    "rows" if rows.is_none() => {
-                        rows = Some(JsonSpool::copy(&mut r, &sink.store.root, cancel)?)
-                    }
+                    "rows" if rows.is_none() => rows = Some(JsonRange::scan(&mut r, cancel)?),
                     "key_b64" | "type" | "expires_at_ms" | "rows" => {
                         return Err(AppError::invalid("Redis JSON 字段重复"));
                     }
@@ -465,7 +462,7 @@ fn preview_redis_json(
         if !preview.push(redis_preview_row(&key, &kind, &expiry, "key", Vec::new()))? {
             break;
         }
-        let mut row_reader = rows.reader()?;
+        let mut row_reader = rows.reader(PREVIEW_BYTES);
         if let Err(e) = row_reader.expect(b'[') {
             preview.failure(record_no, e);
             break;

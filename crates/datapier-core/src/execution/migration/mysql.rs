@@ -118,7 +118,19 @@ pub(super) async fn write_rows(
             let mut location = locator.clone();
             location.first_record = first.map(|record| record + index as u64);
             location.last_record = location.first_record;
-            write_one_batch(target, table, object, policy, vec![row], location, journal).await?;
+            write_one_batch(
+                target,
+                table,
+                object,
+                policy,
+                RowBatch {
+                    rows: vec![row],
+                    locator: location,
+                },
+                journal,
+                cancel,
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -129,7 +141,16 @@ pub(super) async fn write_rows(
             table.schema.target.name
         ));
     }
-    write_one_batch(target, table, object, policy, rows, locator, journal).await
+    write_one_batch(
+        target,
+        table,
+        object,
+        policy,
+        RowBatch { rows, locator },
+        journal,
+        cancel,
+    )
+    .await
 }
 
 async fn write_one_batch(
@@ -137,16 +158,17 @@ async fn write_one_batch(
     table: &MigrationTable,
     object: &TransferObject,
     policy: ConflictPolicy,
-    rows: Vec<Vec<Value>>,
-    locator: TransferLocator,
+    batch: RowBatch,
     journal: &mut TransferJournal,
+    cancel: &CancellationToken,
 ) -> Result<()> {
+    let RowBatch { rows, locator } = batch;
     let count = rows.len() as u64;
     let row_digest = digest(&rows)?;
     let first_record = locator.first_record;
     let ticket = journal.begin("data", locator, row_digest).await?;
     match target
-        .write_batch(table, object, policy, rows, &ticket.sink)
+        .write_batch(table, object, policy, rows, &ticket.sink, cancel)
         .await
     {
         Ok(outcome) => {
@@ -196,7 +218,9 @@ async fn write_one_batch(
             journal.progress.written_rows += applied;
             journal.progress.rolled_back += rolled_back;
             journal.progress.skipped += skipped;
-            journal.progress.failed += 1;
+            if error.code != "cancelled" {
+                journal.progress.failed += 1;
+            }
             if unknown {
                 journal.progress.outcome_unknown += 1;
             }
@@ -204,6 +228,8 @@ async fn write_one_batch(
                 TransferStepState::OutcomeUnknown
             } else if rolled_back > 0 {
                 TransferStepState::RolledBack
+            } else if error.code == "cancelled" {
+                TransferStepState::NotSent
             } else {
                 TransferStepState::Failed
             };

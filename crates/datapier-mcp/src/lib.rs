@@ -3,7 +3,10 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -378,7 +381,30 @@ struct Adapter {
     approvals: Arc<Mutex<HashMap<String, String>>>,
     project_roots: Vec<String>,
     environment: Option<String>,
-    roots_gate: Arc<tokio::sync::Mutex<()>>,
+    roots_gate: Arc<tokio::sync::Mutex<RootsState>>,
+    roots_generation: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct RootsState {
+    applied: u64,
+    pending: Option<(u64, Value)>,
+}
+impl RootsState {
+    async fn retry_pending<F, Fut>(&mut self, current: u64, update: F) -> bool
+    where
+        F: FnOnce(Value) -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        if let Some((generation, params)) = self.pending.clone()
+            && generation == current
+            && update(params).await
+        {
+            self.applied = generation;
+            self.pending = None;
+        }
+        self.applied == current
+    }
 }
 fn response(value: Value, error: bool) -> CallToolResponse {
     let value = if value.is_object() {
@@ -405,8 +431,12 @@ fn response(value: Value, error: bool) -> CallToolResponse {
 impl Adapter {
     #[allow(deprecated)]
     async fn refresh_roots(&self, context: NotificationContext<RoleServer>) {
-        // 顺序应用 roots 通知，避免较早的慢响应覆盖较新的仓库上下文。
-        let _guard = self.roots_gate.lock().await;
+        // 通知到达时立即使旧上下文失效，即使另一个更新仍在等待。
+        let generation = self.roots_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut state = self.roots_gate.lock().await;
+        if generation != self.roots_generation.load(Ordering::SeqCst) {
+            return;
+        }
         let supports_roots = context
             .peer
             .peer_info()
@@ -428,13 +458,20 @@ impl Adapter {
         } else {
             (self.project_roots.clone(), "explicit")
         };
-        let _ = self
+        if generation != self.roots_generation.load(Ordering::SeqCst) {
+            return;
+        }
+        let params = json!({"roots":roots,"source":source,"environment":self.environment});
+        state.pending = Some((generation, params.clone()));
+        if self
             .engine
-            .request(
-                "mcp.context.update",
-                json!({"roots":roots,"source":source,"environment":self.environment}),
-            )
-            .await;
+            .request("mcp.context.update", params)
+            .await
+            .is_ok()
+        {
+            state.applied = generation;
+            state.pending = None;
+        }
     }
 }
 impl ServerHandler for Adapter {
@@ -475,6 +512,16 @@ impl ServerHandler for Adapter {
         let spec = SPECS.iter().find(|spec| spec.name == request.name).ok_or_else(|| ErrorData::invalid_params("Unknown tool", None))?;
         let mut args = request.arguments.unwrap_or_default();
         validate(spec, &args)?;
+        let discovery = matches!(spec.name, "get_server_info" | "list_connections" | "list_databases");
+        let mut roots = if discovery { Some(self.roots_gate.lock().await) } else { None };
+        if let Some(state) = roots.as_mut() {
+            let current = self.roots_generation.load(Ordering::SeqCst);
+            if !state.retry_pending(current, |params| async {
+                self.engine.request("mcp.context.update", params).await.is_ok()
+            }).await {
+                return Ok(response(json!({"code":"context_unavailable","message":"Project roots are being updated or could not be synchronized; retry discovery."}), true));
+            }
+        }
         if spec.name == "approve_command" {
             let approving = args.get("decision").and_then(Value::as_str) == Some("approve");
             let native = context.client_capabilities().and_then(|c| c.elicitation).is_some_and(|c| c.form.is_some() || c.url.is_none());
@@ -505,7 +552,13 @@ impl ServerHandler for Adapter {
             args.insert("interaction_source".into(), json!(if native && approving { "native_elicitation" } else { "trusted_host" }));
         }
         let method = format!("mcp.{}", spec.name);
-        match self.engine.request(&method, Value::Object(args)).await {
+        let result = self.engine.request(&method, Value::Object(args)).await;
+        if let Some(state) = roots.as_ref()
+            && state.applied != self.roots_generation.load(Ordering::SeqCst)
+        {
+            return Ok(response(json!({"code":"context_unavailable","message":"Project roots changed during discovery; retry."}), true));
+        }
+        match result {
             Ok(value) => {
                 if let (Some(approval), Some(execution)) = (value.get("approval_id").and_then(Value::as_str), value.get("execution_id").and_then(Value::as_str)) {
                     self.approvals.lock().unwrap().insert(approval.into(), execution.into());
@@ -554,7 +607,8 @@ pub async fn run(
         approvals: Arc::new(Mutex::new(HashMap::new())),
         project_roots,
         environment,
-        roots_gate: Arc::new(tokio::sync::Mutex::new(())),
+        roots_gate: Arc::new(tokio::sync::Mutex::new(RootsState::default())),
+        roots_generation: Arc::new(AtomicU64::new(1)),
     };
     let service = match adapter.serve(stdio()).await {
         Ok(service) => service,

@@ -46,6 +46,12 @@
   border-radius: 0 !important;
   background: transparent !important;
   text-align: left !important;
+  display: block !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  height: auto !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
 }
 .project-local-list .sf.sf-el.sf-act.project-local-item.active {
   background: var(--tv-sel) !important;
@@ -89,6 +95,7 @@
 .project-local-project-info {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 .project-local-roots {
   display: flex;

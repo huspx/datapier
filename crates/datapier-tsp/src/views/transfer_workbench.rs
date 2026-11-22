@@ -807,7 +807,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 ));
             }
             body = body.child(html::span(
-                "使用项目绑定组解析连接与路径 / Project bindings resolve connections and paths",
+                crate::i18n::tr("使用项目绑定组解析连接与路径").into_owned(),
             ));
         } else {
             if matches!(mode, "copy" | "export" | "sql_dump") {
@@ -1422,11 +1422,11 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     .and_then(|s| s["mode"].as_str())
                     .unwrap_or("");
                 let explanation = if run_mode == "copy" {
-                    "已处理字节为逻辑内容字节（含 ZSet score，不含 Base64 和列表索引）；当前对象为源 key SHA-256 摘要。 / Processed bytes are logical payload bytes (including ZSet scores, excluding Base64 and list indexes); current object is the source key SHA-256 digest."
+                    "已处理字节为逻辑内容字节（含 ZSet score，不含 Base64 和列表索引）；当前对象为源 key SHA-256 摘要。"
                 } else {
-                    "已处理字节为文件实际字节；当前对象为源 key SHA-256 摘要。 / Processed bytes are actual file bytes; current object is the source key SHA-256 digest."
+                    "已处理字节为文件实际字节；当前对象为源 key SHA-256 摘要。"
                 };
-                body = body.child(html::span(explanation));
+                body = body.child(html::span(crate::i18n::tr(explanation).into_owned()));
             }
             body = body
                 .child(input(app, "report-path", "报告输出路径"))

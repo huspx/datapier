@@ -622,7 +622,7 @@ impl App {
                 self.refresh_archery_servers(backend);
                 self.field_set("settings-tab", "general");
                 self.focus = "settings-tab-general".into();
-                self.workbench.focus_request = Some(String::new());
+                self.workbench.focus_request = Some(self.focus.clone());
             }
             return true;
         }
@@ -631,7 +631,7 @@ impl App {
                 self.field_set("settings-tab", tab);
                 self.workbench.generic_select = None;
                 self.focus = format!("settings-tab-{tab}");
-                self.workbench.focus_request = Some(String::new());
+                self.workbench.focus_request = Some(self.focus.clone());
             }
             return true;
         }

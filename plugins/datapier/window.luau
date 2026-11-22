@@ -74,9 +74,11 @@ end)
 
 tern.files.button({
   id = "projects",
-  title = "Datapier MCP 项目",
+  title = "Datapier MCP 项目 / MCP projects",
   icon = "database",
   run = function(files, cx)
+    local counts = window_bridge.pending_counts()
+    local english = not counts or counts.english
     local local_host = false
     for _, host in ipairs(cx.hosts:list()) do
       if host.name == files.host and host.kind == "local" then
@@ -85,12 +87,24 @@ tern.files.button({
       end
     end
     if not local_host or type(files.root) ~= "string" or files.root == "" then
-      cx:toast("error", "Datapier", "无法将当前 Files 目录映射到本机")
+      cx:toast(
+        "error",
+        "Datapier",
+        if english
+          then "Cannot map the current Files directory to this computer"
+          else "无法将当前 Files 目录映射到本机"
+      )
       return
     end
     local payload = tern.base64.encode(tern.json.encode({ host = "localhost", path = files.root }))
     if not window_bridge.navigate(cx, "datapier-project-path:" .. payload) then
-      cx:toast("info", "Datapier", "请先打开工作台，然后再次选择目录")
+      cx:toast(
+        "info",
+        "Datapier",
+        if english
+          then "Open the workbench first, then select the directory again"
+          else "请先打开工作台，然后再次选择目录"
+      )
       bootstrap.start(cx)
     end
   end,

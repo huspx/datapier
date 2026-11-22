@@ -602,6 +602,11 @@ fn bind_row(
     }
     Ok(())
 }
+pub(super) enum MigrationBatchSource<'a> {
+    Transfer(&'a CancellationToken),
+    SqlRestore(&'a [String]),
+}
+
 impl MysqlSession {
     /// 写入一个有界批次。调用方在调用前后登记批次日志；每次发送由 sink 保护。
     pub async fn write_batch(
@@ -611,9 +616,17 @@ impl MysqlSession {
         policy: ConflictPolicy,
         rows: Vec<Vec<Value>>,
         sink: &ExecutionSink,
+        cancel: &CancellationToken,
     ) -> Result<MigrationWriteOutcome> {
-        self.write_batch_with_context(table, object, policy, rows, sink, &[])
-            .await
+        self.write_batch_with_context(
+            table,
+            object,
+            policy,
+            rows,
+            sink,
+            MigrationBatchSource::Transfer(cancel),
+        )
+        .await
     }
 
     pub(super) async fn write_batch_with_context(
@@ -623,8 +636,12 @@ impl MysqlSession {
         policy: ConflictPolicy,
         rows: Vec<Vec<Value>>,
         sink: &ExecutionSink,
-        settings: &[String],
+        source: MigrationBatchSource<'_>,
     ) -> Result<MigrationWriteOutcome> {
+        let (settings, cancel) = match source {
+            MigrationBatchSource::Transfer(cancel) => (&[][..], Some(cancel)),
+            MigrationBatchSource::SqlRestore(settings) => (settings, None),
+        };
         self.profile.ensure_write()?;
         if !table.schema.engine.eq_ignore_ascii_case("innodb") && rows.len() > 1 {
             return Err(AppError::invalid("非事务表必须逐行登记和写入"));
@@ -703,8 +720,17 @@ impl MysqlSession {
         let all: Vec<usize> = (0..columns.len()).collect();
         let mut states = vec![TransferStepState::NotSent; rows.len()];
         let mut marked_sent = false;
-        for (index, row) in rows.iter().enumerate() {
-            let result: Result<bool> = async {
+        let check_cancelled = || {
+            sink.check_cancelled()?;
+            cancel.map_or(Ok(()), crate::model::ensure_not_cancelled)
+        };
+        // 最后一轮只检查提交边界；任何取消都沿相同的回滚确认路径处理。
+        for index in 0..=rows.len() {
+            let result: Result<Option<bool>> = async {
+                check_cancelled()?;
+                let Some(row) = rows.get(index) else {
+                    return Ok(None);
+                };
                 let exists = if key.is_empty() {
                     false
                 } else {
@@ -725,14 +751,14 @@ impl MysqlSession {
                         .is_some()
                 };
                 if exists && policy == ConflictPolicy::Skip {
-                    return Ok(false);
+                    return Ok(Some(false));
                 }
                 let mut args = MySqlArguments::default();
                 let sql = if exists {
                     let update: Vec<usize> =
                         all.iter().copied().filter(|i| !key.contains(i)).collect();
                     if update.is_empty() {
-                        return Ok(false);
+                        return Ok(Some(false));
                     }
                     bind_row(&mut args, &columns, row, &update)?;
                     bind_row(&mut args, &columns, row, &key)?;
@@ -760,17 +786,24 @@ impl MysqlSession {
                     sink.mark_sent(true).await?;
                     marked_sent = true;
                 }
+                // 上方的锁定读取或发送登记可能等待，真正派发前再次检查。
+                check_cancelled()?;
                 sqlx::query_with(sqlx::AssertSqlSafe(sql), args)
                     .execute(&mut conn)
                     .await?;
-                Ok(true)
+                Ok(Some(true))
             }
             .await;
             match result {
-                Ok(true) => states[index] = TransferStepState::Applied,
-                Ok(false) => states[index] = TransferStepState::Skipped,
+                Ok(Some(true)) => states[index] = TransferStepState::Applied,
+                Ok(Some(false)) => states[index] = TransferStepState::Skipped,
+                Ok(None) => break,
                 Err(mut error) => {
-                    states[index] = TransferStepState::Failed;
+                    if error.code != "cancelled"
+                        && let Some(state) = states.get_mut(index)
+                    {
+                        *state = TransferStepState::Failed;
+                    }
                     if transactional {
                         let rollback = sqlx::raw_sql("ROLLBACK").execute(&mut conn).await;
                         let confirmed = if rollback.is_ok() {
@@ -795,7 +828,11 @@ impl MysqlSession {
                             }
                         }
                         if !confirmed {
-                            states[index] = TransferStepState::OutcomeUnknown;
+                            if error.code != "cancelled"
+                                && let Some(state) = states.get_mut(index)
+                            {
+                                *state = TransferStepState::OutcomeUnknown;
+                            }
                             error = AppError::unknown(format!("回滚结果无法确认: {error}"));
                         }
                     } else if error.code == "database" && error.database_code.is_none() {

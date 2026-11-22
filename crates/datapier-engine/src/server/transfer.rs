@@ -513,6 +513,7 @@ impl Engine {
         let engine = self.clone();
         let handle = tokio::spawn(async move {
             let started = Instant::now();
+            let has_destination = spec.destination.is_some();
             let result: Result<Value> = async {
                 {
                     let _guard = transition.lock().await;
@@ -575,7 +576,26 @@ impl Engine {
             if let Err(error) = &result {
                 let mut slot = slot.lock().await;
                 slot.state = "failed".into();
-                slot.error = Some(error.clone());
+                // 计划响应也可能携带数据库输入值；仅放行已知的静态预检诊断。
+                slot.error = Some(
+                    if error.code == "permission_denied" && error.message == "连接为只读模式"
+                    {
+                        AppError::new(
+                            "transfer_target_read_only",
+                            "目标连接为只读模式，请返回来源与目标选择可写连接，或在连接设置中调整访问模式",
+                        )
+                    } else if has_destination
+                        && error.code == "permission_denied"
+                        && error.message == "无法证明 SQL 的访问范围"
+                    {
+                        AppError::new(
+                            "transfer_scope_unknown",
+                            "无法证明 SQL 的访问范围；请返回来源与目标检查数据库选择和连接的可见范围，再检查输入 SQL 是否明确指定数据库",
+                        )
+                    } else {
+                        AppError::new(&error.code, format!("数据交换准备失败（{}）", error.code))
+                    },
+                );
                 slot.prepared = None;
                 bytes.store(0, Ordering::Relaxed);
                 // 长预检失败后仍需向客户端展示诊断，不能让旧 TTL 抢先遮住真实错误。

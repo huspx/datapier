@@ -64,13 +64,13 @@ fn unordered_json_fields_preserve_typed_rows() {
     fs::write(&input, r#"{"rows":[[{"type":"unsigned","value":"2026"}]],"ignored":{"nested":[1,2]},"columns":[{"name":"year","type_name":"year"}],"version":1,"format":"datapier"}"#).unwrap();
     let doc = json_document(
         File::open(input).unwrap(),
-        &root,
         "rows",
         &CancellationToken::new(),
+        256 * 1024,
     )
     .unwrap();
     assert_eq!(doc.columns.as_ref().unwrap()[0].name, "year");
-    let mut reader = doc.data.reader().unwrap();
+    let mut reader = doc.data.reader(256 * 1024);
     reader.expect(b'[').unwrap();
     let mut first = true;
     assert!(reader.array_next(&mut first).unwrap());
@@ -82,5 +82,81 @@ fn unordered_json_fields_preserve_typed_rows() {
     reader.end_document().unwrap();
     drop(reader);
     drop(doc);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn json_ranges_share_open_file_without_spooling_and_keep_independent_positions() {
+    let root = std::env::temp_dir().join(format!("datapier-json-range-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let input = root.join("input.json");
+    let records = (0..2000)
+        .map(|i| format!("[{i}]"))
+        .collect::<Vec<_>>()
+        .join(",");
+    fs::write(
+        &input,
+        format!(r#"{{"rows":[{records}],"columns":[],"version":1,"format":"datapier"}}"#),
+    )
+    .unwrap();
+    let doc = json_document(
+        File::open(&input).unwrap(),
+        "rows",
+        &CancellationToken::new(),
+        256 * 1024,
+    )
+    .unwrap();
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    let mut first = doc.data.reader(256 * 1024);
+    let mut second = doc.data.reader(256 * 1024);
+    first.expect(b'[').unwrap();
+    second.expect(b'[').unwrap();
+    let mut a = true;
+    let mut b = true;
+    for i in 0..2000 {
+        assert!(first.array_next(&mut a).unwrap());
+        assert_eq!(first.value::<Vec<u32>>().unwrap(), vec![i]);
+        if i == 1000 {
+            assert!(second.array_next(&mut b).unwrap());
+            assert_eq!(second.value::<Vec<u32>>().unwrap(), vec![0]);
+        }
+    }
+    assert!(!first.array_next(&mut a).unwrap());
+    first.end_document().unwrap();
+    assert!(second.array_next(&mut b).unwrap());
+    assert_eq!(second.value::<Vec<u32>>().unwrap(), vec![1]);
+    drop((first, second, doc));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn json_metadata_obeys_preview_and_import_limits() {
+    let root = std::env::temp_dir().join(format!("datapier-json-limit-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let input = root.join("input.json");
+    fs::write(
+        &input,
+        format!(
+            r#"{{"rows":[],"format":"{}","version":1}}"#,
+            "x".repeat(300_000)
+        ),
+    )
+    .unwrap();
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        json_document(File::open(&input).unwrap(), "rows", &cancel, 256 * 1024)
+            .err()
+            .unwrap()
+            .code,
+        "resource_limit"
+    );
+    assert_eq!(
+        json_document(File::open(&input).unwrap(), "rows", &cancel, 32)
+            .err()
+            .unwrap()
+            .code,
+        "resource_limit"
+    );
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
     fs::remove_dir_all(root).unwrap();
 }

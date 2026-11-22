@@ -135,6 +135,8 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
     let mut native_state = "";
     let mut retained_value_sources = std::collections::BTreeSet::new();
     loop {
+        // SDK 在 pump/render 中也可能接收 resize；始终同步最新能力。
+        changed |= app.update_viewport(session.caps());
         let reduce_motion = session.caps().reduce_motion;
         if app.native_ui.reduce_motion != reduce_motion {
             app.native_ui.reduce_motion = reduce_motion;
@@ -837,9 +839,6 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         };
                         changed = true;
                     }
-                }
-                tern_sdk::Event::Resize(_) => {
-                    changed |= app.update_viewport(session.caps());
                 }
                 tern_sdk::Event::Error(error) => {
                     app.status = i18n::UiMessage::raw(format!("Tern: {error:?}"));

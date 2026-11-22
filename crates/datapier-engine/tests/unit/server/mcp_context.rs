@@ -35,6 +35,15 @@ fn register_mcp(engine: &Engine) -> Uuid {
     owner
 }
 
+fn request<'a>(
+    engine: &'a Arc<Engine>,
+    owner: Uuid,
+    method: &'a str,
+    params: Value,
+) -> impl Future<Output = Result<Value>> + 'a {
+    Box::pin(engine.dispatch(owner, method, params))
+}
+
 async fn connections(engine: &Arc<Engine>, owner: Uuid) -> Vec<Value> {
     let result = tokio::time::timeout(
         Duration::from_secs(3),
@@ -155,6 +164,37 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
         "dev"
     );
 
+    request(
+        &engine,
+        client_a,
+        "mcp.context.update",
+        json!({"roots":[],"source":"roots_error","environment":"dev"}),
+    )
+    .await
+    .unwrap();
+    let unavailable = request(&engine, client_a, "mcp.get_server_info", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(unavailable["project_context"]["status"], "unavailable");
+    assert!(
+        by_id(&connections(&engine, client_a).await, first.id)["recommendation"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    request(
+        &engine,
+        client_a,
+        "mcp.context.update",
+        json!({"roots":[root_a.to_str().unwrap()],"source":"roots","environment":"dev"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        by_id(&connections(&engine, client_a).await, first.id)["recommendation"][0]["project_id"],
+        project_a.to_string()
+    );
+
     engine
         .dispatch(
             client_a,
@@ -233,6 +273,37 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
                 .is_empty()
         );
     }
+    let restricted = Uuid::new_v4();
+    assert!(engine.register_with(
+        restricted,
+        ClientContext {
+            kind: model::ClientKind::Mcp,
+            workspace: "default".into(),
+            allow_connections: vec![first.id],
+        }
+    ));
+    request(
+        &engine,
+        restricted,
+        "mcp.context.update",
+        json!({"roots":[root_b.to_str().unwrap()],"source":"roots","environment":"staging"}),
+    )
+    .await
+    .unwrap();
+    let hidden = request(&engine, restricted, "mcp.get_server_info", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        hidden["project_context"]["roots"][0]["environments"][0]["invalid_resource_count"],
+        0
+    );
+    let visible = request(&engine, client_b, "mcp.get_server_info", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        visible["project_context"]["roots"][0]["environments"][0]["invalid_resource_count"],
+        1
+    );
     assert!(
         matches!(&listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "上下文和连接发现不应连接 provider"
@@ -240,5 +311,81 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
     assert!(engine.state.lock().unwrap().databases.is_empty());
     assert!(engine.state.lock().unwrap().discovery.is_empty());
     drop(listener);
+    cleanup(engine, root).await;
+}
+
+#[tokio::test]
+async fn catalog_cursors_reject_changed_connection_and_database_order() {
+    let (engine, root) = engine().await;
+    let mut settings = engine.store.settings().await.unwrap();
+    settings.limits.response_bytes = 1024;
+    settings.limits.value_preview_bytes = settings.limits.value_preview_bytes.min(1024);
+    engine.store.set_settings(&settings).await.unwrap();
+    let owner = register_mcp(&engine);
+    let mut profiles = Vec::new();
+    for i in 0..12 {
+        let item = profile(&format!("connection-{i}-{}", "x".repeat(100)), 3306);
+        engine.store.save_profile(&item, None, false).await.unwrap();
+        profiles.push(item);
+    }
+    let first = request(&engine, owner, "mcp.list_connections", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].clone();
+    let added = profile("new connection", 3306);
+    engine
+        .store
+        .save_profile(&added, None, false)
+        .await
+        .unwrap();
+    let error = request(
+        &engine,
+        owner,
+        "mcp.list_connections",
+        json!({"cursor":cursor}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "expired");
+
+    let id = profiles[0].id;
+    let databases: Vec<String> = (0..30)
+        .map(|i| format!("db-{i:02}-{}", "x".repeat(70)))
+        .collect();
+    let discovery = |names: &[String]| json!({"state":"known","source":"cache","databases":names,"configured_count":null,"reason":null});
+    engine
+        .state
+        .lock()
+        .unwrap()
+        .discovery
+        .insert(id, (profiles[0].revision, discovery(&databases)));
+    let page = request(
+        &engine,
+        owner,
+        "mcp.list_databases",
+        json!({"connection_id":id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page["has_more"], true);
+    let mut changed = databases;
+    changed.remove(0);
+    changed.push(format!("db-99-{}", "x".repeat(70)));
+    engine
+        .state
+        .lock()
+        .unwrap()
+        .discovery
+        .insert(id, (profiles[0].revision, discovery(&changed)));
+    let error = request(
+        &engine,
+        owner,
+        "mcp.list_databases",
+        json!({"connection_id":id,"cursor":page["next_cursor"]}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "expired");
     cleanup(engine, root).await;
 }

@@ -785,7 +785,7 @@ impl App {
             restore_focus_pending: false,
             workspace_interacted: false,
             tabs: vec![Tab {
-                title: "查询 1".into(),
+                title: crate::i18n::format_message("查询 {number}", &[("number", "1")]),
                 query: Editor::new(""),
                 cli_query: Editor::default(),
                 profile_id: None,

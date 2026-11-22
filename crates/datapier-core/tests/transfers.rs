@@ -169,6 +169,97 @@ async fn mysql_migration_preserves_explicit_zero_autoincrement_key() {
     std::fs::remove_dir_all(root).unwrap();
     result.unwrap();
 }
+#[tokio::test]
+#[ignore = "需要隔离 MySQL，验证迁移提交边界取消"]
+async fn mysql_migration_cancel_on_last_row_rolls_back_batch() {
+    use datapier_core::{
+        execution::migration,
+        model::transfer::{TransferSpec, TransferStepState},
+    };
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let root = (*store.root).clone();
+    let direct = profile.direct().unwrap();
+    let pool = MySqlPoolOptions::new()
+        .max_connections(3)
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&direct.host)
+                .port(direct.port)
+                .username(&direct.username)
+                .password(secret.as_deref().unwrap())
+                .database("datapier_fixture"),
+        )
+        .await
+        .unwrap();
+    store.save_profile(&profile, secret, false).await.unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let target = format!("dp_cancel_{suffix}");
+    let trigger = format!("dp_trigger_{suffix}");
+    let lock = format!("dp_{suffix}");
+    let input = root.join("cancel.csv");
+    std::fs::write(&input, "id\n1\n2\n").unwrap();
+    let mut guard = pool.acquire().await.unwrap();
+    let acquired: i32 = sqlx::query_scalar("SELECT GET_LOCK(?, 10)")
+        .bind(&lock)
+        .fetch_one(&mut *guard)
+        .await
+        .unwrap();
+    assert_eq!(acquired, 1);
+    let result = AssertUnwindSafe(async {
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TABLE `{target}` (id INT PRIMARY KEY) ENGINE=InnoDB")))
+            .execute(&pool).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TRIGGER `{trigger}` BEFORE INSERT ON `{target}` FOR EACH ROW SET @dp_cancel = IF(NEW.id = 2, GET_LOCK('{lock}', 30), 1)")))
+            .execute(&pool).await.unwrap();
+        let spec: TransferSpec = serde_json::from_value(json!({
+            "mode":"import", "provider":"mysql",
+            "destination":{"profile_id":profile.id,"database":"datapier_fixture"},
+            "inputs":[{"path":input,"format":"csv","target":{"database":"datapier_fixture","name":target,"kind":"table"}}],
+            "options":{"include_schema":false,"include_data":true}
+        })).unwrap();
+        let cancel = CancellationToken::new();
+        let prepared = migration::prepare(&sink(&store, "transfer.prepare", &profile).await, spec, &cancel).await.unwrap();
+        let owner = Uuid::new_v4();
+        let task = store.create_task(owner, "cancel-fixture", "transfer.submit", json!({}), true).await.unwrap();
+        let sink = ExecutionSink::new(store.clone(), task.id).with_owner(owner);
+        let run = migration::execute(&prepared, &sink, task.id, "cancel-fixture", None, &[], &cancel);
+        let stop = async {
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB = 'datapier_fixture' AND STATE = 'User lock'")
+                        .fetch_one(&pool).await.unwrap();
+                    if waiting > 0 { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }).await.expect("未观察到最后一行等待锁");
+            cancel.cancel();
+            let released: Option<i32> = sqlx::query_scalar("SELECT RELEASE_LOCK(?)").bind(&lock)
+                .fetch_one(&mut *guard).await.unwrap();
+            assert_eq!(released, Some(1));
+        };
+        let (result, ()) = tokio::join!(run, stop);
+        assert!(result.is_err());
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM `{target}`")))
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0);
+        let items = store.transfer_items(task.id, None, 100).await.unwrap();
+        let data = items.iter().find(|item| item.phase == "data").unwrap();
+        assert_eq!(data.item_states, vec![TransferStepState::RolledBack, TransferStepState::RolledBack]);
+    }).catch_unwind().await;
+    drop(guard);
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS `{target}`"
+    )))
+    .execute(&pool)
+    .await;
+    pool.close().await;
+    store.pool.close().await;
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+    result.unwrap();
+}
+
 fn mysql_target(name: &str) -> ResourceTarget {
     ResourceTarget {
         database: Some("datapier_fixture".into()),

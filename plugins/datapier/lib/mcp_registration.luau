@@ -94,7 +94,8 @@ function M.register(cx, binary, data_dir)
         found, index = entry, i
       end
     end
-    if found and (not record or not same(startup(found), record.startup)) then
+    local current = if found then startup(found) else nil
+    if current and (not record or (not same(current, record.startup) and not same(current, record.pending))) then
       error("同名 MCP 配置已由用户自定义")
     end
     local desired = if found then table.clone(found) else { name = "datapier" }
@@ -104,13 +105,26 @@ function M.register(cx, binary, data_dir)
     desired.transport = "stdio"
     desired.command = binary
     desired.args = { "mcp" }
-    if not found then
-      table.insert(entries, desired)
-    elseif not same(startup(found), startup(desired)) then
+    local next_startup = startup(desired)
+    if same(current, next_startup) then
+      if not same(record.startup, current) or record.pending ~= nil or record.version ~= current_version then
+        tern.kv.set("mcp_managed", { host = host, data_dir = data_dir, startup = current, version = current_version })
+      end
+      return found
+    end
+    if index then
       entries[index] = desired
     else
-      return desired
+      table.insert(entries, desired)
     end
+    -- 先持久登记待写入的启动字段；中断后可识别两种合法状态。
+    tern.kv.set("mcp_managed", {
+      host = host,
+      data_dir = data_dir,
+      startup = current or (record and record.startup),
+      pending = next_startup,
+      version = current_version,
+    })
     -- 同步调用内重新合并最新设置，避免使用安装前的陈旧快照。
     cx.settings:set("agents.mcp", entries)
     local readback = cx.settings:get("agents.mcp")
@@ -121,15 +135,15 @@ function M.register(cx, binary, data_dir)
         count += 1
       end
     end
-    if count ~= 1 or not same(startup(match), startup(desired)) then
+    if count ~= 1 or not same(startup(match), next_startup) then
       error("MCP 配置写入后读回不一致")
     end
+    tern.kv.set("mcp_managed", { host = host, data_dir = data_dir, startup = next_startup, version = current_version })
     return match
   end)
   if not ok then
     return false, tostring(result)
   end
-  tern.kv.set("mcp_managed", { host = host, data_dir = data_dir, startup = startup(result), version = current_version })
   return true
 end
 

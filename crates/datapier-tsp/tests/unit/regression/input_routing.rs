@@ -82,7 +82,14 @@ fn settings_and_pending_tabs_accept_keys_after_open_and_pointer_activation() {
     app.reconcile_modal_focus();
     app.take_focus_request();
     assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
-    assert_eq!(app.field("settings-tab"), "editing");
+    assert_eq!(app.field("settings-tab"), "updates");
+    assert_eq!(
+        app.take_focus_request().as_deref(),
+        Some("settings-tab-updates")
+    );
+    app.reconcile_modal_focus();
+    let view = crate::views::render_window(&app, None);
+    assert!(crate::input::focus_node_id(&view, "settings-tab-updates").is_some());
     app.focus = "settings-paging-table_rows".into();
     app.action("settings-tab:general", &backend);
     assert!(app.workbench_key(&tern_sdk::Key::named("end"), &backend));

@@ -760,7 +760,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             }
         }
         if app.redis_key_delete_opening() {
-            body = body.child(
+            content = content.child(
                 html::div()
                     .class("draftbar")
                     .child(html::span(
@@ -773,7 +773,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             + app.redis_changes.len()
             + app.grid.as_ref().map_or(0, |g| g.edits().len())
             + app.pending_key_delete_count();
-        if changes > 0 {
+        let draftbar = if changes > 0 {
             let mut bar = html::div()
                 .class("draftbar")
                 .child(html::span(crate::i18n::format_message(
@@ -792,19 +792,27 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                     bar = bar.child(button("提交", "submit"));
                 }
             }
-            body = body.child(bar.child(button("丢弃", "discard")));
-        }
-        if app.paste_preview.is_some() && writable(app) {
-            body = body.child(button("查看粘贴预览", "overlay:preview"));
-        }
-        if !app.tabs[app.active].pending.is_null() && changes == 0 {
-            body = body.child(
+            Some(bar.child(button("丢弃", "discard")))
+        } else if !app.tabs[app.active].pending.is_null() {
+            Some(
                 html::div()
                     .class("draftbar")
                     .child(html::span(crate::i18n::tr("已保存的编辑意图").into_owned()))
                     .child(button("恢复编辑意图", "restore-pending"))
                     .child(button("丢弃", "discard")),
-            );
+            )
+        } else {
+            None
+        };
+        if let Some(bar) = draftbar {
+            if redis {
+                content = content.child(bar);
+            } else {
+                body = body.child(bar);
+            }
+        }
+        if app.paste_preview.is_some() && writable(app) {
+            body = body.child(button("查看粘贴预览", "overlay:preview"));
         }
         if redis
             && app
@@ -931,15 +939,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     }
     content = content.child(status);
     let layout = html::div()
-        .class(format!(
-            "layout {}{}",
-            app.viewport_class(),
-            if app.viewport_width > 0 && app.viewport_width <= 760 && !app.navigation_compact() {
-                " navigation-overlay"
-            } else {
-                ""
-            }
-        ))
+        .class(format!("layout {}", app.viewport_class()))
         .key("layout")
         .attr(
             "data-window-bridge",

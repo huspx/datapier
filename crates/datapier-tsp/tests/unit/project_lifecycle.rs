@@ -1,6 +1,25 @@
 //! 项目预览消费与未保存查询保护回归。
 use super::*;
 use datapier_core::model::AppError;
+#[test]
+fn existing_project_directory_is_reported_at_path_field() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-create".into());
+    app.project_set("path", "/existing");
+    app.project_set("name", "project");
+    app.project_action("project-ui-create", &backend);
+    let request = requests.try_recv().unwrap();
+    app.project_response(
+        request.tag.splitn(3, ':').nth(2).unwrap(),
+        &Err(AppError::new("project_path_exists", "exists")),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        app.project_key("path")
+    );
+    assert_eq!(app.project_value("path"), "/existing");
+}
 
 #[test]
 fn failed_commit_releases_consumed_preview_and_preserves_draft() {

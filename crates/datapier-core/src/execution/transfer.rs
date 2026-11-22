@@ -8,7 +8,7 @@ mod preview;
 mod redis_export;
 mod redis_import;
 
-use self::json::{JsonReader, JsonSpool, json_document};
+use self::json::{JsonRange, JsonReader, json_document};
 #[cfg(test)]
 use export::{ExportFile, export_cached, finish_export};
 use export::{csv_error, export, flush_csv};

@@ -1175,7 +1175,7 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                         row = row.child(super::text_diff(before, after, ""));
                         if change["complete"] != true {
                             row = row.child(
-                                html::span("仅显示有界前缀 / Showing bounded prefixes only")
+                                html::span(crate::i18n::tr("仅显示有界前缀").into_owned())
                                     .class("notice"),
                             );
                         }
@@ -1183,7 +1183,7 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                 }
                 if item["text_changes_complete"] != true {
                     row = row.child(
-                        html::span("部分列超出预览额度 / Some columns exceed the preview budget")
+                        html::span(crate::i18n::tr("部分列超出预览额度").into_owned())
                             .class("notice"),
                     );
                 }
@@ -1195,7 +1195,7 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                     row = row.child(super::text_diff(&before, &after, ""));
                     if item["before"]["complete"] == false || item["after"]["complete"] == false {
                         row = row.child(
-                            html::span("仅显示有界前缀 / Showing bounded prefixes only")
+                            html::span(crate::i18n::tr("仅显示有界前缀").into_owned())
                                 .class("notice"),
                         );
                     }

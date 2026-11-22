@@ -48,7 +48,10 @@ impl App {
         let database = self.database.clone();
         let redis_db = self.is_redis().then(|| self.current_redis_db());
         self.tabs.push(Tab {
-            title: format!("查询 {}", self.tabs.len() + 1),
+            title: crate::i18n::format_message(
+                "查询 {number}",
+                &[("number", &(self.tabs.len() + 1).to_string())],
+            ),
             query: Editor::new(""),
             cli_query: Editor::default(),
             profile_id: self.profile.as_ref().map(|p| p.id),

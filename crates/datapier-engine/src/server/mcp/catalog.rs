@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 struct CatalogScope<'a> {
     owner: Uuid,
@@ -19,11 +20,18 @@ impl Engine {
         resource: Uuid,
         params: &Value,
         filters: &Value,
-    ) -> Result<u64> {
+    ) -> Result<(u64, Option<Value>)> {
         match self.mcp_cursor(owner, op, resource, params)? {
-            Some(cursor) if cursor.params.get("filters") == Some(filters) => Ok(cursor.start),
+            Some(cursor) if cursor.params.get("filters") == Some(filters) => {
+                let order = cursor
+                    .params
+                    .get("order")
+                    .cloned()
+                    .ok_or_else(|| AppError::new("expired", "目录游标已过期，请重新读取"))?;
+                Ok((cursor.start, Some(order)))
+            }
             Some(_) => Err(denied("游标与请求条件不匹配")),
-            None => Ok(0),
+            None => Ok((0, None)),
         }
     }
 
@@ -31,7 +39,7 @@ impl Engine {
         &self,
         scope: CatalogScope<'_>,
         filters: Value,
-        start: u64,
+        position: (u64, Option<Value>),
         items: Vec<Value>,
         key: &str,
         extra: Value,
@@ -42,6 +50,29 @@ impl Engine {
             resource,
         } = scope;
         let limit = self.store.settings().await?.limits.response_bytes;
+        // 目录由当前授权结果构建；续页时校验完整顺序，集合变化则要求重读。
+        let order = if op == "resources" {
+            Value::Null
+        } else {
+            let mut hash = Sha256::new();
+            for item in &items {
+                let identity = item
+                    .get("connection_id")
+                    .unwrap_or(item)
+                    .as_str()
+                    .ok_or_else(|| AppError::new("internal", "目录项身份无效"))?;
+                hash.update((identity.len() as u64).to_be_bytes());
+                hash.update(identity.as_bytes());
+            }
+            json!(format!("{:x}", base16ct::HexDisplay(&hash.finalize())))
+        };
+        let (start, expected_order) = position;
+        if expected_order
+            .as_ref()
+            .is_some_and(|expected| expected != &order)
+        {
+            return Err(AppError::new("expired", "目录已变化，请重新读取"));
+        }
         let start = usize::try_from(start).map_err(|_| AppError::invalid("游标位置无效"))?;
         if start > items.len() {
             return Err(AppError::new("expired", "目录已变化，请重新读取"));
@@ -77,7 +108,7 @@ impl Engine {
                 resource,
                 index as u64,
                 0,
-                json!({"filters":filters}),
+                json!({"filters":filters,"order":order}),
             )
         });
         out.insert(key.into(), Value::Array(page));
@@ -603,7 +634,7 @@ impl Engine {
                 resource: session_id,
             },
             filters,
-            cursor.map_or(0, |c| c.start),
+            (cursor.map_or(0, |c| c.start), None),
             items,
             "resources",
             json!({"complete":complete}),

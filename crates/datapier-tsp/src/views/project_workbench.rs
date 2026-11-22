@@ -75,7 +75,7 @@ fn changes(items: &serde_json::Value, recovery: bool) -> Node<Msg> {
                     ));
                     if item["comparison"]["complete"] != true {
                         row = row.child(
-                            html::span("仅显示有界前缀 / Showing bounded prefixes only")
+                            html::span(crate::i18n::tr("仅显示有界前缀").into_owned())
                                 .class("notice"),
                         );
                     }
@@ -84,7 +84,7 @@ fn changes(items: &serde_json::Value, recovery: bool) -> Node<Msg> {
                     .is_some_and(|path| path.to_ascii_lowercase().ends_with(".sql"))
                 {
                     row = row.child(
-                        html::span("比较内容超出预览额度 / Comparison exceeds preview budget")
+                        html::span(crate::i18n::tr("比较内容超出预览额度").into_owned())
                             .class("notice"),
                     );
                 }
@@ -837,11 +837,9 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
     }
     root = root.child(summary);
     if app.workbench.project.external.is_some() || app.workbench.project.needs_baseline_check {
-        root = root.child(
-            html::div()
-                .class("project-error")
-                .child(html::span("请在保存分区核对外部版本并确认基线。")),
-        );
+        root = root.child(html::div().class("project-error").child(html::span(
+            crate::i18n::tr("请在保存分区核对外部版本并确认基线。").into_owned(),
+        )));
     }
     let mut tabs = ui::tabs().key("project-tabs").active(section.to_owned());
     for (id, title) in [
@@ -867,6 +865,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     .class("project-file-group")
                     .child(html::strong(crate::i18n::tr("打开项目").into_owned()))
                     .child(input(app, "path", "项目目录"))
+                    .child(html::span(crate::i18n::tr("新建项目时，项目目录必须不存在；请选择已有的父目录并输入新的目录名。").into_owned()).class("muted"))
                     .child(input(app, "name", "新项目名称"))
                     .child(
                         html::div()
@@ -885,7 +884,8 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             );
         if app.workbench.project.restored.is_some() {
             body = body.child(html::span(
-                "已恢复本地草稿；请重新打开原项目目录，不会自动连接或执行。",
+                crate::i18n::tr("已恢复本地草稿；请重新打开原项目目录，不会自动连接或执行。")
+                    .into_owned(),
             ));
         }
     }
@@ -1395,7 +1395,9 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             );
             if app.workbench.project.file_next.is_some() {
                 body = body
-                    .child(html::span("正在分块读取项目文件。"))
+                    .child(html::span(
+                        crate::i18n::tr("正在分块读取项目文件。").into_owned(),
+                    ))
                     .child(button("继续读取项目文件", "project-ui-file-next"));
             }
             if let Some(transfers) = project["manifest"]["transfers"].as_array() {

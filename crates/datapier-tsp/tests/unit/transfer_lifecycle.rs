@@ -8,6 +8,37 @@ fn restore_app(backend: &Backend) -> App {
     app.transfer_set("file-0", "first.sql");
     app
 }
+#[test]
+fn missing_and_readonly_targets_return_to_source_form() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = restore_app(&backend);
+    app.transfer_set("destination-profile", "");
+    app.transfer_action("transfer-ui-prepare", &backend);
+    assert_eq!(app.workbench.transfer.stage, "source");
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        app.transfer_key("destination-profile")
+    );
+    assert!(requests.try_recv().is_err());
+
+    app.transfer_set("destination-profile", Uuid::new_v4().to_string());
+    app.transfer_action("transfer-ui-prepare", &backend);
+    let prepare = requests.try_recv().unwrap();
+    let id = Uuid::new_v4();
+    app.transfer_response(
+        prepare.tag.splitn(3, ':').nth(2).unwrap(),
+        &Ok(json!({"id":id,"revision":1,"state":"preparing"})),
+        &backend,
+    );
+    app.transfer_action("transfer-ui-refresh-plan", &backend);
+    let poll = requests.try_recv().unwrap();
+    app.transfer_response(poll.tag.splitn(3, ':').nth(2).unwrap(), &Ok(json!({"id":id,"revision":1,"state":"failed","error":{"code":"transfer_target_read_only"}})), &backend);
+    assert_eq!(app.workbench.transfer.stage, "source");
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        app.transfer_key("destination-profile")
+    );
+}
 
 #[test]
 fn late_prepare_is_discarded_before_new_prepare() {

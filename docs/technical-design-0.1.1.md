@@ -742,7 +742,7 @@ README、产品规划、UI 设计说明和 CHANGELOG 记录当前功能及验证
 
 ## 12. 实现与验证记录
 
-本节按验证范围汇总结果和限制，不记录逐轮修复过程。0.1.1 尚未发布，配置 schema 1 → 2、cache schema 1 和 IPC v2 已实现。原生运行证据限于 macOS arm64；其他五个目标保留实现，在 PR 阶段验证编译、默认测试和版本 smoke，尚不能写为通过。
+本节记录 0.1.1 各开发候选的历史验证范围。配置 schema 1 → 2、cache schema 1 和 IPC v2 已实现。原生运行证据限于 macOS arm64；其余目标的构建、默认测试及版本 smoke 按对应 CI 核对。正式发布状态见 [GitHub Releases](https://github.com/huspx/datapier/releases)。
 
 最近一次功能修复的本机回归证据为 `target/accepted-fixes/evidence.json`，对应开发二进制 SHA-256 为 `58c65907c89237bfbea5bd06c22c8c95b0b647af6c30cd3ceaa386b73da88076`。后续源码结构整理的验证另见 `target/structure-cleanup/evidence.json`；下表证据分别对应各自候选，不能合并为当前源码的一次完整验收。
 

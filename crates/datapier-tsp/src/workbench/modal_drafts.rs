@@ -141,7 +141,11 @@ impl App {
             self.workbench.modal_after_close = None;
             if let Some(draft) = &self.workbench.modal_draft {
                 self.focus = draft.focus.clone();
-                self.workbench.focus_request = Some(format!("input-{}", draft.focus));
+                self.workbench.focus_request = Some(if draft.focus.starts_with("settings-tab-") {
+                    draft.focus.clone()
+                } else {
+                    format!("input-{}", draft.focus)
+                });
             }
             return true;
         }

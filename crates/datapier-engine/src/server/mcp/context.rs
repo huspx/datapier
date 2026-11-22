@@ -116,10 +116,7 @@ impl Engine {
             };
             for env in &mut selected {
                 let resources = env["resources"].as_array().cloned().unwrap_or_default();
-                let invalid_count = resources
-                    .iter()
-                    .filter(|r| r["binding_status"] == "invalid")
-                    .count();
+                let mut invalid_count = 0;
                 let mut visible = Vec::new();
                 for resource in resources {
                     let Some(id) = resource["profile_id"]
@@ -141,6 +138,9 @@ impl Engine {
                         .await
                         .is_ok()
                     {
+                        if resource["binding_status"] == "invalid" {
+                            invalid_count += 1;
+                        }
                         visible.push(resource);
                     }
                 }
@@ -155,7 +155,7 @@ impl Engine {
             matched.push(json!({"root":root,"status":status,"project_id":project["id"],"project_name":project["name"],"project_revision":project["revision"],"environments":selected}));
         }
         Ok(
-            json!({"source":if context.source.is_empty() {"unknown"} else {&context.source},"context_revision":context.revision,"status":if context.roots.is_empty() {"unknown"} else {"available"},"roots":matched}),
+            json!({"source":if context.source.is_empty() {"unknown"} else {&context.source},"context_revision":context.revision,"status":if context.source == "roots_error" {"unavailable"} else if context.roots.is_empty() {"unknown"} else {"available"},"roots":matched}),
         )
     }
     pub(super) fn mcp_recommendations(context: &Value, profile: Uuid) -> Vec<Value> {

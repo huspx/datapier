@@ -28,14 +28,14 @@ Changelog 按最后一个已发布版本比较：新功能在首次发布前的�
 
 - 使用 Rust／Cargo 1.100.0 及以上稳定版；workspace 使用 edition 2024，六个 crate 统一继承 `rust-version = 1.100`，CI 显式使用 Rust 1.100.0。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
-- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；版本约束及 features 以根 `Cargo.toml` 和各 crate 配置为准。当前使用 base64 0.23.1、sha2 0.11.1、sqlparser 0.64.0、resvg 0.50.0、rmcp 3.10.0、zip 9.6.0；摘要十六进制显示使用 base16ct 1.0.0。官方 `tern-sdk` 精确固定为 registry 的 0.2.0。六种目标使用一致的锁文件，历史方案保留各自依赖版本。
+- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；版本约束及 features 以根 `Cargo.toml` 和各 crate 配置为准。当前使用 base64 0.23.1、sha2 0.11.1、sqlparser 0.64.0、resvg 0.50.0、rmcp 3.11.0、sqlx 0.9.1、zip 9.8.1；摘要十六进制显示使用 base16ct 1.0.0。官方 `tern-sdk` 精确固定为 registry 的 0.2.0。六种目标使用一致的锁文件，历史方案保留各自依赖版本。
 - 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
 - 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 - 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
 - 完整工作台与插件集成以 Tern 0.9.29 或更新和 tern-sdk 0.2.0 为基线。应用以 sans 打开 surface，使用公开 TSP 控件和宿主主题。连接／资源行、标签、grid 和状态入口按唯一 HTML 设计使用局部命名 CSS，保留对齐、选中、禁用与键盘焦点。右键菜单使用公开结构化条目。尚无类型化 builder 的公开 prop 通过通用 prop 写入并在宿主实测。启动 plugin 与命令面板使用内置 `database` 图标。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
 
-格式化使用 dprint 0.64.3；插件精确版本统一维护在 [dprint.json](dprint.json)。当前 TypeScript／JSON／TOML 插件为 0.101.0／0.26.0／0.10.0，Malva／SQL／shfmt／StyLua／Ruff 为 0.16.1／0.5.0／0.2.0／0.2.0／0.12.2，Markup／YAML 保持 0.27.6／0.6.0。Python 仍使用 3.15 线，Actions 的 checkout／setup-python 保持 v7。
+格式化使用 dprint 0.65.0；插件精确版本统一维护在 [dprint.json](dprint.json)。Python 仍使用 3.15 线，GitHub Action 的精确版本以 [发布工作流](.github/workflows/native-release.yml)和[原生构建工作流](.github/workflows/native-build.yml)为准。
 
 构建本地程序，启动普通终端 TUI 或在 Tern 中启动 TSP：
 
@@ -75,6 +75,12 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 - 避免不必要的分配、复制、重复计算与全量读取；大数据按需、分页或分批处理，不以复杂优化替代清晰设计。
 - 日志沿用项目统一机制，提供必要定位信息，不记录凭据、Token 或其他敏感数据；交付前清理临时调试输出。
 - 修改接口或行为时更新全部受影响的调用方、相关测试、文档与注释，清理被替代的实现；不保留无需求的兼容分支。
+
+### 界面国际化（i18n）
+
+- 新增或修改的界面文案须同时提供简体中文和英文。检查经数组、配置或状态生成的 tab、下拉选项和菜单，也检查空态、加载、校验失败、插件通知、tooltip 和可访问名称。文案与语言切换的行为约定见 [UI 设计规范](docs/ui-guidelines.md#6-响应式键盘与语言)。
+- TSP 文案按界面职责登记到 [英文词条目录](crates/datapier-tsp/src/i18n/catalog/)，同一词条只登记一次。静态标签通过现有控件或 `i18n::tr` 翻译。需要随语言切换重新显示的状态和提示保留为 `UiMessage`，在渲染时翻译完整模板，再按具名占位符插值。连接名、对象名、SQL、用户输入、数据及原始诊断作为原值传入。
+- 在改动对应的实际界面切换简体中文和英文，检查相关入口、动态标签和失败路径是否仍有漏译，并确认长译文可读、切换后选择与未保存输入仍保留。设计稿涉及的页面使用 [HTML 原型](docs/ui-redesign.html)核对两种语言。
 
 ## 代码可读性与注释
 

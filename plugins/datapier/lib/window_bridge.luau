@@ -134,7 +134,7 @@ local function launch_editor(cx, pane, node)
     then
       return
     end
-    local ok, problem = false, "Datapier 准备失败"
+    local ok, problem = false, if node.english then "Datapier preparation failed" else "Datapier 准备失败"
     if directory then
       ok, problem = pcall(function()
         local program = if tern.runtime.os == "windows" then ".\\datapier.exe" else "./datapier"
@@ -150,7 +150,11 @@ local function launch_editor(cx, pane, node)
     attempt.ok = ok
     if not ok then
       bootstrap.invalidate()
-      fresh:toast("error", "Datapier 编辑器启动失败", tostring(problem))
+      fresh:toast(
+        "error",
+        if node.english then "Datapier editor launch failed" else "Datapier 编辑器启动失败",
+        tostring(problem)
+      )
     end
     pcall(function()
       fresh.session:event(pane, {
@@ -173,9 +177,13 @@ local function notify(cx, pane, node, notifications)
     if type(item) == "table" then
       local id, message
       if item.kind == "approval" and type(item.approval_id) == "string" then
-        id, message = "approval:" .. item.approval_id, "有命令等待审批"
+        id, message =
+          "approval:" .. item.approval_id,
+          if node.english then "A command is awaiting approval" else "有命令等待审批"
       elseif item.kind == "authentication" and type(item.request_id) == "string" then
-        id, message = "authentication:" .. item.request_id, "有连接等待认证"
+        id, message =
+          "authentication:" .. item.request_id,
+          if node.english then "A connection is awaiting authentication" else "有连接等待认证"
       end
       if id then
         current[id] = true
@@ -353,7 +361,7 @@ local function glimpse(cx, pane, node)
     end
   end)
   if not ok then
-    cx:toast("error", "Datapier 预览失败", tostring(problem))
+    cx:toast("error", if node.english then "Datapier preview failed" else "Datapier 预览失败", tostring(problem))
   end
   cx.session:event(pane, {
     ev = "action",

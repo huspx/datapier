@@ -135,7 +135,7 @@ impl App {
         };
         self.action(&format!("{action_prefix}{}", values[next]), backend);
         self.focus = format!("{prefix}{}", values[next]);
-        self.workbench.focus_request = Some(String::new());
+        self.workbench.focus_request = Some(self.focus.clone());
         true
     }
 

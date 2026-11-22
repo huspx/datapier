@@ -71,9 +71,17 @@ fn quit_protects_unsaved_settings() {
     app.action("app-settings", &backend);
     app.field_set("settings-paging-sql_rows", "123");
     assert!(app.settings_form_dirty());
+    app.action("settings-tab:updates", &backend);
     assert!(!app.request_quit(&backend));
     assert!(app.workbench.overlay_close_confirm);
     assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    app.action("overlay-close-continue", &backend);
+    assert_eq!(
+        app.take_focus_request().as_deref(),
+        Some("settings-tab-updates")
+    );
+    assert_eq!(app.field("settings-paging-sql_rows"), "123");
+    assert!(!app.request_quit(&backend));
     app.action("overlay-close-discard", &backend);
     assert!(!app.settings_form_dirty());
     assert!(app.request_quit(&backend));

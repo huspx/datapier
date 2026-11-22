@@ -457,6 +457,13 @@ impl App {
                     self.workbench.project.preview = None;
                     self.workbench.project.obsolete_preview = None;
                 }
+                if method == "project.create" && error.code == "project_path_exists" {
+                    self.field_error(
+                        &self.project_key("path"),
+                        i18n::UiMessage::local("项目目录已存在，请选择不存在的新目录"),
+                    );
+                    return true;
+                }
                 self.status = i18n::UiMessage::raw(error.to_string());
             }
             Ok(value) => match method.as_str() {
@@ -476,10 +483,15 @@ impl App {
                     if value["status"] == "matched" {
                         self.local_project_select(value["project"].clone());
                     } else {
-                        self.status = i18n::UiMessage::raw(format!(
-                            "仓库无法定位 / Repository could not be resolved: {}",
-                            value["status"].as_str().unwrap_or("unknown")
-                        ));
+                        self.status = i18n::UiMessage::template(
+                            "仓库无法定位：{status}",
+                            vec![(
+                                "status",
+                                i18n::UiArg::Raw(
+                                    value["status"].as_str().unwrap_or("unknown").to_owned(),
+                                ),
+                            )],
+                        );
                     }
                 }
                 "local_project.get" | "local_project.save" => {
@@ -535,9 +547,8 @@ impl App {
                         });
                     if !valid {
                         self.workbench.project.upload = None;
-                        self.status = i18n::UiMessage::raw(
-                            "项目上传确认偏移或版本无效，请重新准备".to_owned(),
-                        );
+                        self.status =
+                            i18n::UiMessage::key("项目上传确认偏移或版本无效，请重新准备");
                         return true;
                     }
                     if let Some(upload) = &mut self.workbench.project.upload {
@@ -548,12 +559,12 @@ impl App {
                             upload.revision = revision;
                         } else {
                             self.workbench.project.upload = None;
-                            self.status = i18n::UiMessage::raw("项目上传响应缺少版本".to_owned());
+                            self.status = i18n::UiMessage::key("项目上传响应缺少版本");
                             return true;
                         }
                         if upload.id.is_none() {
                             self.workbench.project.upload = None;
-                            self.status = i18n::UiMessage::raw("项目上传响应缺少句柄".to_owned());
+                            self.status = i18n::UiMessage::key("项目上传响应缺少句柄");
                             return true;
                         }
                     }
@@ -573,9 +584,8 @@ impl App {
                                 json!({"project_id":opened["project_id"],"discard_previews":true}),
                             );
                             self.workbench.project.restored = Some(saved);
-                            self.status = i18n::UiMessage::raw(
-                                "恢复的草稿属于另一项目目录，请打开原目录".to_owned(),
-                            );
+                            self.status =
+                                i18n::UiMessage::key("恢复的草稿属于另一项目目录，请打开原目录");
                             return true;
                         }
                         restored = true;
@@ -723,8 +733,7 @@ impl App {
                         }
                     } else {
                         self.workbench.project.external = None;
-                        self.status =
-                            i18n::UiMessage::raw("外部项目再次改变，请重新查看".to_owned());
+                        self.status = i18n::UiMessage::key("外部项目再次改变，请重新查看");
                     }
                 }
                 "project.external.accept" => {
@@ -901,8 +910,7 @@ impl App {
         {
             self.workbench.project.open_file = None;
             if !success {
-                self.status =
-                    i18n::UiMessage::raw("文件预览失败 / Could not preview file".to_owned());
+                self.status = i18n::UiMessage::key("文件预览失败");
             }
         }
     }
@@ -1140,9 +1148,7 @@ impl App {
                             Some(json!({"id":Uuid::new_v4(),"path":path,"host":"local"}));
                     }
                 } else {
-                    self.status = i18n::UiMessage::raw(
-                        "请先保存项目文件 / Save the project file first".to_owned(),
-                    );
+                    self.status = i18n::UiMessage::key("请先保存项目文件");
                 }
             }
             return true;
@@ -1436,10 +1442,7 @@ impl App {
                         } else if let Ok(value) = redis.parse::<u32>() {
                             Some(value)
                         } else {
-                            self.status = i18n::UiMessage::raw(
-                                "Redis DB 必须是非负整数 / Redis DB must be a non-negative integer"
-                                    .to_owned(),
-                            );
+                            self.status = i18n::UiMessage::key("Redis DB 必须为非负整数");
                             return true;
                         };
                         if (!is_redis && database.is_empty()) || (is_redis && redis_db.is_none()) {
@@ -1452,9 +1455,7 @@ impl App {
                             || discovery.profile_id != self.project_value("local-profile")
                             || !discovery.databases.iter().any(|db| db == selected)
                         {
-                            self.status = i18n::UiMessage::raw(
-                                "请选择已发现的数据库 / Select a discovered database".to_owned(),
-                            );
+                            self.status = i18n::UiMessage::key("请选择已发现的数据库");
                             return true;
                         }
                         let resource = json!({"profile_id":self.project_value("local-profile"),"database":if database.is_empty(){None}else{Some(database)},"redis_db":redis_db,"description":self.project_value("local-resource-description")});
@@ -1679,7 +1680,7 @@ impl App {
             return true;
         }
         if self.workbench.project.file_loading && name != "project-ui-file-next" {
-            self.status = i18n::UiMessage::raw("请先完整读取项目文件".to_owned());
+            self.status = i18n::UiMessage::key("请先完整读取项目文件");
             return true;
         }
         if name == "project-ui-connection-new" {
@@ -1892,8 +1893,7 @@ impl App {
                         return true;
                     };
                     if self.workbench.project.external_complete_path.as_deref() != Some(path) {
-                        self.status =
-                            i18n::UiMessage::raw("请先完整读取该外部文件，再合并正文".to_owned());
+                        self.status = i18n::UiMessage::key("请先完整读取该外部文件，再合并正文");
                         return true;
                     }
                     let text = self.workbench.project.external_text.clone();
@@ -1966,7 +1966,7 @@ impl App {
         if (name == "project-ui-transfer-new" || name.starts_with("project-ui-transfer:"))
             && self.workbench.transfer.busy()
         {
-            self.status = i18n::UiMessage::raw("请先完成或取消当前迁移任务".to_owned());
+            self.status = i18n::UiMessage::key("请先完成或取消当前迁移任务");
             return true;
         }
         if name == "project-ui-transfer-new" {
@@ -2043,7 +2043,7 @@ impl App {
                 let path_parameter = self.project_value("path-parameter").trim();
                 if !path_parameter.is_empty() {
                     if !path_parameter.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || self.project_value("local-path").is_empty() {
-                        self.field_error(&self.project_key("path-parameter"), i18n::UiMessage::raw("请输入有效路径参数名和本机路径".to_owned())); return true;
+                        self.field_error(&self.project_key("path-parameter"), i18n::UiMessage::key("请输入有效路径参数名和本机路径")); return true;
                     }
                     paths[path_parameter] = json!(self.project_value("local-path"));
                 }
@@ -2057,13 +2057,13 @@ impl App {
                 self.project_send(backend,"project.bindings.confirm",json!({"project_id":id,"binding_group":self.workbench.project.binding_group,"binding_digest":bindings["binding_digest"]}));
             },
             "project-ui-save-prepare" => if let (Some(id),Some(project)) = (id,project) {
-                if self.workbench.project.needs_baseline_check || self.workbench.project.external.is_some() { self.status = i18n::UiMessage::raw("请先处理外部版本冲突".to_owned()); return true; }
+                if self.workbench.project.needs_baseline_check || self.workbench.project.external.is_some() { self.status = i18n::UiMessage::key("请先处理外部版本冲突"); return true; }
                 if self.workbench.project.file_loading { self.status = i18n::UiMessage::key("请先完整读取项目文件，再保存"); return true; }
                 let mut manifest = project["manifest"].clone(); let mut files = self.workbench.project.transfer_files.clone();
                 let path = self.project_value("query-path");
                 if !path.is_empty() {
                     let provider = manifest["connections"].as_array().and_then(|items| items.iter().find(|c| c["alias"].as_str() == Some(self.project_value("query-alias")))).and_then(|c| c["provider"].as_str());
-                    let language = match provider { Some("mysql") => "sql", Some("redis") => "redis", _ => { self.workbench.project.section = "queries".into(); self.field_error(&self.project_key("query-alias"), i18n::UiMessage::raw("请选择有效的查询连接别名".to_owned())); return true; } };
+                    let language = match provider { Some("mysql") => "sql", Some("redis") => "redis", _ => { self.workbench.project.section = "queries".into(); self.field_error(&self.project_key("query-alias"), i18n::UiMessage::key("请选择有效的查询连接别名")); return true; } };
                     let mut query = manifest["queries"].as_array().and_then(|q|q.iter().find(|q|q["path"].as_str()==Some(path))).cloned().unwrap_or_else(||json!({"id":Uuid::new_v4()}));
                     query["language"] = json!(language);
                     query["name"] = json!(self.project_value("query-name")); query["path"] = json!(path); query["connection_alias"] = json!(self.project_value("query-alias"));
@@ -2082,10 +2082,10 @@ impl App {
             "project-ui-external-accept" => if let (Some(id),Some(external)) = (id,self.workbench.project.external.clone()) {
                 if let Some(baseline) = &self.workbench.project.baseline_manifest
                     && external_deletions(baseline, &external, &project.as_ref().map(|p| p["digests"].clone()).unwrap_or(Value::Null)).iter().any(|(section,index,_)| !self.workbench.project.deletion_decisions.contains(&format!("{section}:{index}")))
-                { self.status = i18n::UiMessage::raw("请逐项决定外部删除是保留还是合并删除".to_owned()); return true; }
+                { self.status = i18n::UiMessage::key("请逐项决定外部删除是保留还是合并删除"); return true; }
                 if let Some(baseline) = &self.workbench.project.baseline_manifest
                     && external_changes(baseline, &external, &project.as_ref().map(|p| p["digests"].clone()).unwrap_or(Value::Null)).iter().any(|(section,index,_)| !self.workbench.project.change_decisions.contains(&format!("{section}:{index}")))
-                { self.status = i18n::UiMessage::raw("请逐项决定外部新增或修改是保留本地还是合并外部版本".to_owned()); return true; }
+                { self.status = i18n::UiMessage::key("请逐项决定外部新增或修改是保留本地还是合并外部版本"); return true; }
                 self.project_send(backend,"project.external.accept",json!({"project_id":id,"digests":external["digests"]}));
             },
             "project-ui-close" => { self.workbench.project.close_confirm = true; },

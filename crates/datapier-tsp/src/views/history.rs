@@ -96,7 +96,7 @@ pub(super) fn history_panel(app: &App) -> Node<Msg> {
             html::div()
                 .class("history-search")
                 .child(field(app, "history_filter", "搜索历史"))
-                .child(button("查询", "history-search")),
+                .child(button("搜索", "history-search")),
         )
         .child(
             html::div()

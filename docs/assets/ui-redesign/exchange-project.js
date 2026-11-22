@@ -582,7 +582,12 @@ function xpProjectBody() {
       xpField('projectName', '项目名称', 'Project name')
     }${xpField('projectPath', '项目目录（示例）', 'Project directory (example)')}${
       xpField('layout', '布局', 'Layout')
-    }</div><div class="xp-section-heading"><h4>${
+    }</div><p class="muted">${
+      xpLabel(
+        '打开时填写已有项目目录；新建时填写尚不存在的目录。',
+        'Open an existing project directory or enter a new path to create one.',
+      )
+    }</p><div class="xp-section-heading"><h4>${
       xpLabel('归档导入／导出', 'Archive import / export')
     }</h4><div class="xp-actions">${xpIcon('upload', '预览导入归档', 'Preview archive import', 'archive-import')}${
       xpIcon('download', '预览导出归档', 'Preview archive export', 'archive-export')

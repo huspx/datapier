@@ -122,6 +122,9 @@
   color: var(--warn);
   font-size: 12px;
 }
+.bp-small .draftbar {
+  flex-wrap: wrap;
+}
 .draft-list {
   max-height: 50vh;
   overflow: auto;
@@ -594,22 +597,6 @@
   bottom: 29px;
   z-index: 5;
   width: 280px;
-}
-.bp-small .sidebar {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 5;
-  width: 224px;
-}
-.bp-small .sidebar.compact {
-  position: relative;
-  display: flex;
-  width: 58px;
-}
-.bp-small.navigation-overlay .content {
-  margin-left: 58px;
 }
 .bp-small .resource-nav {
   padding-right: 8px;

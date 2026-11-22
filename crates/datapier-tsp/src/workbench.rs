@@ -475,11 +475,7 @@ impl App {
         if width == 0 || self.workbench.inline.is_some() {
             return;
         }
-        let sidebar = if width <= 760 || self.navigation_compact() {
-            58
-        } else {
-            224
-        };
+        let sidebar = if self.navigation_compact() { 58 } else { 224 };
         let beside = if self.is_redis() {
             match width {
                 0..=760 => 210,

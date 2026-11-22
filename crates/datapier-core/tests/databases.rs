@@ -354,7 +354,7 @@ async fn mysql_decimal_baselines_match_zero_and_small_values_on_tables_and_views
 #[tokio::test]
 #[ignore = "需要隔离的 MySQL，验证真实 KILL QUERY"]
 async fn mysql_cancel_does_not_kill_the_next_query() {
-    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let (store, mut profile, secret) = context(ProviderKind::Mysql).await;
     let direct = profile.direct().unwrap();
     let observer = sqlx::mysql::MySqlPoolOptions::new()
         .max_connections(1)
@@ -368,28 +368,23 @@ async fn mysql_cancel_does_not_kill_the_next_query() {
         )
         .await
         .unwrap();
-    let mut db = ProviderSession::connect(profile, secret).await.unwrap();
     let fixture = format!("cancel_fixture_{}", Uuid::new_v4().simple());
-
-    // MySQL 不允许在同一查询中多次引用同一个临时表。
     for index in 0..10 {
-        execute(
-            &mut db,
-            &store,
-            &format!("CREATE TEMPORARY TABLE {fixture}_{index} (n INT NOT NULL)"),
-        )
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE {fixture}_{index} (n INT NOT NULL)"
+        )))
+        .execute(&observer)
         .await
         .unwrap();
-        execute(
-            &mut db,
-            &store,
-            &format!(
-                "INSERT INTO {fixture}_{index} VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
-            ),
-        )
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {fixture}_{index} VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+        )))
+        .execute(&observer)
         .await
         .unwrap();
     }
+    profile.access_mode = AccessMode::ReadOnly;
+    let mut db = ProviderSession::connect(profile, secret).await.unwrap();
     // 聚合每个组合中的各列，避免 COUNT(*) 被直接按表行数计算。
     let tables = (0..10)
         .map(|index| format!("{fixture}_{index} AS t{index}"))
@@ -457,6 +452,12 @@ async fn mysql_cancel_does_not_kill_the_next_query() {
         .unwrap();
     assert_eq!(result_rows(&store, &after).await[0][0].text(), "42");
     db.close().await.unwrap();
+    for index in 0..10 {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {fixture}_{index}")))
+            .execute(&observer)
+            .await
+            .unwrap();
+    }
     observer.close().await;
     drop(execution_sink);
     clean(store).await;
