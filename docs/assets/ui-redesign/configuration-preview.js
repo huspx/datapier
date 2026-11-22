@@ -37,9 +37,13 @@ const configDefaults = {
   defaultPolicy: 'dangerous',
   fineGrained: false,
 };
+const configUpdateDefaults = { auto_check: true, auto_download: false, auto_apply: false };
 const configPreview = {
   saved: configCopy(configDefaults),
   draft: configCopy(configDefaults),
+  updateSaved: configCopy(configUpdateDefaults),
+  updateDraft: configCopy(configUpdateDefaults),
+  updateState: 'unchecked',
   tab: 'general',
   message: '',
   profile: '',
@@ -95,9 +99,11 @@ function redisConnectionPreview(form) {
     : count === null
     ? configText('数量未知', 'Count unknown')
     : configText(`示例探测：${count} 个 DB`, `Example detection: ${count} databases`);
-  return `<label class="wide">${h(t('initialDb'))}<select data-connection-field="redisDb">${
-    redisDbOptions(form.redisDb, count)
-  }</select></label>
+  return `<label class="wide">${
+    h(t('initialDb'))
+  }<input type="number" min="0" max="4294967295" step="1" data-connection-field="redisDb" value="${
+    h(form.redisDb)
+  }"></label>
     <label class="wide">${
       h(configText(
         'Redis DB 数量覆盖（1–4294967295；留空自动探测）',
@@ -106,12 +112,12 @@ function redisConnectionPreview(form) {
     }<input type="number" min="1" max="4294967295" step="1" data-config-redis-override value="${
       h(form.redisDatabasesOverride)
     }"></label>
-    <div class="wide config-inline"><span class="muted small" role="status">${h(status)}${
-      count > 1024 ? ` · ${h(configText('仅列出前 1024 项及当前 DB', 'Showing first 1024 and current DB'))}` : ''
-    } · ${h(configText('仅为示例，不连接数据库', 'Example only; no database connection'))}</span>
-    <button type="button" class="button" data-config-action="redis-detect" ${
+    <div class="wide config-inline"><button type="button" class="button" data-config-action="redis-detect" ${
       state.redisDetection === 'loading' ? 'disabled' : ''
     }>${h(configText('模拟探测', 'Simulate detection'))}</button>
+    <span class="muted small" role="status">${h(status)} · ${
+      h(configText('仅为示例，不连接数据库', 'Example only; no database connection'))
+    }</span>
     <button type="button" class="button" data-config-action="redis-fail" ${
       state.redisDetection === 'loading' ? 'disabled' : ''
     }>${h(configText('模拟失败', 'Simulate failure'))}</button></div>`;
@@ -168,7 +174,8 @@ function configSwitch(key, zh, en) {
   );
 }
 function configDirty() {
-  return JSON.stringify(configPreview.draft) !== JSON.stringify(configPreview.saved);
+  return JSON.stringify(configPreview.draft) !== JSON.stringify(configPreview.saved)
+    || JSON.stringify(configPreview.updateDraft) !== JSON.stringify(configPreview.updateSaved);
 }
 function configRuleDirty(profile = configPreview.profile) {
   const c = configPreview;
@@ -398,6 +405,90 @@ function configFilesPreview() {
       : ''
   }</section>`;
 }
+function configUpdatesPreview() {
+  const c = configPreview,
+    labels = {
+      unchecked: ['未检查', 'Not checked'],
+      available: ['发现更新', 'Update available'],
+      plugin: ['正在下载插件 ZIP', 'Downloading plugin ZIP'],
+      archive: ['正在下载程序归档', 'Downloading program archive'],
+      verifying: ['正在校验下载', 'Verifying downloads'],
+      ready: ['已准备，等待退出', 'Ready; waiting for exit'],
+      installed: ['安装成功', 'Installed'],
+      waiting: ['已安排，等待客户端退出', 'Scheduled; waiting for clients to exit'],
+    };
+  const switches = [
+    ['auto_check', '自动检查更新', 'Check for updates automatically'],
+    ['auto_download', '自动下载更新', 'Download updates automatically'],
+    ['auto_apply', '退出后自动应用', 'Apply automatically after exit'],
+  ].map(([key, zh, en]) =>
+    configRow(
+      configText(zh, en),
+      `<button type="button" class="config-switch" role="switch" aria-label="${h(configText(zh, en))}" aria-checked="${
+        c.updateDraft[key]
+      }" data-config-action="update-toggle" data-config-key="${key}" ${
+        c.settingsBusy || (key === 'auto_apply' && !c.updateDraft.auto_download) ? 'disabled' : ''
+      }><span></span></button>`,
+    )
+  ).join('');
+  const actions = [
+    ['check', '检查更新', 'Check for updates', false],
+    ['download', '下载更新', 'Download update', c.updateState !== 'available'],
+    ['apply', '退出后安装更新', 'Install update after exit', c.updateState !== 'ready'],
+    [
+      'exit',
+      '模拟所有客户端安全退出',
+      'Simulate all clients exiting safely',
+      c.updateState !== 'waiting' && !(c.updateState === 'ready' && c.updateSaved.auto_apply),
+    ],
+  ].map(([key, zh, en, disabled]) =>
+    `<button type="button" data-config-action="update-${key}" ${disabled || c.settingsBusy ? 'disabled' : ''}>${
+      h(configText(zh, en))
+    }</button>`
+  ).join('');
+  return `<section class="config-section config-section-wide">${switches}<p>${
+    h(configText(
+      '自动应用须启用自动下载，且仅在所有客户端安全退出后执行。',
+      'Automatic application requires automatic downloads and runs only after all clients exit safely.',
+    ))
+  }</p><p role="status">${h(configText(...labels[c.updateState]))}${
+    c.updateState !== 'unchecked' ? ' · 0.5.1 (' + h(configText('示例版本', 'example version')) + ')' : ''
+  }</p>${
+    c.updateState === 'plugin'
+      ? `<p>${
+        h(configText(
+          '插件 ZIP · 已接收 3 MiB / 6 MiB · 50%（示例）',
+          'Plugin ZIP · received 3 MiB / 6 MiB · 50% (example)',
+        ))
+      }</p><progress max="100" value="50" aria-label="Plugin ZIP"></progress>`
+      : c.updateState === 'archive'
+      ? `<p>${
+        h(configText(
+          '程序归档 · 已接收 8 MiB · 总量未知（示例）',
+          'Program archive · received 8 MiB · total unknown (example)',
+        ))
+      }</p>`
+      : c.updateState === 'verifying'
+      ? `<p>${
+        h(configText(
+          '下载完成，正在校验，尚不可安装（示例）。',
+          'Download complete; verifying before installation (example).',
+        ))
+      }</p>`
+      : ''
+  }${
+    ['plugin', 'archive', 'verifying'].includes(c.updateState)
+      ? `<button type="button" data-config-action="update-next">${
+        h(configText('下一示例状态', 'Next example state'))
+      }</button>`
+      : ''
+  }<div class="config-inline">${actions}</div><p class="muted small">${
+    h(configText(
+      '此示例不检查、下载或安装真实更新。',
+      'This example does not check, download, or install real updates.',
+    ))
+  }</p></section>`;
+}
 function settingsPreview() {
   const c = configPreview, d = c.draft;
   if (c.confirm) {
@@ -542,6 +633,7 @@ function settingsPreview() {
     <div class="config-tabs" role="tablist" aria-label="${h(t('settings'))}">${
       [
         ['general', configText('常规', 'General')],
+        ['updates', configText('更新', 'Update')],
         ['editing', configText('编辑与文件', 'Editing and files')],
         ['archery', 'Archery'],
         ['mcp', 'MCP'],
@@ -555,12 +647,13 @@ function settingsPreview() {
       h(
         ({
           general: configText('常规', 'General'),
+          updates: configText('更新', 'Update'),
           editing: configText('编辑与文件', 'Editing and files'),
           archery: 'Archery',
           mcp: 'MCP',
         })[c.tab],
       )
-    }">${({ general, editing, archery, mcp })[c.tab]}</div>
+    }">${({ general, updates: configUpdatesPreview(), editing, archery, mcp })[c.tab]}</div>
     <p role="status" class="muted small">${h(configMessage(c.message))}</p>
     <details class="config-demo-controls"><summary>${
       h(configText('示例说明与状态', 'Example notes and states'))
@@ -669,7 +762,7 @@ document.addEventListener('keydown', event => {
   const tab = event.target.closest('[data-config-action="tab"]');
   if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const tabs = ['general', 'editing', 'archery', 'mcp'];
+  const tabs = ['general', 'updates', 'editing', 'archery', 'mcp'];
   const current = tabs.indexOf(tab.dataset.configTab);
   const next = event.key === 'Home'
     ? 0
@@ -748,6 +841,20 @@ document.addEventListener('click', event => {
   if (!button || button.disabled) return;
   const action = button.dataset.configAction;
   const c = configPreview;
+  if (action.startsWith('update-')) {
+    if (action === 'update-toggle') {
+      const key = button.dataset.configKey;
+      c.updateDraft[key] = !c.updateDraft[key];
+      if (!c.updateDraft.auto_download) c.updateDraft.auto_apply = false;
+    } else if (action === 'update-check') c.updateState = c.updateSaved.auto_download ? 'plugin' : 'available';
+    else if (action === 'update-download') c.updateState = 'plugin';
+    else if (action === 'update-next') {
+      c.updateState = c.updateState === 'plugin' ? 'archive' : c.updateState === 'archive' ? 'verifying' : 'ready';
+    } else if (action === 'update-apply') c.updateState = 'waiting';
+    else if (action === 'update-exit') c.updateState = 'installed';
+    render();
+    return;
+  }
   if (action === 'tab') {
     c.tab = button.dataset.configTab;
     render();
@@ -781,6 +888,7 @@ document.addEventListener('click', event => {
       return;
     }
     const snapshot = configCopy(c.draft);
+    const updateSnapshot = configCopy(c.updateDraft);
     c.settingsBusy = true;
     c.message = ['正在模拟保存全局设置…', 'Simulating global settings save…'];
     render();
@@ -793,6 +901,7 @@ document.addEventListener('click', event => {
         ];
       } else {
         c.saved = snapshot;
+        c.updateSaved = updateSnapshot;
         c.message = [
           '全局设置已保存在本页示例中，未发送。',
           'Global settings saved in this page example; nothing was sent.',
@@ -808,6 +917,7 @@ document.addEventListener('click', event => {
       document.querySelector('[data-config-action="cancel-confirm"]')?.focus();
     } else {
       c.draft = configCopy(c.saved);
+      c.updateDraft = configCopy(c.updateSaved);
       c.errors = {};
       c.message = ['已重新加载本页示例。', 'Reloaded the page example.'];
       render();
@@ -818,6 +928,7 @@ document.addEventListener('click', event => {
     const close = c.confirm === 'close';
     c.confirm = '';
     c.draft = configCopy(c.saved);
+    c.updateDraft = configCopy(c.updateSaved);
     c.errors = {};
     if (close) {
       c.ruleDrafts = {};

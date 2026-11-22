@@ -26,7 +26,7 @@ function openConnectionForm(
       : 'default',
     password: '',
     database: '',
-    mysqlTimezone: mode === 'new-connection' ? '+00:00' : state.mysqlOptions?.timezone ?? '+00:00',
+    mysqlTimezone: mode === 'new-connection' ? '' : state.mysqlOptions?.timezone ?? '',
     mysqlConnectTimeout: mode === 'new-connection' ? '' : state.mysqlOptions?.connectTimeout ?? '',
     mysqlQueryTimeout: mode === 'new-connection' ? '' : state.mysqlOptions?.queryTimeout ?? '',
     redisDb: mode === 'new-connection' ? 0 : state.redisDb,

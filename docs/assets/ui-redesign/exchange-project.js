@@ -3,6 +3,7 @@
 const xp = {
   open: '',
   section: 'sources',
+  previewTab: 'structure',
   mode: 'import',
   provider: 'mysql',
   scenario: 'default',
@@ -20,12 +21,9 @@ const xp = {
     defaults: '',
     recordRanges: '',
     range: 'all',
-    filter: '',
     prefix: 'cache:',
     targetPrefix: 'copy:',
     conflict: 'stop',
-    mapping: 'order_id → id\namount → total',
-    types: 'id: BIGINT\ntotal: DECIMAL(18,2)',
     projectName: '订单测试',
     projectPath: '/example/orders',
     alias: 'orders',
@@ -36,29 +34,104 @@ const xp = {
     transferConfig: '{\n  "mode": "copy",\n  "source": "orders"\n}',
     layout: '查询与迁移并列',
   },
+  endpoints: { source: { connection: '', database: '' }, target: { connection: '', database: '' } },
+  catalogState: 'ready',
+  newTargetStep: false,
+  newTargetName: '',
+  mappings: [{ source: '', target: '' }],
+  files: ['orders.csv'],
+  filters: [''],
+  activeObject: 0,
+  objects: [{ source: '', target: '', checked: true }],
   selected: {
-    table: true,
-    view: true,
-    trigger: false,
-    procedure: false,
-    function: false,
-    event: false,
-    key: true,
     difference: false,
   },
   confirmed: false,
   prepared: false,
   bindingConfirmed: false,
   projectDirty: false,
+  fileSelection: { bindings: 'current', queries: 'mysql', transfers: 'current' },
   projectActive: false,
   projectBaseline: null,
   savePreview: false,
   conflictDecisions: { added: '', modified: '', deleted: '' },
+  documentRatio: 25,
   pendingLeave: null,
   allowLeave: false,
   previousSelect: '',
   message: '',
 };
+const xpCatalog = {
+  mysql: {
+    'Commerce MySQL': {
+      commerce: { orders: ['id', 'total'], orders_summary: ['id', 'total'] },
+      analytics: { sales: ['id', 'amount'] },
+    },
+    'Warehouse MySQL': { warehouse: { orders: ['id', 'total'], inventory: ['id', 'quantity'] } },
+  },
+  redis: {
+    'Cache Redis': { 'DB 0': { 'cache:example': [] }, 'DB 3': { 'cache:archive': [] } },
+    'Sessions Redis': { 'DB 0': { 'session:example': [] }, 'DB 1': { 'session:archive': [] } },
+  },
+};
+const xpFileColumns = ['order_id', 'amount'];
+const mcpExample = {
+  view: 'mcp',
+  selected: 0,
+  environment: 0,
+  form: '',
+  editIndex: -1,
+  draft: {},
+  error: '',
+  projects: [
+    {
+      name: '订单服务',
+      description: '订单应用数据库',
+      roots: ['/example/orders'],
+      environments: [
+        {
+          name: '开发',
+          type: 'dev',
+          description: '日常开发',
+          default: true,
+          resources: [
+            { profile: 'Commerce MySQL', type: 'mysql', database: 'orders_dev', description: '订单数据' },
+            { profile: 'Cache Redis', type: 'redis', redisDb: '0', description: '开发缓存' },
+            {
+              profile: '旧连接（已失效）',
+              type: 'mysql',
+              database: 'orders_archive',
+              description: '需重新关联',
+              invalid: true,
+            },
+          ],
+        },
+        {
+          name: '测试',
+          type: 'test',
+          description: '集成测试',
+          default: false,
+          resources: [
+            { profile: 'Commerce MySQL', type: 'mysql', database: 'orders_test', description: '测试数据' },
+          ],
+        },
+        { name: '生产', type: 'prod', description: '生产环境', default: false, resources: [] },
+      ],
+    },
+    {
+      name: '库存服务',
+      description: '库存与缓存',
+      roots: ['/example/inventory'],
+      environments: [
+        { name: '开发', type: 'dev', description: '开发环境', default: true, resources: [] },
+      ],
+    },
+  ],
+};
+const mcpProfiles = [
+  { name: 'Commerce MySQL', type: 'mysql', databases: ['orders_dev', 'orders_test', 'inventory'] },
+  { name: 'Cache Redis', type: 'redis', databases: Array.from({ length: 16 }, (_, index) => String(index)) },
+];
 const xpText = (zh, en) => language === 'zh-CN' ? zh : en;
 const xpLabel = (zh, en) => h(xpText(zh, en));
 const xpProjectKeys = [
@@ -139,9 +212,135 @@ function xpTabs(items) {
     ).join('')
   }</div>`;
 }
+function xpMenu(attribute, label, value, options, disabled = false) {
+  return `<label class="xp-field"><span>${h(label)}</span><select ${attribute}${
+    disabled ? ' disabled' : ''
+  }><option value="">${xpLabel('请选择', 'Select')}</option>${
+    options.map(option => `<option value="${h(option)}"${value === option ? ' selected' : ''}>${h(option)}</option>`)
+      .join('')
+  }</select></label>`;
+}
+function xpEndpoint(side) {
+  const endpoint = xp.endpoints[side];
+  const connections = xpCatalog[xp.provider];
+  const databases = connections[endpoint.connection] || {};
+  return `${
+    xpMenu(
+      `data-xp-endpoint="${side}:connection"`,
+      xpText(
+        side === 'source' ? '来源连接' : '目标连接',
+        side === 'source' ? 'Source connection' : 'Target connection',
+      ),
+      endpoint.connection,
+      Object.keys(connections),
+    )
+  }${
+    xpMenu(
+      `data-xp-endpoint="${side}:database"`,
+      xpText(
+        side === 'source' ? '来源数据库' : '目标数据库',
+        side === 'source' ? 'Source database' : 'Target database',
+      ),
+      endpoint.database,
+      Object.keys(databases),
+      !endpoint.connection || xp.catalogState !== 'ready',
+    )
+  }`;
+}
+function xpCollection(key, zh, en) {
+  const label = xpText(zh, en);
+  const rows = xp[key].map((value, index) =>
+    `<div class="xp-collection-row"><input data-xp-collection="${key}:${index}" aria-label="${h(label)} ${
+      index + 1
+    }" value="${h(value)}">${
+      xpIcon('trash', `移除${zh} ${index + 1}`, `Remove ${en} ${index + 1}`, `collection-remove:${key}:${index}`)
+    }</div>`
+  ).join('');
+  return `<div class="xp-group"><div class="xp-section-heading"><h4>${h(label)}</h4>${
+    xpIcon('plus', `添加${zh}`, `Add ${en}`, `collection-add:${key}`)
+  }</div>${rows || `<p>${xpLabel('暂无项目', 'No items')}</p>`}</div>`;
+}
+function xpObjects() {
+  const source = xpCatalog[xp.provider][xp.endpoints.source.connection]?.[xp.endpoints.source.database] || {};
+  const target = xpCatalog[xp.provider][xp.endpoints.target.connection]?.[xp.endpoints.target.database] || {};
+  const sourceObjects = ['import', 'sql_restore'].includes(xp.mode) ? xp.files.filter(Boolean) : Object.keys(source);
+  const rows = xp.objects.map((item, index) =>
+    `<div class="xp-map-row"><input type="checkbox" data-xp-collection-check="${index}" aria-label="${
+      xpLabel('选择对象', 'Select object')
+    } ${index + 1}"${item.checked ? ' checked' : ''}>${
+      xpMenu(
+        `data-xp-object="${index}:source"`,
+        xpText('来源对象', 'Source object'),
+        item.source,
+        sourceObjects,
+        xp.catalogState !== 'ready',
+      )
+    }${
+      ['export', 'sql_dump'].includes(xp.mode)
+        ? ''
+        : xpMenu(
+          `data-xp-object="${index}:target"`,
+          xpText('目标对象', 'Target object'),
+          item.target,
+          Object.keys(target),
+          xp.catalogState !== 'ready',
+        )
+    }<button data-xp-action="mapping-object:${index}" aria-pressed="${xp.activeObject === index}">${
+      xpLabel('字段', 'Columns')
+    }</button>${xpIcon('trash', '移除对象', 'Remove object', `collection-remove:objects:${index}`)}</div>`
+  ).join('');
+  const object = xp.objects[xp.activeObject] || {};
+  const sourceColumns = ['import', 'sql_restore'].includes(xp.mode)
+    ? (object.source ? xpFileColumns : [])
+    : source[object.source] || [];
+  const targetColumns = target[object.target] || [];
+  const mappings = xp.mappings.map((item, index) =>
+    `<div class="xp-map-row">${
+      xpMenu(
+        `data-xp-mapping="${index}:source"`,
+        xpText('来源字段', 'Source column'),
+        item.source,
+        sourceColumns,
+        !sourceColumns.length,
+      )
+    }${
+      xpMenu(
+        `data-xp-mapping="${index}:target"`,
+        xpText('目标字段', 'Target column'),
+        item.target,
+        targetColumns,
+        !targetColumns.length,
+      )
+    }${xpIcon('trash', '移除字段映射', 'Remove column mapping', `collection-remove:mappings:${index}`)}</div>`
+  ).join('');
+  return `<div class="xp-group"><div class="xp-section-heading"><h4>${xpLabel('对象映射', 'Object mappings')}</h4>${
+    xpIcon('plus', '添加对象', 'Add object', 'collection-add:objects')
+  }</div>${rows}${
+    xp.provider === 'mysql' && !['export', 'sql_dump'].includes(xp.mode)
+      ? `<button data-xp-action="new-target">${xpLabel('新建目标表', 'Create target table')}</button>${
+        xp.newTargetStep
+          ? `<div class="xp-group"><label class="xp-field"><span>${
+            xpLabel('新表名称（示例）', 'New table name (example)')
+          }</span><input data-xp-new-target value="${
+            h(xp.newTargetName)
+          }"></label><div class="xp-actions"><button data-xp-action="new-target-cancel">${
+            xpLabel('取消', 'Cancel')
+          }</button><button data-xp-action="new-target-save">${
+            xpLabel('添加示例目标', 'Add example target')
+          }</button></div></div>`
+          : ''
+      }`
+      : ''
+  }</div>${
+    xp.provider === 'mysql' && !['export', 'sql_dump'].includes(xp.mode)
+      ? `<div class="xp-group"><div class="xp-section-heading"><h4>${xpLabel('字段映射', 'Column mappings')}</h4>${
+        xpIcon('plus', '添加字段映射', 'Add column mapping', 'collection-add:mappings')
+      }</div>${mappings}</div>`
+      : ''
+  }`;
+}
 function xpExchangeBody() {
   const mysql = xp.provider === 'mysql',
-    file = ['import', 'export', 'sql_dump', 'sql_restore'].includes(xp.mode),
     csv = xp.fields.format === 'CSV' && ['import', 'export'].includes(xp.mode);
   if (xp.scenario === 'loading') {
     return `<p role="status">${
@@ -172,11 +371,33 @@ function xpExchangeBody() {
       xpLabel('数据库类型', 'Database type')
     }</span><select data-xp-provider><option value="mysql"${
       mysql ? ' selected' : ''
-    }>MySQL</option><option value="redis"${!mysql ? ' selected' : ''}>Redis</option></select></label>${
-      xpField('source', file ? '来源文件或连接' : '来源连接', file ? 'Source file or connection' : 'Source connection')
-    }${xpField('target', '目标文件或连接', 'Target file or connection')}${
+    }>MySQL</option><option value="redis"${
+      !mysql ? ' selected' : ''
+    }>Redis</option></select></label></div><div class="xp-group"><h4>${
+      xpLabel('来源与目标', 'Source and target')
+    }</h4><div class="xp-grid">${['import', 'sql_restore'].includes(xp.mode) ? '' : xpEndpoint('source')}${
+      ['export', 'sql_dump'].includes(xp.mode) ? xpField('target', '目标文件', 'Target file') : xpEndpoint('target')
+    }${
       ['import', 'export'].includes(xp.mode)
         ? xpSelect('format', '格式', 'Format', [['CSV', 'CSV', 'CSV'], ['JSON', '类型化 JSON', 'Typed JSON']])
+        : ''
+    }</div></div>${
+      ['import', 'sql_restore'].includes(xp.mode) ? xpCollection('files', '输入文件', 'Input files') : ''
+    }<div class="xp-group"><label class="xp-field"><span>${
+      xpLabel('示例元数据状态', 'Example metadata state')
+    }</span><select data-xp-catalog><option value="ready"${xp.catalogState === 'ready' ? ' selected' : ''}>${
+      xpLabel('示例数据', 'Example data')
+    }</option><option value="loading"${xp.catalogState === 'loading' ? ' selected' : ''}>${
+      xpLabel('加载中', 'Loading')
+    }</option><option value="failed"${xp.catalogState === 'failed' ? ' selected' : ''}>${
+      xpLabel('加载失败', 'Failed')
+    }</option></select></label>${
+      xp.catalogState === 'loading'
+        ? `<p role="status">${xpLabel('正在加载示例元数据。', 'Loading example metadata.')}</p>`
+        : xp.catalogState === 'failed'
+        ? `<p role="alert">${xpLabel('示例元数据加载失败。', 'Example metadata failed to load.')} ${
+          xpIcon('repeat', '重试示例元数据', 'Retry example metadata', 'catalog-retry')
+        }</p>`
         : ''
     }</div><p class="muted">${
       xpLabel(
@@ -186,30 +407,13 @@ function xpExchangeBody() {
     }</p>`;
   }
   if (xp.section === 'objects') {
-    return `<h3>${xpLabel('对象与映射', 'Objects and mappings')}</h3><div class="xp-grid">${
+    return `<h3>${xpLabel('对象与映射', 'Objects and mappings')}</h3>${
       mysql
-        ? `${xpField('mapping', '字段／对象映射，每行一项', 'Column / object mapping, one per line', true)}${
-          xpField('types', '目标类型', 'Target types', true)
-        }${xpField('filter', '筛选条件（留空为全部）', 'Filter (empty means all)')}`
-        : `${xpField('prefix', '来源 key 前缀', 'Source key prefix')}${
+        ? ''
+        : `<div class="xp-grid">${xpField('prefix', '来源 key 前缀', 'Source key prefix')}${
           xpField('targetPrefix', '目标 key 前缀', 'Target key prefix')
-        }<p>${
-          xpLabel(
-            '支持 String、Hash、List、Set、ZSet；保留绝对到期时间。',
-            'String, Hash, List, Set and ZSet; absolute expiry is preserved.',
-          )
-        }</p>`
-    }</div><h4>${xpLabel('选择对象', 'Select objects')}</h4>${
-      mysql
-        ? xpCheck('table', '表及数据 · orders', 'Table and data · orders')
-          + xpCheck('view', '视图 · orders_summary', 'View · orders_summary')
-          + xpCheck('trigger', '触发器 · orders_update', 'Trigger · orders_update') + (xp.mode.startsWith('sql_')
-            ? xpCheck('procedure', '存储过程 · close_order', 'Procedure · close_order')
-              + xpCheck('function', '函数 · order_total', 'Function · order_total')
-              + xpCheck('event', '事件 · cleanup', 'Event · cleanup')
-            : '')
-        : xpCheck('key', '示例 key · cache:example', 'Example key · cache:example')
-    }${
+        }</div>`
+    }${mysql ? xpCollection('filters', '筛选条件', 'Filter conditions') : ''}${xpObjects()}${
       mysql
         ? `<h4>${xpLabel('结构差异', 'Schema differences')}</h4>${
           xpCheck('difference', '添加目标列 total DECIMAL(18,2)', 'Add target column total DECIMAL(18,2)')
@@ -240,10 +444,21 @@ function xpExchangeBody() {
         ? `${xpField('delimiter', '分隔符（单个 ASCII 字符）', 'Delimiter (one ASCII character)')}${
           xpField('nullMarker', 'NULL 标记（允许空）', 'NULL marker (empty allowed)')
         }${xpField('encoding', '编码', 'Encoding')}${
-          xpField('csvColumns', '无表头时的列顺序', 'Column order without a header')
-        }${xpField('binaryColumns', '二进制列名', 'Binary column names')}${
-          xpField('defaults', '输入列默认值语义', 'Input column default semantics', true)
-        }<label class="xp-choice"><input type="checkbox" data-xp-field="header"${xp.fields.header ? ' checked' : ''}> ${
+          ['csvColumns', 'binaryColumns'].map(key =>
+            `<label class="xp-field"><span>${
+              key === 'csvColumns'
+                ? xpLabel('无表头时的列顺序', 'Column order without a header')
+                : xpLabel('二进制列', 'Binary columns')
+            }</span><select multiple data-xp-columns="${key}">${
+              xpFileColumns.map(column =>
+                `<option value="${h(column)}"${
+                  xp.fields[key].split(',').map(value => value.trim()).includes(column) ? ' selected' : ''
+                }>${h(column)}</option>`
+              ).join('')
+            }</select></label>`
+          ).join('')
+        }${xpField('defaults', '输入列默认值语义', 'Input column default semantics', true)}
+        <label class="xp-choice"><input type="checkbox" data-xp-field="header"${xp.fields.header ? ' checked' : ''}> ${
           xpLabel('首行是表头', 'First row is header')
         }</label><label class="xp-choice"><input type="checkbox" data-xp-field="backslashEscape"${
           xp.fields.backslashEscape ? ' checked' : ''
@@ -265,21 +480,36 @@ function xpExchangeBody() {
     }</p>`;
   }
   if (xp.section === 'preview') {
-    return `<h3>${xpLabel('准备预览 · 示例', 'Prepared preview · example')}</h3><p>${
-      xpLabel(
-        '样本仅用于展示，后续记录仍可能转换失败。',
-        'Samples are illustrative; later records may fail conversion.',
-      )
-    }</p><div class="xp-table"><table><thead><tr><th>order_id · BIGINT</th><th>amount · DECIMAL</th><th>${
-      xpLabel('目标', 'Target')
-    }</th></tr></thead><tbody><tr><td>10421</td><td>268.50</td><td>orders</td></tr><tr><td>10422</td><td>128.00</td><td>orders</td></tr></tbody></table></div>${
-      xpCheck('difference', '包含结构差异：添加 total 列', 'Include schema difference: add total column')
-    }<details><summary>${xpLabel('完整诊断', 'Full diagnostics')}</summary><p>${
-      xpLabel(
-        '示例：检查目标列与对象依赖；未发送请求。',
-        'Example: inspect target columns and object dependencies; no request sent.',
-      )
-    }</p></details><label class="xp-choice"><input type="checkbox" data-xp-confirm${xp.confirmed ? ' checked' : ''}> ${
+    const tabs = [
+      ['structure', '结构', 'Structure'],
+      ['sample', '样本', 'Sample'],
+      ['diagnostics', '诊断', 'Diagnostics'],
+    ];
+    return `<h3>${
+      xpLabel('准备预览 · 示例', 'Prepared preview · example')
+    }</h3><div class="xp-tabs xp-preview-tabs" role="tablist" aria-label="${xpLabel('预览详情', 'Preview details')}">${
+      tabs.map(([id, zh, en]) =>
+        `<button role="tab" data-xp-preview="${id}" aria-selected="${xp.previewTab === id}">${xpLabel(zh, en)}</button>`
+      ).join('')
+    }</div>${
+      xp.previewTab === 'structure'
+        ? xpCheck('difference', '包含结构差异：添加 total 列', 'Include schema difference: add total column')
+        : xp.previewTab === 'sample'
+        ? `<p>${
+          xpLabel(
+            '样本仅用于展示，后续记录仍可能转换失败。',
+            'Samples are illustrative; later records may fail conversion.',
+          )
+        }</p><div class="xp-table"><table><thead><tr><th>order_id · BIGINT</th><th>amount · DECIMAL</th><th>${
+          xpLabel('目标', 'Target')
+        }</th></tr></thead><tbody><tr><td>10421</td><td>268.50</td><td>orders</td></tr><tr><td>10422</td><td>128.00</td><td>orders</td></tr></tbody></table></div>`
+        : `<p>${
+          xpLabel(
+            '示例：检查目标列与对象依赖；未发送请求。',
+            'Example: inspect target columns and object dependencies; no request sent.',
+          )
+        }</p>`
+    }<label class="xp-choice"><input type="checkbox" data-xp-confirm${xp.confirmed ? ' checked' : ''}> ${
       xpLabel('我已单独确认所选危险变更及目标', 'I separately confirm the selected dangerous changes and target')
     }</label>`;
   }
@@ -324,9 +554,7 @@ function xpExchangeBody() {
       '示例 partial 文件：身份待核对，不代表完整导出。',
       'Example partial file: identity requires verification; it is not a complete export.',
     )
-  }</p></details><button type="button" data-xp-action="resume">${
-    xpLabel('预览可续作项（未发送）', 'Preview resumable items (not sent)')
-  }</button>`;
+  }</p></details>`;
 }
 function xpProjectBody() {
   if (xp.scenario === 'loading') {
@@ -334,7 +562,7 @@ function xpProjectBody() {
       xpLabel('正在加载项目示例… 未发送请求。', 'Loading project example… No request was sent.')
     }</p>`;
   }
-  if (xp.scenario === 'empty' && xp.section !== 'overview') {
+  if (xp.scenario === 'empty' && !['overview', 'local'].includes(xp.section)) {
     return `<p>${
       xpLabel('尚无项目示例；请在概览中创建或打开。', 'No project example; create or open one in Overview.')
     }</p>`;
@@ -348,21 +576,17 @@ function xpProjectBody() {
       xp.projectDirty
         ? xpLabel('共享草稿有未确认更改', 'Shared draft has unconfirmed changes')
         : xpLabel('共享草稿无未确认更改', 'No unconfirmed shared draft changes')
-    }</p><div class="xp-grid">${xpField('projectName', '项目名称', 'Project name')}${
-      xpField('projectPath', '项目目录（示例）', 'Project directory (example)')
-    }${xpField('layout', '布局', 'Layout')}</div><div class="xp-actions"><button data-xp-action="create">${
-      xpLabel('预览创建', 'Preview create')
-    }</button><button data-xp-action="open">${
-      xpLabel('预览打开', 'Preview open')
-    }</button><button data-xp-action="archive-import">${
-      xpLabel('预览导入归档', 'Preview archive import')
-    }</button><button data-xp-action="archive-export">${xpLabel('预览导出归档', 'Preview archive export')}</button>${
-      xp.projectActive
-        ? `<button data-xp-section="bindings">${
-          xpLabel('本机绑定', 'Local bindings')
-        }</button><button data-xp-section="queries">${xpLabel('查询', 'Queries')}</button>`
-        : ''
-    }</div><p>${
+    }</p><div class="xp-section-heading"><h4>${xpLabel('打开／新建', 'Open / create')}</h4><div class="xp-actions">${
+      xpIcon('plus', '预览创建', 'Preview create', 'create')
+    }${xpIcon('folder', '预览打开', 'Preview open', 'open')}</div></div><div class="xp-grid">${
+      xpField('projectName', '项目名称', 'Project name')
+    }${xpField('projectPath', '项目目录（示例）', 'Project directory (example)')}${
+      xpField('layout', '布局', 'Layout')
+    }</div><div class="xp-section-heading"><h4>${
+      xpLabel('归档导入／导出', 'Archive import / export')
+    }</h4><div class="xp-actions">${xpIcon('upload', '预览导入归档', 'Preview archive import', 'archive-import')}${
+      xpIcon('download', '预览导出归档', 'Preview archive export', 'archive-export')
+    }</div></div><p>${
       xpLabel(
         '归档包含共享项目文件，不包含凭据或本机绑定。导入新目录后必须重新确认绑定；原目录重开沿用已确认绑定。',
         'Archives contain shared project files, never credentials or local bindings. Confirm bindings again after import into a new directory; reopening the original directory retains confirmed bindings.',
@@ -370,30 +594,70 @@ function xpProjectBody() {
     }</p>`;
   }
   if (xp.section === 'bindings') {
-    return `<h3>${xpLabel('逻辑连接与本机绑定', 'Logical connections and local bindings')}</h3><div class="xp-grid">${
-      xpField('alias', '逻辑连接 alias', 'Logical connection alias')
-    }${xpField('binding', '本机连接 / 数据库', 'Local connection / database')}</div><p>${
-      xpLabel(
-        '本机绑定只属于本机，不写入项目归档。',
-        'Local bindings remain on this machine and are excluded from archives.',
-      )
-    }</p><label class="xp-choice"><input type="checkbox" data-xp-binding${xp.bindingConfirmed ? ' checked' : ''}> ${
-      xpLabel('明确确认此示例绑定', 'Explicitly confirm this example binding')
-    }</label><p>${
-      xp.bindingConfirmed
-        ? xpLabel('示例绑定已在本页确认；未保存。', 'Example binding confirmed on this page; not saved.')
-        : xpLabel('绑定待确认，不能作为已连接。', 'Binding requires confirmation; it is not connected.')
-    }</p>`;
+    return `<h3>${
+      xpLabel('逻辑连接与本机绑定', 'Logical connections and local bindings')
+    }</h3><div class="xp-file-list"><button data-xp-file="bindings:current" aria-pressed="${
+      xp.fileSelection.bindings === 'current'
+    }"><strong>${h(xp.fields.alias)}</strong><span>MySQL · ${h(xp.fields.binding)} · ${
+      xp.bindingConfirmed ? xpLabel('已确认', 'Confirmed') : xpLabel('待确认', 'Unconfirmed')
+    }</span></button><button data-xp-file="bindings:invalid" aria-pressed="${
+      xp.fileSelection.bindings === 'invalid'
+    }"><strong>${xpLabel('旧连接示例', 'Previous connection example')}</strong><span>${
+      xpLabel('连接已失效', 'Connection unavailable')
+    }</span></button></div>${
+      xp.fileSelection.bindings === 'invalid'
+        ? `<p role="status">${
+          xpLabel('连接已失效，请重新选择本机连接。', 'Connection unavailable; select a local connection again.')
+        }</p>`
+        : `<h4>${xpLabel('编辑所选绑定', 'Edit selected binding')}</h4><div class="xp-grid">${
+          xpField('alias', '逻辑连接 alias', 'Logical connection alias')
+        }${xpField('binding', '本机连接 / 数据库', 'Local connection / database')}</div><p>${
+          xpLabel(
+            '本机绑定只属于本机，不写入项目归档。',
+            'Local bindings remain on this machine and are excluded from archives.',
+          )
+        }</p><label class="xp-choice"><input type="checkbox" data-xp-binding${xp.bindingConfirmed ? ' checked' : ''}> ${
+          xpLabel('明确确认此示例绑定', 'Explicitly confirm this example binding')
+        }</label><p>${
+          xp.bindingConfirmed
+            ? xpLabel('示例绑定已在本页确认；未保存。', 'Example binding confirmed on this page; not saved.')
+            : xpLabel('绑定待确认，不能作为已连接。', 'Binding requires confirmation; it is not connected.')
+        }</p>`
+    }`;
   }
   if (xp.section === 'queries') {
-    return `<h3>${xpLabel('查询', 'Queries')}</h3><div class="xp-grid">${
-      xpField('query', 'MySQL 查询正文', 'MySQL query text', true)
-    }${xpField('redisQuery', 'Redis 命令正文', 'Redis command text', true)}</div><p>${
+    return `<h3>${
+      xpLabel('查询', 'Queries')
+    }</h3><div class="xp-file-list"><button data-xp-file="queries:mysql" aria-pressed="${
+      xp.fileSelection.queries === 'mysql'
+    }"><strong>MySQL</strong><code>queries/orders.sql</code></button><button data-xp-file="queries:redis" aria-pressed="${
+      xp.fileSelection.queries === 'redis'
+    }"><strong>Redis</strong><code>queries/cache.redis</code></button></div><h4>${
+      xpLabel('编辑所选查询', 'Edit selected query')
+    }</h4><div class="xp-grid">${
+      xp.fileSelection.queries === 'mysql'
+        ? xpField('query', 'MySQL 查询正文', 'MySQL query text', true)
+        : xpField('redisQuery', 'Redis 命令正文', 'Redis command text', true)
+    }</div><p>${
       xpLabel(
         '多行文本为项目草稿，切换分区保留；不会执行。',
         'Multiline text is a project draft, retained across sections; it is never executed.',
       )
-    }</p>${
+    }</p><details class="xp-document-preview"><summary>${
+      xpLabel('预览 README.md（示例）', 'Preview README.md (example)')
+    }</summary><label>${
+      xpLabel('标题索引宽度', 'Heading index width')
+    } <input type="range" min="15" max="50" value="${xp.documentRatio}" data-xp-document-ratio></label><div class="xp-document-split" style="grid-template-columns: minmax(0, ${xp.documentRatio}fr) minmax(0, ${
+      100 - xp.documentRatio
+    }fr)"><nav aria-label="${xpLabel('标题索引', 'Heading index')}"><a href="#example-readme-intro">${
+      xpLabel('介绍', 'Introduction')
+    }</a><a href="#example-readme-query">${
+      xpLabel('示例查询', 'Example query')
+    }</a></nav><article><h3 id="example-readme-intro">${xpLabel('订单项目', 'Orders project')}</h3><p>${
+      xpLabel('这是本页的只读 Markdown 示例，不读取文件。', 'This read-only Markdown example does not read files.')
+    }</p><h3 id="example-readme-query">${
+      xpLabel('示例查询', 'Example query')
+    }</h3><pre><code>SELECT * FROM orders;</code></pre></article></div></details>${
       xp.fields.externalQuery
         ? `<label class="xp-field"><span>queries/new.sql</span><textarea readonly rows="3">${
           h(xp.fields.externalQuery)
@@ -402,11 +666,15 @@ function xpProjectBody() {
     }`;
   }
   if (xp.section === 'transfers') {
-    return `<h3>${xpLabel('迁移配置', 'Transfer configuration')}</h3><div class="xp-grid">${
-      xpField('transferName', '配置名称', 'Configuration name')
-    }${xpField('transferConfig', '配置正文', 'Configuration text', true)}</div><p>transfers/old.json · ${
+    return `<h3>${
+      xpLabel('迁移配置', 'Transfer configuration')
+    }</h3><div class="xp-file-list"><button data-xp-file="transfers:current" aria-pressed="true"><strong>${
+      h(xp.fields.transferName)
+    }</strong><code>transfers/old.json</code><span>${
       xp.fields.oldTransfer ? xpLabel('保留在草稿', 'Retained in draft') : xpLabel('已从草稿删除', 'Removed from draft')
-    }</p>`;
+    }</span></button></div><h4>${xpLabel('编辑所选配置', 'Edit selected configuration')}</h4><div class="xp-grid">${
+      xpField('transferName', '配置名称', 'Configuration name')
+    }${xpField('transferConfig', '配置正文', 'Configuration text', true)}</div>`;
   }
   if (xp.section === 'save') {
     return `<h3>${xpLabel('保存差异', 'Save changes')}</h3><p role="status">${
@@ -427,10 +695,30 @@ function xpProjectBody() {
             }</pre></td></tr>`
           ).join('') || `<tr><td colspan="3">${xpLabel('无差异', 'No changes')}</td></tr>`
         }</tbody></table></div>`
+          + (xp.projectBaseline?.query !== xp.fields.query
+            ? `<details class="xp-diff"><summary>${
+              xpLabel('逐行对比示例', 'Compare example lines')
+            }</summary><div><pre>− ${h(xp.projectBaseline?.query || '')}</pre><pre>+ ${
+              h(xp.fields.query)
+            }</pre></div></details>`
+            : '')
         : ''
-    }<button data-xp-section="recovery">${xpLabel('查看外部冲突示例', 'Review example external conflicts')}</button>`;
+    }${xpProjectConflicts()}`;
   }
-  return `<h3>${xpLabel('冲突恢复与遗留资源', 'Conflict recovery and leftover resources')}</h3><p>${
+  return `<h3>${xpLabel('遗留资源', 'Leftover resources')}</h3><div class="xp-file-list"><div><strong>${
+    xpLabel('部分导出文件', 'Partial export file')
+  }</strong><code>orders.csv.partial</code><span>${
+    xpLabel('身份待核对', 'Identity requires verification')
+  }</span></div></div><details><summary>${xpLabel('文件身份与摘要', 'File identity and summary')}</summary><p>${
+    xpLabel('示例身份待核对；不是完整导出。', 'Example identity requires verification; it is not a complete export.')
+  }</p></details><label class="xp-choice"><input type="checkbox" data-xp-confirm${xp.confirmed ? ' checked' : ''}> ${
+    xpLabel('已核对身份，预览领取', 'Identity reviewed; preview claim')
+  }</label><button data-xp-action="claim"${xp.confirmed ? '' : ' disabled'}>${
+    xpLabel('预览领取（未发送）', 'Preview claim (not sent)')
+  }</button>`;
+}
+function xpProjectConflicts() {
+  return `<h4>${xpLabel('外部冲突', 'External conflicts')}</h4><p>${
     xpLabel(
       '逐项决定如何合并外部新增、修改和删除；接受后仅更新本页示例。',
       'Decide how to merge each external addition, modification and deletion; acceptance updates only this page example.',
@@ -479,21 +767,228 @@ function xpProjectBody() {
     ).join('')
   }<button data-xp-action="accept-baseline"${Object.values(xp.conflictDecisions).every(Boolean) ? '' : ' disabled'}>${
     xpLabel('接受新基线（仅示例）', 'Accept new baseline (example only)')
-  }</button><details><summary>${
-    xpLabel('遗留 partial 文件身份与摘要', 'Partial file identity and summary')
-  }</summary><p>orders.csv.partial · ${
-    xpLabel('示例身份待核对；不是完整导出。', 'Example identity requires verification; not a complete export.')
-  }</p></details><label class="xp-choice"><input type="checkbox" data-xp-confirm${xp.confirmed ? ' checked' : ''}> ${
-    xpLabel('已核对身份，预览领取', 'Identity reviewed; preview claim')
-  }</label><button data-xp-action="claim"${xp.confirmed ? '' : ' disabled'}>${
-    xpLabel('预览领取（未发送）', 'Preview claim (not sent)')
   }</button>`;
+}
+function mcpField(key, zh, en) {
+  return `<label class="xp-field"><span>${xpLabel(zh, en)}</span><input data-mcp-field="${key}" value="${
+    h(mcpExample.draft[key] || '')
+  }"></label>`;
+}
+function mcpIcon(name, zh, en, action, disabled = false) {
+  const label = xpLabel(zh, en);
+  return `<button class="mcp-icon-button" data-mcp-action="${action}" title="${label}" aria-label="${label}"${
+    disabled ? ' disabled' : ''
+  }>${icon(name)}</button>`;
+}
+function xpIcon(name, zh, en, action) {
+  const label = xpLabel(zh, en);
+  return `<button class="mcp-icon-button" data-xp-action="${action}" title="${label}" aria-label="${label}">${
+    icon(name)
+  }</button>`;
+}
+function mcpNavigation() {
+  return `<div class="xp-tabs" role="tablist" aria-label="${xpLabel('项目工作台', 'Project workbench')}">${
+    [
+      ['mcp', 'MCP 项目', 'MCP projects'],
+      ['files', '项目文件', 'Project files'],
+    ].map(([id, zh, en]) =>
+      `<button role="tab" data-mcp-action="view:${id}" aria-selected="${mcpExample.view === id}">${
+        xpLabel(zh, en)
+      }</button>`
+    ).join('')
+  }</div>`;
+}
+function mcpDialog() {
+  const form = mcpExample.form;
+  if (!form) return '';
+  const draft = mcpExample.draft;
+  const rootStep = form === 'project' && mcpExample.rootStep;
+  const title = rootStep
+    ? xpText('添加仓库目录', 'Add repository directory')
+    : form === 'project'
+    ? (mcpExample.editIndex < 0 ? xpText('新建项目', 'New project') : xpText('项目设置', 'Project settings'))
+    : form === 'environment'
+    ? (mcpExample.editIndex < 0 ? xpText('新增环境', 'Add environment') : xpText('编辑环境', 'Edit environment'))
+    : (mcpExample.editIndex < 0 ? xpText('关联数据库', 'Associate database') : xpText('编辑关联', 'Edit association'));
+  let fields = '';
+  if (rootStep) fields = mcpField('rootPath', '仓库目录', 'Repository directory');
+  else if (form === 'project') {
+    fields = `<div class="xp-grid">${mcpField('name', '项目名称', 'Project name')}${
+      mcpField('description', '项目说明', 'Description')
+    }</div><div class="mcp-environment-heading"><strong>${
+      xpLabel('仓库目录', 'Repository directories')
+    }</strong><button data-mcp-action="root-add">${xpLabel('添加仓库', 'Add repository')}</button></div>${
+      draft.roots.length
+        ? draft.roots.map((root, index) =>
+          `<div class="mcp-resource"><span>${h(root)}</span><button data-mcp-action="root-remove:${index}">${
+            xpLabel('移除', 'Remove')
+          }</button></div>`
+        ).join('')
+        : `<p>${xpLabel('尚未添加仓库目录。', 'No repository directories added.')}</p>`
+    }`;
+  } else if (form === 'environment') {
+    fields = `<div class="xp-grid">${mcpField('name', '环境名称', 'Environment name')}${
+      mcpField('type', '环境类型', 'Environment type')
+    }${mcpField('description', '环境用途', 'Purpose')}</div>`;
+  } else {
+    const profile = mcpProfiles.find(item => item.name === draft.profile);
+    const key = draft.type === 'redis' ? 'redisDb' : 'database';
+    const current = draft[key] || '';
+    const options = mcpProfiles.map(item =>
+      `<option value="${h(item.name)}"${draft.profile === item.name ? ' selected' : ''}>${
+        h(item.name)
+      } · ${item.type.toUpperCase()}</option>`
+    ).join('');
+    const unavailableProfile = draft.profile && !profile
+      ? `<option value="${h(draft.profile)}" selected disabled>${h(draft.profile)} · ${
+        xpLabel('不可用', 'Unavailable')
+      }</option>`
+      : '';
+    const unavailableDatabase = current && !profile?.databases.includes(current)
+      ? `<option value="${h(current)}" selected disabled>${h(current)} · ${xpLabel('不可用', 'Unavailable')}</option>`
+      : '';
+    const databases =
+      profile?.databases.map(value =>
+        `<option value="${h(value)}"${current === value ? ' selected' : ''}>${draft.type === 'redis' ? 'DB ' : ''}${
+          h(value)
+        }</option>`
+      ).join('') || '';
+    const state = mcpExample.catalogState || 'ready';
+    fields = `<div class="xp-grid"><label class="xp-field"><span>${
+      xpLabel('已有实例', 'Existing instance')
+    }</span><select data-mcp-field="profile"><option value="">${
+      xpLabel('请选择实例', 'Select an instance')
+    }</option>${unavailableProfile}${options}</select></label><label class="xp-field"><span>${
+      draft.type === 'redis' ? 'Redis DB' : xpLabel('数据库', 'Database')
+    }</span><select data-mcp-field="${key}"${!profile || state !== 'ready' ? ' disabled' : ''}><option value="">${
+      xpLabel('请选择数据库', 'Select a database')
+    }</option>${unavailableDatabase}${databases}</select></label>${
+      mcpField('description', '资源用途', 'Purpose')
+    }</div><label class="xp-field"><span>${
+      xpLabel('示例目录状态', 'Example catalog state')
+    }</span><select data-mcp-catalog-state><option value="ready"${state === 'ready' ? ' selected' : ''}>${
+      xpLabel('示例数据', 'Example data')
+    }</option><option value="loading"${state === 'loading' ? ' selected' : ''}>${
+      xpLabel('加载中', 'Loading')
+    }</option><option value="failed"${state === 'failed' ? ' selected' : ''}>${
+      xpLabel('加载失败', 'Failed')
+    }</option></select></label>${
+      state === 'loading'
+        ? `<p role="status">${xpLabel('正在加载数据库列表（示例）。', 'Loading database list (example).')}</p>`
+        : state === 'failed'
+        ? `<div class="mcp-feedback"><p role="alert">${
+          xpLabel('数据库列表加载失败（示例）。', 'Database list failed to load (example).')
+        }</p>${mcpIcon('refresh', '重试', 'Retry', 'database-retry', !profile)}</div>`
+        : ''
+    }`;
+  }
+  return `<dialog class="mcp-dialog" aria-labelledby="mcp-dialog-title"><div class="mcp-dialog-header"><h3 id="mcp-dialog-title">${
+    h(title)
+  }</h3></div><div class="mcp-dialog-body">${fields}${
+    mcpExample.error ? `<p role="alert">${h(mcpExample.error)}</p>` : ''
+  }<p class="mcp-notice">${
+    xpLabel('示例操作未发送，不读取或写入文件。', 'Example actions are not sent; no files are read or written.')
+  }</p></div><div class="mcp-dialog-footer"><button data-mcp-action="${rootStep ? 'root-cancel' : 'cancel'}">${
+    xpLabel('取消', 'Cancel')
+  }</button><button class="primary" data-mcp-action="${rootStep ? 'root-save' : 'save'}">${
+    rootStep ? xpLabel('添加', 'Add') : xpLabel('保存示例', 'Save example')
+  }</button></div></dialog>`;
+}
+function renderMcpProject(area) {
+  const project = mcpExample.projects[mcpExample.selected];
+  const environment = project?.environments[mcpExample.environment];
+  let content = '';
+  if (!project || xp.scenario === 'empty') {
+    content = `<p>${xpLabel('暂无项目，请新建项目。', 'No projects. Create a project to begin.')}</p>`;
+  } else if (xp.scenario === 'loading') {
+    content = `<p role="status">${xpLabel('正在加载项目示例…', 'Loading project example…')}</p>`;
+  } else {
+    content = `<div class="mcp-project-heading"><div><h3>${h(project.name)}</h3><div class="mcp-roots">${
+      project.roots.length
+        ? project.roots.map(root => `<div>${icon('folder')}<code>${h(root)}</code></div>`).join('')
+        : `<span>${xpLabel('尚未添加仓库目录', 'No repository directories')}</span>`
+    }</div></div>${
+      mcpIcon('gear', '项目设置', 'Project settings', 'project-settings')
+    }</div><div class="mcp-tabs-row"><div class="xp-tabs mcp-environment-tabs" role="tablist" aria-label="${
+      xpLabel('环境', 'Environments')
+    }">${
+      project.environments.map((item, index) =>
+        `<button role="tab" data-mcp-action="environment:${index}" aria-selected="${
+          index === mcpExample.environment
+        }">${h(item.name)}</button>`
+      ).join('')
+    }</div>${mcpIcon('plus', '新增环境', 'Add environment', 'environment-add')}</div>${
+      environment
+        ? `<div class="mcp-environment-summary"><div><span>${
+          h(environment.description || xpText('暂无用途说明', 'No purpose specified'))
+        }</span>${
+          environment.default ? `<span class="mcp-default">${xpLabel('默认', 'Default')}</span>` : ''
+        }</div><div class="xp-actions">${mcpIcon('edit', '编辑环境', 'Edit environment', 'environment-edit')}${
+          mcpIcon('check', '设为默认', 'Set default', 'environment-default', environment.default)
+        }${
+          mcpIcon('trash', '移除环境', 'Remove environment', 'environment-remove')
+        }</div></div><div class="mcp-database-heading"><h3>${
+          xpLabel('已关联数据库', 'Associated databases')
+        } <span>${environment.resources.length}</span></h3>${
+          mcpIcon('plus', '关联数据库', 'Associate database', 'resource-add')
+        }</div>${
+          environment.resources.length
+            ? `<div class="mcp-resource-list"><div class="mcp-resource-columns" aria-hidden="true"><span>${
+              xpLabel('实例', 'Instance')
+            }</span><span>${xpLabel('数据库', 'Database')}</span><span>${xpLabel('用途', 'Purpose')}</span><span>${
+              xpLabel('操作', 'Actions')
+            }</span></div>${
+              environment.resources.map((resource, index) =>
+                `<div class="mcp-resource-row"><div class="mcp-instance">${icon('database')}<div><strong>${
+                  h(resource.profile)
+                }</strong>${
+                  resource.invalid
+                    ? `<div class="mcp-invalid">${xpLabel('连接已失效', 'Connection unavailable')}</div>`
+                    : ''
+                }</div></div><code>${
+                  resource.type === 'redis' ? `Redis DB ${h(resource.redisDb)}` : `MySQL / ${h(resource.database)}`
+                }</code><span class="mcp-purpose">${
+                  h(resource.description || '—')
+                }</span><div class="xp-actions mcp-resource-actions">${
+                  mcpIcon('edit', '编辑', 'Edit', `resource-edit:${index}`)
+                }${mcpIcon('trash', '移除', 'Remove', `resource-remove:${index}`)}</div></div>`
+              ).join('')
+            }</div>`
+            : `<p>${xpLabel('当前环境尚未关联数据库。', 'No databases associated with this environment.')}</p>`
+        }`
+        : `<p>${xpLabel('暂无环境，请新增环境。', 'No environments. Add an environment.')}</p>`
+    }`;
+  }
+  area.innerHTML = `<section class="xp-workbench project-workbench"><header class="xp-header"><div><h2>${
+    xpLabel('项目', 'Project')
+  }</h2><p>${
+    xpLabel('交互预览 · 示例数据 · 所有动作未发送', 'Interactive preview · example data · all actions not sent')
+  }</p></div><button data-xp-action="close">${
+    xpLabel('返回工作区', 'Return to workspace')
+  }</button></header>${mcpNavigation()}<div class="mcp-layout"><aside class="mcp-project-list"><div class="mcp-list-heading"><strong>${
+    xpLabel('项目', 'Projects')
+  }</strong><div>${mcpIcon('plus', '新建项目', 'New project', 'project-add')}${
+    mcpIcon('repeat', '刷新项目', 'Refresh projects', 'project-refresh')
+  }</div></div>${
+    mcpExample.projects.map((item, index) =>
+      `<button class="mcp-project-row" data-mcp-action="project:${index}" aria-pressed="${
+        index === mcpExample.selected
+      }">${h(item.name)}</button>`
+    ).join('')
+  }</aside><div class="xp-body mcp-detail">${content}<p role="status" class="mcp-notice">${
+    h(
+      xp.message
+        || xpText('示例操作未发送，不读取或写入文件。', 'Example actions are not sent; no files are read or written.'),
+    )
+  }</p></div></div>${mcpDialog()}</section>`;
+  area.querySelector('.mcp-dialog')?.showModal();
 }
 function renderExchangeProject() {
   if (!xp.open) return;
   const area = document.querySelector('#app .workarea');
   if (!area) return;
   const exchange = xp.open === 'exchange';
+  if (!exchange && mcpExample.view === 'mcp') return renderMcpProject(area);
   const tabs = exchange
     ? [
       ['sources', '来源与目标', 'Source and target'],
@@ -517,13 +1012,27 @@ function renderExchangeProject() {
     exchange ? xpLabel('数据交换与迁移', 'Data exchange and migration') : xpLabel('项目', 'Project')
   }</h2><p>${
     xpLabel('交互预览 · 示例数据 · 所有动作未发送', 'Interactive preview · example data · all actions not sent')
-  }</p></div><button data-xp-action="close">${
-    xpLabel('返回工作区', 'Return to workspace')
-  }</button></header><div class="xp-summary"><strong>${xpLabel('目标摘要', 'Target summary')}</strong><span>${
+  }</p></div><button data-xp-action="close">${xpLabel('返回工作区', 'Return to workspace')}</button></header>${
+    exchange ? '' : mcpNavigation()
+  }<div class="xp-summary"><strong>${xpLabel('目标摘要', 'Target summary')}</strong><div class="xp-summary-target">${
     exchange
-      ? `${h(xp.provider.toUpperCase())} · ${h(xp.fields.source)} → ${h(xp.fields.target)}`
-      : `${h(xp.fields.projectName)} · ${h(xp.fields.projectPath)}`
-  }</span><span>${readOnly ? xpLabel('只读示例', 'Read-only example') : xpLabel('未发送', 'Not sent')}</span></div>${
+      ? `<span><b>${xpLabel('来源', 'Source')}</b> <code data-xp-summary="source">${
+        h(
+          ['import', 'sql_restore'].includes(xp.mode)
+            ? xp.files.join(' · ') || '—'
+            : [xp.endpoints.source.connection, xp.endpoints.source.database].filter(Boolean).join(' / ') || '—',
+        )
+      }</code></span><span><b>${xpLabel('目标', 'Target')}</b> <code data-xp-summary="target">${
+        h(
+          ['export', 'sql_dump'].includes(xp.mode)
+            ? xp.fields.target
+            : [xp.endpoints.target.connection, xp.endpoints.target.database].filter(Boolean).join(' / ') || '—',
+        )
+      }</code></span><span>${h(xp.provider.toUpperCase())}</span>`
+      : `<span>${h(xp.fields.projectName)}</span><span><b>${xpLabel('项目目录', 'Project directory')}</b> <code>${
+        h(xp.fields.projectPath)
+      }</code></span>`
+  }</div><span>${readOnly ? xpLabel('只读示例', 'Read-only example') : xpLabel('未发送', 'Not sent')}</span></div>${
     xpTabs(tabs)
   }<div class="xp-body ${xp.open}-body">${
     readOnly
@@ -540,17 +1049,27 @@ function renderExchangeProject() {
     h(xp.message || xpText('示例 · 未发送', 'Example · not sent'))
   }</span><div class="xp-actions">${
     exchange
-      ? `<button data-xp-action="prepare"${readOnly ? ' disabled' : ''}>${
-        xpLabel('准备预览', 'Prepare preview')
-      }</button><button class="primary" data-xp-action="execute"${
-        readOnly || !xp.prepared || !xp.confirmed ? ' disabled' : ''
-      }>${xpLabel('预览执行（未发送）', 'Preview execution (not sent)')}</button><button data-xp-action="cancel"${
-        xp.scenario === 'running' ? '' : ' disabled'
-      }>${xpLabel('预览取消', 'Preview cancellation')}</button>`
-      : `<button data-xp-action="save-preview">${
-        xpLabel('查看保存差异', 'Review save changes')
-      }</button><button class="primary" data-xp-action="save"${readOnly || !xp.savePreview ? ' disabled' : ''}>${
+      ? xp.scenario === 'running'
+        ? `<button data-xp-action="cancel">${xpLabel('预览取消', 'Preview cancellation')}</button>`
+        : xp.section === 'report'
+        ? `<button data-xp-action="resume">${
+          xpLabel('预览可续作项（未发送）', 'Preview resumable items (not sent)')
+        }</button>`
+        : xp.section === 'preview' && xp.prepared
+        ? `<button data-xp-action="discard-plan">${
+          xpLabel('丢弃计划', 'Discard plan')
+        }</button><button class="primary" data-xp-action="execute"${readOnly || !xp.confirmed ? ' disabled' : ''}>${
+          xpLabel('预览执行（未发送）', 'Preview execution (not sent)')
+        }</button>`
+        : `<button class="primary" data-xp-action="prepare"${readOnly ? ' disabled' : ''}>${
+          xpLabel('准备预览', 'Prepare preview')
+        }</button>`
+      : xp.section === 'save' && xp.savePreview
+      ? `<button class="primary" data-xp-action="save"${readOnly ? ' disabled' : ''}>${
         xpLabel('确认示例保存（未发送）', 'Confirm example save (not sent)')
+      }</button>`
+      : `<button class="primary" data-xp-action="save-preview">${
+        xpLabel('查看保存差异', 'Review save changes')
       }</button>`
   }</div></footer>${
     xp.pendingLeave
@@ -570,12 +1089,177 @@ function renderExchangeProject() {
 function xpOpen(kind, section = '') {
   xp.open = kind;
   xp.section = section || (kind === 'exchange' ? 'sources' : 'overview');
+  if (kind === 'project') {
+    mcpExample.view = !section || section === 'local' || ['empty', 'loading'].includes(xp.scenario) ? 'mcp' : 'files';
+    mcpExample.form = '';
+  }
   xp.message = '';
   state.overlay = null;
   state.menu = null;
   render();
 }
-document.addEventListener('click', event => {
+document.addEventListener('cancel', event => {
+  if (!event.target.matches('.mcp-dialog')) return;
+  event.preventDefault();
+  if (mcpExample.rootStep) {
+    mcpExample.rootStep = false;
+    mcpExample.error = '';
+  } else {
+    mcpExample.form = '';
+    mcpExample.error = '';
+  }
+  renderExchangeProject();
+  if (!mcpExample.form && mcpExample.opener) {
+    document.querySelector(`[data-mcp-action="${mcpExample.opener}"]`)?.focus();
+  }
+}, true);
+window.addEventListener('click', event => {
+  const mcpButton = event.target.closest('.project-workbench [data-mcp-action]');
+  if (mcpButton && !mcpButton.disabled) {
+    event.stopImmediatePropagation();
+    const [action, argument] = mcpButton.dataset.mcpAction.split(':');
+    const index = Number(argument);
+    const project = mcpExample.projects[mcpExample.selected];
+    const environment = project?.environments[mcpExample.environment];
+    if (action === 'view') {
+      mcpExample.view = argument;
+      mcpExample.form = '';
+      xp.section = 'overview';
+    }
+    if (action === 'project') {
+      mcpExample.selected = index;
+      mcpExample.environment = 0;
+      mcpExample.form = '';
+      xp.scenario = 'default';
+    }
+    if (action === 'environment') {
+      mcpExample.environment = index;
+      mcpExample.form = '';
+    }
+    if (action === 'cancel') {
+      mcpExample.form = '';
+      mcpExample.error = '';
+    }
+    if (
+      ['project-add', 'project-settings', 'environment-add', 'environment-edit', 'resource-add', 'resource-edit']
+        .includes(action)
+    ) mcpExample.opener = mcpButton.dataset.mcpAction;
+    if (action === 'project-add' || action === 'project-settings') {
+      mcpExample.form = 'project';
+      mcpExample.editIndex = action === 'project-add' ? -1 : mcpExample.selected;
+      mcpExample.rootStep = false;
+      mcpExample.draft = action === 'project-add'
+        ? { name: '', description: '', roots: [] }
+        : { name: project.name, description: project.description, roots: [...project.roots] };
+    }
+    if (action === 'root-add') {
+      mcpExample.rootStep = true;
+      mcpExample.draft.rootPath = '';
+      mcpExample.error = '';
+    }
+    if (action === 'root-cancel') {
+      mcpExample.rootStep = false;
+      mcpExample.error = '';
+    }
+    if (action === 'root-remove') mcpExample.draft.roots.splice(index, 1);
+    if (action === 'root-save') {
+      const path = mcpExample.draft.rootPath.trim();
+      if (!path) mcpExample.error = xpText('请输入仓库目录。', 'Enter a repository directory.');
+      else if (mcpExample.draft.roots.includes(path)) {
+        mcpExample.error = xpText('该目录已添加。', 'This directory has already been added.');
+      } else {
+        mcpExample.draft.roots.push(path);
+        mcpExample.rootStep = false;
+        mcpExample.error = '';
+      }
+    }
+    if (action === 'environment-add' || action === 'environment-edit') {
+      mcpExample.form = 'environment';
+      mcpExample.editIndex = action === 'environment-add' ? -1 : mcpExample.environment;
+      mcpExample.draft = action === 'environment-add' ? { name: '', type: 'dev', description: '' } : { ...environment };
+    }
+    if (action === 'resource-add' || action === 'resource-edit') {
+      mcpExample.form = 'resource';
+      mcpExample.editIndex = action === 'resource-add' ? -1 : index;
+      const existing = environment.resources[index];
+      mcpExample.draft = action === 'resource-add'
+        ? { profile: '', type: 'mysql', database: '', redisDb: '', description: '' }
+        : { ...existing };
+      mcpExample.catalogState = 'ready';
+    }
+    if (action === 'database-retry') {
+      mcpExample.catalogState = 'ready';
+      mcpExample.error = '';
+    }
+    if (action === 'environment-default') project.environments.forEach(item => item.default = item === environment);
+    if (action === 'environment-remove') {
+      project.environments.splice(mcpExample.environment, 1);
+      mcpExample.environment = 0;
+    }
+    if (action === 'resource-remove') environment.resources.splice(index, 1);
+    if (action === 'save') {
+      const draft = mcpExample.draft;
+      const profile = mcpProfiles.find(item => item.name === draft.profile);
+      const required = mcpExample.form === 'resource'
+        ? mcpExample.catalogState === 'ready'
+          && profile?.databases.includes(draft.type === 'redis' ? draft.redisDb : draft.database)
+        : draft.name?.trim();
+      const duplicate = mcpExample.form === 'resource'
+        && environment.resources.some((item, index) =>
+          index !== mcpExample.editIndex && item.profile === draft.profile && item.type === draft.type
+          && (draft.type === 'redis' ? item.redisDb === draft.redisDb : item.database === draft.database)
+        );
+      if (!required || duplicate) {
+        mcpExample.error = duplicate
+          ? xpText(
+            '当前环境已关联该实例和数据库。',
+            'This instance and database are already associated with this environment.',
+          )
+          : xpText(
+            '请选择可用实例和数据库，或填写必填项。',
+            'Select an available instance and database, or complete required fields.',
+          );
+      } else {
+        if (mcpExample.form === 'project') {
+          const value = { name: draft.name, description: draft.description, roots: [...draft.roots] };
+          if (mcpExample.editIndex < 0) {
+            mcpExample.projects.push({ ...value, environments: [] });
+            mcpExample.selected = mcpExample.projects.length - 1;
+            mcpExample.environment = 0;
+          } else Object.assign(project, value);
+        }
+        if (mcpExample.form === 'environment') {
+          const value = { name: draft.name, type: draft.type, description: draft.description };
+          if (mcpExample.editIndex < 0) {
+            project.environments.push({ ...value, default: false, resources: [] });
+            mcpExample.environment = project.environments.length - 1;
+          } else Object.assign(environment, value);
+        }
+        if (mcpExample.form === 'resource') {
+          const value = {
+            profile: draft.profile,
+            type: draft.type,
+            description: draft.description,
+            ...(draft.type === 'redis' ? { redisDb: draft.redisDb } : { database: draft.database }),
+          };
+          if (mcpExample.editIndex < 0) environment.resources.push(value);
+          else environment.resources[mcpExample.editIndex] = value;
+        }
+        mcpExample.form = '';
+        mcpExample.error = '';
+        xp.scenario = 'default';
+      }
+    }
+    xp.message = xpText(
+      '本页示例，未发送请求，也未读写文件。',
+      'Page example; no request sent and no files read or written.',
+    );
+    renderExchangeProject();
+    if (!mcpExample.form && ['save', 'cancel'].includes(action) && mcpExample.opener) {
+      document.querySelector(`[data-mcp-action="${mcpExample.opener}"]`)?.focus();
+    }
+    return;
+  }
   const open = event.target.closest('[data-workbench-open]');
   const resource = event.target.closest('[data-action="import"], [data-action="export"], [data-action="transfer"]');
   const navigation = open || resource
@@ -617,6 +1301,23 @@ document.addEventListener('click', event => {
       '[data-provider], [data-tab], [data-open-table], [data-action="new-query"], [data-action="key-browser"]',
     )
   ) xp.open = '';
+  const file = event.target.closest('[data-xp-file]');
+  if (file) {
+    event.stopImmediatePropagation();
+    const [section, selection] = file.dataset.xpFile.split(':');
+    xp.fileSelection[section] = selection;
+    renderExchangeProject();
+    document.querySelector(`[data-xp-file="${section}:${selection}"]`)?.focus();
+    return;
+  }
+  const previewTab = event.target.closest('[data-xp-preview]');
+  if (previewTab) {
+    event.stopImmediatePropagation();
+    xp.previewTab = previewTab.dataset.xpPreview;
+    renderExchangeProject();
+    document.querySelector(`[data-xp-preview="${xp.previewTab}"]`)?.focus();
+    return;
+  }
   const section = event.target.closest('[data-xp-section]');
   if (section) {
     event.stopImmediatePropagation();
@@ -629,6 +1330,85 @@ document.addEventListener('click', event => {
   if (!button || button.disabled) return;
   event.stopImmediatePropagation();
   const action = button.dataset.xpAction;
+  if (action.startsWith('mapping-object:')) {
+    if (xp.objects[xp.activeObject]) xp.objects[xp.activeObject].mappings = xp.mappings;
+    xp.activeObject = Number(action.split(':')[1]);
+    xp.mappings = xp.objects[xp.activeObject].mappings || [{ source: '', target: '' }];
+    renderExchangeProject();
+    return;
+  }
+  if (action === 'catalog-retry') {
+    xp.catalogState = 'ready';
+    renderExchangeProject();
+    return;
+  }
+  if (action === 'new-target' || action === 'new-target-cancel') {
+    xp.newTargetStep = action === 'new-target';
+    xp.newTargetName = '';
+    renderExchangeProject();
+    return;
+  }
+  if (action === 'new-target-save') {
+    const endpoint = xp.endpoints.target;
+    const database = xpCatalog[xp.provider][endpoint.connection]?.[endpoint.database];
+    const name = xp.newTargetName.trim();
+    if (!database || !name || Object.hasOwn(database, name)) {
+      xp.message = xpText(
+        '请选择目标数据库并填写未使用的表名。',
+        'Select a target database and enter an unused table name.',
+      );
+      renderExchangeProject();
+      return;
+    }
+    database[name] = [...xpFileColumns];
+    xp.newTargetStep = false;
+    xp.newTargetName = '';
+    xp.message = xpText(
+      '仅添加本页示例，未创建数据库对象。',
+      'Added to this page example only; no database object was created.',
+    );
+    renderExchangeProject();
+    return;
+  }
+  if (action.startsWith('collection-')) {
+    const [command, key, rawIndex] = action.split(':');
+    if (command === 'collection-add') {
+      xp[key].push(
+        key === 'objects'
+          ? { source: '', target: '', checked: true }
+          : key === 'mappings'
+          ? { source: '', target: '' }
+          : '',
+      );
+    } else xp[key].splice(Number(rawIndex), 1);
+    if (key === 'objects' && command === 'collection-remove') {
+      xp.activeObject = 0;
+      xp.mappings = xp.objects[0]?.mappings || [{ source: '', target: '' }];
+    }
+    if (key === 'files') {
+      xp.objects.forEach(item => {
+        item.source = '';
+        (item.mappings || []).forEach(mapping => {
+          mapping.source = '';
+        });
+      });
+      xp.mappings.forEach(item => {
+        item.source = '';
+      });
+    }
+    xp.prepared = false;
+    xp.confirmed = false;
+    renderExchangeProject();
+    const selector = command === 'collection-add'
+      ? key === 'objects'
+        ? `[data-xp-object="${xp.objects.length - 1}:source"]`
+        : key === 'mappings'
+        ? `[data-xp-mapping="${xp.mappings.length - 1}:source"]`
+        : `[data-xp-collection="${key}:${xp[key].length - 1}"]`
+      : `[data-xp-action="collection-add:${key}"]`;
+    document.querySelector(selector)?.focus();
+    return;
+  }
   if (action.startsWith('leave-')) {
     xpFinishLeave(action.slice(6));
     return;
@@ -649,6 +1429,10 @@ document.addEventListener('click', event => {
     xp.open = '';
     render();
     return;
+  }
+  if (action === 'discard-plan') {
+    xp.prepared = false;
+    xp.confirmed = false;
   }
   if (action === 'prepare') {
     xp.prepared = true;
@@ -720,6 +1504,48 @@ document.addEventListener('click', event => {
   renderExchangeProject();
 }, true);
 document.addEventListener('input', event => {
+  if (event.target.hasAttribute('data-xp-document-ratio')) {
+    xp.documentRatio = Number(event.target.value);
+    event.target.closest('.xp-document-preview').querySelector('.xp-document-split').style.gridTemplateColumns =
+      `minmax(0, ${xp.documentRatio}fr) minmax(0, ${100 - xp.documentRatio}fr)`;
+    return;
+  }
+  if (event.target.hasAttribute('data-xp-new-target')) {
+    xp.newTargetName = event.target.value;
+    return;
+  }
+  const collection = event.target.dataset.xpCollection;
+  if (collection) {
+    const [key, rawIndex] = collection.split(':');
+    const index = Number(rawIndex);
+    if (key === 'objects') xp.objects[index].name = event.target.value;
+    else xp[key][index] = event.target.value;
+    if (key === 'files') {
+      xp.objects.forEach(item => {
+        item.source = '';
+        (item.mappings || []).forEach(mapping => {
+          mapping.source = '';
+        });
+      });
+      xp.mappings.forEach(item => {
+        item.source = '';
+      });
+    }
+    if (key === 'files') document.querySelector('[data-xp-summary="source"]').textContent = xp.files.join(' · ') || '—';
+    xp.prepared = false;
+    xp.confirmed = false;
+    return;
+  }
+  if (event.target.hasAttribute('data-xp-collection-check')) {
+    xp.objects[Number(event.target.dataset.xpCollectionCheck)].checked = event.target.checked;
+    xp.prepared = false;
+    xp.confirmed = false;
+    return;
+  }
+  if (event.target.dataset.mcpField) {
+    mcpExample.draft[event.target.dataset.mcpField] = event.target.value;
+    return;
+  }
   const field = event.target.dataset.xpField;
   if (!field) return;
   xp.fields[field] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
@@ -728,11 +1554,13 @@ document.addEventListener('input', event => {
     const confirmation = document.querySelector('[data-xp-binding]');
     if (confirmation) confirmation.checked = false;
   }
-  const summary = document.querySelector('.xp-summary span:nth-child(2)');
-  if (summary) {
-    summary.textContent = xp.open === 'exchange'
-      ? `${xp.provider.toUpperCase()} · ${xp.fields.source} → ${xp.fields.target}`
-      : `${xp.fields.projectName} · ${xp.fields.projectPath}`;
+  if (xp.open === 'exchange' && (field === 'source' || field === 'target')) {
+    const summary = document.querySelector(`[data-xp-summary="${field}"]`);
+    if (summary) summary.textContent = xp.fields[field];
+  }
+  if (xp.open === 'project') {
+    const summary = document.querySelector('.xp-summary-target');
+    if (summary) summary.textContent = `${xp.fields.projectName} · ${xp.fields.projectPath}`;
   }
   xp.prepared = false;
   xp.confirmed = false;
@@ -745,6 +1573,65 @@ document.addEventListener('input', event => {
 }, true);
 document.addEventListener('change', event => {
   const target = event.target;
+  if (target.hasAttribute('data-xp-catalog')) {
+    xp.catalogState = target.value;
+    renderExchangeProject();
+    return;
+  }
+  if (target.dataset.xpColumns) {
+    xp.fields[target.dataset.xpColumns] = Array.from(target.selectedOptions, option => option.value).join(', ');
+    xp.prepared = false;
+    return;
+  }
+  if (target.dataset.xpEndpoint) {
+    const [side, field] = target.dataset.xpEndpoint.split(':');
+    xp.endpoints[side][field] = target.value;
+    if (field === 'connection') xp.endpoints[side].database = '';
+    xp.objects.forEach(item => {
+      item[side] = '';
+      (item.mappings || []).forEach(mapping => {
+        mapping[side] = '';
+      });
+    });
+    xp.mappings.forEach(item => {
+      item[side] = '';
+    });
+    xp.prepared = false;
+    renderExchangeProject();
+    return;
+  }
+  if (target.dataset.xpObject || target.dataset.xpMapping) {
+    const isObject = !!target.dataset.xpObject;
+    const [index, side] = (target.dataset.xpObject || target.dataset.xpMapping).split(':');
+    (isObject ? xp.objects : xp.mappings)[Number(index)][side] = target.value;
+    if (isObject) {
+      const object = xp.objects[Number(index)];
+      const mappings = Number(index) === xp.activeObject ? xp.mappings : object.mappings || [];
+      mappings.forEach(item => {
+        item[side] = '';
+      });
+    }
+    xp.prepared = false;
+    renderExchangeProject();
+    return;
+  }
+  if (target.hasAttribute('data-mcp-catalog-state')) {
+    mcpExample.catalogState = target.value;
+    renderExchangeProject();
+    document.querySelector('[data-mcp-catalog-state]')?.focus();
+    return;
+  }
+  if (target.dataset.mcpField === 'profile') {
+    const profile = mcpProfiles.find(item => item.name === target.value);
+    mcpExample.draft.profile = target.value;
+    mcpExample.draft.type = profile?.type || 'mysql';
+    mcpExample.draft.database = '';
+    mcpExample.draft.redisDb = '';
+    mcpExample.error = '';
+    renderExchangeProject();
+    document.querySelector('[data-mcp-field="profile"]')?.focus();
+    return;
+  }
   if (target.dataset.xpConflict) {
     xp.conflictDecisions[target.dataset.xpConflict] = target.value;
     renderExchangeProject();
@@ -783,7 +1670,7 @@ document.addEventListener('change', event => {
           : kind === 'exchange' && ['running', 'cancelled', 'unknown', 'failed'].includes(part)
           ? 'report'
           : part === 'conflict'
-          ? 'recovery'
+          ? 'save'
           : part,
       );
       return;
@@ -793,11 +1680,18 @@ document.addEventListener('change', event => {
   if (target.id === 'preview-source') xp.open = '';
   if (target.hasAttribute('data-xp-mode')) {
     xp.mode = target.value;
+    xp.objects = [{ source: '', target: '', checked: true }];
+    xp.activeObject = 0;
+    xp.mappings = [{ source: '', target: '' }];
     xp.prepared = false;
     renderExchangeProject();
   }
   if (target.hasAttribute('data-xp-provider')) {
     xp.provider = target.value;
+    xp.endpoints = { source: { connection: '', database: '' }, target: { connection: '', database: '' } };
+    xp.objects = [{ source: '', target: '', checked: true }];
+    xp.activeObject = 0;
+    xp.mappings = [{ source: '', target: '' }];
     if (xp.provider === 'redis' && xp.mode.startsWith('sql_')) xp.mode = 'import';
     xp.prepared = false;
     renderExchangeProject();
@@ -833,6 +1727,12 @@ document.addEventListener('keydown', event => {
     : event.key === 'End'
     ? tabs.length - 1
     : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  if (tabs[next].dataset.mcpAction) {
+    const action = tabs[next].dataset.mcpAction;
+    tabs[next].click();
+    document.querySelector(`[data-mcp-action="${action}"]`)?.focus();
+    return;
+  }
   xp.section = tabs[next].dataset.xpSection;
   renderExchangeProject();
   document.querySelector(`[data-xp-section="${xp.section}"]`)?.focus();

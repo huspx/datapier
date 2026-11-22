@@ -159,33 +159,33 @@ function mcpApproval() {
     h(mz(...item.title))
   }</strong><span class="spacer"></span><span>${status}</span></div>
     <dl class="facts">${fact(mz('连接 / 数据库', 'Connection / database'), item.connection)}${
-    fact(mz('状态', 'Status'), status)
-  }${fact(mz('到期时间', 'Expires'), item.expires)}</dl>
+      fact(mz('状态', 'Status'), status)
+    }${fact(mz('到期时间', 'Expires'), item.expires)}</dl>
     ${
-    mcp.scenario === 'mcp-observer'
-      ? `<p class="muted">${
-        mz('仅观察：请在控制窗口处理审批', 'Observe only: handle approvals in the controlling window')
-      }</p>`
-      : ''
-  }
+      mcp.scenario === 'mcp-observer'
+        ? `<p class="muted">${
+          mz('仅观察：请在控制窗口处理审批', 'Observe only: handle approvals in the controlling window')
+        }</p>`
+        : ''
+    }
     <section class="detail-section"><h3>${mz('执行语句', 'Statement')}</h3><pre class="mcp-code mono">${
-    h(item.command)
-  }</pre></section>
+      h(item.command)
+    }</pre></section>
     <section class="detail-section"><h3>${mz('绑定参数', 'Bindings')}</h3><div class="mcp-parameters">${
-    item.parameters.map((value, index) =>
-      `<div class="mcp-parameter"><span>${index + 1}</span><pre class="mono">${h(value)}</pre></div>`
-    ).join('')
-  }</div></section>
+      item.parameters.map((value, index) =>
+        `<div class="mcp-parameter"><span>${index + 1}</span><pre class="mono">${h(value)}</pre></div>`
+      ).join('')
+    }</div></section>
     <div class="mcp-tools"><button class="button" data-mcp-action="diagnostic" aria-expanded="${mcp.diagnostic}">${
-    mz('完整诊断', 'Full diagnostics')
-  }</button><button class="button" data-mcp-action="observe">${mz('查看执行', 'View execution')}</button></div>
+      mz('完整诊断', 'Full diagnostics')
+    }</button><button class="button" data-mcp-action="observe">${mz('查看执行', 'View execution')}</button></div>
     ${
-    mcp.diagnostic
-      ? `<pre class="mcp-code mono">${
-        h(JSON.stringify({ request_id: item.id, command: item.command, parameters: item.parameters }, null, 2))
-      }</pre>`
-      : ''
-  }</section>`;
+      mcp.diagnostic
+        ? `<pre class="mcp-code mono">${
+          h(JSON.stringify({ request_id: item.id, command: item.command, parameters: item.parameters }, null, 2))
+        }</pre>`
+        : ''
+    }</section>`;
 }
 function mcpAuth() {
   const observer = mcp.scenario === 'mcp-observer';
@@ -210,25 +210,25 @@ function mcpTask() {
   const rows = mcpRows.slice(mcp.page * mcp.size, (mcp.page + 1) * mcp.size);
   return `<div class="mcp-list">${mcpTasks.map((row, i) => mcpListRow(row, i, mz(...row.status))).join('')}</div>
     <section class="detail-section mcp-details"><div class="detail-summary"><strong>${
-    h(mz(...item.title))
-  }</strong><span class="spacer"></span><span>${h(mz(...item.status))}</span></div><dl class="facts">${
-    fact(mz('连接 / 数据库', 'Connection / database'), item.connection)
-  }${fact(mz('创建时间', 'Created'), item.created)}</dl>
+      h(mz(...item.title))
+    }</strong><span class="spacer"></span><span>${h(mz(...item.status))}</span></div><dl class="facts">${
+      fact(mz('连接 / 数据库', 'Connection / database'), item.connection)
+    }${fact(mz('创建时间', 'Created'), item.created)}</dl>
     ${
-    failed
-      ? `<section class="detail-section"><h3>${
-        mz('错误', 'Error')
-      }</h3><div class="notice error-notice">Table 'reporting.customers' doesn't exist</div></section>`
-      : `<div class="mcp-tools"><button class="button" data-mcp-action="result" aria-pressed="true">${
-        mz('结果 1', 'Result 1')
-      }</button></div>${
-        mcp.scenario === 'mcp-expired'
-          ? `<p class="mcp-error" role="alert">${
-            mz('结果已过期或已释放', 'The result has expired or been released')
-          }</p>`
-          : `<p class="muted small">${mz('读取完成', 'Read complete')}</p><p class="muted small">${
-            mz('仅显示当前已返回的数据', 'Only data already returned is shown')
-          }</p><div class="mcp-table">${simpleTable(['order_id', 'customer_name', 'total_amount'], rows)}</div>
+      failed
+        ? `<section class="detail-section"><h3>${
+          mz('错误', 'Error')
+        }</h3><div class="notice error-notice">Table 'reporting.customers' doesn't exist</div></section>`
+        : `<div class="mcp-tools"><button class="button" data-mcp-action="result" aria-pressed="true">${
+          mz('结果 1', 'Result 1')
+        }</button></div>${
+          mcp.scenario === 'mcp-expired'
+            ? `<p class="mcp-error" role="alert">${
+              mz('结果已过期或已释放', 'The result has expired or been released')
+            }</p>`
+            : `<p class="muted small">${mz('读取完成', 'Read complete')}</p><p class="muted small">${
+              mz('仅显示当前已返回的数据', 'Only data already returned is shown')
+            }</p><div class="mcp-table">${simpleTable(['order_id', 'customer_name', 'total_amount'], rows)}</div>
           <div class="result-pager mcp-result-pager"><label>${
             mz('每页', 'Per page')
           } <select data-mcp-size aria-label="${mz('每页行数', 'Rows per page')}">${
@@ -249,8 +249,8 @@ function mcpTask() {
           }" ${(mcp.page + 1) * mcp.size >= mcpRows.length ? 'disabled' : ''}>${
             icon('chev-r')
           }</button><span class="muted">${mz(`共 ${mcpRows.length} 条`, `${mcpRows.length} entries`)}</span></div>`
-      }`
-  }</section>`;
+        }`
+    }</section>`;
 }
 function renderMcpPreview() {
   const status = document.querySelector('#app .statusbar');
@@ -262,12 +262,25 @@ function renderMcpPreview() {
     'beforeend',
     `<button data-mcp-action="open">${mz('MCP 待办', 'MCP pending')} (${countLabel(count)})</button>`,
   );
+  status.insertAdjacentHTML(
+    'beforeend',
+    `<details class="mcp-widget"><summary>${
+      mz('待办 Widget · 示例', 'Pending widget · example')
+    }</summary><div class="mcp-widget-panel"><p>${
+      mz('示例数据', 'Sample data')
+    }</p><button data-mcp-action="widget-approval">${mz('待审批', 'Approvals')} · ${
+      countLabel(approvalCount)
+    }</button><button data-mcp-action="widget-auth">${mz('待认证', 'Authentication')} · ${
+      countLabel(authCount)
+    }</button></div></details>`,
+  );
   if (!mcp.open) return;
   const empty = mcp.scenario === 'mcp-empty' || (mcp.scenario === 'mcp-auth-only' && mcp.tab === 'approval');
-  const tabs = [['approval', `${mz('待审批', 'Approvals')} (${countLabel(approvalCount)})`], [
-    'auth',
-    `${mz('待认证', 'Authentication')} (${countLabel(authCount)})`,
-  ], ['tasks', mz('Agent 任务', 'Agent tasks')]];
+  const tabs = [
+    ['approval', `${mz('待审批', 'Approvals')} (${countLabel(approvalCount)})`],
+    ['auth', `${mz('待认证', 'Authentication')} (${countLabel(authCount)})`],
+    ['tasks', mz('Agent 任务', 'Agent tasks')],
+  ];
   const listName = mcp.tab === 'approval'
     ? mz('审批列表', 'Approval list')
     : mcp.tab === 'auth'
@@ -358,11 +371,11 @@ document.addEventListener('click', event => {
   const focusAttributes = ['data-mcp-action', 'data-index', 'data-tab'];
   const focusSelector = focusAttributes.filter(name => button.hasAttribute(name))
     .map(name => `[${name}="${CSS.escape(button.getAttribute(name))}"]`).join('');
-  if (action === 'open') {
+  if (action === 'open' || action === 'widget-approval' || action === 'widget-auth') {
     mcp.open = true;
     mcp.authHandoff = false;
-    mcp.tab = mcpInitialTab();
-    mcp.returnFocus = '[data-mcp-action="open"]';
+    mcp.tab = action === 'widget-approval' ? 'approval' : action === 'widget-auth' ? 'auth' : mcpInitialTab();
+    mcp.returnFocus = action === 'open' ? '[data-mcp-action="open"]' : '.mcp-widget summary';
     mcp.selected = 0;
     state.overlay = null;
     ap.modal = false;
@@ -403,7 +416,7 @@ document.addEventListener('click', event => {
   } else if (action === 'previous') mcp.page--;
   else if (action === 'next') mcp.page++;
   render();
-  const focusTarget = action === 'open'
+  const focusTarget = ['open', 'widget-approval', 'widget-auth'].includes(action)
     ? document.querySelector('.mcp-overlay [role="tab"][aria-selected="true"]')
     : action === 'authenticate'
     ? document.querySelector('.mcp-overlay [data-mcp-action="close"]')

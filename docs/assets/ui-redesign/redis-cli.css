@@ -212,6 +212,7 @@
 .cli-output {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   flex: 1;
   padding: 9px 18px;
   font: 11px/1.7 var(--mono);

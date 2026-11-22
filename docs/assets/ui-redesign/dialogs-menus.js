@@ -32,11 +32,14 @@ function detail(kind) {
           ? `<div class="notice">${t('draftRestored')}</div>`
           : ''
       }<section class="detail-section"><h3>${t('fieldChanges')}</h3>${
-        simpleTable([t('field'), t('oldValue'), t('newValue')], [[
-          'status',
-          'pending',
-          'paid',
-        ]])
+        simpleTable(
+          [t('field'), t('oldValue'), t('newValue')],
+          [[
+            'status',
+            'pending',
+            'paid',
+          ]],
+        )
       }</section>`;
   } else if (kind === 'import') {
     title = t('importDetails');
@@ -46,18 +49,15 @@ function detail(kind) {
       }${fact(t('previewRows'), '3')}${
         fact(t('pendingErrors'), t('convertError'))
       }</dl><section class="detail-section"><h3>${t('columnMapping')}</h3>${
-        simpleTable([t('fileColumn'), t('targetField'), t('conversion')], [[
-          'order_no',
-          'order_no',
-          t('text'),
-        ], ['total', 'total', 'DECIMAL(12,2)']])
+        simpleTable(
+          [t('fileColumn'), t('targetField'), t('conversion')],
+          [['order_no', 'order_no', t('text')], ['total', 'total', 'DECIMAL(12,2)']],
+        )
       }</section><section class="detail-section"><h3>${t('rowErrors')}</h3>${
-        simpleTable([
-          t('rowNumber'),
-          t('field'),
-          t('oldValue'),
-          t('reason'),
-        ], [['3', 'total', 'unknown', t('invalidDecimal')]])
+        simpleTable(
+          [t('rowNumber'), t('field'), t('oldValue'), t('reason')],
+          [['3', 'total', 'unknown', t('invalidDecimal')]],
+        )
       }</section>`;
   } else if (kind === 'schema') {
     title = t('resourceDetails');
@@ -65,11 +65,14 @@ function detail(kind) {
       + `<dl class="facts">${fact(t('connection'), 'Commerce')}${fact(t('engine'), 'InnoDB')}${
         fact(t('primaryKey'), 'id')
       }${fact(t('editability'), t('reliableKey'))}</dl><section class="detail-section"><h3>${t('field')}</h3>${
-        simpleTable([t('field'), t('type'), 'NULL', t('constraint')], [
-          ['id', 'BIGINT', t('no'), t('primaryAuto')],
-          ['status', 'VARCHAR(32)', t('no'), '—'],
-          ['total', 'DECIMAL(12,2)', t('no'), '—'],
-        ])
+        simpleTable(
+          [t('field'), t('type'), 'NULL', t('constraint')],
+          [
+            ['id', 'BIGINT', t('no'), t('primaryAuto')],
+            ['status', 'VARCHAR(32)', t('no'), '—'],
+            ['total', 'DECIMAL(12,2)', t('no'), '—'],
+          ],
+        )
       }</section>`;
   } else {
     title = t('taskDetails');
@@ -84,12 +87,15 @@ function detail(kind) {
       }${fact(t('result'), t('dimensions'))}${
         fact(t('started'), language === 'zh-CN' ? '未记录' : 'Not recorded')
       }</dl><section class="detail-section"><h3>${t('resultSet')}</h3>${
-        simpleTable([t('result'), t('type'), t('rowCount'), t('status')], [[
-          t('resultOne'),
-          t('tableData'),
-          language === 'zh-CN' ? '未记录' : 'Not recorded',
-          t('readComplete'),
-        ]])
+        simpleTable(
+          [t('result'), t('type'), t('rowCount'), t('status')],
+          [[
+            t('resultOne'),
+            t('tableData'),
+            language === 'zh-CN' ? '未记录' : 'Not recorded',
+            t('readComplete'),
+          ]],
+        )
       }</section><section class="detail-section"><h3>${t('executedStatement')}</h3><span class="muted">${
         language === 'zh-CN' ? '未记录' : 'Not recorded'
       }</span></section>`;
@@ -212,13 +218,13 @@ function overlay() {
             state.hiddenColumns[key]?.includes(id) ? '' : 'checked'
           }> ${h(name)}</label>
             <label>${
-            language === 'zh-CN' ? '宽度（像素，留空自动）' : 'Width (pixels, blank for auto)'
-          } <input type="number" min="1" max="65535" data-column-width="${h(id)}" value="${
-            state.columnWidths[key]?.[id] ?? ''
-          }"></label>
+              language === 'zh-CN' ? '宽度（像素，留空自动）' : 'Width (pixels, blank for auto)'
+            } <input type="number" min="1" max="65535" data-column-width="${h(id)}" value="${
+              state.columnWidths[key]?.[id] ?? ''
+            }"></label>
             <label><input type="checkbox" data-column-freeze="${h(id)}" ${
-            state.frozenColumns?.[key]?.includes(id) ? 'checked' : ''
-          }> ${language === 'zh-CN' ? '冻结列' : 'Freeze column'} · ${h(name)}</label></div>`;
+              state.frozenColumns?.[key]?.includes(id) ? 'checked' : ''
+            }> ${language === 'zh-CN' ? '冻结列' : 'Freeze column'} · ${h(name)}</label></div>`;
         }).join('')
       }</div>`,
       `<span class="spacer"></span><button data-action="apply-columns" class="primary">${h(t('applyFilter'))}</button>`,
