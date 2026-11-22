@@ -51,7 +51,7 @@ pub fn root(path: &Path) -> Result<PathBuf> {
 /// 普通连接可并发准入；建立更新门禁时必须排除所有正在准入的连接。
 pub enum AdmissionMode {
     Shared,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(test, unix)))]
     Exclusive,
 }
 
@@ -65,7 +65,7 @@ pub fn update_admission(root: &Path, mode: AdmissionMode) -> Result<std::fs::Fil
         .open(root.join("update-admission.lock"))?;
     match mode {
         AdmissionMode::Shared => FileExt::try_lock_shared(&lock),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", all(test, unix)))]
         AdmissionMode::Exclusive => lock.try_lock_exclusive(),
     }
     .map_err(|error| {
