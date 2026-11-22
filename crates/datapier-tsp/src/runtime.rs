@@ -1,8 +1,43 @@
 use super::*;
 use crate::{input::focus_node_id, workspace::finish_after_input_closed};
 use tern_sdk::{Input, Options, Session, SurfaceOptions};
-/// 使用短生命周期客户端同步真实窗口租约；不会启动或保活 Engine。
-pub async fn window_bridge(root: PathBuf, payload: Value) -> Result<Value> {
+/// 每批处理一条请求帧；每个 pane 独立校验目录、nonce 和窗口租约。
+pub async fn window_bridge(mut payload: Value) -> Result<Value> {
+    let requests = payload
+        .get_mut("requests")
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
+        .ok_or_else(|| AppError::invalid("缺少窗口桥接请求列表"))?;
+    if requests.len() > 128 {
+        return Err(AppError::invalid("窗口桥接请求超过 128 项"));
+    }
+    let mut jobs = tokio::task::JoinSet::new();
+    for request in requests {
+        jobs.spawn(async move {
+            let pane = request.get("pane_id").cloned().unwrap_or(Value::Null);
+            let nonce = request["nonce"].clone();
+            let root = request["data_dir"].as_str().map(PathBuf::from);
+            let result = match root {
+                Some(root) if root.is_absolute() => window_bridge_item(root, request).await,
+                _ => Err(AppError::invalid("窗口桥接数据目录必须为绝对路径")),
+            };
+            let mut item = match result {
+                Ok(value) => value,
+                Err(error) => json!({"bound":false,"error":error}),
+            };
+            item["pane_id"] = pane;
+            item["nonce"] = nonce;
+            item
+        });
+    }
+    let mut items = Vec::with_capacity(jobs.len());
+    while let Some(result) = jobs.join_next().await {
+        items.push(result.map_err(|error| AppError::new("internal", error.to_string()))?);
+    }
+    Ok(json!({"items":items}))
+}
+
+async fn window_bridge_item(root: PathBuf, payload: Value) -> Result<Value> {
     let client = datapier_engine::Client::connect_with(
         &root,
         datapier_engine::ClientOptions {
@@ -96,8 +131,17 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
     let mut quitting = false;
     let mut clipboard = clipboard::Clipboard::default();
     let mut revealed_tab = None;
+    let mut pane_visible = true;
+    let mut native_state = "";
     let mut retained_value_sources = std::collections::BTreeSet::new();
     loop {
+        // SDK 在 pump/render 中也可能接收 resize；始终同步最新能力。
+        changed |= app.update_viewport(session.caps());
+        let reduce_motion = session.caps().reduce_motion;
+        if app.native_ui.reduce_motion != reduce_motion {
+            app.native_ui.reduce_motion = reduce_motion;
+            changed = true;
+        }
         if app.workspace_loaded
             && !app.tabs.is_empty()
             && app.advanced_schema.is_none()
@@ -106,6 +150,15 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             app.advanced_schema_restore(&backend, draft);
         }
         changed |= app.navigation_poll_drop(&backend);
+        changed |= app.completion_poll(&backend);
+        changed |= app.native_ui_tick();
+        let activity = crate::native_ui::program_state(&app);
+        if native_state != activity {
+            use std::io::Write as _;
+            write!(std::io::stdout(), "\x1b]7501;state={activity}\x1b\\")?;
+            std::io::stdout().flush()?;
+            native_state = activity;
+        }
         changed |= app.navigation_poll_create_database(&backend);
         clipboard.observe_redis_context(&app);
         while let Some(mut reply) = backend.receive() {
@@ -136,7 +189,9 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         app.sync_draft_scope(&backend);
         app.replace_poll(&backend);
         changed |= clipboard.expire(&mut app);
-        if app.last_settings_poll.elapsed() >= Duration::from_secs(5) {
+        if app.last_settings_poll.elapsed()
+            >= Duration::from_secs(if pane_visible { 5 } else { 30 })
+        {
             app.last_settings_poll = Instant::now();
             app.refresh_settings(&backend);
             app.approval_refresh(&backend);
@@ -153,8 +208,10 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     )],
                 );
                 changed = true;
-            } else if app.settings_save_token.is_some() && !backend.is_closed() {
-                // 等待本次及排队的语言设置写入确认；失败时仍可退出会话。
+            } else if (app.settings_save_token.is_some() || app.native_ui.settings_busy())
+                && !backend.is_closed()
+            {
+                // 全局设置需要确认 Engine 和本机 host 各自负责的写入。
             } else if app.dirty {
                 app.save_workspace(&backend);
             } else if !app.saving {
@@ -162,7 +219,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             }
         }
         // Engine 事件只是提示，定期查询每个 tab 的当前任务以补偿遗漏事件。
-        if app.last_poll.elapsed() >= Duration::from_millis(700) {
+        if app.last_poll.elapsed() >= Duration::from_millis(if pane_visible { 700 } else { 7000 }) {
             app.last_poll = Instant::now();
             let active = app.active;
             for index in 0..app.tabs.len() {
@@ -239,7 +296,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             app.save_workspace(&backend);
             last_save = Instant::now();
         }
-        if changed {
+        if changed && pane_visible {
             app.sync_grid_visible_rows();
             app.fit_grid();
             let next_css = views::stylesheet(&app);
@@ -298,7 +355,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         match session.next(Some(if redis_sending {
             Duration::ZERO
         } else {
-            Duration::from_millis(250)
+            Duration::from_millis(if pane_visible { 50 } else { 500 })
         })) {
             Ok(Some(Input::Msg(_, tern_sdk::Event::Action(action))))
             | Ok(Some(Input::Event(tern_sdk::Event::Action(action))))
@@ -313,6 +370,19 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 ) {
                     app.status = i18n::UiMessage::raw(error.to_string());
                 }
+            }
+            Ok(Some(Input::Msg(_, tern_sdk::Event::Action(action))))
+            | Ok(Some(Input::Event(tern_sdk::Event::Action(action))))
+                if window_node.as_deref() == Some(action.id.as_str())
+                    && (action.act.starts_with("datapier-plugin-reply:")
+                        || action.act.starts_with("datapier-plugin-update-status:")
+                        || action.act.starts_with("datapier-project-path:")
+                        || action.act.starts_with("datapier-glimpse-opened:")
+                        || action.act.starts_with("datapier-glimpse-failed:")
+                        || action.act == "datapier-open-todos"
+                        || action.act.starts_with("datapier-open-todos:")) =>
+            {
+                changed |= app.native_ui_action(&action.act, &backend);
             }
             Ok(Some(Input::Msg(_, _) | Input::Key(_))) if app.workspace_switch_pending() => {}
             Ok(Some(Input::Msg(message, event))) => {
@@ -376,8 +446,16 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     Msg::Action(name) if name == "cli-copy" => {
                         clipboard.copy_cli(&mut app, &backend)
                     }
+                    Msg::Action(name) if name == "query-completion" => {
+                        app.completion_update(true);
+                    }
                     Msg::Action(name) => app.action(&name, &backend),
                     Msg::CliResize(share) => app.resize_cli(share),
+                    Msg::QueryResize(share) => {
+                        if share.is_finite() {
+                            app.query_share = share.clamp(0.15, 0.85);
+                        }
+                    }
                     Msg::CopyText(text) => clipboard.copy(&mut app, &mut session, &text)?,
                     Msg::CopyRedisValue => clipboard.copy_redis_value(&mut app, &backend),
                     Msg::CopyGrid => {
@@ -450,6 +528,8 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                     }
                     Msg::Tab(index) => {
                         if index != app.active && index < app.tabs.len() {
+                            app.completion_close();
+                            app.completion_unsubscribe(&backend);
                             app.invalidate_history(&backend);
                         }
                         app.select_tab(index);
@@ -470,13 +550,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             app.page(&backend, start);
                         }
                     }
-                    Msg::Complete(text, start, end) => {
-                        if let Some(tab) = app.tabs.get_mut(app.active)
-                            && tab.query.edit(start..end, &text)
-                        {
-                            app.changed_field("query");
-                        }
-                    }
+                    Msg::CompletionAccept(id, index) => app.completion_accept(id, index),
                     Msg::Cell(row, column, extend) => {
                         if !app.finish_inline(true) {
                             changed = true;
@@ -577,6 +651,10 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                             "current"
                         };
                         app.action(action, &backend);
+                        changed = true;
+                        continue;
+                    }
+                    if app.completion_key(&key) {
                         changed = true;
                         continue;
                     }
@@ -707,6 +785,16 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 changed = true;
             }
             Ok(Some(Input::Event(event))) => match event {
+                tern_sdk::Event::Visible(event) => {
+                    pane_visible = event.visible;
+                    if pane_visible {
+                        app.last_poll = Instant::now() - Duration::from_secs(8);
+                        app.last_settings_poll = Instant::now() - Duration::from_secs(31);
+                        app.refresh_settings(&backend);
+                        app.approval_refresh(&backend);
+                    }
+                    changed = true;
+                }
                 tern_sdk::Event::Action(action)
                     if action.act == "datapier-window-bind"
                         && window_node.as_deref() == Some(action.id.as_str()) =>
@@ -751,9 +839,6 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                         };
                         changed = true;
                     }
-                }
-                tern_sdk::Event::Resize(_) => {
-                    changed |= app.update_viewport(session.caps());
                 }
                 tern_sdk::Event::Error(error) => {
                     app.status = i18n::UiMessage::raw(format!("Tern: {error:?}"));

@@ -58,7 +58,10 @@ pub(super) fn resolved() -> Language {
 /// 英文及未知文案均可借用，调用方须仅传入已知 UI 文案。
 pub(super) fn tr(text: &str) -> Cow<'_, str> {
     if resolved() == Language::En
-        && let Some((_, english)) = CATALOG.iter().find(|(chinese, _)| *chinese == text)
+        && let Some((_, english)) = CATALOG
+            .iter()
+            .flat_map(|entries| entries.iter())
+            .find(|(chinese, _)| *chinese == text)
     {
         return Cow::Borrowed(english);
     }

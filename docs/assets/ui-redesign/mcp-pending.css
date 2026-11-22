@@ -202,3 +202,32 @@
     gap: 8px;
   }
 }
+
+.mcp-widget {
+  position: relative;
+}
+.mcp-widget summary {
+  cursor: pointer;
+}
+.mcp-widget-panel {
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  z-index: 20;
+  display: grid;
+  gap: 8px;
+  min-width: 200px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.statusbar .mcp-widget-panel button {
+  min-height: 28px;
+  font-size: 12px;
+}
+.mcp-widget-panel {
+  font-size: 12px;
+}
+.mcp-widget-panel p {
+  margin: 0;
+}

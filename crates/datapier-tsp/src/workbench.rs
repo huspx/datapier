@@ -142,6 +142,8 @@ pub(super) struct Workbench {
     pub query_ui: crate::query_ui::QueryUiState,
     pub(super) archery_history: crate::application::ArcheryHistory,
     pub sql_mode: Option<editor::MysqlMode>,
+    pub server_version: Option<String>,
+    pub lower_case_table_names: Option<u8>,
     pub section: String,
     pub schema_section: String,
     pub overlay: Option<String>,
@@ -224,6 +226,8 @@ impl Default for Workbench {
             query_ui: crate::query_ui::QueryUiState::default(),
             archery_history: crate::application::ArcheryHistory::default(),
             sql_mode: None,
+            server_version: None,
+            lower_case_table_names: None,
             section: "data".into(),
             schema_section: "columns".into(),
             overlay: None,
@@ -471,11 +475,7 @@ impl App {
         if width == 0 || self.workbench.inline.is_some() {
             return;
         }
-        let sidebar = if width <= 760 || self.navigation_compact() {
-            58
-        } else {
-            224
-        };
+        let sidebar = if self.navigation_compact() { 58 } else { 224 };
         let beside = if self.is_redis() {
             match width {
                 0..=760 => 210,

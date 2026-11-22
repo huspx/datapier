@@ -269,9 +269,8 @@ document.addEventListener('change', event => {
     requestDialogClose(() => {
       state.menuCell = next;
       state.cellInspectorValue = null;
-      state.cellInspectorIsNull = databases[state.database][state.table].find(row =>
-        rowId(row) === state.menuRow
-      )?.[next] === null;
+      state.cellInspectorIsNull =
+        databases[state.database][state.table].find(row => rowId(row) === state.menuRow)?.[next] === null;
       state.cellInspectorDirty = false;
       render();
       document.getElementById('cell-field')?.focus();

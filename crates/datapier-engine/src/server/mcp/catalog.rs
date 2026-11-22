@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 struct CatalogScope<'a> {
     owner: Uuid,
@@ -19,11 +20,18 @@ impl Engine {
         resource: Uuid,
         params: &Value,
         filters: &Value,
-    ) -> Result<u64> {
+    ) -> Result<(u64, Option<Value>)> {
         match self.mcp_cursor(owner, op, resource, params)? {
-            Some(cursor) if cursor.params.get("filters") == Some(filters) => Ok(cursor.start),
+            Some(cursor) if cursor.params.get("filters") == Some(filters) => {
+                let order = cursor
+                    .params
+                    .get("order")
+                    .cloned()
+                    .ok_or_else(|| AppError::new("expired", "目录游标已过期，请重新读取"))?;
+                Ok((cursor.start, Some(order)))
+            }
             Some(_) => Err(denied("游标与请求条件不匹配")),
-            None => Ok(0),
+            None => Ok((0, None)),
         }
     }
 
@@ -31,7 +39,7 @@ impl Engine {
         &self,
         scope: CatalogScope<'_>,
         filters: Value,
-        start: u64,
+        position: (u64, Option<Value>),
         items: Vec<Value>,
         key: &str,
         extra: Value,
@@ -42,6 +50,29 @@ impl Engine {
             resource,
         } = scope;
         let limit = self.store.settings().await?.limits.response_bytes;
+        // 目录由当前授权结果构建；续页时校验完整顺序，集合变化则要求重读。
+        let order = if op == "resources" {
+            Value::Null
+        } else {
+            let mut hash = Sha256::new();
+            for item in &items {
+                let identity = item
+                    .get("connection_id")
+                    .unwrap_or(item)
+                    .as_str()
+                    .ok_or_else(|| AppError::new("internal", "目录项身份无效"))?;
+                hash.update((identity.len() as u64).to_be_bytes());
+                hash.update(identity.as_bytes());
+            }
+            json!(format!("{:x}", base16ct::HexDisplay(&hash.finalize())))
+        };
+        let (start, expected_order) = position;
+        if expected_order
+            .as_ref()
+            .is_some_and(|expected| expected != &order)
+        {
+            return Err(AppError::new("expired", "目录已变化，请重新读取"));
+        }
         let start = usize::try_from(start).map_err(|_| AppError::invalid("游标位置无效"))?;
         if start > items.len() {
             return Err(AppError::new("expired", "目录已变化，请重新读取"));
@@ -77,7 +108,7 @@ impl Engine {
                 resource,
                 index as u64,
                 0,
-                json!({"filters":filters}),
+                json!({"filters":filters,"order":order}),
             )
         });
         out.insert(key.into(), Value::Array(page));
@@ -96,7 +127,9 @@ impl Engine {
     pub(super) async fn mcp_connections(&self, owner: Uuid, params: &Value) -> Result<Value> {
         let provider = optional::<String>(params, "provider")?;
         let source = optional::<String>(params, "source")?;
-        let filters = json!({"provider":provider,"source":source});
+        let project_context = self.mcp_project_context(owner).await?;
+        let filters =
+            json!({"provider":provider,"source":source,"project_context":project_context});
         let start = self.catalog_position(owner, "connections", Uuid::nil(), params, &filters)?;
         let mut items = Vec::new();
         for profile in self.store.profiles().await? {
@@ -158,8 +191,20 @@ impl Engine {
                 }
                 None => "ready".to_owned(),
             };
-            items.push(json!({"connection_id":profile.id,"name":profile.name,"provider":profile.provider,"source":source_name,"access":if writable {"read_write"} else {"read_only"},"auth_state":auth_state}));
+            let recommendation = Self::mcp_recommendations(&project_context, profile.id);
+            items.push(json!({"connection_id":profile.id,"name":profile.name,"provider":profile.provider,"source":source_name,"access":if writable {"read_write"} else {"read_only"},"auth_state":auth_state,"recommendation":recommendation}));
         }
+        items.sort_by(|a, b| {
+            b["recommendation"]
+                .as_array()
+                .map_or(0, Vec::len)
+                .cmp(&a["recommendation"].as_array().map_or(0, Vec::len))
+                .then_with(|| {
+                    a["connection_id"]
+                        .as_str()
+                        .cmp(&b["connection_id"].as_str())
+                })
+        });
         self.catalog_page(
             CatalogScope {
                 owner,
@@ -183,7 +228,9 @@ impl Engine {
         let id: Uuid = model::param(params, "connection_id")?;
         let profile = self.mcp_profile(owner, id).await?;
         let refresh = optional::<bool>(params, "refresh")?.unwrap_or(false);
-        let filters = json!({"refresh":refresh});
+        let project_context = self.mcp_project_context(owner).await?;
+        let mut recommendation = Self::mcp_recommendations(&project_context, id);
+        let filters = json!({"refresh":refresh,"project_context":project_context});
         let start = self.catalog_position(owner, "databases", id, params, &filters)?;
         if refresh && profile.is_archery() {
             let auth = self.mcp_auth(owner, &json!({"connection_id":id})).await?;
@@ -214,7 +261,31 @@ impl Engine {
                 items.push(json!(name));
             }
         }
-        self.catalog_page(CatalogScope { owner, operation: "databases", resource: id }, filters, start, items, "databases", json!({"state":discovery["state"],"source":discovery["source"],"configured_count":discovery["configured_count"],"reason":discovery["reason"]})).await
+        recommendation.retain(|r| {
+            let name = r["database"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| r["redis_db"].as_u64().map(|db| db.to_string()));
+            name.as_ref().is_none_or(|name| {
+                items
+                    .iter()
+                    .any(|item| item.as_str() == Some(name.as_str()))
+            })
+        });
+        items.sort_by(|a, b| {
+            let rank = |item: &Value| {
+                recommendation.iter().any(|r| {
+                    r["database"] == *item
+                        || r["redis_db"]
+                            .as_u64()
+                            .is_some_and(|db| item.as_str() == Some(db.to_string().as_str()))
+                })
+            };
+            rank(b)
+                .cmp(&rank(a))
+                .then_with(|| a.as_str().cmp(&b.as_str()))
+        });
+        self.catalog_page(CatalogScope { owner, operation: "databases", resource: id }, filters, start, items, "databases", json!({"state":discovery["state"],"source":discovery["source"],"configured_count":discovery["configured_count"],"reason":discovery["reason"],"recommendation":recommendation})).await
     }
 
     pub(super) async fn mcp_open(self: &Arc<Self>, owner: Uuid, params: &Value) -> Result<Value> {
@@ -563,7 +634,7 @@ impl Engine {
                 resource: session_id,
             },
             filters,
-            cursor.map_or(0, |c| c.start),
+            (cursor.map_or(0, |c| c.start), None),
             items,
             "resources",
             json!({"complete":complete}),

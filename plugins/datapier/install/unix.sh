@@ -43,6 +43,20 @@ VERSION=$(awk '
 hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d ' ' -f 1; else fail '需要 sha256sum 或 shasum'; fi; }
 mkdir -p "$CACHE" || fail '无法创建缓存目录'
 CACHE=$(CDPATH= cd -- "$CACHE" && pwd -P)
+# 进程锁在崩溃或 plugin 重载后由操作系统释放，重入脚本在锁内重新检查缓存。
+if [ "${1:-}" != --locked ]; then
+  case $(uname -s) in
+  Darwin)
+    command -v lockf >/dev/null 2>&1 || fail '需要 lockf 协调安装'
+    exec lockf -k -t 300 "$CACHE/.install.lock" /bin/sh "$0" --locked
+    ;;
+  Linux)
+    command -v flock >/dev/null 2>&1 || fail '需要 flock 协调安装'
+    exec flock -w 300 "$CACHE/.install.lock" /bin/sh "$0" --locked
+    ;;
+  *) fail '不支持的操作系统' ;;
+  esac
+fi
 case $(uname -s) in
 Darwin)
   OS=apple-darwin
@@ -78,15 +92,20 @@ else
   done
   DEST=$CACHE/$VERSION/$TARGET-$DIGEST
   if [ ! -f "$DEST/datapier" ]; then
-    URL=${DATAPIER_RELEASE_URL:-}
-    if [ -z "$URL" ] && [ -f "$PLUGIN_DIR/release-url.txt" ]; then URL=$(cat "$PLUGIN_DIR/release-url.txt"); fi
-    case $URL in https://*) ;; *) fail '未配置有效的 HTTPS 发布地址；请设置 DATAPIER_RELEASE_URL' ;; esac
-    command -v curl >/dev/null 2>&1 || fail '需要 curl 下载发布文件'
-    curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error "${URL%/}/$FILE" -o "$TMP/package.tar.gz" || fail '下载发布文件失败'
+    PACKAGE=$TMP/package.tar.gz
+    if [ -n "${DATAPIER_UPDATE_ARCHIVE:-}" ]; then
+      PACKAGE=$DATAPIER_UPDATE_ARCHIVE
+    else
+      URL=${DATAPIER_RELEASE_URL:-}
+      if [ -z "$URL" ] && [ -f "$PLUGIN_DIR/release-url.txt" ]; then URL=$(cat "$PLUGIN_DIR/release-url.txt"); fi
+      case $URL in https://*) ;; *) fail '未配置有效的 HTTPS 发布地址；请设置 DATAPIER_RELEASE_URL' ;; esac
+      command -v curl >/dev/null 2>&1 || fail '需要 curl 下载发布文件'
+      curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error "${URL%/}/$FILE" -o "$TMP/package.tar.gz" || fail '下载发布文件失败'
+    fi
     # 归档摘要验证下载内容，程序摘要再次验证解包结果；固定成员名也避免路径穿越。
-    [ "$(hash "$TMP/package.tar.gz")" = "$DIGEST" ] || fail '发布文件 SHA256 不匹配'
-    [ "$(tar -tzf "$TMP/package.tar.gz")" = datapier ] || fail '发布压缩包内容无效'
-    tar -xOzf "$TMP/package.tar.gz" datapier >"$TMP/datapier" || fail '解包失败'
+    [ "$(hash "$PACKAGE")" = "$DIGEST" ] || fail '发布文件 SHA256 不匹配'
+    [ "$(tar -tzf "$PACKAGE")" = datapier ] || fail '发布压缩包内容无效'
+    tar -xOzf "$PACKAGE" datapier >"$TMP/datapier" || fail '解包失败'
     [ "$(hash "$TMP/datapier")" = "$BINARY_HASH" ] || fail '发布程序 SHA256 不匹配'
   fi
 fi

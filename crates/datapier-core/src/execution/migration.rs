@@ -1,6 +1,7 @@
 //! 跨文件／跨实例的数据交换编排。数据库行只在有界流中传递，日志只保存执行事实。
 
 mod files;
+mod inspect;
 mod mysql;
 mod prepare;
 mod redis;
@@ -230,6 +231,7 @@ pub async fn prepare_retry_with_progress(
     prepare::prepare(sink, spec, Some(old_run), cancel, Some(progress)).await
 }
 
+pub use inspect::inspect_input;
 pub use prepare::plan_digest;
 
 /// 每次执行都重新解析权限及 profile 指纹，不将旧计划当成可重放的数据库命令。

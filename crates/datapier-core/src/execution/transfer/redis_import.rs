@@ -118,8 +118,8 @@ pub(super) async fn import_redis_json(
     budget: usize,
 ) -> Result<()> {
     let limit = (budget / 64).max(1);
-    let doc = super::json::json_document_bounded(file, &sink.store.root, "records", cancel, limit)?;
-    let mut r = doc.data.reader_bounded(limit)?;
+    let doc = json_document(file, "records", cancel, limit)?;
+    let mut r = doc.data.reader(limit);
     r.expect(b'[')?;
     let mut active: Option<KeyImport> = None;
     let result: Result<()> = async {
@@ -131,16 +131,14 @@ pub(super) async fn import_redis_json(
             let mut key: Option<String> = None;
             let mut kind: Option<String> = None;
             let mut expiry: Option<Json> = None;
-            let mut rows: Option<JsonSpool> = None;
+            let mut rows: Option<JsonRange> = None;
             while let Some(field) = r.object_next(&mut fields_first)? {
                 ensure_not_cancelled(cancel)?;
                 match field.as_str() {
                     "key_b64" if key.is_none() => key = Some(r.value()?),
                     "type" if kind.is_none() => kind = Some(r.value()?),
                     "expires_at_ms" if expiry.is_none() => expiry = Some(r.value()?),
-                    "rows" if rows.is_none() => {
-                        rows = Some(JsonSpool::copy(&mut r, &sink.store.root, cancel)?)
-                    }
+                    "rows" if rows.is_none() => rows = Some(JsonRange::scan(&mut r, cancel)?),
                     "key_b64" | "type" | "expires_at_ms" | "rows" => {
                         return Err(AppError::invalid("Redis JSON 字段重复"));
                     }
@@ -152,7 +150,7 @@ pub(super) async fn import_redis_json(
             let expiry =
                 expiry.ok_or_else(|| AppError::invalid("Redis JSON 缺少 expires_at_ms"))?;
             let rows = rows.ok_or_else(|| AppError::invalid("Redis JSON 缺少 rows"))?;
-            let mut row_reader = rows.reader_bounded(limit)?;
+            let mut row_reader = rows.reader(limit);
             row_reader.expect(b'[')?;
             active = Some(
                 begin_key(

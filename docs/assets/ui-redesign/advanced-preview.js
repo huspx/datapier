@@ -252,10 +252,11 @@ function replacementPreview(info) {
       advancedSelect(
         'scope',
         t('范围', 'Scope'),
-        [['selected', t('选中行', 'Selected rows')], ['page', t('当前页', 'Current page')], [
-          'filter',
-          t('当前筛选结果', 'Filtered results'),
-        ]],
+        [
+          ['selected', t('选中行', 'Selected rows')],
+          ['page', t('当前页', 'Current page')],
+          ['filter', t('当前筛选结果', 'Filtered results')],
+        ],
         s.scope,
         frozen,
       )
@@ -275,10 +276,12 @@ function replacementPreview(info) {
     }<fieldset><legend>${t('替换角色', 'Replacement roles')}</legend>${
       choose('roles', roles[s.kind], s.roles)
     }</fieldset>`;
-  const flags = [['regex', t('正则表达式', 'Regular expression')], ['sensitive', t('区分大小写', 'Case sensitive')], [
-    'multiline',
-    t('多行', 'Multiline'),
-  ], ['dotall', t('点匹配换行', 'Dot matches newline')]].map(([key, label]) =>
+  const flags = [
+    ['regex', t('正则表达式', 'Regular expression')],
+    ['sensitive', t('区分大小写', 'Case sensitive')],
+    ['multiline', t('多行', 'Multiline')],
+    ['dotall', t('点匹配换行', 'Dot matches newline')],
+  ].map(([key, label]) =>
     advancedSwitch(key, label, s[key], frozen || (!s.regex && (key === 'multiline' || key === 'dotall')))
   ).join('') + (s.regex
     ? `<p class="muted">${
@@ -360,7 +363,15 @@ function replacementPreview(info) {
       t('原值', 'Before')
     }</th><th>${t('新值', 'After')}</th><th>${
       t('包含', 'Include')
-    }</th></tr></thead><tbody>${row}</tbody></table></div><div class="fields">${
+    }</th></tr></thead><tbody>${row}</tbody></table></div>${
+      item
+        ? `<details class="xp-diff"><summary>${
+          t('逐行对比所选项', 'Compare selected item lines')
+        }</summary><div><pre>− ${advancedEscape(item.before)}</pre><pre>+ ${
+          advancedEscape(item.after)
+        }</pre></div></details>`
+        : ''
+    }<div class="fields">${
       advancedSelect('pageSize', t('每页数量', 'Page size'), [['1', '1'], ['2', '2'], ['5', '5']], String(pageSize))
     }${advancedSwitch('unknownTotal', t('模拟总数未知', 'Simulate unknown total'), !!s.unknownTotal)}</div><p>${
       t('第', 'Page')
@@ -521,10 +532,13 @@ function advancedValuePreview(info) {
     confirm: false,
     dirty: false,
   };
-  const modes = [['text', t('文本', 'Text')], ['hex', 'Hex'], ['json', 'JSON'], ['xml', 'XML'], [
-    'image',
-    t('图片', 'Image'),
-  ]];
+  const modes = [
+    ['text', t('文本', 'Text')],
+    ['hex', 'Hex'],
+    ['json', 'JSON'],
+    ['xml', 'XML'],
+    ['image', t('图片', 'Image')],
+  ];
   const phases = [
     ['normal', t('普通值', 'Normal value')],
     ['null', 'NULL'],
@@ -633,10 +647,11 @@ function advancedValuePreview(info) {
             'NULL differs from empty text and empty bytes. Choose the new value type.',
           )
         }</p>${
-          advancedSelect('nullType', t('新值类型', 'New value type'), [['text', t('文本', 'Text')], [
-            'binary',
-            t('二进制', 'Binary'),
-          ], ['json', 'JSON']], s.nullType)
+          advancedSelect('nullType', t('新值类型', 'New value type'), [
+            ['text', t('文本', 'Text')],
+            ['binary', t('二进制', 'Binary')],
+            ['json', 'JSON'],
+          ], s.nullType)
         }`
         : ''
     }${

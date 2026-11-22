@@ -11,7 +11,7 @@
 | [发布指南](RELEASING.md) | 产品版本派生、组包、发布流程及发布前后核对 | 逐条功能说明和开发排查日志 |
 | [CHANGELOG](CHANGELOG.md) | 相对已发布版本的用户可见功能、改进、修复和兼容性变化 | 新功能发布前的内部修正、代码重构、设计稿同步或每轮验证结果 |
 | [产品规划](docs/product-plan.md) | 产品目标、交付范围、路线和验收方向 | 控件尺寸、文案、字段级交互及源码实现细节 |
-| [0.1.0 技术方案](docs/technical-design-0.1.0.md)、[0.1.1 技术方案](docs/technical-design-0.1.1.md)、[0.2.0 技术方案](docs/technical-design-0.2.0.md)、[0.3.0 技术方案](docs/technical-design-0.3.0.md)、[0.4.0 技术方案](docs/technical-design-0.4.0.md) | 对应版本的架构、数据与接口契约、决策理由、迁移、验收要求及简洁结果摘要；当前实现与未验收范围以实际代码和对应版本运行证据为准 | 每轮修复和候选构建的流水账 |
+| [0.1.0 技术方案](docs/technical-design-0.1.0.md)、[0.1.1 技术方案](docs/technical-design-0.1.1.md)、[0.2.0 技术方案](docs/technical-design-0.2.0.md)、[0.3.0 技术方案](docs/technical-design-0.3.0.md)、[0.4.0 技术方案](docs/technical-design-0.4.0.md)、[0.5.0 技术方案](docs/technical-design-0.5.0.md) | 对应版本的架构、数据与接口契约、决策理由、迁移、验收要求及简洁结果摘要；当前实现与未验收范围以实际代码和运行证据为准 | 每轮修复和候选构建的流水账 |
 | [UI 设计规范](docs/ui-guidelines.md) | 从原设计整理的视觉、组件、文案、响应式和状态约定；新增界面的共同基准 | Engine 接口与版本范围 |
 | [UI 设计说明](docs/ui-redesign.md) | 具体功能的操作语义与交互约束 | 重复通用设计规范、平台接口契约或运行日志 |
 | [HTML 设计稿](docs/ui-redesign.html) | 与 UI 说明一致的可交互示例 | 真实数据库执行、持久化或原生验收证据 |
@@ -22,20 +22,20 @@ Changelog 按最后一个已发布版本比较：新功能在首次发布前的�
 
 用户的新要求优先于历史方案；范围或架构变化时同步相关文档。功能任务按完整可运行路径交付，不留下空壳、假结果或未接线接口。仅涉及文档的任务不顺带创建 workspace、plugin 或数据库。
 
-当前 0.4.0 实现整合已合入的 0.3.0 及此前版本能力；正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。历史方案中的旧入口与结果缓存契约不应覆盖当前实现；继续遵守类型、提交、凭据、隔离与验证约束。
+当前 0.5.0 候选整合此前版本能力；正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。历史方案中的旧入口与结果缓存契约不应覆盖当前实现；继续遵守类型、提交、凭据、隔离与验证约束。
 
 ## 开发环境
 
 - 使用 Rust／Cargo 1.100.0 及以上稳定版；workspace 使用 edition 2024，六个 crate 统一继承 `rust-version = 1.100`，CI 显式使用 Rust 1.100.0。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
-- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；版本约束及 features 以根 `Cargo.toml` 和各 crate 配置为准。0.4.0 当前使用 base64 0.23.1、sha2 0.11.1、sqlparser 0.64.0、resvg 0.50.0、rmcp 3.10.0、zip 9.6.0；摘要十六进制显示使用 base16ct 1.0.0，保持原有持久化格式。官方 `tern-sdk` 仍精确固定为 registry 的 0.2.0。六种目标使用一致的锁文件，历史方案保留各自设计及验收时的依赖版本。
+- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；版本约束及 features 以根 `Cargo.toml` 和各 crate 配置为准。当前使用 base64 0.23.1、sha2 0.11.1、sqlparser 0.64.0、resvg 0.50.0、rmcp 3.11.0、sqlx 0.9.1、zip 9.8.1；摘要十六进制显示使用 base16ct 1.0.0。官方 `tern-sdk` 精确固定为 registry 的 0.2.0。六种目标使用一致的锁文件，历史方案保留各自依赖版本。
 - 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
 - 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 - 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。
-- 当前开发验收基线为 macOS arm64、Tern 0.9.21（实测 `0.9.21 dbe0861`）与 tern-sdk 0.2.0，不维护旧 SDK 兼容层。应用以 sans 打开 surface，使用公开 `button`、`field`、`select`、`switch`、`menu` 和 `overlay`。表单与主操作保留明确控件层级；连接／资源行、标签、grid 和状态入口按唯一 HTML 设计采用局部命名 CSS，维护对齐、选中、禁用与键盘焦点，禁止全局覆盖表单控件。右键菜单使用公开结构化条目，外壳和定位由宿主管理。尚无类型化 builder 的公开 prop（如 editor 的 `nowrap`）通过通用 prop 写入并在宿主实测。启动 plugin 和命令面板使用内置 `database` 图标。
+- 完整工作台与插件集成以 Tern 0.9.29 或更新和 tern-sdk 0.2.0 为基线。应用以 sans 打开 surface，使用公开 TSP 控件和宿主主题。连接／资源行、标签、grid 和状态入口按唯一 HTML 设计使用局部命名 CSS，保留对齐、选中、禁用与键盘焦点。右键菜单使用公开结构化条目。尚无类型化 builder 的公开 prop 通过通用 prop 写入并在宿主实测。启动 plugin 与命令面板使用内置 `database` 图标。
 - 若仓库已有 `.codegraph/` 且工具可用，优先借助 CodeGraph 定位符号与调用关系；无索引时直接检索代码，不自行建立索引。
 
-格式化使用 dprint 0.64.3；插件精确版本统一维护在 [dprint.json](dprint.json)。当前 TypeScript／JSON／TOML 插件为 0.101.0／0.26.0／0.10.0，Malva／SQL／shfmt／StyLua／Ruff 为 0.16.1／0.5.0／0.2.0／0.2.0／0.12.2，Markup／YAML 保持 0.27.6／0.6.0。Python 仍使用 3.15 线，Actions 的 checkout／setup-python 保持 v7。
+格式化使用 dprint 0.65.0；插件精确版本统一维护在 [dprint.json](dprint.json)。Python 仍使用 3.15 线，GitHub Action 的精确版本以 [发布工作流](.github/workflows/native-release.yml)和[原生构建工作流](.github/workflows/native-build.yml)为准。
 
 构建本地程序，启动普通终端 TUI 或在 Tern 中启动 TSP：
 
@@ -75,6 +75,12 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 - 避免不必要的分配、复制、重复计算与全量读取；大数据按需、分页或分批处理，不以复杂优化替代清晰设计。
 - 日志沿用项目统一机制，提供必要定位信息，不记录凭据、Token 或其他敏感数据；交付前清理临时调试输出。
 - 修改接口或行为时更新全部受影响的调用方、相关测试、文档与注释，清理被替代的实现；不保留无需求的兼容分支。
+
+### 界面国际化（i18n）
+
+- 新增或修改的界面文案须同时提供简体中文和英文。检查经数组、配置或状态生成的 tab、下拉选项和菜单，也检查空态、加载、校验失败、插件通知、tooltip 和可访问名称。文案与语言切换的行为约定见 [UI 设计规范](docs/ui-guidelines.md#6-响应式键盘与语言)。
+- TSP 文案按界面职责登记到 [英文词条目录](crates/datapier-tsp/src/i18n/catalog/)，同一词条只登记一次。静态标签通过现有控件或 `i18n::tr` 翻译。需要随语言切换重新显示的状态和提示保留为 `UiMessage`，在渲染时翻译完整模板，再按具名占位符插值。连接名、对象名、SQL、用户输入、数据及原始诊断作为原值传入。
+- 在改动对应的实际界面切换简体中文和英文，检查相关入口、动态标签和失败路径是否仍有漏译，并确认长译文可读、切换后选择与未保存输入仍保留。设计稿涉及的页面使用 [HTML 原型](docs/ui-redesign.html)核对两种语言。
 
 ## 代码可读性与注释
 
@@ -116,7 +122,7 @@ DATAPIER_BINARY="$PWD/target/debug/datapier" tern
 
 Windows 安装器由 Windows PowerShell 5.1 读取，源码保留 UTF-8 BOM，以正确识别中文；交给启动 plugin 的 stdout JSON 则固定为无 BOM 的 UTF-8。
 
-dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。当前配置 schema 为 5，查询结果不再写入结果缓存；SQL 格式整理必须保持迁移语义，验证新建、升级和拒绝较新基线。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
+dprint 默认复用仓库 `.gitignore`，配置另排除依赖、第三方目录及生成文件；不使用忽略注释或排除规则掩盖格式化失败。配置 schema 以迁移实现及当前版本技术方案为准，查询结果不写入结果缓存；SQL 格式整理必须保持迁移语义，验证新建、升级和拒绝较新基线。Rust、HTML 或 Shell 字符串中的 SQL 不交给独立 SQL 插件处理。
 
 ### 本地执行与 AI 修改要求
 
@@ -243,7 +249,7 @@ cargo test -p datapier-core --test tls -- --ignored
 
 普通 `cargo test` 通过不等于数据库验收。代码行为变更必须运行对应路径：数据库使用真实测试实例，UI 在实际 Tern 中交互验证，IPC／退出观察进程和资源状态。只通过编译或 mock 测试不能代替运行证明。回归测试针对用户可见行为、边界、冲突和状态迁移；不测试源码文字、机械转发或偶然默认值。
 
-按[0.4.0 验收矩阵](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)验证迁移与项目，并回归 [0.3.0 既有行为](docs/technical-design-0.3.0.md#131-必须观察的行为)及 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)，记录实际平台与环境。当前开发基线为 macOS arm64、Tern 0.9.21；其他平台保留实现与 CI 配置，历史证据不替代本候选验证。正常窗口的 window／pane 绑定、bridge 启动终端编辑器与显式回填必须实际验收，不能以 `serve` 渲染或缓存安装成功替代。具体发布检查见[发布前检查](RELEASING.md#发布前检查)。
+按[0.5.0 验收矩阵](docs/technical-design-0.5.0.md#8-验收矩阵与验证方式)验证新增能力，回归 [0.4.0 迁移与项目](docs/technical-design-0.4.0.md#14-验收矩阵与运行证据)、[0.3.0 既有行为](docs/technical-design-0.3.0.md#131-必须观察的行为)及 [0.2.0 入口与权限边界](docs/technical-design-0.2.0.md#14-验收要求)。用正常窗口验收绑定、桥接重载、外部编辑器交接与显式回填。具体发布检查见[发布前检查](RELEASING.md#发布前检查)。
 
 只报告实际执行的命令、结果、未执行的检查及环境限制，不静默缩减平台范围。[0.1.0 历史验收](docs/technical-design-0.1.0.md#11-实现与运行记录)和[0.1.1 候选运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)不是当前候选的验证证据；0.2.0 结果记录在[技术方案](docs/technical-design-0.2.0.md#15-风险与当前完成状态)，发布门禁以[发布前检查](RELEASING.md#发布前检查)为准。纯文档变更检查相对链接、章节锚点、标题、表格、代码块及方案一致性，无需安装依赖、启动数据库或运行无关构建、单测和 smoke。
 

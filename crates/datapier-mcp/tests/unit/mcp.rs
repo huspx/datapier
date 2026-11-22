@@ -78,3 +78,30 @@ fn database_diagnostics_are_structured_without_duplicating_rows() {
     assert_eq!(result.content.len(), 1);
     assert_eq!(result.is_error, Some(true));
 }
+
+#[tokio::test]
+async fn roots_sync_failure_stays_unavailable_and_recovers_without_stale_retry() {
+    let new_roots = json!({"roots":["file:///new"],"source":"roots"});
+    let mut state = RootsState {
+        applied: 1,
+        pending: Some((2, new_roots.clone())),
+    };
+    assert!(!state.retry_pending(2, |_| async { false }).await);
+    assert_eq!(state.applied, 1);
+    assert_eq!(state.pending.as_ref().unwrap().1, new_roots);
+    assert!(
+        !state
+            .retry_pending(3, |_| async { panic!("不能重放过期 roots") })
+            .await
+    );
+    assert!(
+        state
+            .retry_pending(2, |params| async move {
+                assert_eq!(params, new_roots);
+                true
+            })
+            .await
+    );
+    assert_eq!(state.applied, 2);
+    assert!(state.pending.is_none());
+}

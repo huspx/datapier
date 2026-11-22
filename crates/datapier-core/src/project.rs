@@ -379,7 +379,16 @@ pub fn create(root: &Path, name: String) -> Result<ProjectSnapshot> {
         display: None,
     };
     validate(&manifest, &BTreeMap::new())?;
-    fs::create_dir(root)?;
+    fs::create_dir(root).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::new(
+                "project_path_exists",
+                "项目目录已存在，请选择不存在的新目录",
+            )
+        } else {
+            error.into()
+        }
+    })?;
     let file = root.join(MANIFEST);
     let mut out = OpenOptions::new().write(true).create_new(true).open(file)?;
     out.write_all(sorted_json(&manifest)?.as_bytes())?;

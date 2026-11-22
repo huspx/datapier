@@ -3,7 +3,10 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -20,7 +23,7 @@ use rmcp::{
         PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
         ToolAnnotations,
     },
-    service::{RequestContext, RoleServer},
+    service::{NotificationContext, RequestContext, RoleServer},
     transport::stdio,
 };
 use serde_json::{Map, Value, json};
@@ -376,6 +379,32 @@ fn validate(spec: &Spec, args: &Map<String, Value>) -> std::result::Result<(), E
 struct Adapter {
     engine: Client,
     approvals: Arc<Mutex<HashMap<String, String>>>,
+    project_roots: Vec<String>,
+    environment: Option<String>,
+    roots_gate: Arc<tokio::sync::Mutex<RootsState>>,
+    roots_generation: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct RootsState {
+    applied: u64,
+    pending: Option<(u64, Value)>,
+}
+impl RootsState {
+    async fn retry_pending<F, Fut>(&mut self, current: u64, update: F) -> bool
+    where
+        F: FnOnce(Value) -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        if let Some((generation, params)) = self.pending.clone()
+            && generation == current
+            && update(params).await
+        {
+            self.applied = generation;
+            self.pending = None;
+        }
+        self.applied == current
+    }
 }
 fn response(value: Value, error: bool) -> CallToolResponse {
     let value = if value.is_object() {
@@ -399,7 +428,59 @@ fn response(value: Value, error: bool) -> CallToolResponse {
     result.structured_content = Some(value);
     result.into()
 }
+impl Adapter {
+    #[allow(deprecated)]
+    async fn refresh_roots(&self, context: NotificationContext<RoleServer>) {
+        // 通知到达时立即使旧上下文失效，即使另一个更新仍在等待。
+        let generation = self.roots_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut state = self.roots_gate.lock().await;
+        if generation != self.roots_generation.load(Ordering::SeqCst) {
+            return;
+        }
+        let supports_roots = context
+            .peer
+            .peer_info()
+            .is_some_and(|info| info.capabilities.roots.is_some());
+        let (roots, source) = if supports_roots {
+            match context.peer.list_roots().await {
+                Ok(result) => (
+                    result
+                        .roots
+                        .into_iter()
+                        .map(|root| root.uri)
+                        .collect::<Vec<_>>(),
+                    "roots",
+                ),
+                Err(_) => (Vec::new(), "roots_error"),
+            }
+        } else if self.project_roots.is_empty() {
+            (Vec::new(), "unknown")
+        } else {
+            (self.project_roots.clone(), "explicit")
+        };
+        if generation != self.roots_generation.load(Ordering::SeqCst) {
+            return;
+        }
+        let params = json!({"roots":roots,"source":source,"environment":self.environment});
+        state.pending = Some((generation, params.clone()));
+        if self
+            .engine
+            .request("mcp.context.update", params)
+            .await
+            .is_ok()
+        {
+            state.applied = generation;
+            state.pending = None;
+        }
+    }
+}
 impl ServerHandler for Adapter {
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        self.refresh_roots(context).await;
+    }
+    async fn on_roots_list_changed(&self, context: NotificationContext<RoleServer>) {
+        self.refresh_roots(context).await;
+    }
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         // 2026-07-28 禁止 server-to-client 请求；本服务依赖原生 elicitation。
         Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
@@ -431,6 +512,16 @@ impl ServerHandler for Adapter {
         let spec = SPECS.iter().find(|spec| spec.name == request.name).ok_or_else(|| ErrorData::invalid_params("Unknown tool", None))?;
         let mut args = request.arguments.unwrap_or_default();
         validate(spec, &args)?;
+        let discovery = matches!(spec.name, "get_server_info" | "list_connections" | "list_databases");
+        let mut roots = if discovery { Some(self.roots_gate.lock().await) } else { None };
+        if let Some(state) = roots.as_mut() {
+            let current = self.roots_generation.load(Ordering::SeqCst);
+            if !state.retry_pending(current, |params| async {
+                self.engine.request("mcp.context.update", params).await.is_ok()
+            }).await {
+                return Ok(response(json!({"code":"context_unavailable","message":"Project roots are being updated or could not be synchronized; retry discovery."}), true));
+            }
+        }
         if spec.name == "approve_command" {
             let approving = args.get("decision").and_then(Value::as_str) == Some("approve");
             let native = context.client_capabilities().and_then(|c| c.elicitation).is_some_and(|c| c.form.is_some() || c.url.is_none());
@@ -461,7 +552,13 @@ impl ServerHandler for Adapter {
             args.insert("interaction_source".into(), json!(if native && approving { "native_elicitation" } else { "trusted_host" }));
         }
         let method = format!("mcp.{}", spec.name);
-        match self.engine.request(&method, Value::Object(args)).await {
+        let result = self.engine.request(&method, Value::Object(args)).await;
+        if let Some(state) = roots.as_ref()
+            && state.applied != self.roots_generation.load(Ordering::SeqCst)
+        {
+            return Ok(response(json!({"code":"context_unavailable","message":"Project roots changed during discovery; retry."}), true));
+        }
+        match result {
             Ok(value) => {
                 if let (Some(approval), Some(execution)) = (value.get("approval_id").and_then(Value::as_str), value.get("execution_id").and_then(Value::as_str)) {
                     self.approvals.lock().unwrap().insert(approval.into(), execution.into());
@@ -476,7 +573,26 @@ impl ServerHandler for Adapter {
 }
 
 /// 启动 MCP stdio 服务；上游断开或收到中断时关闭独立 Engine 客户端会话。
-pub async fn run(root: PathBuf, allow_connections: Vec<Uuid>) -> Result<()> {
+pub async fn run(
+    root: PathBuf,
+    allow_connections: Vec<Uuid>,
+    project_roots: Vec<PathBuf>,
+    environment: Option<String>,
+) -> Result<()> {
+    let project_roots = project_roots
+        .into_iter()
+        .map(|path| {
+            let absolute = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()?.join(path)
+            };
+            absolute
+                .into_os_string()
+                .into_string()
+                .map_err(|_| AppError::invalid("项目路径不是 UTF-8"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let engine = Client::connect_with(
         &root,
         ClientOptions {
@@ -489,6 +605,10 @@ pub async fn run(root: PathBuf, allow_connections: Vec<Uuid>) -> Result<()> {
     let adapter = Adapter {
         engine: engine.clone(),
         approvals: Arc::new(Mutex::new(HashMap::new())),
+        project_roots,
+        environment,
+        roots_gate: Arc::new(tokio::sync::Mutex::new(RootsState::default())),
+        roots_generation: Arc::new(AtomicU64::new(1)),
     };
     let service = match adapter.serve(stdio()).await {
         Ok(service) => service,

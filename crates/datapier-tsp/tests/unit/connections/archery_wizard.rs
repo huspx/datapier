@@ -658,8 +658,11 @@ fn modal_tabs_keep_host_text_focus_cleared_and_approval_can_reopen() {
     app.workbench.overlay = Some("settings".into());
     app.focus = "settings-tab-general".into();
     assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
-    assert_eq!(app.focus, "settings-tab-editing");
-    assert_eq!(app.workbench.focus_request.as_deref(), Some(""));
+    assert_eq!(app.focus, "settings-tab-updates");
+    assert_eq!(
+        app.workbench.focus_request.as_deref(),
+        Some("settings-tab-updates")
+    );
     app.workbench.overlay = None;
     app.action("approval-toggle", &backend);
     app.action("approval-close", &backend);

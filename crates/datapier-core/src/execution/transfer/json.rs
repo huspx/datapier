@@ -1,18 +1,75 @@
 use super::*;
 
+// 各范围共享同一打开文件，但独立维护偏移；避免重新按路径打开或复制敏感数据。
+struct JsonFile {
+    file: std::sync::Arc<std::sync::Mutex<File>>,
+    position: u64,
+    end: u64,
+}
+impl Read for JsonFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::{Seek, SeekFrom};
+        let len = buf
+            .len()
+            .min(self.end.saturating_sub(self.position) as usize);
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| std::io::Error::other("JSON 文件锁已损坏"))?;
+        file.seek(SeekFrom::Start(self.position))?;
+        let read = file.read(&mut buf[..len])?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+impl std::io::Seek for JsonFile {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let next = match position {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::Current(n) => self.position.checked_add_signed(n),
+            SeekFrom::End(n) => self.end.checked_add_signed(n),
+        }
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无效 JSON 偏移"))?;
+        self.position = next;
+        Ok(next)
+    }
+}
+
 // 每次只解析一个 JSON 值，避免将完整行数组载入内存。
 pub(super) struct JsonReader {
-    input: BufReader<File>,
+    input: BufReader<JsonFile>,
     pending: Option<u8>,
     value_limit: usize,
 }
 impl JsonReader {
-    fn new(file: File) -> Self {
+    fn new(file: File, limit: usize) -> Self {
+        Self::from_range(
+            std::sync::Arc::new(std::sync::Mutex::new(file)),
+            0,
+            u64::MAX,
+            limit,
+        )
+    }
+    fn from_range(
+        file: std::sync::Arc<std::sync::Mutex<File>>,
+        start: u64,
+        end: u64,
+        value_limit: usize,
+    ) -> Self {
         Self {
-            input: BufReader::new(file),
+            input: BufReader::new(JsonFile {
+                file,
+                position: start,
+                end,
+            }),
             pending: None,
-            value_limit: usize::MAX,
+            value_limit,
         }
+    }
+    fn position(&mut self) -> Result<u64> {
+        use std::io::Seek;
+        Ok(self.input.stream_position()? - u64::from(self.pending.is_some()))
     }
     fn byte(&mut self) -> Result<Option<u8>> {
         if let Some(c) = self.pending.take() {
@@ -192,73 +249,45 @@ impl JsonReader {
         Ok(())
     }
 }
-// 数据字段可能先于元数据出现：暂存其原始 JSON，验证外层后再流式读取。
-pub(super) struct JsonSpool {
-    path: PathBuf,
+// 先定位数据范围再读取元数据，允许字段乱序而无需磁盘暂存。
+pub(super) struct JsonRange {
+    file: std::sync::Arc<std::sync::Mutex<File>>,
+    start: u64,
+    end: u64,
 }
-impl JsonSpool {
-    pub(super) fn copy(
-        reader: &mut JsonReader,
-        root: &Path,
-        cancel: &CancellationToken,
-    ) -> Result<Self> {
-        let path = temp_path(&root.join("transfer-json"), "temporary");
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path)?;
-        let spool = Self { path };
-        let mut writer = BufWriter::new(file);
-        reader.copy_value(&mut writer, cancel)?;
-        writer.flush()?;
-        Ok(spool)
+impl JsonRange {
+    pub(super) fn scan(reader: &mut JsonReader, cancel: &CancellationToken) -> Result<Self> {
+        let start = reader.position()?;
+        reader.copy_value(&mut std::io::sink(), cancel)?;
+        let end = reader.position()?;
+        Ok(Self {
+            file: reader.input.get_ref().file.clone(),
+            start,
+            end,
+        })
     }
-    pub(super) fn reader(&self) -> Result<JsonReader> {
-        Ok(JsonReader::new(File::open(&self.path)?))
-    }
-    pub(super) fn reader_bounded(&self, limit: usize) -> Result<JsonReader> {
-        let mut reader = self.reader()?;
-        reader.value_limit = limit;
-        Ok(reader)
-    }
-}
-impl Drop for JsonSpool {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+    pub(super) fn reader(&self, limit: usize) -> JsonReader {
+        JsonReader::from_range(self.file.clone(), self.start, self.end, limit)
     }
 }
 
 pub(super) struct JsonDocument {
     pub(super) columns: Option<Vec<Column>>,
-    pub(super) data: JsonSpool,
+    pub(super) data: JsonRange,
 }
 pub(super) fn json_document(
     file: File,
-    root: &Path,
-    array: &str,
-    cancel: &CancellationToken,
-) -> Result<JsonDocument> {
-    json_document_bounded(file, root, array, cancel, usize::MAX)
-}
-pub(super) fn json_document_bounded(
-    file: File,
-    root: &Path,
     array: &str,
     cancel: &CancellationToken,
     limit: usize,
 ) -> Result<JsonDocument> {
-    let mut reader = JsonReader::new(file);
-    reader.value_limit = limit;
+    let mut reader = JsonReader::new(file, limit);
     reader.expect(b'{')?;
     let mut first = true;
     let mut format: Option<String> = None;
     let mut version: Option<u64> = None;
     let mut columns: Option<Vec<Column>> = None;
-    let mut data: Option<JsonSpool> = None;
+    let mut data: Option<JsonRange> = None;
     while let Some(name) = reader.object_next(&mut first)? {
         ensure_not_cancelled(cancel)?;
         match name.as_str() {
@@ -266,7 +295,7 @@ pub(super) fn json_document_bounded(
             "version" if version.is_none() => version = Some(reader.value()?),
             "columns" if array == "rows" && columns.is_none() => columns = Some(reader.value()?),
             key if key == array && data.is_none() => {
-                data = Some(JsonSpool::copy(&mut reader, root, cancel)?)
+                data = Some(JsonRange::scan(&mut reader, cancel)?)
             }
             "format" | "version" => return Err(AppError::invalid("JSON 字段重复")),
             "columns" if array == "rows" => return Err(AppError::invalid("JSON 列字段重复")),

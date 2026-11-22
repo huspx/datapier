@@ -223,6 +223,7 @@ impl Engine {
     pub(in crate::server) async fn editing_invalidate_data(&self, profile: Uuid) {
         let plans = {
             let mut state = self.state.lock().unwrap();
+            state.completion.invalidate_profile(profile);
             let sessions: Vec<_> = state
                 .databases
                 .iter()

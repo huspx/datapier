@@ -4,6 +4,7 @@ mod archery;
 mod authorization;
 mod edit_files;
 mod fixed_pool;
+mod local_project;
 mod migration;
 mod profiles;
 mod results;

@@ -198,6 +198,10 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                 crate::i18n::tr("关闭连接").into_owned(),
             ));
         }
+        actions = actions.menu(ui::MenuItem::new(
+            "local-project-associate",
+            crate::i18n::tr("关联到项目…").into_owned(),
+        ));
         actions = actions.menu(ui::MenuEntry::Separator).menu(
             ui::MenuItem::new("delete", crate::i18n::tr("删除连接").into_owned())
                 .icon("trash")
@@ -229,6 +233,10 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                 .on_action(
                     "profile-close",
                     Msg::Action(format!("profile-close:{}", p.id)),
+                )
+                .on_action(
+                    "local-project-associate",
+                    Msg::Action(format!("local-project-associate:{}::", p.id)),
                 )
                 .on_action(
                     "delete",

@@ -8,6 +8,37 @@ fn restore_app(backend: &Backend) -> App {
     app.transfer_set("file-0", "first.sql");
     app
 }
+#[test]
+fn missing_and_readonly_targets_return_to_source_form() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = restore_app(&backend);
+    app.transfer_set("destination-profile", "");
+    app.transfer_action("transfer-ui-prepare", &backend);
+    assert_eq!(app.workbench.transfer.stage, "source");
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        app.transfer_key("destination-profile")
+    );
+    assert!(requests.try_recv().is_err());
+
+    app.transfer_set("destination-profile", Uuid::new_v4().to_string());
+    app.transfer_action("transfer-ui-prepare", &backend);
+    let prepare = requests.try_recv().unwrap();
+    let id = Uuid::new_v4();
+    app.transfer_response(
+        prepare.tag.splitn(3, ':').nth(2).unwrap(),
+        &Ok(json!({"id":id,"revision":1,"state":"preparing"})),
+        &backend,
+    );
+    app.transfer_action("transfer-ui-refresh-plan", &backend);
+    let poll = requests.try_recv().unwrap();
+    app.transfer_response(poll.tag.splitn(3, ':').nth(2).unwrap(), &Ok(json!({"id":id,"revision":1,"state":"failed","error":{"code":"transfer_target_read_only"}})), &backend);
+    assert_eq!(app.workbench.transfer.stage, "source");
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        app.transfer_key("destination-profile")
+    );
+}
 
 #[test]
 fn late_prepare_is_discarded_before_new_prepare() {
@@ -278,4 +309,51 @@ fn invalid_redis_key_and_numeric_filter_focus_object_fields() {
         app.workbench.field_error.as_ref().unwrap().field,
         app.transfer_key("object-filter-value-0-0")
     );
+}
+
+#[test]
+fn object_mapping_preserves_default_columns_and_rejects_empty_projection() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let (backend, _, _) = Backend::scripted();
+    let mut app = restore_app(&backend);
+    app.transfer_set("mode", "copy");
+    app.transfer_set("source-profile", Uuid::new_v4().to_string());
+    app.transfer_set("source-database", "source_db");
+    app.transfer_set("destination-database", "target_db");
+    app.transfer_set("object-source-0", "orders");
+    app.transfer_set("object-target-0", "archive");
+    app.workbench.transfer.catalog.insert(
+        "source:columns:source_db:orders".into(),
+        TransferCatalog {
+            value: Some(json!({"columns":[{"name":"id"},{"name":"email"},{"name":"total"}]})),
+            ..Default::default()
+        },
+    );
+    let action = |source: &str, target: &str| {
+        format!(
+            "transfer-map:object:0:{}:{}",
+            URL_SAFE_NO_PAD.encode(source),
+            URL_SAFE_NO_PAD.encode(target)
+        )
+    };
+    app.transfer_action(&action("id", "order_id"), &backend);
+    assert_eq!(
+        app.transfer_spec().unwrap()["objects"][0]["columns"],
+        json!([
+            {"source":"email","target":"email"},
+            {"source":"id","target":"order_id"},
+            {"source":"total","target":"total"}
+        ])
+    );
+    app.transfer_action(&action("email", "\0"), &backend);
+    assert_eq!(
+        app.transfer_spec().unwrap()["objects"][0]["columns"],
+        json!([
+            {"source":"id","target":"order_id"},
+            {"source":"total","target":"total"}
+        ])
+    );
+    app.transfer_action(&action("id", "\0"), &backend);
+    app.transfer_action(&action("total", "\0"), &backend);
+    assert_eq!(app.transfer_spec().unwrap_err().0, "object-mapping-0");
 }

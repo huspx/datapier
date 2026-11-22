@@ -48,7 +48,10 @@ impl App {
         let database = self.database.clone();
         let redis_db = self.is_redis().then(|| self.current_redis_db());
         self.tabs.push(Tab {
-            title: format!("查询 {}", self.tabs.len() + 1),
+            title: crate::i18n::format_message(
+                "查询 {number}",
+                &[("number", &(self.tabs.len() + 1).to_string())],
+            ),
             query: Editor::new(""),
             cli_query: Editor::default(),
             profile_id: self.profile.as_ref().map(|p| p.id),
@@ -164,6 +167,15 @@ impl App {
                 return false;
             }
         }
+        let active = self.active;
+        for id in &ids {
+            if let Some(index) = self.tabs.iter().position(|tab| tab.id == *id) {
+                self.switch_tab(index);
+                self.completion_close();
+                self.completion_unsubscribe(backend);
+            }
+        }
+        self.switch_tab(active);
         self.tab_close = Some(CloseOperation {
             remaining: ids,
             waiting: None,
@@ -233,6 +245,20 @@ impl App {
             let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
                 continue;
             };
+            let transfer = if index == self.active {
+                &mut self.workbench.transfer
+            } else {
+                &mut self.tabs[index].runtime.workbench.transfer
+            };
+            for entry in transfer.catalog.values_mut() {
+                if let Some(session) = entry.session.take() {
+                    let _ = backend.request(
+                        "transfer-catalog-close",
+                        "connection.close",
+                        json!({"session_id":session}),
+                    );
+                }
+            }
             let session = if index == self.active {
                 &self.session
             } else {

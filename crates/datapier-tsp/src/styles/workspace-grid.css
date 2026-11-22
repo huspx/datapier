@@ -38,6 +38,21 @@
   min-height: 0;
   overflow: hidden;
 }
+.workspace-split {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+/* split 的比例尺寸需要明确的可用区域，不能让原生根节点按内容收缩。 */
+.workspace-split > .sf-split {
+  position: absolute;
+  inset: 0;
+  height: auto !important;
+  min-height: 0;
+  margin: 0;
+}
 .redis-layout {
   flex-direction: row;
 }
@@ -81,6 +96,18 @@
   overflow: auto;
   padding: 12px;
 }
+/* 下拉菜单须越过正文与固定操作栏；关闭后恢复正文滚动。 */
+.transfer-picker-open .transfer-body {
+  overflow: visible;
+}
+.transfer-picker-open > strong,
+.transfer-picker-open > .transfer-summary,
+.transfer-picker-open > .transfer-tabs,
+.transfer-picker-open > .transfer-footer {
+  position: relative;
+  z-index: 1;
+  background: var(--panel);
+}
 .transfer-footer, .project-actions {
   display: flex;
   flex: none;
@@ -112,8 +139,97 @@
 .bp-small .transfer-body, .bp-small .project-body {
   grid-template-columns: minmax(0, 1fr);
 }
-.bp-small .transfer-panel .transfer-summary {
+.transfer-group, .transfer-filter {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px 20px;
+  min-width: 0;
+}
+.transfer-group {
+  padding: 12px 0;
+  border-top: 1px solid var(--l2);
+}
+.transfer-group > *, .transfer-filter > * {
+  min-width: 0;
+}
+.transfer-group > strong,
+.transfer-group > span,
+.transfer-group > .workbench-wide,
+.transfer-group > .transfer-filter,
+.transfer-group > .transfer-mapping,
+.transfer-group > .transfer-actions {
+  grid-column: 1 / -1;
+}
+.transfer-filter {
+  padding: 8px 0;
+  border-top: 1px solid var(--l2);
+}
+.transfer-filter > .sf-button {
+  justify-self: start;
+}
+.transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.transfer-footer {
+  flex-wrap: wrap;
+  align-items: center;
+}
+.transfer-actions > .sf-button, .transfer-footer > .sf-button {
+  flex: none;
+  width: auto;
+}
+.transfer-actions > .sf-button.only-ic, .transfer-filter > .sf-button.only-ic {
+  width: 28px;
+  min-width: 28px;
+}
+.transfer-body > .transfer-catalog-field {
+  grid-column: auto;
+}
+.transfer-catalog-field {
+  min-width: 0;
+}
+.transfer-catalog-field > .sf-button.only-ic {
+  width: 28px;
+  min-width: 28px;
+}
+.transfer-mapping {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 20px;
+  min-width: 0;
+}
+.transfer-mapping > strong, .transfer-mapping > span {
+  grid-column: 1 / -1;
+}
+.bp-small .transfer-mapping {
+  grid-template-columns: minmax(0, 1fr);
+}
+.transfer-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.transfer-key-list > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.transfer-key-list > .sf-button {
+  align-self: start;
+}
+.transfer-summary .advanced-fact {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.bp-small .transfer-group, .bp-small .transfer-filter {
+  grid-template-columns: minmax(0, 1fr);
+}
+.bp-small .transfer-panel .transfer-summary {
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding: 4px 12px;
 }
@@ -248,14 +364,33 @@
 }
 .completion {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 3px;
+  max-height: 360px;
+  overflow-y: auto;
+  overflow-anchor: none;
+}
+.completion-candidates {
+  flex: none;
+  max-height: 240px;
+  overflow: auto;
+}
+.query-results {
+  min-height: 0;
+  overflow: hidden;
+}
+.cli-entry, .task-section {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
+  overflow-anchor: auto;
 }
 .gridscroll {
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: contain;
 }
 .gridrow {
   display: flex;
@@ -370,6 +505,10 @@
   flex: 1;
   min-width: max-content;
   min-height: 100%;
+}
+.sql-editor .sf-ed-scroll {
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: contain;
 }
 .ddl-code .sf-code {
   border: 0;

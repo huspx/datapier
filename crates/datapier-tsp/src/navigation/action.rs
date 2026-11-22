@@ -82,22 +82,8 @@ impl App {
             }
             return true;
         }
-        if let Some(open) = name
-            .strip_prefix("form-redis-db-menu-open:")
-            .and_then(|value| value.parse::<bool>().ok())
-        {
-            self.navigation.form_redis_db_menu = open;
-            if open {
-                self.redis_discover(backend, true);
-            }
-            return true;
-        }
-        if let Some(db) = name
-            .strip_prefix("form-redis-db:")
-            .and_then(|v| v.parse::<u32>().ok())
-        {
-            self.navigation.form_redis_db_menu = false;
-            self.field_set("redis_db", db.to_string());
+        if name == "form-redis-db-detect" {
+            self.redis_discover(backend, true);
             return true;
         }
         if name == "profile-databases-load" {

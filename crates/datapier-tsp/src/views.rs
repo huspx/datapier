@@ -28,45 +28,28 @@ use redis_detail::{cli_panel, string_value};
 mod history;
 use history::{history_footer, history_panel};
 
-fn redis_db_picker(app: &App, form: bool) -> Node<Msg> {
-    let current = if form {
-        app.field("redis_db").parse::<u32>().unwrap_or(0)
-    } else {
-        app.current_redis_db()
-    };
-    let open = if form {
-        app.navigation.form_redis_db_menu
-    } else {
-        app.navigation.redis_db_menu
-    };
-    let prefix = if form { "form-redis-db" } else { "redis-db" };
+fn redis_db_picker(app: &App) -> Node<Msg> {
+    let current = app.current_redis_db();
     let mut select = ui::select()
         .value(current.to_string())
-        .open(open)
-        .disabled(form && app.connection_form_busy())
-        .on_toggle(move |collapsed| Msg::Action(format!("{prefix}-menu-open:{}", !collapsed)))
-        .on_change(move |change| {
+        .open(app.navigation.redis_db_menu)
+        .on_toggle(|collapsed| Msg::Action(format!("redis-db-menu-open:{}", !collapsed)))
+        .on_change(|change| {
             Msg::Action(format!(
-                "{prefix}:{}",
+                "redis-db:{}",
                 change.value.as_str().unwrap_or_default()
             ))
         });
-    let discovery = if form {
-        Some(&app.navigation.form_redis_discovery)
-    } else {
-        app.profile
-            .as_ref()
-            .and_then(|profile| app.navigation.redis_discovery.get(&profile.id))
-    };
-    let databases = if !form {
-        app.profile
-            .as_ref()
-            .and_then(|profile| profile.archery())
-            .map(|source| &source.databases)
-            .or_else(|| discovery.map(|state| &state.databases))
-    } else {
-        discovery.map(|state| &state.databases)
-    };
+    let discovery = app
+        .profile
+        .as_ref()
+        .and_then(|profile| app.navigation.redis_discovery.get(&profile.id));
+    let databases = app
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.archery())
+        .map(|source| &source.databases)
+        .or_else(|| discovery.map(|state| &state.databases));
     let mut has_current = false;
     if let Some(databases) = databases {
         for database in databases {
@@ -83,33 +66,7 @@ fn redis_db_picker(app: &App, form: bool) -> Node<Msg> {
             format!("DB {current}"),
         ));
     }
-    let mut picker = html::div();
-    if form {
-        let editor = &app.fields["redis_db"];
-        picker = picker.child(
-            ui::input()
-                .variant(ui::InputVariant::Field)
-                .aria(crate::i18n::tr("默认 DB").into_owned())
-                .readonly(app.connection_form_busy())
-                .key("input-redis_db")
-                .text(editor.text.clone())
-                .cursor(editor.cursor)
-                .anchor(editor.anchor)
-                .on_focus(Msg::Focus("redis_db".into()))
-                .on_undo(Msg::Undo("redis_db".into()))
-                .on_edit(|e| {
-                    Msg::Edit(
-                        "redis_db".into(),
-                        e.from,
-                        e.to,
-                        e.text.clone(),
-                        e.cursor,
-                        e.len,
-                    )
-                }),
-        );
-    }
-    picker = picker.child(select);
+    let mut picker = html::div().child(select);
     if let Some(state) = discovery {
         if state.loading {
             picker = picker
@@ -213,6 +170,11 @@ fn shortcut_help() -> Node<Msg> {
             &[
                 ("{mod}+Enter", "执行选区或当前语句"),
                 ("{mod}+Shift+Enter", "执行全部 SQL"),
+                ("Ctrl+Space", "SQL 补全"),
+                (
+                    "↑ / ↓ / Tab / Enter / Escape",
+                    "上下选择、Tab / Enter 接受、Escape 关闭",
+                ),
             ],
         ),
         (
@@ -476,16 +438,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         app.view.as_str(),
         "transfer-workbench" | "project-workbench"
     ) {
-        content = content.child(
-            html::div()
-                .class("draftbar")
-                .child(button("导入数据", "transfer-new:import"))
-                .child(button("导出数据", "transfer-new:export"))
-                .child(button("迁移到…", "transfer-new:copy"))
-                .child(button("导出 SQL", "transfer-new:sql_dump"))
-                .child(button("恢复 SQL", "transfer-new:sql_restore"))
-                .child(button("项目", "project-new")),
-        );
+        content = content.child(crate::native_ui::draftbar(app));
     }
     if app.save_blocked {
         content = content.child(
@@ -520,6 +473,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         } else {
             "body detail-panel"
         });
+        let mut editor_pane = None;
         if app.view == "advanced-schema" {
             if let Some(schema) = &app.advanced_schema {
                 body = body.child(schema.view());
@@ -545,6 +499,10 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             } else {
                 body.child(crate::query_ui::panel(app))
             };
+            if !redis && app.workbench.query_ui.executed && !app.workbench.query_ui.results_hidden {
+                editor_pane = Some(body);
+                body = html::div().class("body query-results");
+            }
         } else if redis && app.target.is_none() {
             let mut empty = html::div()
                 .class("empty-state")
@@ -802,7 +760,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             }
         }
         if app.redis_key_delete_opening() {
-            body = body.child(
+            content = content.child(
                 html::div()
                     .class("draftbar")
                     .child(html::span(
@@ -815,7 +773,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             + app.redis_changes.len()
             + app.grid.as_ref().map_or(0, |g| g.edits().len())
             + app.pending_key_delete_count();
-        if changes > 0 {
+        let draftbar = if changes > 0 {
             let mut bar = html::div()
                 .class("draftbar")
                 .child(html::span(crate::i18n::format_message(
@@ -834,19 +792,27 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                     bar = bar.child(button("提交", "submit"));
                 }
             }
-            body = body.child(bar.child(button("丢弃", "discard")));
-        }
-        if app.paste_preview.is_some() && writable(app) {
-            body = body.child(button("查看粘贴预览", "overlay:preview"));
-        }
-        if !app.tabs[app.active].pending.is_null() && changes == 0 {
-            body = body.child(
+            Some(bar.child(button("丢弃", "discard")))
+        } else if !app.tabs[app.active].pending.is_null() {
+            Some(
                 html::div()
                     .class("draftbar")
                     .child(html::span(crate::i18n::tr("已保存的编辑意图").into_owned()))
                     .child(button("恢复编辑意图", "restore-pending"))
                     .child(button("丢弃", "discard")),
-            );
+            )
+        } else {
+            None
+        };
+        if let Some(bar) = draftbar {
+            if redis {
+                content = content.child(bar);
+            } else {
+                body = body.child(bar);
+            }
+        }
+        if app.paste_preview.is_some() && writable(app) {
+            body = body.child(button("查看粘贴预览", "overlay:preview"));
         }
         if redis
             && app
@@ -889,7 +855,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             if app.focus == "cli_height" {
                 split = split.active(0u32);
             }
-            content = content.child(html::div().class("redis-cli-layout").child(split));
+            content = content.child(html::div().class("workspace-split").child(split));
         } else {
             content = if redis {
                 content.child(
@@ -904,6 +870,31 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
                         .class("split")
                         .child(body)
                         .child(cell_drawer(app)),
+                )
+            } else if let Some(editor) = editor_pane {
+                content.child(
+                    html::div().class("workspace-split").child(
+                        ui::split()
+                            .key("sql-query-split")
+                            .dir(ui::SplitDir::Col)
+                            .h(ui::Extent::Fraction(1.0))
+                            .sizes(vec![app.query_share, 1.0 - app.query_share])
+                            .min(ui::PaneMin::Each(vec![
+                                Some(ui::Extent::Lines(5.0)),
+                                Some(ui::Extent::Lines(5.0)),
+                            ]))
+                            .on_change(|change| {
+                                Msg::QueryResize(
+                                    change
+                                        .value
+                                        .get(0)
+                                        .and_then(Value::as_f64)
+                                        .unwrap_or(f64::NAN),
+                                )
+                            })
+                            .child(editor)
+                            .child(body),
+                    ),
                 )
             } else {
                 content.child(body)
@@ -948,26 +939,18 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     }
     content = content.child(status);
     let layout = html::div()
-        .class(format!(
-            "layout {}{}",
-            app.viewport_class(),
-            if app.viewport_width > 0 && app.viewport_width <= 760 && !app.navigation_compact() {
-                " navigation-overlay"
-            } else {
-                ""
-            }
-        ))
+        .class(format!("layout {}", app.viewport_class()))
         .key("layout")
         .attr(
             "data-window-bridge",
             nonce
-                .map(|id| format!("datapier-window-bridge:{}", json!({"nonce":id,"data_dir":app.window_data_dir,"editor_handoff":app.advanced_files.terminal_handoff})))
+                .map(|id| format!("datapier-window-bridge:{}", json!({"nonce":id,"data_dir":app.window_data_dir,"editor_handoff":app.advanced_files.terminal_handoff,"plugin_request":app.native_ui.request,"open_file":app.workbench.project.open_file,"project_summary":crate::native_ui::project_summary(app),"english":i18n::resolved() == i18n::Language::En})))
                 .unwrap_or_default(),
         )
         .on_click(Msg::Action("result-info-dismiss".into()))
         .child(resource_panel(app))
         .child(content);
-    let layer = if app.approvals.open {
+    let mut layer = if app.approvals.open {
         vec![approval::panel(app)]
     } else {
         app.workbench
@@ -977,7 +960,16 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
             .map(|kind| vec![overlay(app, kind)])
             .unwrap_or_default()
     };
-    View::new().main(vec![Node::from(layout)]).layer(layer)
+    if let Some(notice) = crate::native_ui::pending_notice(app) {
+        layer.push(notice);
+    }
+    let view = View::new().main(vec![Node::from(layout)]);
+    if let Some(editor_id) = crate::input::focus_node_id(&view, "query-editor")
+        && let Some(overlay) = crate::completion::overlay(app, &editor_id)
+    {
+        layer.push(overlay);
+    }
+    view.layer(layer)
 }
 
 #[cfg(test)]

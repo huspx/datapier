@@ -100,6 +100,25 @@ pub(super) fn external_changes(
 }
 
 #[derive(Clone, Default)]
+pub(super) struct ProjectDatabaseDiscovery {
+    pub profile_id: String,
+    pub token: Option<Uuid>,
+    pub databases: Vec<String>,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+pub(super) fn is_project_markdown(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            ["md", "markdown"]
+                .iter()
+                .any(|kind| extension.eq_ignore_ascii_case(kind))
+        })
+}
+
+#[derive(Clone, Default)]
 pub(super) struct ProjectWorkbench {
     epoch: u64,
     pending: Option<(Uuid, u64, String)>,
@@ -144,6 +163,21 @@ pub(super) struct ProjectWorkbench {
     pub transfer_loading: Option<(String, String)>,
     pub query_loading: Option<Value>,
     pub cleanup_confirm: bool,
+    pub local_projects: Vec<Value>,
+    pub local_project: Option<Value>,
+    pub local_environment: Option<usize>,
+    pub local_form: String,
+    pub local_roots: Vec<Value>,
+    pub local_resource_edit: Option<usize>,
+    pub local_database_discovery: ProjectDatabaseDiscovery,
+    pub git_binding_edit: bool,
+    pub git_connection_new: bool,
+    pub git_query_edit: bool,
+    pub local_loaded: bool,
+    pub open_file: Option<Value>,
+    pub local_delete_confirm: bool,
+    pub document_root: Option<String>,
+    pub document_files: Vec<String>,
 }
 impl ProjectWorkbench {
     pub fn invalidate(&mut self) {
@@ -167,6 +201,38 @@ impl ProjectWorkbench {
     }
 }
 impl App {
+    fn project_discover_databases(&mut self, backend: &Backend) {
+        let id = self.project_value("local-profile").to_owned();
+        let token = Uuid::new_v4();
+        self.workbench.project.local_database_discovery = ProjectDatabaseDiscovery {
+            profile_id: id.clone(),
+            token: Some(token),
+            ..Default::default()
+        };
+        if id.is_empty() {
+            self.workbench.project.local_database_discovery.token = None;
+            return;
+        }
+        let session = self
+            .profile
+            .as_ref()
+            .filter(|profile| profile.id.to_string() == id)
+            .and_then(|_| self.session_id());
+        let tag = format!(
+            "{}:{}:project-db/{token}",
+            self.tabs[self.active].id, self.generation
+        );
+        if let Err(error) = backend.request(
+            tag,
+            "database.list",
+            json!({"profile_id": id, "session_id": session, "refresh": true}),
+        ) {
+            let discovery = &mut self.workbench.project.local_database_discovery;
+            discovery.token = None;
+            discovery.error = Some(error.to_string());
+        }
+    }
+
     pub(super) fn project_key(&self, name: &str) -> String {
         format!("project-{}-{name}", self.tabs[self.active].id)
     }
@@ -176,6 +242,39 @@ impl App {
     fn project_set(&mut self, name: &str, value: impl Into<String>) {
         let key = self.project_key(name);
         self.field_set(&key, value);
+    }
+    pub(crate) fn project_form_snapshot(&self) -> Value {
+        let fields: &[&str] = match self.workbench.project.local_form.as_str() {
+            "project-new" => &["local-name", "local-description"],
+            "settings" | "root-add" | "root-cancel-confirm" => {
+                &["local-name", "local-description", "local-root"]
+            }
+            "environment-new" | "environment-edit" => &[
+                "local-environment-name",
+                "local-environment-kind",
+                "local-environment-type",
+                "local-environment-description",
+            ],
+            "resource" => &[
+                "local-profile",
+                "local-database",
+                "local-redis-db",
+                "local-resource-description",
+            ],
+            _ => &[],
+        };
+        let values: Vec<_> = fields
+            .iter()
+            .map(|field| self.project_value(field))
+            .collect();
+        if matches!(
+            self.workbench.project.local_form.as_str(),
+            "settings" | "root-add" | "root-cancel-confirm"
+        ) {
+            json!([values, self.workbench.project.local_roots])
+        } else {
+            json!(values)
+        }
     }
     fn project_send(&mut self, backend: &Backend, method: &str, params: Value) {
         if !matches!(
@@ -256,6 +355,70 @@ impl App {
         result: &Result<Value>,
         backend: &Backend,
     ) -> bool {
+        if let Some(token) = tag
+            .strip_prefix("project-db/")
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            let discovery = &self.workbench.project.local_database_discovery;
+            if discovery.token != Some(token)
+                || self.workbench.overlay.as_deref() != Some("project-local")
+                || self.workbench.project.local_form != "resource"
+                || discovery.profile_id != self.project_value("local-profile")
+            {
+                return true;
+            }
+            let profile_id = discovery.profile_id.clone();
+            let profile = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id.to_string() == profile_id);
+            let visible = profile.and_then(|p| match &p.connection {
+                datapier_core::model::ConnectionConfig::Direct(direct) => {
+                    direct.visible_databases.as_ref()
+                }
+                _ => None,
+            });
+            let redis =
+                profile.is_some_and(|p| p.provider == datapier_core::model::ProviderKind::Redis);
+            let parsed = result
+                .as_ref()
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    if value["state"] != "known" {
+                        return Err(value["reason"]
+                            .as_str()
+                            .unwrap_or("数据库发现失败 / Database discovery failed")
+                            .to_owned());
+                    }
+                    let items = value["databases"].as_array().ok_or_else(|| {
+                        "数据库列表响应无效 / Invalid database list response".to_owned()
+                    })?;
+                    Ok(items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|db| {
+                            (!redis || db.parse::<u32>().is_ok())
+                                && visible.is_none_or(|v| v.iter().any(|item| item.as_str() == *db))
+                        })
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>())
+                });
+            let discovery = &mut self.workbench.project.local_database_discovery;
+            discovery.token = None;
+            match parsed {
+                Ok(databases) => {
+                    discovery.databases = databases;
+                    discovery.loaded = true;
+                    discovery.error = None;
+                }
+                Err(error) => {
+                    discovery.databases.clear();
+                    discovery.loaded = false;
+                    discovery.error = Some(error);
+                }
+            }
+            return true;
+        }
         let Some(token) = tag
             .strip_prefix("project-ui/")
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -294,9 +457,79 @@ impl App {
                     self.workbench.project.preview = None;
                     self.workbench.project.obsolete_preview = None;
                 }
+                if method == "project.create" && error.code == "project_path_exists" {
+                    self.field_error(
+                        &self.project_key("path"),
+                        i18n::UiMessage::local("项目目录已存在，请选择不存在的新目录"),
+                    );
+                    return true;
+                }
                 self.status = i18n::UiMessage::raw(error.to_string());
             }
             Ok(value) => match method.as_str() {
+                "local_project.list" => {
+                    self.workbench.project.local_projects =
+                        value["projects"].as_array().cloned().unwrap_or_default();
+                    if self.workbench.project.local_project.is_none()
+                        && matches!(self.workbench.project.local_form.as_str(), "" | "resource")
+                        && let Some(project) =
+                            self.workbench.project.local_projects.first().cloned()
+                    {
+                        self.local_project_select(project);
+                    }
+                    self.workbench.project.local_loaded = true;
+                }
+                "local_project.resolve" => {
+                    if value["status"] == "matched" {
+                        self.local_project_select(value["project"].clone());
+                    } else {
+                        self.status = i18n::UiMessage::template(
+                            "仓库无法定位：{status}",
+                            vec![(
+                                "status",
+                                i18n::UiArg::Raw(
+                                    value["status"].as_str().unwrap_or("unknown").to_owned(),
+                                ),
+                            )],
+                        );
+                    }
+                }
+                "local_project.get" | "local_project.save" => {
+                    if method == "local_project.save" {
+                        self.workbench.project.local_form.clear();
+                        self.workbench.project.local_resource_edit = None;
+                        if self.workbench.overlay.as_deref() == Some("project-local") {
+                            self.workbench_action("overlay-close", backend);
+                        }
+                    }
+                    let previous = self.workbench.project.local_environment.and_then(|index| {
+                        self.workbench
+                            .project
+                            .local_project
+                            .as_ref()
+                            .and_then(|p| p["environments"].get(index))
+                            .map(|e| e["id"].clone())
+                    });
+                    self.local_project_select(value["project"].clone());
+                    if let Some(index) = previous.and_then(|id| {
+                        value["project"]["environments"]
+                            .as_array()
+                            .and_then(|items| items.iter().position(|e| e["id"] == id))
+                    }) {
+                        self.local_environment_select(index);
+                    }
+                    self.project_send(backend, "local_project.list", json!({}));
+                }
+                "local_project.delete" => {
+                    self.workbench.project.local_project = None;
+                    self.workbench.project.local_environment = None;
+                    self.workbench.project.local_form.clear();
+                    self.workbench.project.local_delete_confirm = false;
+                    if self.workbench.overlay.as_deref() == Some("project-local") {
+                        self.workbench_action("overlay-close", backend);
+                    }
+                    self.project_send(backend, "local_project.list", json!({}));
+                }
                 "project.save.upload.begin" | "project.save.upload.chunk" => {
                     let valid = self
                         .workbench
@@ -314,9 +547,8 @@ impl App {
                         });
                     if !valid {
                         self.workbench.project.upload = None;
-                        self.status = i18n::UiMessage::raw(
-                            "项目上传确认偏移或版本无效，请重新准备".to_owned(),
-                        );
+                        self.status =
+                            i18n::UiMessage::key("项目上传确认偏移或版本无效，请重新准备");
                         return true;
                     }
                     if let Some(upload) = &mut self.workbench.project.upload {
@@ -327,18 +559,20 @@ impl App {
                             upload.revision = revision;
                         } else {
                             self.workbench.project.upload = None;
-                            self.status = i18n::UiMessage::raw("项目上传响应缺少版本".to_owned());
+                            self.status = i18n::UiMessage::key("项目上传响应缺少版本");
                             return true;
                         }
                         if upload.id.is_none() {
                             self.workbench.project.upload = None;
-                            self.status = i18n::UiMessage::raw("项目上传响应缺少句柄".to_owned());
+                            self.status = i18n::UiMessage::key("项目上传响应缺少句柄");
                             return true;
                         }
                     }
                     self.project_upload_next(backend);
                 }
                 "project.open" | "project.create" | "project.import" => {
+                    self.workbench.project.document_root = None;
+                    self.workbench.project.document_files.clear();
                     self.workbench.project.baseline_manifest = Some(value["manifest"].clone());
                     let mut restored = false;
                     let mut opened = value.clone();
@@ -350,9 +584,8 @@ impl App {
                                 json!({"project_id":opened["project_id"],"discard_previews":true}),
                             );
                             self.workbench.project.restored = Some(saved);
-                            self.status = i18n::UiMessage::raw(
-                                "恢复的草稿属于另一项目目录，请打开原目录".to_owned(),
-                            );
+                            self.status =
+                                i18n::UiMessage::key("恢复的草稿属于另一项目目录，请打开原目录");
                             return true;
                         }
                         restored = true;
@@ -500,8 +733,7 @@ impl App {
                         }
                     } else {
                         self.workbench.project.external = None;
-                        self.status =
-                            i18n::UiMessage::raw("外部项目再次改变，请重新查看".to_owned());
+                        self.status = i18n::UiMessage::key("外部项目再次改变，请重新查看");
                     }
                 }
                 "project.external.accept" => {
@@ -610,7 +842,713 @@ impl App {
         }
         true
     }
+
+    pub(super) fn project_navigate_path(&mut self, backend: &Backend, host: &str, path: &str) {
+        self.project_action("project-new", backend);
+        self.workbench.project.section = "local".to_owned();
+        self.project_send(
+            backend,
+            "local_project.resolve",
+            json!({"host":host,"path":path}),
+        );
+    }
+
+    pub(super) fn project_associate_resource(
+        &mut self,
+        backend: &Backend,
+        profile_id: &str,
+        database: Option<&str>,
+        redis_db: Option<u32>,
+    ) {
+        self.project_action("project-new", backend);
+        self.workbench.project.section = "local".to_owned();
+        let defaults = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id.to_string() == profile_id)
+            .map(|profile| {
+                let db = profile.default_database().unwrap_or("").to_owned();
+                let redis = match &profile.connection {
+                    datapier_core::model::ConnectionConfig::Direct(connection) => {
+                        Some(connection.redis_db)
+                    }
+                    datapier_core::model::ConnectionConfig::Archery(connection) => {
+                        connection.default_database.parse().ok()
+                    }
+                };
+                (db, redis)
+            });
+        self.project_set("local-profile", profile_id);
+        self.project_set(
+            "local-database",
+            database
+                .map(str::to_owned)
+                .or_else(|| defaults.as_ref().map(|v| v.0.clone()))
+                .unwrap_or_default(),
+        );
+        self.project_set(
+            "local-redis-db",
+            redis_db
+                .or_else(|| defaults.and_then(|v| v.1))
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        self.workbench.project.local_form = "resource".into();
+        self.workbench.project.local_resource_edit = None;
+        self.workbench.overlay = Some("project-local".into());
+        self.project_discover_databases(backend);
+    }
+
+    pub(super) fn project_glimpse_result(&mut self, id: &str, success: bool) {
+        if self
+            .workbench
+            .project
+            .open_file
+            .as_ref()
+            .and_then(|v| v["id"].as_str())
+            == Some(id)
+        {
+            self.workbench.project.open_file = None;
+            if !success {
+                self.status = i18n::UiMessage::key("文件预览失败");
+            }
+        }
+    }
+
+    fn project_document_scan(&mut self, root: &str) {
+        // 仅枚举已选择目录的直属文件；嵌套说明文件可由用户填写相对路径。
+        let result = (|| -> std::io::Result<Vec<String>> {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with("readme")
+                    || [".md", ".markdown", ".txt", ".rst", ".adoc"]
+                        .iter()
+                        .any(|suffix| lower.ends_with(suffix))
+                {
+                    files.push(name);
+                }
+            }
+            files.sort();
+            Ok(files)
+        })();
+        match result {
+            Ok(files) => {
+                self.workbench.project.document_root = Some(root.to_owned());
+                self.workbench.project.document_files = files;
+                self.project_set("document-path", "");
+                self.status.clear();
+            }
+            Err(error) => {
+                self.workbench.project.document_root = None;
+                self.workbench.project.document_files.clear();
+                self.status = i18n::UiMessage::raw(error.to_string());
+            }
+        }
+    }
+
+    fn project_document_preview(&mut self, relative: &str, how: Option<&str>) {
+        let Some(root) = self.workbench.project.document_root.as_deref() else {
+            return;
+        };
+        let relative = std::path::Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            self.status = i18n::UiMessage::key("请输入项目内文件的相对路径");
+            return;
+        }
+        if how.is_some() && !is_project_markdown(relative) {
+            self.status = i18n::UiMessage::key("请选择 Markdown 文件");
+            return;
+        }
+        let result = (|| -> std::io::Result<std::path::PathBuf> {
+            let root = std::fs::canonicalize(root)?;
+            let path = std::fs::canonicalize(root.join(relative))?;
+            if !path.starts_with(&root) || !path.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "文件不在项目目录内或不是普通文件",
+                ));
+            }
+            Ok(path)
+        })();
+        match result {
+            Ok(path) => {
+                self.status.clear();
+                self.workbench.project.open_file =
+                    Some(json!({"id":Uuid::new_v4(),"path":path,"host":"local","how":how}));
+            }
+            Err(error) => self.status = i18n::UiMessage::raw(error.to_string()),
+        }
+    }
+
+    fn local_project_select(&mut self, project: Value) {
+        if self
+            .workbench
+            .project
+            .local_project
+            .as_ref()
+            .map(|old| &old["id"])
+            != Some(&project["id"])
+            || self
+                .workbench
+                .project
+                .document_root
+                .as_ref()
+                .is_some_and(|root| {
+                    !project["roots"].as_array().is_some_and(|roots| {
+                        roots
+                            .iter()
+                            .any(|item| item["path"].as_str() == Some(root.as_str()))
+                    })
+                })
+        {
+            self.workbench.project.document_root = None;
+            self.workbench.project.document_files.clear();
+        }
+        self.project_set("local-name", project["name"].as_str().unwrap_or(""));
+        self.project_set(
+            "local-description",
+            project["description"].as_str().unwrap_or(""),
+        );
+        self.workbench.project.local_environment =
+            project["environments"].as_array().and_then(|items| {
+                items
+                    .iter()
+                    .position(|item| item["id"] == project["default_environment_id"])
+                    .or_else(|| (!items.is_empty()).then_some(0))
+            });
+        self.workbench.project.local_project = Some(project);
+    }
+
+    fn local_environment_select(&mut self, index: usize) {
+        let Some(environment) = self
+            .workbench
+            .project
+            .local_project
+            .as_ref()
+            .and_then(|project| project["environments"].get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.project_set(
+            "local-environment-name",
+            environment["name"].as_str().unwrap_or(""),
+        );
+        self.project_set(
+            "local-environment-type",
+            environment["environment_type"].as_str().unwrap_or(""),
+        );
+        let kind = environment["environment_type"].as_str().unwrap_or("");
+        self.project_set(
+            "local-environment-kind",
+            if matches!(kind, "dev" | "test" | "staging" | "production") {
+                kind
+            } else {
+                "custom"
+            },
+        );
+        self.project_set(
+            "local-environment-description",
+            environment["description"].as_str().unwrap_or(""),
+        );
+        self.workbench.project.local_environment = Some(index);
+    }
+
+    fn local_project_save(&mut self, backend: &Backend, project: Value, creating: bool) {
+        // 所有嵌套关系共用项目 revision，冲突时保留当前表单，不能自动覆盖。
+        let revision = if creating {
+            Value::Null
+        } else {
+            project["revision"].clone()
+        };
+        self.project_send(
+            backend,
+            "local_project.save",
+            json!({"project":project,"expected_revision":revision}),
+        );
+    }
+
+    fn local_project_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if !name.starts_with("project-local-") {
+            return false;
+        }
+        if name == "project-local-documents-git" {
+            let root = self
+                .workbench
+                .project
+                .project
+                .as_ref()
+                .and_then(|p| p["root"].as_str())
+                .map(str::to_owned);
+            if let Some(root) = root {
+                self.project_document_scan(&root);
+            }
+            return true;
+        }
+        if let Some(index) = name
+            .strip_prefix("project-local-documents:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            let root = self
+                .workbench
+                .project
+                .local_roots
+                .get(index)
+                .and_then(|root| root["path"].as_str())
+                .map(str::to_owned);
+            if let Some(root) = root {
+                self.project_document_scan(&root);
+            }
+            return true;
+        }
+        for (action, prefix, how) in [
+            ("open", "project-local-document:", None),
+            ("beside", "project-local-document-beside:", Some("beside")),
+            ("over", "project-local-document-over:", Some("over")),
+        ] {
+            if name.strip_prefix("project-local-document-") == Some(action) {
+                let path = self.project_value("document-path").to_owned();
+                self.project_document_preview(&path, how);
+                return true;
+            }
+            if let Some(index) = name
+                .strip_prefix(prefix)
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                if let Some(path) = self.workbench.project.document_files.get(index).cloned() {
+                    self.project_document_preview(&path, how);
+                }
+                return true;
+            }
+        }
+        if let Some(relative) = name.strip_prefix("project-local-glimpse:") {
+            let safe = std::path::Path::new(relative)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)));
+            if let Some(project) = &self.workbench.project.project {
+                if safe
+                    && !self.workbench.project.unsaved
+                    && project["digests"].get(relative).is_some()
+                {
+                    if let Some(root) = project["root"].as_str() {
+                        let path = std::path::Path::new(root).join(relative);
+                        self.workbench.project.open_file =
+                            Some(json!({"id":Uuid::new_v4(),"path":path,"host":"local"}));
+                    }
+                } else {
+                    self.status = i18n::UiMessage::key("请先保存项目文件");
+                }
+            }
+            return true;
+        }
+        if self.workbench.project.pending.is_some() {
+            self.status = i18n::UiMessage::key("请求处理中，请稍候");
+            return true;
+        }
+        if name == "project-local-form-cancel" {
+            self.workbench.project.local_form.clear();
+            self.workbench.project.local_resource_edit = None;
+            self.workbench.project.local_database_discovery = ProjectDatabaseDiscovery::default();
+            self.status.clear();
+            return true;
+        }
+        if !self.workbench.project.local_form.is_empty()
+            && ((self.workbench.project.local_form != "resource"
+                || self.workbench.project.local_resource_edit.is_some())
+                && (name.starts_with("project-local-select:")
+                    || name.starts_with("project-local-environment:"))
+                || matches!(
+                    name,
+                    "project-local-new"
+                        | "project-local-settings"
+                        | "project-local-environment-new"
+                        | "project-local-environment-edit"
+                        | "project-local-resource-new"
+                ))
+        {
+            self.status = i18n::UiMessage::key("请先保存或取消当前表单");
+            return true;
+        }
+        match name {
+            "project-local-settings" => {
+                if let Some(project) = self.workbench.project.local_project.clone() {
+                    self.project_set("local-name", project["name"].as_str().unwrap_or(""));
+                    self.project_set(
+                        "local-description",
+                        project["description"].as_str().unwrap_or(""),
+                    );
+                    self.workbench.project.local_roots =
+                        project["roots"].as_array().cloned().unwrap_or_default();
+                }
+                self.project_set("local-root", "");
+                self.workbench.project.local_form = "settings".into();
+                self.workbench.overlay = Some("project-local".into());
+                return true;
+            }
+            "project-local-environment-new" => {
+                for (field, value) in [
+                    ("local-environment-name", ""),
+                    ("local-environment-type", ""),
+                    ("local-environment-kind", "dev"),
+                    ("local-environment-description", ""),
+                ] {
+                    self.project_set(field, value);
+                }
+                self.workbench.project.local_form = "environment-new".into();
+                self.workbench.overlay = Some("project-local".into());
+                return true;
+            }
+            "project-local-environment-edit" => {
+                if let Some(index) = self.workbench.project.local_environment {
+                    self.local_environment_select(index);
+                }
+                self.workbench.project.local_form = "environment-edit".into();
+                self.workbench.overlay = Some("project-local".into());
+                return true;
+            }
+            "project-local-resource-new" => {
+                for field in [
+                    "local-profile",
+                    "local-database",
+                    "local-redis-db",
+                    "local-resource-description",
+                ] {
+                    self.project_set(field, "");
+                }
+                self.workbench.project.local_resource_edit = None;
+                self.workbench.project.local_database_discovery =
+                    ProjectDatabaseDiscovery::default();
+                self.workbench.project.local_form = "resource".into();
+                self.workbench.overlay = Some("project-local".into());
+                return true;
+            }
+            "project-local-database-retry" => {
+                self.project_discover_databases(backend);
+                return true;
+            }
+            "project-local-root-open" => {
+                self.project_set("local-root", "");
+                self.workbench.project.local_form = "root-add".into();
+                return true;
+            }
+            "project-local-root-cancel" => {
+                self.workbench.project.local_form =
+                    if self.project_value("local-root").is_empty() {
+                        "settings"
+                    } else {
+                        "root-cancel-confirm"
+                    }
+                    .into();
+                return true;
+            }
+            "project-local-root-continue" => {
+                self.workbench.project.local_form = "root-add".into();
+                return true;
+            }
+            "project-local-root-discard" => {
+                self.project_set("local-root", "");
+                self.workbench.project.local_form = "settings".into();
+                return true;
+            }
+            "project-local-root-add" => {
+                let path = self.project_value("local-root").trim().to_owned();
+                if !path.is_empty() {
+                    self.workbench
+                        .project
+                        .local_roots
+                        .push(json!({"path":path,"identity":""}));
+                    self.project_set("local-root", "");
+                    self.workbench.project.local_form = "settings".into();
+                }
+                return true;
+            }
+            _ => {}
+        }
+        if let Some(index) = name
+            .strip_prefix("project-local-root-delete:")
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if index < self.workbench.project.local_roots.len() {
+                self.workbench.project.local_roots.remove(index);
+            }
+            return true;
+        }
+        if let Some(id) = name.strip_prefix("project-local-target:") {
+            self.workbench.generic_select = None;
+            if self
+                .workbench
+                .project
+                .local_projects
+                .iter()
+                .any(|project| project["id"].as_str() == Some(id))
+            {
+                self.project_send(backend, "local_project.get", json!({"project_id":id}));
+            }
+            return true;
+        }
+        if let Some(index) = name
+            .strip_prefix("project-local-select:")
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if let Some(id) = self
+                .workbench
+                .project
+                .local_projects
+                .get(index)
+                .map(|project| project["id"].clone())
+            {
+                self.project_send(backend, "local_project.get", json!({"project_id":id}));
+            }
+            return true;
+        }
+        if let Some(index) = name
+            .strip_prefix("project-local-environment:")
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            self.local_environment_select(index);
+            return true;
+        }
+        if name == "project-local-new" {
+            self.workbench.project.local_form = "project-new".into();
+            for (field, value) in [
+                ("local-name", ""),
+                ("local-description", ""),
+                ("local-root", ""),
+            ] {
+                self.project_set(field, value);
+            }
+            self.workbench.overlay = Some("project-local".into());
+            return true;
+        }
+        if name == "project-local-refresh" {
+            self.project_send(backend, "local_project.list", json!({}));
+            return true;
+        }
+        if name == "project-local-create" {
+            let id = Uuid::new_v4();
+            let project = json!({"id":id,"name":self.project_value("local-name"),"description":self.project_value("local-description"),"revision":0,"default_environment_id":null,"roots":[],"environments":[]});
+            self.local_project_save(backend, project, true);
+            return true;
+        }
+        let Some(mut project) = self.workbench.project.local_project.clone() else {
+            return true;
+        };
+        if name == "project-local-delete" {
+            self.workbench.project.local_delete_confirm = true;
+            return true;
+        }
+        if name == "project-local-delete-cancel" {
+            self.workbench.project.local_delete_confirm = false;
+            return true;
+        }
+        if name == "project-local-delete-confirm" {
+            self.workbench.project.local_delete_confirm = false;
+            self.project_send(
+                backend,
+                "local_project.delete",
+                json!({"project_id":project["id"],"expected_revision":project["revision"]}),
+            );
+            return true;
+        }
+        let mut changed = true;
+        match name {
+            "project-local-clear-default" => project["default_environment_id"] = Value::Null,
+            "project-local-save" => {
+                project["name"] = json!(self.project_value("local-name"));
+                project["description"] = json!(self.project_value("local-description"));
+                if self.workbench.project.local_form == "settings" {
+                    project["roots"] = json!(self.workbench.project.local_roots);
+                }
+            }
+            "project-local-environment-add" => {
+                let kind = if self.project_value("local-environment-kind") == "custom" {
+                    self.project_value("local-environment-type")
+                } else {
+                    self.project_value("local-environment-kind")
+                };
+                project["environments"].as_array_mut().unwrap().push(json!({"id":Uuid::new_v4(),"name":self.project_value("local-environment-name"),"environment_type":kind,"description":self.project_value("local-environment-description"),"resources":[]}));
+            }
+            "project-local-environment-save"
+            | "project-local-default"
+            | "project-local-environment-delete"
+            | "project-local-resource-save" => {
+                let Some(index) = self.workbench.project.local_environment else {
+                    return true;
+                };
+                let Some(environment) = project["environments"].get_mut(index) else {
+                    return true;
+                };
+                match name {
+                    "project-local-environment-save" => {
+                        let kind = if self.project_value("local-environment-kind") == "custom" {
+                            self.project_value("local-environment-type")
+                        } else {
+                            self.project_value("local-environment-kind")
+                        };
+                        environment["name"] = json!(self.project_value("local-environment-name"));
+                        environment["environment_type"] = json!(kind);
+                        environment["description"] =
+                            json!(self.project_value("local-environment-description"));
+                    }
+                    "project-local-default" => {
+                        let id = environment["id"].clone();
+                        project["default_environment_id"] = id;
+                    }
+                    "project-local-environment-delete" => {
+                        let id = environment["id"].clone();
+                        project["environments"]
+                            .as_array_mut()
+                            .unwrap()
+                            .remove(index);
+                        if project["default_environment_id"] == id {
+                            project["default_environment_id"] = Value::Null;
+                        }
+                    }
+                    _ => {
+                        let Some(profile) = self
+                            .profiles
+                            .iter()
+                            .find(|p| p.id.to_string() == self.project_value("local-profile"))
+                        else {
+                            self.status = i18n::UiMessage::key("请选择连接");
+                            return true;
+                        };
+                        let is_redis =
+                            profile.provider == datapier_core::model::ProviderKind::Redis;
+                        let database = if is_redis {
+                            ""
+                        } else {
+                            self.project_value("local-database").trim()
+                        };
+                        let redis = if is_redis {
+                            self.project_value("local-redis-db").trim()
+                        } else {
+                            ""
+                        };
+                        let redis_db = if redis.is_empty() {
+                            None
+                        } else if let Ok(value) = redis.parse::<u32>() {
+                            Some(value)
+                        } else {
+                            self.status = i18n::UiMessage::key("Redis DB 必须为非负整数");
+                            return true;
+                        };
+                        if (!is_redis && database.is_empty()) || (is_redis && redis_db.is_none()) {
+                            self.status = i18n::UiMessage::key("请填写数据库");
+                            return true;
+                        }
+                        let discovery = &self.workbench.project.local_database_discovery;
+                        let selected = if is_redis { redis } else { database };
+                        if !discovery.loaded
+                            || discovery.profile_id != self.project_value("local-profile")
+                            || !discovery.databases.iter().any(|db| db == selected)
+                        {
+                            self.status = i18n::UiMessage::key("请选择已发现的数据库");
+                            return true;
+                        }
+                        let resource = json!({"profile_id":self.project_value("local-profile"),"database":if database.is_empty(){None}else{Some(database)},"redis_db":redis_db,"description":self.project_value("local-resource-description")});
+                        let resources = environment["resources"].as_array_mut().unwrap();
+                        if resources.iter().enumerate().any(|(index, item)| {
+                            Some(index) != self.workbench.project.local_resource_edit
+                                && item["profile_id"] == resource["profile_id"]
+                                && item["database"] == resource["database"]
+                                && item["redis_db"] == resource["redis_db"]
+                        }) {
+                            self.status = i18n::UiMessage::key("该数据库已关联");
+                            return true;
+                        }
+                        if let Some(index) = self.workbench.project.local_resource_edit {
+                            let Some(existing) = resources.get_mut(index) else {
+                                return true;
+                            };
+                            *existing = resource;
+                        } else {
+                            resources.push(resource);
+                        }
+                    }
+                }
+            }
+            _ => {
+                if let Some(index) = name
+                    .strip_prefix("project-local-resource-delete:")
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    if let Some(environment) = self
+                        .workbench
+                        .project
+                        .local_environment
+                        .and_then(|i| project["environments"].get_mut(i))
+                    {
+                        if index < environment["resources"].as_array().map_or(0, Vec::len) {
+                            environment["resources"]
+                                .as_array_mut()
+                                .unwrap()
+                                .remove(index);
+                        } else {
+                            changed = false;
+                        }
+                    } else {
+                        changed = false;
+                    }
+                } else if let Some(index) = name
+                    .strip_prefix("project-local-resource:")
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    if let Some(resource) = self
+                        .workbench
+                        .project
+                        .local_environment
+                        .and_then(|i| project["environments"].get(i))
+                        .and_then(|e| e["resources"].get(index))
+                        .cloned()
+                    {
+                        for (field, key) in [
+                            ("local-profile", "profile_id"),
+                            ("local-database", "database"),
+                            ("local-resource-description", "description"),
+                        ] {
+                            self.project_set(field, resource[key].as_str().unwrap_or(""));
+                        }
+                        self.project_set(
+                            "local-redis-db",
+                            resource["redis_db"]
+                                .as_u64()
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                        );
+                        self.workbench.project.local_resource_edit = Some(index);
+                        self.workbench.project.local_form = "resource".into();
+                        self.workbench.overlay = Some("project-local".into());
+                        self.project_discover_databases(backend);
+                    }
+                    changed = false;
+                } else {
+                    changed = false;
+                }
+            }
+        }
+        if changed {
+            self.local_project_save(backend, project, false);
+        }
+        true
+    }
+
     pub(super) fn project_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if self.local_project_action(name, backend) {
+            return true;
+        }
         if let Some(index) = name
             .strip_prefix("project-ui-alias:")
             .and_then(|s| s.parse::<usize>().ok())
@@ -638,6 +1576,7 @@ impl App {
                     .cloned()
                     .unwrap_or(Value::Null);
                 self.project_set("alias", alias);
+                self.workbench.project.git_binding_edit = true;
                 self.project_set("profile", binding["profile_id"].as_str().unwrap_or(""));
                 self.project_set(
                     "database",
@@ -654,6 +1593,14 @@ impl App {
             return true;
         }
         if name == "project-new" {
+            self.workbench.project.document_root = None;
+            self.workbench.project.document_files.clear();
+            self.workbench.project.local_project = None;
+            self.workbench.project.local_environment = None;
+            self.workbench.project.local_form.clear();
+            self.workbench.project.local_resource_edit = None;
+            self.workbench.project.section = "local".into();
+            self.workbench.project.local_delete_confirm = false;
             self.workbench.project.binding_history.clear();
             self.workbench.project.binding_offset = 0;
             self.workbench.project.artifact_history.clear();
@@ -686,15 +1633,36 @@ impl App {
                 ("artifact-path", ""),
                 ("artifact-index", "1"),
                 ("artifact-side", "old"),
+                ("local-name", ""),
+                ("local-description", ""),
+                ("local-root", ""),
+                ("local-environment-name", ""),
+                ("local-environment-type", "dev"),
+                ("local-environment-kind", "dev"),
+                ("local-environment-description", ""),
+                ("local-profile", ""),
+                ("local-database", ""),
+                ("local-redis-db", ""),
+                ("local-resource-description", ""),
             ] {
                 self.project_set(key, value);
             }
+            self.project_send(backend, "local_project.list", json!({}));
             return true;
         }
         if let Some(rest) = name.strip_prefix("field:project-") {
             if let Some((key, value)) = rest.split_once(':') {
                 let key = format!("project-{key}");
+                let profile_changed =
+                    key == self.project_key("local-profile") && self.field(&key) != value;
+                if profile_changed {
+                    self.project_set("local-database", "");
+                    self.project_set("local-redis-db", "");
+                }
                 self.field_set(&key, value);
+                if profile_changed {
+                    self.project_discover_databases(backend);
+                }
                 self.changed_field(&key);
                 self.workbench.generic_select = None;
             }
@@ -712,12 +1680,30 @@ impl App {
             return true;
         }
         if self.workbench.project.file_loading && name != "project-ui-file-next" {
-            self.status = i18n::UiMessage::raw("请先完整读取项目文件".to_owned());
+            self.status = i18n::UiMessage::key("请先完整读取项目文件");
+            return true;
+        }
+        if name == "project-ui-connection-new" {
+            self.workbench.project.git_connection_new = true;
+            return true;
+        }
+        if name == "project-ui-query-new" {
+            if self.workbench.project.unsaved {
+                self.status = i18n::UiMessage::key("请先保存项目，再切换查询");
+                return true;
+            }
+            for field in ["query-name", "query-path", "query-alias", "query-text"] {
+                self.project_set(field, "");
+            }
+            self.workbench.project.git_query_edit = true;
             return true;
         }
         if name.starts_with("project-ui-query:") && self.workbench.project.unsaved {
             self.status = i18n::UiMessage::key("请先保存项目，再切换查询");
             return true;
+        }
+        if name.starts_with("project-ui-query:") {
+            self.workbench.project.git_query_edit = true;
         }
         if matches!(
             name,
@@ -729,10 +1715,37 @@ impl App {
         }
         self.dirty = true;
         if let Some(section) = name.strip_prefix("project-ui-section:") {
+            if section != "local" && !self.workbench.project.local_form.is_empty() {
+                self.status = i18n::UiMessage::key("请先保存或取消当前表单");
+                return true;
+            }
             if matches!(
                 section,
-                "overview" | "bindings" | "queries" | "transfers" | "save" | "recovery"
+                "overview" | "bindings" | "local" | "queries" | "transfers" | "save" | "recovery"
             ) {
+                if section == "local" {
+                    for (field, default) in [
+                        ("local-name", ""),
+                        ("local-description", ""),
+                        ("local-root", ""),
+                        ("local-environment-name", ""),
+                        ("local-environment-type", ""),
+                        ("local-environment-kind", "dev"),
+                        ("local-environment-description", ""),
+                        ("local-profile", ""),
+                        ("local-database", ""),
+                        ("local-redis-db", ""),
+                        ("local-resource-description", ""),
+                    ] {
+                        let key = self.project_key(field);
+                        if !self.fields.contains_key(&key) {
+                            self.field_set(&key, default);
+                        }
+                    }
+                    if !self.workbench.project.local_loaded {
+                        self.project_send(backend, "local_project.list", json!({}));
+                    }
+                }
                 self.workbench.project.section = section.to_owned();
                 self.focus.clear();
             }
@@ -880,8 +1893,7 @@ impl App {
                         return true;
                     };
                     if self.workbench.project.external_complete_path.as_deref() != Some(path) {
-                        self.status =
-                            i18n::UiMessage::raw("请先完整读取该外部文件，再合并正文".to_owned());
+                        self.status = i18n::UiMessage::key("请先完整读取该外部文件，再合并正文");
                         return true;
                     }
                     let text = self.workbench.project.external_text.clone();
@@ -954,7 +1966,7 @@ impl App {
         if (name == "project-ui-transfer-new" || name.starts_with("project-ui-transfer:"))
             && self.workbench.transfer.busy()
         {
-            self.status = i18n::UiMessage::raw("请先完成或取消当前迁移任务".to_owned());
+            self.status = i18n::UiMessage::key("请先完成或取消当前迁移任务");
             return true;
         }
         if name == "project-ui-transfer-new" {
@@ -1020,7 +2032,7 @@ impl App {
                 if let Some(project) = &mut self.workbench.project.project
                     && let Some(connections) = project["manifest"]["connections"].as_array_mut() {
                         if connections.iter().any(|c|c["alias"] == connection["alias"]) { self.status = i18n::UiMessage::key("逻辑连接别名已存在"); return true; }
-                        connections.push(connection); self.workbench.project.unsaved = true; self.workbench.project.invalidate();
+                        connections.push(connection); self.workbench.project.unsaved = true; self.workbench.project.invalidate(); self.workbench.project.git_connection_new = false;
                     }
             },
             "project-ui-bindings-save" => if let Some(id) = id {
@@ -1031,7 +2043,7 @@ impl App {
                 let path_parameter = self.project_value("path-parameter").trim();
                 if !path_parameter.is_empty() {
                     if !path_parameter.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || self.project_value("local-path").is_empty() {
-                        self.field_error(&self.project_key("path-parameter"), i18n::UiMessage::raw("请输入有效路径参数名和本机路径".to_owned())); return true;
+                        self.field_error(&self.project_key("path-parameter"), i18n::UiMessage::key("请输入有效路径参数名和本机路径")); return true;
                     }
                     paths[path_parameter] = json!(self.project_value("local-path"));
                 }
@@ -1045,13 +2057,13 @@ impl App {
                 self.project_send(backend,"project.bindings.confirm",json!({"project_id":id,"binding_group":self.workbench.project.binding_group,"binding_digest":bindings["binding_digest"]}));
             },
             "project-ui-save-prepare" => if let (Some(id),Some(project)) = (id,project) {
-                if self.workbench.project.needs_baseline_check || self.workbench.project.external.is_some() { self.status = i18n::UiMessage::raw("请先处理外部版本冲突".to_owned()); return true; }
+                if self.workbench.project.needs_baseline_check || self.workbench.project.external.is_some() { self.status = i18n::UiMessage::key("请先处理外部版本冲突"); return true; }
                 if self.workbench.project.file_loading { self.status = i18n::UiMessage::key("请先完整读取项目文件，再保存"); return true; }
                 let mut manifest = project["manifest"].clone(); let mut files = self.workbench.project.transfer_files.clone();
                 let path = self.project_value("query-path");
                 if !path.is_empty() {
                     let provider = manifest["connections"].as_array().and_then(|items| items.iter().find(|c| c["alias"].as_str() == Some(self.project_value("query-alias")))).and_then(|c| c["provider"].as_str());
-                    let language = match provider { Some("mysql") => "sql", Some("redis") => "redis", _ => { self.workbench.project.section = "queries".into(); self.field_error(&self.project_key("query-alias"), i18n::UiMessage::raw("请选择有效的查询连接别名".to_owned())); return true; } };
+                    let language = match provider { Some("mysql") => "sql", Some("redis") => "redis", _ => { self.workbench.project.section = "queries".into(); self.field_error(&self.project_key("query-alias"), i18n::UiMessage::key("请选择有效的查询连接别名")); return true; } };
                     let mut query = manifest["queries"].as_array().and_then(|q|q.iter().find(|q|q["path"].as_str()==Some(path))).cloned().unwrap_or_else(||json!({"id":Uuid::new_v4()}));
                     query["language"] = json!(language);
                     query["name"] = json!(self.project_value("query-name")); query["path"] = json!(path); query["connection_alias"] = json!(self.project_value("query-alias"));
@@ -1070,10 +2082,10 @@ impl App {
             "project-ui-external-accept" => if let (Some(id),Some(external)) = (id,self.workbench.project.external.clone()) {
                 if let Some(baseline) = &self.workbench.project.baseline_manifest
                     && external_deletions(baseline, &external, &project.as_ref().map(|p| p["digests"].clone()).unwrap_or(Value::Null)).iter().any(|(section,index,_)| !self.workbench.project.deletion_decisions.contains(&format!("{section}:{index}")))
-                { self.status = i18n::UiMessage::raw("请逐项决定外部删除是保留还是合并删除".to_owned()); return true; }
+                { self.status = i18n::UiMessage::key("请逐项决定外部删除是保留还是合并删除"); return true; }
                 if let Some(baseline) = &self.workbench.project.baseline_manifest
                     && external_changes(baseline, &external, &project.as_ref().map(|p| p["digests"].clone()).unwrap_or(Value::Null)).iter().any(|(section,index,_)| !self.workbench.project.change_decisions.contains(&format!("{section}:{index}")))
-                { self.status = i18n::UiMessage::raw("请逐项决定外部新增或修改是保留本地还是合并外部版本".to_owned()); return true; }
+                { self.status = i18n::UiMessage::key("请逐项决定外部新增或修改是保留本地还是合并外部版本"); return true; }
                 self.project_send(backend,"project.external.accept",json!({"project_id":id,"digests":external["digests"]}));
             },
             "project-ui-close" => { self.workbench.project.close_confirm = true; },

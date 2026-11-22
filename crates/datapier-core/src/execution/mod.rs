@@ -153,6 +153,9 @@ impl ExecutionSink {
     pub async fn finish(&self, result_id: Uuid, summary: Json) -> Result<()> {
         self.store.finish_result(result_id, summary).await
     }
+    pub(crate) fn check_cancelled(&self) -> Result<()> {
+        ensure_not_cancelled(&self.cancel)
+    }
     /// 在控制门内检查取消并持久化发送阶段，调用方应在实际发送前等待成功。
     /// `may_write` 一旦为真，后续调用不会将其清除。
     pub async fn mark_sent(&self, may_write: bool) -> Result<()> {

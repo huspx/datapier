@@ -91,6 +91,7 @@
   -webkit-text-fill-color: transparent;
   caret-color: var(--fg);
   overflow: auto;
+  overscroll-behavior: contain;
 }
 .query-editor::selection {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
@@ -233,4 +234,35 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
+}
+.sql-completion-popup {
+  position: fixed;
+  z-index: 120;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  background: var(--surface);
+  color: var(--fg);
+}
+.sql-completion-popup > button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  border: 0;
+  text-align: left;
+}
+.sql-completion-popup > button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.sql-completion-popup > button > span, .sql-completion-detail {
+  color: var(--muted);
+  font-size: 11px;
+}
+.sql-completion-detail {
+  border-top: 1px solid var(--border);
+  padding: 6px;
 }

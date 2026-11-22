@@ -11,6 +11,7 @@ pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
         contexts: HashMap::new(),
         windows: HashMap::new(),
         mcp: Default::default(),
+        completion: Default::default(),
         mcp_owners: HashSet::new(),
         client_cancels: HashMap::new(),
         event_senders: HashMap::new(),
@@ -32,6 +33,19 @@ pub(in crate::server) async fn engine() -> (Arc<Engine>, PathBuf) {
     let (destroyed_signal, destroyed) = tokio::sync::oneshot::channel();
     (
         Arc::new(Engine {
+            root: root.clone(),
+            #[cfg(target_os = "macos")]
+            instance_lock: Arc::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(root.join("engine.lock"))
+                    .unwrap(),
+            ),
+            update_stop: CancellationToken::new(),
+            update_done: Mutex::new(None),
             id: Uuid::new_v4(),
             store,
             state: Mutex::new(state),
@@ -61,6 +75,8 @@ pub(in crate::server) async fn cleanup(engine: Arc<Engine>, root: PathBuf) {
 
 #[path = "server/lifecycle.rs"]
 mod lifecycle;
+#[path = "server/mcp_context.rs"]
+mod mcp_context;
 #[path = "server/project_queries.rs"]
 mod project_queries;
 #[path = "server/redis.rs"]

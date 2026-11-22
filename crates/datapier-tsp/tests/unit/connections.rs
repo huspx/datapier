@@ -47,6 +47,54 @@ fn connection_edit_keeps_mcp_policy_and_creation_uses_global_default() {
 }
 
 #[test]
+fn new_provider_switches_do_not_count_automatic_fields_as_edits() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("provider-baseline".into());
+    app.profile_form(None);
+    app.action("field:provider:redis", &backend);
+    assert_eq!(app.field("port"), "6379");
+    app.action("archery-open", &backend);
+    assert!(app.archery.open);
+    assert!(!app.workbench.overlay_close_confirm);
+    app.action("field:provider:mysql", &backend);
+    assert!(!app.archery.open);
+    app.action("field:provider:redis", &backend);
+    app.action("overlay-close", &backend);
+    assert!(app.workbench.overlay.is_none());
+}
+
+#[test]
+fn provider_switch_preserves_confirmation_for_real_input() {
+    for (field, value) in [
+        ("name", "cache"),
+        ("host", "example.org"),
+        ("password", "secret"),
+        ("port", "6380"),
+        ("redis_db", "3"),
+    ] {
+        let (backend, _, _) = Backend::scripted();
+        let mut app = App::new("provider-edited".into());
+        app.profile_form(None);
+        app.field_set(field, value);
+        app.action("field:provider:redis", &backend);
+        if field == "port" {
+            app.action("field:provider:mysql", &backend);
+            app.action("field:provider:redis", &backend);
+            assert_eq!(app.field("port"), value);
+        }
+        app.action("archery-open", &backend);
+        assert!(!app.archery.open, "{field}");
+        assert!(app.workbench.overlay_close_confirm, "{field}");
+    }
+    let (backend, _, _) = Backend::scripted();
+    let (mut app, profile, _) = connected_app();
+    app.profile_form(Some(profile));
+    app.field_set("name", "edited");
+    app.action("overlay-close", &backend);
+    assert!(app.workbench.overlay_close_confirm);
+}
+
+#[test]
 fn mysql_options_roundtrip_and_validate_without_losing_input() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("mysql-options".into());
@@ -61,9 +109,8 @@ fn mysql_options_roundtrip_and_validate_without_losing_input() {
             .mysql
             .timezone
             .as_deref(),
-        Some("+00:00")
+        None
     );
-    app.field_set("mysql_timezone", "");
     app.field_set("mysql_connect_timeout_seconds", "12");
     app.field_set("mysql_query_timeout_seconds", "86401");
     app.action("test-profile", &backend);
@@ -206,7 +253,6 @@ fn new_form_after_editing_resets_credentials_tls_scope_and_undo() {
     app.navigation.form.loaded = true;
     app.navigation.form.candidates = vec!["previous-db".into()];
     app.field_set("database_search", "previous");
-    app.navigation.form_redis_db_menu = true;
     app.workbench.profile_error = Some("previous failure".into());
     app.profile_form(None);
     let fresh = app.form_profile().unwrap();
@@ -229,7 +275,7 @@ fn new_form_after_editing_resets_credentials_tls_scope_and_undo() {
     assert!(!app.fields.get_mut("name").unwrap().undo());
     assert!(!app.navigation.form.loaded && app.navigation.form.candidates.is_empty());
     assert!(app.navigation.form.selected.is_empty() && app.field("database_search").is_empty());
-    assert!(!app.navigation.form_redis_db_menu && !app.workbench.profile_tls_details);
+    assert!(!app.workbench.profile_tls_details);
     assert!(app.workbench.profile_error.is_none());
     assert_eq!(app.session, Some(session));
 }

@@ -28,11 +28,10 @@ fn redis_csv_preview_rejects_invalid_key_contents() {
     fs::remove_file(path).unwrap();
 }
 
-#[tokio::test]
-async fn redis_score_validation_matches_csv_and_json_previews() {
+#[test]
+fn redis_score_validation_matches_csv_and_json_previews() {
     let root = std::env::temp_dir().join(format!("datapier-score-{}", Uuid::new_v4()));
-    let store = crate::Store::open(&root).await.unwrap();
-    let sink = ExecutionSink::new(store.clone(), Uuid::new_v4());
+    fs::create_dir(&root).unwrap();
     let target = ResourceTarget {
         database: None,
         name: String::new(),
@@ -59,12 +58,26 @@ async fn redis_score_validation_matches_csv_and_json_previews() {
         assert_eq!(preview.errors.is_empty(), valid, "CSV {score}");
         let doc = json!({"format":"datapier","version":2,"records":[{"key_b64":"aw==","type":"zset","expires_at_ms":null,"rows":[values]}]});
         fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
-        let preview =
-            preview_redis_json(&target, &sink, &cancel, File::open(&path).unwrap()).unwrap();
+        let preview = preview_redis_json(&target, &cancel, File::open(&path).unwrap()).unwrap();
         assert_eq!(preview.errors.is_empty(), valid, "JSON {score}");
     }
-    drop(sink);
-    store.pool.close().await;
-    drop(store);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn redis_json_preview_bounds_record_field_names() {
+    let path = std::env::temp_dir().join(format!("datapier-json-field-{}", Uuid::new_v4()));
+    let target = ResourceTarget {
+        database: None,
+        name: String::new(),
+        key_b64: None,
+        kind: "database".into(),
+    };
+    let cancel = CancellationToken::new();
+    let oversized_field = "x".repeat(PREVIEW_BYTES);
+    let doc = json!({"format":"datapier","version":2,"records":[{(oversized_field):null}]});
+    fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    let preview = preview_redis_json(&target, &cancel, File::open(&path).unwrap()).unwrap();
+    assert_eq!(preview.errors[0]["error"]["code"], "resource_limit");
+    fs::remove_file(path).unwrap();
 }

@@ -58,6 +58,7 @@ impl App {
                 continue;
             }
             if kind == "schema.changed" {
+                self.completion_invalidate();
                 self.workbench.schema_invalidated_task |=
                     self.operation_pending || self.task.is_some();
                 let previous = self.generation;
@@ -481,6 +482,9 @@ impl App {
                         self.session = Some(value);
                         self.workbench.cli_database = None;
                         self.workbench.sql_mode = None;
+                        self.workbench.server_version = None;
+                        self.workbench.lower_case_table_names = None;
+                        self.completion_invalidate();
                         self.status = "数据库连接已打开".into();
                         if archery_redis {
                             self.workbench.queued_target = None;
@@ -695,6 +699,10 @@ impl App {
                     }
                 }
                 self.workbench.sql_mode = application::mysql_mode(&value);
+                self.workbench.server_version = value["server_version"].as_str().map(str::to_owned);
+                self.workbench.lower_case_table_names = value["lower_case_table_names"]
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok());
                 if self.workbench.sql_mode.is_none() {
                     self.status = i18n::UiMessage::key("数据库未返回 sql_mode，无法安全处理选区");
                 }

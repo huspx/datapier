@@ -57,6 +57,11 @@ async fn verify_structure(conn: &mut SqliteConnection, version: i64) -> Result<(
             .execute(&mut reference)
             .await?;
     }
+    if version >= 6 {
+        sqlx::raw_sql(include_str!("../../migrations/0006_config.sql"))
+            .execute(&mut reference)
+            .await?;
+    }
     let query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
     let expected = sqlx::query(query).fetch_all(&mut reference).await?;
     let actual = sqlx::query(query).fetch_all(&mut *conn).await?;
@@ -303,6 +308,24 @@ async fn verify_data(conn: &mut SqliteConnection, version: i64) -> Result<()> {
             }
         }
     }
+    if version >= 6 {
+        let invalid: i64 = sqlx::query_scalar("SELECT count(*) FROM local_projects p WHERE p.default_environment_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM local_project_environments e WHERE e.id=p.default_environment_id AND e.project_id=p.id)")
+            .fetch_one(&mut *conn).await?;
+        if invalid != 0 {
+            return Err(invalid_schema());
+        }
+        for row in sqlx::query(
+            "SELECT id FROM local_projects UNION ALL SELECT id FROM local_project_environments",
+        )
+        .fetch_all(&mut *conn)
+        .await?
+        {
+            let id: &str = row.try_get(0).map_err(|_| invalid_schema())?;
+            if Uuid::parse_str(id).is_err() {
+                return Err(invalid_schema());
+            }
+        }
+    }
     if !sqlx::query("PRAGMA foreign_key_check")
         .fetch_all(&mut *conn)
         .await?
@@ -328,7 +351,7 @@ async fn preflight_connection(conn: &mut SqliteConnection) -> Result<i64> {
                 return Err(invalid_schema());
             }
         }
-        1..=5 => {
+        1..=6 => {
             verify_structure(conn, version).await?;
             verify_data(conn, version).await?;
         }
@@ -356,7 +379,7 @@ pub(super) async fn migrate_config(conn: &mut SqliteConnection) -> Result<()> {
     let result: Result<()> = async {
         let mut tx = conn.begin().await?;
         let version = preflight_connection(&mut tx).await?;
-        if version == 5 {
+        if version == 6 {
             tx.commit().await?;
             return Ok(());
         }
@@ -395,9 +418,12 @@ pub(super) async fn migrate_config(conn: &mut SqliteConnection) -> Result<()> {
                 .execute(&mut *tx)
                 .await?;
         }
-        verify_structure(&mut tx, 5).await?;
-        verify_data(&mut tx, 5).await?;
-        sqlx::query("PRAGMA user_version=5")
+        sqlx::raw_sql(include_str!("../../migrations/0006_config.sql"))
+            .execute(&mut *tx)
+            .await?;
+        verify_structure(&mut tx, 6).await?;
+        verify_data(&mut tx, 6).await?;
+        sqlx::query("PRAGMA user_version=6")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

@@ -13,6 +13,7 @@ datapier-core = { path = "../datapier-core" }
 datapier-engine = { path = "../datapier-engine" }
 serde.workspace = true
 serde_json.workspace = true
+similar = "=3.2.1"
 sqlformat.workspace = true
 sqlparser.workspace = true
 tern-sdk.workspace = true

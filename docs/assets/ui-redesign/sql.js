@@ -186,8 +186,8 @@ function queryPanel(tab) {
     t('runAll')
   }</button><button class="button" data-action="sql-selection" disabled>${
     t('runSelection')
-  }</button><button data-action="sql-current">${
-    t('currentStatement')
+  }</button><button data-action="sql-current">${t('currentStatement')}</button><button data-action="sql-completion">${
+    az('SQL 补全', 'SQL completion')
   }</button><button class="button" data-action="sql-explain" title="${h(t('explainTarget'))}">${
     t('explainPlan')
   }</button>${ib('stop', t('cancelExecution'), 'cancel', 'disabled')}${ib('history', t('queryHistory'), 'history')}${

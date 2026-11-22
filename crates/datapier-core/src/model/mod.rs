@@ -1,11 +1,16 @@
 //! Core 与调用方共享的连接、类型化值、结果和任务模型。
 
+pub mod completion;
 pub mod editing;
+pub mod local_project;
 pub mod preview;
 pub mod project;
 pub mod replace;
 pub mod schema;
 pub mod transfer;
+
+pub use completion::*;
+pub use local_project::*;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -398,28 +403,14 @@ pub enum ConnectionConfig {
     Archery(ArcheryConnection),
 }
 /// MySQL 直连的会话时区和可选超时；空超时继承全局设置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MysqlConnectionOptions {
-    #[serde(default = "default_mysql_timezone")]
+    #[serde(default)]
     pub timezone: Option<String>,
     #[serde(default)]
     pub connect_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub query_timeout_seconds: Option<u64>,
-}
-
-fn default_mysql_timezone() -> Option<String> {
-    Some("+00:00".into())
-}
-
-impl Default for MysqlConnectionOptions {
-    fn default() -> Self {
-        Self {
-            timezone: default_mysql_timezone(),
-            connect_timeout_seconds: None,
-            query_timeout_seconds: None,
-        }
-    }
 }
 
 impl MysqlConnectionOptions {

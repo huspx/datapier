@@ -129,21 +129,6 @@
   color: var(--t3);
   font-size: 11px;
 }
-.redis-cli-layout {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-/* 只约束公开 split 根节点；pane 几何与拖拽继续由宿主负责。 */
-.redis-cli-layout > .sf-split {
-  position: absolute;
-  inset: 0;
-  height: auto !important;
-  min-height: 0;
-  margin: 0;
-}
 .cli-panel {
   box-sizing: border-box;
   min-width: 0;
@@ -186,6 +171,8 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: contain;
   padding: 10px 18px;
   font: 11px/1.8 var(--mono);
 }

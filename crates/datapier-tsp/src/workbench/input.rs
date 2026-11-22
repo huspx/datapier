@@ -83,7 +83,7 @@ impl App {
             {
                 (
                     "settings-tab-",
-                    &["general", "editing", "archery", "mcp"],
+                    &["general", "updates", "editing", "archery", "mcp"],
                     "settings-tab:",
                 )
             } else if self.workbench.overlay.as_deref() == Some("advanced-value")
@@ -135,7 +135,7 @@ impl App {
         };
         self.action(&format!("{action_prefix}{}", values[next]), backend);
         self.focus = format!("{prefix}{}", values[next]);
-        self.workbench.focus_request = Some(String::new());
+        self.workbench.focus_request = Some(self.focus.clone());
         true
     }
 
@@ -200,14 +200,12 @@ impl App {
         }
         // 原生下拉先消费关闭与确认键，避免穿透到 CLI 或所属弹窗。
         let picker_open = self.navigation.redis_db_menu
-            || self.navigation.form_redis_db_menu
             || self.workbench.key_type_menu
             || self.workbench.cell_fields_open
             || self.workbench.sql_forms.open_select.is_some()
             || self.workbench.generic_select.is_some();
         if picker_open && key.is("escape") {
             self.navigation.redis_db_menu = false;
-            self.navigation.form_redis_db_menu = false;
             self.workbench.key_type_menu = false;
             self.workbench.cell_fields_open = false;
             self.workbench.close_form_select();
@@ -221,6 +219,13 @@ impl App {
             && matches!(key.name.as_str(), "up" | "down" | "home" | "end")
         {
             return true;
+        }
+        if self.workbench.transfer.new_target.is_some() {
+            if key.is("escape") {
+                self.action("transfer-new-target-cancel", backend);
+                return true;
+            }
+            return false;
         }
         if !picker_open && self.modal_tab_key(key, backend) {
             return true;

@@ -184,6 +184,34 @@ async fn request(
     }
     decoded
 }
+/// 仅执行固定的字段元数据语句，沿用平台身份范围与响应解码。
+pub(super) async fn completion_columns(
+    session: &ArcherySession,
+    database: &str,
+    relation: &str,
+    cancel: &CancellationToken,
+) -> Result<QueryResponse> {
+    if session.profile.provider != ProviderKind::Mysql {
+        return Err(AppError::new(
+            "capability_unavailable",
+            "仅 MySQL 支持关系目录",
+        ));
+    }
+    let connection = target(session, database)?;
+    model::ensure_not_cancelled(cancel)?;
+    let envelope: QueryEnvelope = session
+        .auth
+        .completion_columns(&connection.instance_name, database, relation, cancel)
+        .await?;
+    let result = decode_query(envelope, false)?;
+    if serde_json::to_vec(&(&result.columns, &result.rows))?.len() > 8 * 1024 * 1024 {
+        return Err(AppError::new(
+            "response_too_large",
+            "平台字段元数据超过大小限制",
+        ));
+    }
+    Ok(result)
+}
 /// 执行经过共享只读验证的目录 SQL，并保留原始平台行供结构解析。
 pub(super) async fn catalog_query(
     session: &ArcherySession,

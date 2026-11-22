@@ -251,7 +251,34 @@ impl App {
                     if self.field("provider") == value {
                         return true;
                     }
-                    self.field_set("port", if value == "redis" { "6379" } else { "3306" });
+                    let old_provider = self.field("provider").to_owned();
+                    let old_port = self.field("port").to_owned();
+                    let new_port = if old_port
+                        == if old_provider == "redis" {
+                            "6379"
+                        } else {
+                            "3306"
+                        } {
+                        if value == "redis" { "6379" } else { "3306" }
+                    } else {
+                        old_port.as_str()
+                    };
+                    // 类型卡片及其自动端口属于新建表单的基线，其他输入仍须保护。
+                    if !self.form_editing
+                        && let Some((fields, _, _)) = self.archery.direct_draft.as_mut()
+                    {
+                        for ((name, _), baseline) in
+                            crate::connections::PROFILE_DEFAULTS.iter().zip(fields)
+                        {
+                            if (*name == "provider" && *baseline == old_provider)
+                                || (*name == "port" && *baseline == old_port)
+                            {
+                                *baseline =
+                                    if *name == "provider" { value } else { new_port }.into();
+                            }
+                        }
+                    }
+                    self.field_set("port", new_port);
                 }
                 self.field_set(field, value);
                 self.changed_field(field);
@@ -636,6 +663,11 @@ impl App {
                     && self.connection_form_busy()
                 {
                     return true;
+                }
+                if self.workbench.overlay.as_deref() == Some("project-local") {
+                    self.workbench.project.local_form.clear();
+                    self.workbench.project.local_resource_edit = None;
+                    self.workbench.project.local_delete_confirm = false;
                 }
                 if self.workbench.overlay.as_deref() == Some("redis-key-delete") {
                     self.redis_selection_action(backend, "redis-key-delete-cancel");

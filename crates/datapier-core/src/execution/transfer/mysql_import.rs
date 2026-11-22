@@ -144,17 +144,12 @@ pub(super) async fn import_mysql_json(
     input: MysqlImportInput,
 ) -> Result<()> {
     let MysqlImportInput { file, budget } = input;
-    let doc = super::json::json_document_bounded(
-        file,
-        &sink.store.root,
-        "rows",
-        cancel,
-        (budget / 64).max(1),
-    )?;
+    let limit = (budget / 64).max(1);
+    let doc = json_document(file, "rows", cancel, limit)?;
     let source = doc
         .columns
         .ok_or_else(|| AppError::invalid("JSON 缺少列定义"))?;
-    let mut r = doc.data.reader()?;
+    let mut r = doc.data.reader(limit);
     r.expect(b'[')?;
     let names: Vec<String> = source.iter().map(|c| c.name.clone()).collect();
     let projection = mapped_columns(
@@ -163,7 +158,6 @@ pub(super) async fn import_mysql_json(
         &schema(session, target, sink, cancel).await?,
     )?;
     let mut first = true;
-    let limit = (budget / 64).max(1);
     let mut batch_bytes = 0usize;
     let mut batch = Vec::with_capacity(PAGE);
     while r.array_next(&mut first)? {

@@ -131,6 +131,7 @@
 }
 .table-wrap {
   overflow: auto;
+  overscroll-behavior: contain;
   min-height: 0;
   flex: 1;
 }

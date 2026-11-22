@@ -208,22 +208,8 @@
     padding: 8px 4px;
     text-align: center;
   }
-  .sidebar {
-    width: 224px;
-    position: absolute;
-    inset: 0 auto 0 0;
-    z-index: 5;
-    box-shadow: 8px 0 24px #0005;
-  }
-  .main {
-    margin-left: 58px;
-  }
-  .compact .sidebar {
-    position: static;
-    box-shadow: none;
-  }
-  .compact .main {
-    margin-left: 0;
+  #draft-bar {
+    flex-wrap: wrap;
   }
   .context {
     padding: 6px 10px;

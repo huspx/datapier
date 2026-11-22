@@ -20,6 +20,67 @@ use crate::{
     },
 };
 
+/// 按二进制名称顺序分页，前缀使用 LEFT 而非 LIKE，避免通配符改变含义。
+pub(super) async fn completion(
+    conn: &mut sqlx::MySqlConnection,
+    request: &crate::model::CompletionRequest,
+    after: Option<&str>,
+) -> Result<crate::model::CompletionPage> {
+    use crate::model::{CompletionItem, CompletionPage, CompletionScope};
+    let (sql, database, relation) = match request.scope {
+        CompletionScope::Databases => (
+            "SELECT SCHEMA_NAME AS name, 'database' AS kind, NULL AS data_type, NULL AS comment FROM information_schema.SCHEMATA WHERE BINARY LEFT(LOWER(SCHEMA_NAME), CHAR_LENGTH(?)) = BINARY LOWER(?) AND (? IS NULL OR BINARY SCHEMA_NAME > BINARY ?) ORDER BY BINARY SCHEMA_NAME LIMIT ?",
+            None,
+            None,
+        ),
+        CompletionScope::Relations => (
+            "SELECT TABLE_NAME AS name, CASE TABLE_TYPE WHEN 'BASE TABLE' THEN 'table' WHEN 'VIEW' THEN 'view' ELSE 'unknown' END AS kind, NULL AS data_type, NULL AS comment FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY ? AND BINARY LEFT(LOWER(TABLE_NAME), CHAR_LENGTH(?)) = BINARY LOWER(?) AND (? IS NULL OR BINARY TABLE_NAME > BINARY ?) ORDER BY BINARY TABLE_NAME LIMIT ?",
+            request.database.as_deref(),
+            None,
+        ),
+        CompletionScope::Columns => (
+            "SELECT COLUMN_NAME AS name, 'column' AS kind, COLUMN_TYPE AS data_type, COLUMN_COMMENT AS comment FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY ? AND BINARY TABLE_NAME = BINARY ? AND BINARY LEFT(LOWER(COLUMN_NAME), CHAR_LENGTH(?)) = BINARY LOWER(?) AND (? IS NULL OR BINARY COLUMN_NAME > BINARY ?) ORDER BY BINARY COLUMN_NAME LIMIT ?",
+            request.database.as_deref(),
+            request.relation.as_deref(),
+        ),
+    };
+    let mut query = sqlx::query(sql);
+    if let Some(database) = database {
+        query = query.bind(database);
+    }
+    if let Some(relation) = relation {
+        query = query.bind(relation);
+    }
+    let rows = query
+        .bind(&request.prefix)
+        .bind(&request.prefix)
+        .bind(after)
+        .bind(after)
+        .bind((request.limit + 1) as u64)
+        .fetch_all(conn)
+        .await
+        .map_err(super::errors::mysql_error)?;
+    let has_more = rows.len() > request.limit;
+    let mut items = Vec::with_capacity(rows.len().min(request.limit));
+    for row in rows.into_iter().take(request.limit) {
+        items.push(CompletionItem {
+            kind: row.try_get("kind")?,
+            database: request.database.clone(),
+            relation: request.relation.clone(),
+            name: row.try_get("name")?,
+            data_type: row.try_get("data_type")?,
+            comment: row.try_get("comment")?,
+        });
+    }
+    let next_cursor = has_more.then(|| items.last().unwrap().name.clone());
+    Ok(CompletionPage {
+        items,
+        completeness: "complete".into(),
+        next_cursor,
+        reason: None,
+    })
+}
+
 /// 对完整结构计算指纹，忽略 SHOW CREATE TABLE 中会随插入变化的计数。
 pub(super) fn schema_fingerprint(schema: &TableSchema) -> Result<String> {
     let ddl = super::schema::fingerprint(&schema.ddl, "");
@@ -378,6 +439,41 @@ async fn list_inner(s: &mut MysqlSession, params: Json) -> Result<Json> {
     };
     let mut conn = s.new_connection().await?;
     let mut resources = Vec::new();
+    let kind = params.get("kind").and_then(Json::as_str).unwrap_or("");
+    if matches!(kind, "procedure" | "function" | "event" | "database")
+        || (kind == "trigger" && params.get("table").is_none())
+    {
+        let db = requested
+            .as_deref()
+            .filter(|database| !database.is_empty())
+            .ok_or_else(|| AppError::invalid("请先选择数据库"))?;
+        // 下拉框只列当前账号可见的名称；正式备份仍单独核对完整定义与权限。
+        let rows = match kind {
+            "procedure" | "function" => sqlx::query("SELECT ROUTINE_NAME AS name FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND LOWER(ROUTINE_TYPE) = ? ORDER BY ROUTINE_NAME")
+                .bind(db).bind(kind).fetch_all(&mut conn).await?,
+            "event" => sqlx::query("SELECT EVENT_NAME AS name FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? ORDER BY EVENT_NAME")
+                .bind(db).fetch_all(&mut conn).await?,
+            "trigger" => sqlx::query("SELECT TRIGGER_NAME AS name FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? ORDER BY TRIGGER_NAME")
+                .bind(db).fetch_all(&mut conn).await?,
+            _ => sqlx::query("SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?")
+                .bind(db).fetch_all(&mut conn).await?,
+        };
+        for row in rows {
+            resources.push(Resource {
+                name: row.try_get("name")?,
+                kind: kind.into(),
+                database: Some(db.to_owned()),
+                key_b64: None,
+                data: Json::Null,
+            });
+        }
+        return Ok(serde_json::to_value(ResourcePage {
+            resources,
+            cursor: None,
+            complete: true,
+            resource_limited: false,
+        })?);
+    }
     if params.get("kind").and_then(Json::as_str) == Some("trigger") {
         let db = requested
             .as_deref()

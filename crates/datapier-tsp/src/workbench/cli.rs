@@ -105,6 +105,7 @@ impl App {
                 record.state = UiMessage::key("失败");
                 record.elapsed = self.workbench.cli_elapsed;
                 record.error = self.workbench.cli_error.clone();
+                self.workbench.cli_reveal |= self.workbench.cli_selected == Some(record.id);
             }
             if tag.starts_with("cli.page/") {
                 let selected = self.workbench.cli_selected;
@@ -253,6 +254,7 @@ impl App {
                     record.state = UiMessage::key("失败");
                     record.elapsed = self.workbench.cli_elapsed;
                     record.error = self.workbench.cli_error.clone();
+                    self.workbench.cli_reveal |= self.workbench.cli_selected == Some(record.id);
                 }
             } else {
                 self.status = UiMessage::key("Redis 命令已提交");
@@ -321,6 +323,7 @@ impl App {
                 };
                 record.elapsed = self.workbench.cli_elapsed;
                 record.error = self.workbench.cli_error.clone();
+                self.workbench.cli_reveal |= self.workbench.cli_selected == Some(record.id);
             }
             let results: Vec<String> = value
                 .get("results")
@@ -445,7 +448,15 @@ impl App {
                             self.workbench.cli_page_history.pop();
                         }
                     }
+                    // 首次读回结果才获得完整高度；翻页或查看旧记录不触发追尾。
+                    let reveal =
+                        self.workbench.cli_grid.is_none()
+                            && transition.is_none()
+                            && self.workbench.cli_history.last().is_some_and(|record| {
+                                self.workbench.cli_selected == Some(record.id)
+                            });
                     self.workbench.cli_grid = Some(GridState::new(page, false));
+                    self.workbench.cli_reveal |= reveal;
                 }
                 Ok(_) => self.workbench_cli_error(UiMessage::key("CLI 结果页与当前结果不匹配")),
                 Err(error) => self.workbench_cli_error(UiMessage::template(

@@ -25,3 +25,210 @@
 .project-layout-title {
   text-align: left;
 }
+
+.project-local-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 16px;
+}
+.project-local-list {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 200px;
+  gap: 4px;
+  overflow: auto;
+  border-right: 1px solid var(--l2);
+  padding: 12px;
+}
+.project-local-list .sf.sf-el.sf-act.project-local-item {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  text-align: left !important;
+  display: block !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  height: auto !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+.project-local-list .sf.sf-el.sf-act.project-local-item.active {
+  background: var(--tv-sel) !important;
+}
+
+.project-local-item {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--t1);
+  padding: 8px;
+}
+.project-local-item.active {
+  background: var(--tv-sel);
+}
+.project-local-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 12px 16px;
+}
+.project-local-heading,
+.project-local-title,
+.project-local-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.project-local-heading,
+.project-local-title {
+  justify-content: space-between;
+}
+.project-local-title {
+  border-bottom: 1px solid var(--l2);
+  padding-bottom: 12px;
+}
+.project-local-project-info {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.project-local-roots {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+.project-local-root {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.project-local-root > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+.project-local-title p,
+.project-local-heading p {
+  margin: 4px 0 0;
+}
+.project-local-tabs > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.project-local-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.project-local-dialog > .sf-button {
+  align-self: flex-start;
+}
+.project-local-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.project-local-feedback > p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.project-local-feedback > .sf-button {
+  flex: none;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+}
+.project-local-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--l2);
+  padding: 8px 0;
+}
+.project-local-row > span {
+  flex: 1;
+  min-width: 0;
+}
+.project-local-row .project-local-instance {
+  flex: 2 1 160px;
+  min-width: 0;
+}
+.project-local-row .project-local-database {
+  flex: 1 1 110px;
+  min-width: 0;
+  font-family: var(--mono);
+}
+.project-local-row .project-local-purpose {
+  flex: 2 1 140px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.project-local-row .project-local-column-actions {
+  flex: 0 0 64px;
+  justify-content: flex-end;
+}
+.project-local-instance {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.project-local-columns {
+  color: var(--t3);
+  font-size: 11px;
+  padding: 4px 0;
+}
+@media (max-width: 1000px) {
+  .project-local-row {
+    flex-wrap: wrap;
+  }
+  .project-local-columns {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  .project-local-layout {
+    flex-direction: column;
+  }
+  .project-local-list {
+    flex: 0 1 auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--l2);
+  }
+  .project-local-row {
+    flex-wrap: wrap;
+  }
+}
+
+.project-file-group {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--l2);
+  overflow-wrap: anywhere;
+}
+.project-file-group .sf-button {
+  align-self: flex-start;
+}
+.project-actions {
+  flex-wrap: wrap;
+  max-height: 35vh;
+  overflow: auto;
+}
+.project-local-row .workbench-entry {
+  flex: 1;
+  min-width: 0;
+}

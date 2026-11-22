@@ -476,7 +476,7 @@ impl Clipboard {
                     });
                     app.status = i18n::UiMessage::key("正在写入剪贴板");
                 }
-                Ok(_) => app.status = i18n::UiMessage::raw("复制结果无效"),
+                Ok(_) => app.status = i18n::UiMessage::key("复制结果无效"),
                 Err(error) => app.status = i18n::UiMessage::raw(error.to_string()),
             }
             return Ok(true);
@@ -504,7 +504,7 @@ impl Clipboard {
                     });
                     app.status = i18n::UiMessage::key("正在写入剪贴板");
                 }
-                Ok(_) => app.status = i18n::UiMessage::raw("复制结果无效"),
+                Ok(_) => app.status = i18n::UiMessage::key("复制结果无效"),
                 Err(error) => app.status = i18n::UiMessage::raw(error.to_string()),
             }
             return Ok(true);
@@ -534,7 +534,7 @@ impl Clipboard {
                 });
                 app.status = i18n::UiMessage::key("正在写入剪贴板");
             }
-            Ok(_) => app.status = i18n::UiMessage::raw("Redis 复制结果无效"),
+            Ok(_) => app.status = i18n::UiMessage::key("Redis 复制结果无效"),
             Err(error) => app.status = i18n::UiMessage::raw(error.to_string()),
         }
         Ok(true)

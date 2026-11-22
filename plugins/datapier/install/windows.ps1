@@ -116,16 +116,20 @@ public static class DatapierNative
         $dest = Join-Path $parent "$target-$digest"
         if (!(Test-Path -LiteralPath (Join-Path $dest 'datapier.exe'))) {
             $archive = Join-Path $tmp 'package.zip'
-            $baseUrl = $env:DATAPIER_RELEASE_URL
-            $urlFile = Join-Path $plugin 'release-url.txt'
-            if (!$baseUrl -and (Test-Path -LiteralPath $urlFile -PathType Leaf)) {
-                $baseUrl = ([System.IO.File]::ReadAllText($urlFile)).Trim()
+            if ($env:DATAPIER_UPDATE_ARCHIVE) {
+                $archive = $env:DATAPIER_UPDATE_ARCHIVE
+            } else {
+                $baseUrl = $env:DATAPIER_RELEASE_URL
+                $urlFile = Join-Path $plugin 'release-url.txt'
+                if (!$baseUrl -and (Test-Path -LiteralPath $urlFile -PathType Leaf)) {
+                    $baseUrl = ([System.IO.File]::ReadAllText($urlFile)).Trim()
+                }
+                if (!$baseUrl -or !$baseUrl.StartsWith('https://')) {
+                    throw '未配置有效的 HTTPS 发布地址；请设置 DATAPIER_RELEASE_URL'
+                }
+                $url = $baseUrl.TrimEnd('/') + '/' + $file
+                Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
             }
-            if (!$baseUrl -or !$baseUrl.StartsWith('https://')) {
-                throw '未配置有效的 HTTPS 发布地址；请设置 DATAPIER_RELEASE_URL'
-            }
-            $url = $baseUrl.TrimEnd('/') + '/' + $file
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() -ne $digest) {
                 throw '发布文件 SHA256 不匹配'
             }
@@ -150,7 +154,7 @@ public static class DatapierNative
             if ($LASTEXITCODE -ne 0 -or "$output".Trim() -ne "datapier $version") {
                 throw '下载程序版本不匹配'
             }
-            Remove-Item -LiteralPath $archive
+            if (!$env:DATAPIER_UPDATE_ARCHIVE) { Remove-Item -LiteralPath $archive }
             [System.IO.Directory]::CreateDirectory($parent) | Out-Null
             [System.IO.Directory]::Move($tmp, $dest)
             $tmp = $null

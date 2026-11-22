@@ -66,7 +66,9 @@ impl Engine {
                         "编辑器 helper 只能领取和完成自身交接",
                     ));
                 }
-                model::ClientKind::WindowBridge if method != "ui.window.sync" => {
+                model::ClientKind::WindowBridge
+                    if !matches!(method, "ui.window.sync" | "update.handoff") =>
+                {
                     return Err(AppError::new("permission_denied", "窗口桥接不能调用此方法"));
                 }
                 model::ClientKind::Mcp if !method.starts_with("mcp.") => {
@@ -112,6 +114,34 @@ impl Engine {
             .cloned()
             .ok_or_else(|| AppError::new("disconnected", "客户端会话已关闭"))?;
         match method {
+            "update.handoff" => self.update_handoff(owner, params).await,
+            "completion.unsubscribe" => {
+                if context.kind != model::ClientKind::Tsp {
+                    return Err(AppError::new(
+                        "permission_denied",
+                        "SQL 补全仅供 TSP 编辑器使用",
+                    ));
+                }
+                self.completion_unsubscribe(owner, params)
+            }
+            "completion.catalog" => {
+                if context.kind != model::ClientKind::Tsp {
+                    return Err(AppError::new(
+                        "permission_denied",
+                        "SQL 补全仅供 TSP 编辑器使用",
+                    ));
+                }
+                self.completion_catalog(owner, params).await
+            }
+            method if method.starts_with("local_project.") => {
+                if context.kind != model::ClientKind::Tsp {
+                    return Err(AppError::new(
+                        "permission_denied",
+                        "本机项目管理仅供 TSP 工作台使用",
+                    ));
+                }
+                self.local_project_rpc(method, params).await
+            }
             "workspace.activate" => {
                 self.ensure_editing_client(owner)?;
                 let gate = self.workspace_owner_gate(owner);
@@ -421,6 +451,7 @@ impl Engine {
                     if clear_secret {
                         engine.store.clear_profile_secret(profile.id).await?;
                     }
+                    engine.state.lock().unwrap().completion.invalidate_profile(profile.id);
                     engine.emit_connections_changed();
                     Ok(json!({"profile":engine.store.profile(profile.id).await?,"credential_saved":saved && !clear_secret}))
                 })
@@ -461,6 +492,12 @@ impl Engine {
                             return Err(AppError::conflict("连接配置已变化"));
                         }
                         engine.store.delete_profile(id).await?;
+                        engine
+                            .state
+                            .lock()
+                            .unwrap()
+                            .completion
+                            .invalidate_profile(id);
                         engine.emit_connections_changed();
                         Ok(json!({"deleted":true}))
                     })
@@ -475,6 +512,7 @@ impl Engine {
                     return Err(AppError::new("busy", "连接仍在使用，不能删除配置"));
                 }
                 self.store.delete_profile(id).await?;
+                self.state.lock().unwrap().completion.invalidate_profile(id);
                 self.emit_connections_changed();
                 Ok(json!({"deleted":true}))
             }
@@ -542,6 +580,7 @@ impl Engine {
                         None
                     },
                     capabilities: Mutex::new(profile.capabilities()),
+                    completion_context: completion::Context::from_session(&session),
                     session: AsyncMutex::new(session),
                     closing: AtomicBool::new(false),
                 });
@@ -567,6 +606,7 @@ impl Engine {
             "connection.close" => {
                 let db = self.database(owner, &params)?;
                 let id: Uuid = model::param(&params, "session_id")?;
+                self.state.lock().unwrap().transfers.forget_catalog(id);
                 let send_guard = self.send_gate.lock().await;
                 let tasks = {
                     let state = self.state.lock().unwrap();
@@ -580,6 +620,7 @@ impl Engine {
                         .map(|(id, t)| (*id, t.cancel.clone(), t.transition.clone()))
                         .collect::<Vec<_>>()
                 };
+                self.state.lock().unwrap().completion.forget_session(id);
                 drop(send_guard);
                 for (task_id, cancel, transition) in tasks {
                     self.cancel_if_safe(task_id, cancel.clone(), transition.clone())

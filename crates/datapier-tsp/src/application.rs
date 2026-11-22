@@ -140,10 +140,13 @@ impl App {
     }
 
     pub(super) fn settings_form_dirty(&self) -> bool {
-        self.settings_global_form_dirty() || self.mcp_rules_dirty()
+        self.settings_global_form_dirty()
+            || self.mcp_rules_dirty()
+            || self.native_ui.settings_dirty()
     }
 
     pub(super) fn settings_discard_form(&mut self) {
+        self.native_ui.discard_settings();
         if let Ok(Value::Object(snapshot)) =
             serde_json::from_str::<Value>(self.field("settings-form-snapshot"))
         {
@@ -311,6 +314,7 @@ impl App {
             json!({"settings":self.settings}),
         ) {
             self.settings_save_token = None;
+            self.native_ui.save_after_engine = false;
             self.field_set("settings-error", error.to_string());
             self.settings_unsaved = true;
             self.status = i18n::UiMessage::template(
@@ -346,6 +350,7 @@ impl App {
             return;
         };
         let response_pending = saving && self.settings_unsaved;
+        let reloading = !saving && self.field("settings-reload") == "true";
         match response
             .result
             .and_then(|v| serde_json::from_value::<AppSettings>(v).map_err(Into::into))
@@ -368,11 +373,17 @@ impl App {
                     if !saving {
                         self.settings_load_fields();
                         self.field_set("settings-reload", "false");
+                        if reloading {
+                            self.reload_update_settings();
+                        }
                     }
                     i18n::set_preference(self.settings.language);
                 }
             }
             Err(error) => {
+                if saving {
+                    self.native_ui.save_after_engine = false;
+                }
                 if !saving && self.field("settings-reload") == "true" {
                     self.settings_unsaved = self.field("settings-reload-unsaved") == "true";
                 }
@@ -389,6 +400,8 @@ impl App {
         if response_pending {
             // 只有处理完上一笔写入后才能发送期间选中的最新设置。
             self.save_settings(backend);
+        } else if saving && std::mem::take(&mut self.native_ui.save_after_engine) {
+            self.native_update_request("configure");
         }
     }
 
@@ -609,16 +622,16 @@ impl App {
                 self.refresh_archery_servers(backend);
                 self.field_set("settings-tab", "general");
                 self.focus = "settings-tab-general".into();
-                self.workbench.focus_request = Some(String::new());
+                self.workbench.focus_request = Some(self.focus.clone());
             }
             return true;
         }
         if let Some(tab) = name.strip_prefix("settings-tab:") {
-            if matches!(tab, "general" | "editing" | "archery" | "mcp") {
+            if matches!(tab, "general" | "updates" | "editing" | "archery" | "mcp") {
                 self.field_set("settings-tab", tab);
                 self.workbench.generic_select = None;
                 self.focus = format!("settings-tab-{tab}");
-                self.workbench.focus_request = Some(String::new());
+                self.workbench.focus_request = Some(self.focus.clone());
             }
             return true;
         }
@@ -788,13 +801,18 @@ impl App {
             self.field_set("settings-reload-confirm", "false");
             return true;
         }
-        if name == "settings-reload" && self.settings_global_form_dirty() {
+        if name == "settings-reload"
+            && (self.settings_global_form_dirty() || self.native_ui.settings_dirty())
+        {
             self.field_set("settings-reload-confirm", "true");
             return true;
         }
         if name == "settings-reload" || name == "settings-reload-confirm" {
             self.field_set("settings-reload-confirm", "false");
-            if self.settings_save_token.is_none() && self.field("settings-reload") != "true" {
+            if self.settings_save_token.is_none()
+                && self.native_ui.request.is_none()
+                && self.field("settings-reload") != "true"
+            {
                 self.field_set("settings-reload-unsaved", self.settings_unsaved.to_string());
                 self.settings_unsaved = false;
                 self.settings_epoch = self.settings_epoch.wrapping_add(1);
@@ -821,10 +839,19 @@ impl App {
             if !self.settings_loaded
                 || self.field("settings-reload") == "true"
                 || self.settings_save_token.is_some()
+                || self.native_ui.settings_busy()
+                || (self.native_ui.settings_dirty() && self.native_ui.request.is_some())
             {
                 return true;
             }
             self.field_set("settings-error", "");
+            if self.native_ui.settings_dirty()
+                && !self.settings_global_form_dirty()
+                && !self.settings_unsaved
+            {
+                self.native_update_request("configure");
+                return true;
+            }
             for field in [
                 "editing_plan_items",
                 "editing_plan_bytes",
@@ -1017,6 +1044,7 @@ impl App {
                     self.settings = settings;
                     self.settings_epoch = self.settings_epoch.wrapping_add(1);
                     self.settings_unsaved = true;
+                    self.native_ui.save_after_engine = self.native_ui.settings_dirty();
                     if self.settings_save_token.is_none() {
                         self.save_settings(backend);
                     }
@@ -1105,6 +1133,9 @@ impl App {
         // SQL 可修改会话 sql_mode；旧模式与旧结果响应均不能用于新执行。
         self.generation = self.generation.wrapping_add(1);
         self.workbench.sql_mode = None;
+        self.workbench.server_version = None;
+        self.workbench.lower_case_table_names = None;
+        self.completion_invalidate();
         self.workbench.query_ui.executed = true;
         self.workbench.query_ui.results_hidden = false;
         self.workbench.query_ui.menu_open = false;

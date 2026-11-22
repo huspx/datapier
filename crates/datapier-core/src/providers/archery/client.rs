@@ -645,6 +645,28 @@ impl AuthSlot {
     ) -> Result<Json> {
         self.request(path, params, false, false, None, cancel).await
     }
+    // 仅供固定的 SHOW FULL COLUMNS 补全路径；不暴露任意无任务写请求。
+    pub(super) async fn completion_columns<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        instance: &str,
+        database: &str,
+        relation: &str,
+        cancel: &CancellationToken,
+    ) -> Result<T> {
+        let sql = format!(
+            "SHOW FULL COLUMNS FROM `{}` FROM `{}`",
+            relation.replace('`', "``"),
+            database.replace('`', "``")
+        );
+        let form = [
+            ("instance_name", instance.to_owned()),
+            ("db_name", database.to_owned()),
+            ("sql_content", sql),
+            ("limit_num", "10000".into()),
+        ];
+        self.request("query/", &form, true, false, None, cancel)
+            .await
+    }
     pub(super) async fn post_execution<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         path: &str,

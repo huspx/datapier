@@ -11,6 +11,37 @@ use crate::{Msg, i18n::tr};
 use serde_json::Value;
 use tern_sdk::ui::{self, Node, html};
 
+/// 只比较已取得的文本；执行语句和参数仍由各自的预览区展示。
+pub(crate) fn text_diff(before: &str, after: &str, path: &str) -> Node<Msg> {
+    // 大量重复行可能使对比退化；前置字节预算与算法时限共同限制界面线程耗时。
+    let diff = similar::TextDiff::configure()
+        .algorithm(similar::Algorithm::Patience)
+        .timeout(std::time::Duration::from_millis(10))
+        .diff_lines(before, after);
+    let lines = diff
+        .iter_all_changes()
+        .map(|change| {
+            let prefix = match change.tag() {
+                similar::ChangeTag::Equal => ' ',
+                similar::ChangeTag::Delete => '-',
+                similar::ChangeTag::Insert => '+',
+            };
+            let value = change.value();
+            let value = value.strip_suffix('\n').unwrap_or(value);
+            format!("{prefix}{value}")
+        })
+        .collect();
+    ui::diff()
+        .path(path.to_owned())
+        .hunks(vec![ui::Hunk {
+            old_start: Some(1),
+            new_start: Some(1),
+            lines,
+        }])
+        .prop("wrap", false)
+        .into()
+}
+
 pub(crate) fn fact(label: &str, value: impl Into<String>) -> Node<Msg> {
     html::div()
         .class("advanced-fact")

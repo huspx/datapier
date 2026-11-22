@@ -169,13 +169,11 @@ document.addEventListener('click', event => {
   if (button.dataset.connectionType) {
     const form = state.connectionForm;
     if (form.provider !== button.dataset.connectionType) {
-      requestDialogClose(() => {
-        const oldPort = form.provider === 'mysql' ? '3306' : '6379';
-        form.provider = button.dataset.connectionType;
-        if (form.port === oldPort) form.port = form.provider === 'mysql' ? '3306' : '6379';
-        render();
-        document.querySelector(`[data-connection-type="${form.provider}"]`)?.focus();
-      });
+      const oldPort = form.provider === 'mysql' ? '3306' : '6379';
+      form.provider = button.dataset.connectionType;
+      if (form.port === oldPort) form.port = form.provider === 'mysql' ? '3306' : '6379';
+      render();
+      document.querySelector(`[data-connection-type="${form.provider}"]`)?.focus();
     }
     return;
   }
@@ -549,7 +547,8 @@ document.addEventListener('click', event => {
         before: target.keys.map(key => key.name),
         after: t('delete'),
       };
-    } else {target.entries.forEach(entry =>
+    } else {
+      target.entries.forEach(entry =>
         state.drafts.push({
           db: target.db,
           key: target.key.name,
@@ -559,7 +558,8 @@ document.addEventListener('click', event => {
           before: entry.row,
           after: null,
         })
-      );}
+      );
+    }
     state.redisDeleteTarget = null;
     state.overlay = null;
     render();
@@ -1114,9 +1114,8 @@ document.addEventListener('click', event => {
       state.cellInspectorValue = null;
       state.cellInspectorDirty = false;
       state.cellOverlayBaseline = null;
-      state.cellInspectorIsNull = databases[state.database][state.table].find(row =>
-        rowId(row) === state.menuRow
-      )?.[state.menuCell] === null;
+      state.cellInspectorIsNull =
+        databases[state.database][state.table].find(row => rowId(row) === state.menuRow)?.[state.menuCell] === null;
       render();
       document.querySelector('.cell-drawer #cell-value')?.focus();
       break;

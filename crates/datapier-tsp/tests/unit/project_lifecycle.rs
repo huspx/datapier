@@ -1,6 +1,25 @@
 //! 项目预览消费与未保存查询保护回归。
 use super::*;
 use datapier_core::model::AppError;
+#[test]
+fn existing_project_directory_is_reported_at_path_field() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-create".into());
+    app.project_set("path", "/existing");
+    app.project_set("name", "project");
+    app.project_action("project-ui-create", &backend);
+    let request = requests.try_recv().unwrap();
+    app.project_response(
+        request.tag.splitn(3, ':').nth(2).unwrap(),
+        &Err(AppError::new("project_path_exists", "exists")),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench.field_error.as_ref().unwrap().field,
+        app.project_key("path")
+    );
+    assert_eq!(app.project_value("path"), "/existing");
+}
 
 #[test]
 fn failed_commit_releases_consumed_preview_and_preserves_draft() {
@@ -508,4 +527,308 @@ fn accepting_external_deletion_keeps_other_draft_and_uploads_closed_manifest() {
         1
     );
     assert_eq!(prepare.params["manifest"]["queries"][0]["path"], "keep.sql");
+}
+
+#[test]
+fn local_project_conflict_keeps_form_and_revision() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("local-conflict".into());
+    let id = Uuid::new_v4();
+    app.workbench.project.local_project = Some(
+        json!({"id":id,"name":"old","description":"","revision":4,"roots":[],"environments":[],"default_environment_id":null}),
+    );
+    app.project_set("local-name", "new name");
+    app.project_set("local-description", "edited");
+    app.project_action("project-local-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "local_project.save");
+    assert_eq!(request.params["expected_revision"], 4);
+    app.project_response(
+        request.tag.splitn(3, ':').nth(2).unwrap(),
+        &Err(AppError::new("conflict", "revision changed")),
+        &backend,
+    );
+    assert_eq!(app.project_value("local-name"), "new name");
+    assert_eq!(
+        app.workbench.project.local_project.as_ref().unwrap()["revision"],
+        4
+    );
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn saved_file_glimpse_rejects_dirty_or_escaping_paths() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-glimpse".into());
+    app.workbench.project.project =
+        Some(json!({"root":"/example/project","digests":{"queries/a.sql":"digest"}}));
+    app.workbench.project.unsaved = true;
+    app.project_action("project-local-glimpse:queries/a.sql", &backend);
+    assert!(app.workbench.project.open_file.is_none());
+    app.workbench.project.unsaved = false;
+    app.project_action("project-local-glimpse:../a.sql", &backend);
+    assert!(app.workbench.project.open_file.is_none());
+    app.project_action("project-local-glimpse:queries/a.sql", &backend);
+    assert_eq!(
+        app.workbench.project.open_file.as_ref().unwrap()["host"],
+        "local"
+    );
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn document_preview_lists_existing_files_and_rejects_escape() {
+    let root = std::env::temp_dir().join(format!("datapier-project-docs-{}", Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("README.md"), "readme").unwrap();
+    std::fs::write(root.join("project.txt"), "description").unwrap();
+    let mut app = App::new("project-documents".into());
+    app.project_document_scan(root.to_str().unwrap());
+    assert_eq!(
+        app.workbench.project.document_files,
+        vec!["README.md", "project.txt"]
+    );
+    app.project_document_preview("../outside.md", Some("over"));
+    assert!(app.workbench.project.open_file.is_none());
+    app.project_document_preview("missing.md", None);
+    assert!(app.workbench.project.open_file.is_none());
+    app.project_document_preview("project.txt", Some("beside"));
+    assert!(app.workbench.project.open_file.is_none());
+    app.project_document_preview("README.md", Some("beside"));
+    assert_eq!(
+        app.workbench.project.open_file.as_ref().unwrap()["how"],
+        "beside"
+    );
+    let path = app.workbench.project.open_file.as_ref().unwrap()["path"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(path),
+        std::fs::canonicalize(root.join("README.md")).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn editing_environment_blocks_switch_without_discarding_input() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("local-form-guard".into());
+    app.workbench.project.local_project = Some(
+        json!({"id":Uuid::new_v4(),"name":"project","description":"","revision":1,"roots":[],"default_environment_id":null,"environments":[{"id":Uuid::new_v4(),"name":"dev","environment_type":"dev","description":"","resources":[]},{"id":Uuid::new_v4(),"name":"test","environment_type":"test","description":"","resources":[]}]}),
+    );
+    app.local_environment_select(0);
+    app.project_action("project-local-environment-edit", &backend);
+    app.project_set("local-environment-name", "edited");
+    app.project_action("project-local-environment:1", &backend);
+    assert_eq!(app.workbench.project.local_environment, Some(0));
+    assert_eq!(app.project_value("local-environment-name"), "edited");
+    app.project_action("project-local-form-cancel", &backend);
+    app.project_action("project-local-environment:1", &backend);
+    assert_eq!(app.workbench.project.local_environment, Some(1));
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn new_local_project_starts_without_repository() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("local-new-project".into());
+    app.project_action("project-local-new", &backend);
+    app.project_set("local-name", "project");
+    app.project_action("project-local-create", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.params["project"]["roots"], json!([]));
+    assert!(request.params["expected_revision"].is_null());
+}
+
+#[test]
+fn repository_changes_are_staged_until_settings_are_saved() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("local-settings-draft".into());
+    app.workbench.project.local_project = Some(
+        json!({"id":Uuid::new_v4(),"name":"project","description":"","revision":1,"roots":[],"default_environment_id":null,"environments":[]}),
+    );
+    app.project_action("project-local-settings", &backend);
+    app.project_set("local-root", "/example/repository");
+    app.project_action("project-local-root-add", &backend);
+    assert!(requests.try_recv().is_err());
+    assert_eq!(app.workbench.project.local_roots.len(), 1);
+    app.project_action("project-local-save", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(
+        request.params["project"]["roots"][0]["path"],
+        "/example/repository"
+    );
+}
+
+#[test]
+fn duplicate_database_is_rejected_and_edit_replaces_one_association() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("local-resource-identity".into());
+    let id = Uuid::new_v4();
+    app.profiles.push(serde_json::from_value(json!({"id":id,"name":"db","provider":"mysql","connection":{"kind":"direct","host":"localhost","port":3306}})).unwrap());
+    app.workbench.project.local_project = Some(
+        json!({"id":Uuid::new_v4(),"name":"project","description":"","revision":1,"roots":[],"default_environment_id":null,"environments":[{"id":Uuid::new_v4(),"name":"dev","environment_type":"dev","description":"","resources":[{"profile_id":id,"database":"accounts","redis_db":null,"description":"old"}]}]}),
+    );
+    app.workbench.project.local_environment = Some(0);
+    app.project_action("project-local-resource-new", &backend);
+    app.project_action(
+        &format!("field:{}:{}", app.project_key("local-profile"), id),
+        &backend,
+    );
+    let discovery = requests.try_recv().unwrap();
+    let tag = discovery.tag.split(':').next_back().unwrap();
+    app.project_response(
+        tag,
+        &Ok(json!({"state":"known","databases":["accounts","reports"]})),
+        &backend,
+    );
+    app.project_set("local-database", "accounts");
+    app.project_action("project-local-resource-save", &backend);
+    assert!(requests.try_recv().is_err());
+    app.project_action("project-local-form-cancel", &backend);
+    app.project_action("project-local-resource:0", &backend);
+    let discovery = requests.try_recv().unwrap();
+    let tag = discovery.tag.split(':').next_back().unwrap();
+    app.project_response(
+        tag,
+        &Ok(json!({"state":"known","databases":["accounts","reports"]})),
+        &backend,
+    );
+    app.project_set("local-database", "reports");
+    app.project_action("project-local-resource-save", &backend);
+    let request = requests.try_recv().unwrap();
+    let resources = request.params["project"]["environments"][0]["resources"]
+        .as_array()
+        .unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["database"], "reports");
+    assert!(resources[0].get("alias").is_none());
+}
+
+#[test]
+fn project_database_discovery_ignores_stale_and_closed_dialog_results() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-discovery-race".into());
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for id in [first, second] {
+        app.profiles.push(serde_json::from_value(json!({"id":id,"name":"db","provider":"mysql","connection":{"kind":"direct","host":"localhost","port":3306}})).unwrap());
+    }
+    app.project_action("project-local-resource-new", &backend);
+    app.project_action(
+        &format!("field:{}:{}", app.project_key("local-profile"), first),
+        &backend,
+    );
+    let old = requests.try_recv().unwrap();
+    app.project_action(
+        &format!("field:{}:{}", app.project_key("local-profile"), second),
+        &backend,
+    );
+    let current = requests.try_recv().unwrap();
+    app.project_response(
+        old.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"state":"known","databases":["stale"]})),
+        &backend,
+    );
+    assert!(!app.workbench.project.local_database_discovery.loaded);
+    app.project_response(
+        current.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"state":"known","databases":["current"]})),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench.project.local_database_discovery.databases,
+        vec!["current"]
+    );
+    app.project_action("project-local-database-retry", &backend);
+    let late = requests.try_recv().unwrap();
+    app.workbench.overlay = None;
+    app.project_response(
+        late.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"state":"known","databases":["late"]})),
+        &backend,
+    );
+    assert!(!app.workbench.project.local_database_discovery.loaded);
+}
+
+#[test]
+fn redis_discovery_failure_does_not_allow_saving_an_unverified_database() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-redis-discovery".into());
+    let id = Uuid::new_v4();
+    app.profiles.push(serde_json::from_value(json!({"id":id,"name":"cache","provider":"redis","connection":{"kind":"direct","host":"localhost","port":6379}})).unwrap());
+    app.workbench.project.local_project = Some(
+        json!({"id":Uuid::new_v4(),"name":"project","revision":1,"roots":[],"default_environment_id":null,"environments":[{"id":Uuid::new_v4(),"name":"dev","environment_type":"dev","resources":[]}]}),
+    );
+    app.workbench.project.local_environment = Some(0);
+    app.project_action("project-local-resource-new", &backend);
+    app.project_action(
+        &format!("field:{}:{}", app.project_key("local-profile"), id),
+        &backend,
+    );
+    let request = requests.try_recv().unwrap();
+    app.project_response(
+        request.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"state":"unknown","databases":[],"reason":"CONFIG denied"})),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench
+            .project
+            .local_database_discovery
+            .error
+            .as_deref(),
+        Some("CONFIG denied")
+    );
+    app.project_set("local-redis-db", "3");
+    app.project_action("project-local-resource-save", &backend);
+    assert!(requests.try_recv().is_err());
+    app.project_action("project-local-database-retry", &backend);
+    let retry = requests.try_recv().unwrap();
+    assert_eq!(retry.params["refresh"], true);
+    app.project_response(
+        retry.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"state":"known","databases":["0","1","2","3"]})),
+        &backend,
+    );
+    app.project_action("project-local-resource-save", &backend);
+    let saved = requests.try_recv().unwrap();
+    assert_eq!(
+        saved.params["project"]["environments"][0]["resources"][0]["redis_db"],
+        3
+    );
+}
+
+#[test]
+fn new_git_query_requires_saved_draft_before_replacing_editor() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("project-query-new-guard".into());
+    app.project_set("query-text", "draft");
+    app.workbench.project.unsaved = true;
+    app.project_action("project-ui-query-new", &backend);
+    assert_eq!(app.project_value("query-text"), "draft");
+    assert!(!app.workbench.project.git_query_edit);
+    app.workbench.project.unsaved = false;
+    app.project_action("project-ui-query-new", &backend);
+    assert!(app.workbench.project.git_query_edit);
+    assert_eq!(app.project_value("query-text"), "");
+}
+
+#[test]
+fn project_dialog_close_requires_confirmation_after_edit() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("project-dialog".into());
+    app.action("project-local-new", &backend);
+    assert_eq!(app.workbench.overlay.as_deref(), Some("project-local"));
+    app.project_set("local-name", "draft");
+    app.action("overlay-close", &backend);
+    assert!(app.workbench.overlay_close_confirm);
+    assert_eq!(app.project_value("local-name"), "draft");
+    app.action("overlay-close-continue", &backend);
+    assert!(!app.workbench.overlay_close_confirm);
+    assert_eq!(app.workbench.overlay.as_deref(), Some("project-local"));
+    app.action("overlay-close", &backend);
+    app.action("overlay-close-discard", &backend);
+    assert!(app.workbench.overlay.is_none());
+    assert!(app.workbench.project.local_form.is_empty());
 }

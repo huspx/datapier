@@ -30,17 +30,12 @@ function draftOverlay() {
           h('SELECT 1 FROM `example`.`orders` WHERE BINARY `id` <=> BINARY ? AND BINARY `status` <=> BINARY ? FOR UPDATE')
         }</pre>
               <strong>WRITE</strong><pre class="preview-code">${
-          h('UPDATE `example`.`orders` SET `status` = ? WHERE BINARY `id` <=> BINARY ?')
-        }</pre><strong>CHECK · ${h(t('bindings'))}</strong>${
-          parameterTable([[1, 'text', 4, '1042'], [
-            2,
-            'text',
-            7,
-            'pending',
-          ]])
-        }<strong>WRITE · ${h(t('bindings'))}</strong>${
-          parameterTable([[1, 'text', 4, 'paid'], [2, 'text', 4, '1042']])
-        }<p class="muted small">${h(t('validationRole'))}</p>`
+                h('UPDATE `example`.`orders` SET `status` = ? WHERE BINARY `id` <=> BINARY ?')
+              }</pre><strong>CHECK · ${h(t('bindings'))}</strong>${
+                parameterTable([[1, 'text', 4, '1042'], [2, 'text', 7, 'pending']])
+              }<strong>WRITE · ${h(t('bindings'))}</strong>${
+                parameterTable([[1, 'text', 4, 'paid'], [2, 'text', 4, '1042']])
+              }<p class="muted small">${h(t('validationRole'))}</p>`
         : `<p class="muted small">${
           h(
             language === 'zh-CN'

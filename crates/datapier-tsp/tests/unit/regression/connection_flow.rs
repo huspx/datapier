@@ -12,12 +12,12 @@ fn provider_keyboard_preserves_form_and_refuses_changes_during_save() {
     app.focus = "provider-mysql".into();
     assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
     assert_eq!(app.field("provider"), "redis");
-    assert_eq!(app.field("port"), "6379");
+    assert_eq!(app.field("port"), "3307");
     assert_eq!(app.field("name"), "保留名称");
     app.reconcile_modal_focus();
     assert!(app.workbench_key(&tern_sdk::Key::named("left"), &backend));
     assert_eq!(app.field("provider"), "mysql");
-    assert_eq!(app.field("port"), "3306");
+    assert_eq!(app.field("port"), "3307");
     app.profile_saves.insert(app.form_id.unwrap());
     app.reconcile_modal_focus();
     assert!(app.workbench_key(&tern_sdk::Key::named("right"), &backend));
@@ -404,18 +404,11 @@ fn tls_recovery_does_not_reopen_settings_after_a_transport_failure() {
 }
 
 #[test]
-fn escape_dismisses_redis_db_picker_before_its_connection_form() {
+fn escape_dismisses_redis_db_picker() {
     let (backend, _, _) = Backend::scripted();
     let mut app = App::new("db-picker-escape".into());
     let escape = tern_sdk::Key::named("escape");
     app.navigation.redis_db_menu = true;
     assert!(app.workbench_key(&escape, &backend));
     assert!(!app.navigation.redis_db_menu);
-    app.workbench.overlay = Some("profile".into());
-    app.navigation.form_redis_db_menu = true;
-    assert!(app.workbench_key(&escape, &backend));
-    assert!(!app.navigation.form_redis_db_menu);
-    assert_eq!(app.workbench.overlay.as_deref(), Some("profile"));
-    assert!(app.workbench_key(&escape, &backend));
-    assert!(app.workbench.overlay.is_none());
 }

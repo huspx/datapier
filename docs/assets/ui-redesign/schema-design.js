@@ -731,7 +731,13 @@ function schemaStructurePanel(tab) {
         ))
       }</p><pre class="schema-ddl">${
         h(design.plan.split('\n').slice(((design.planPage || 1) - 1) * 3, (design.planPage || 1) * 3).join('\n'))
-      }</pre><p>${h(text('DDL 片段', 'DDL fragment'))} ${(design.planPage || 1)} / ${
+      }</pre><details class="xp-diff"><summary>${
+        h(text('对比字段定义', 'Compare column definitions'))
+      }</summary><div><pre>${
+        h(design.original.map(column => `− ${column.name} ${column.type}`).join('\n'))
+      }</pre><pre>${
+        h(design.columns.map(column => `+ ${column.name} ${column.type}`).join('\n'))
+      }</pre></div></details><p>${h(text('DDL 片段', 'DDL fragment'))} ${(design.planPage || 1)} / ${
         Math.ceil(design.plan.split('\n').length / 3)
       } <button type="button" data-schema-example-op="plan-prev"${(design.planPage || 1) === 1 ? ' disabled' : ''}>${
         h(text('上一页', 'Previous'))
@@ -1075,10 +1081,11 @@ function schemaAdditionalPreview(tab, editable) {
     content = `<section class="schema-section"><h3>${t('视图定义', 'View definition')}</h3><div class="fields">${
       field('viewName', t('视图名称', 'View name'))
     }${
-      select('algorithm', t('算法', 'Algorithm'), [['UNDEFINED', 'UNDEFINED'], ['MERGE', 'MERGE'], [
-        'TEMPTABLE',
-        'TEMPTABLE',
-      ]])
+      select('algorithm', t('算法', 'Algorithm'), [
+        ['UNDEFINED', 'UNDEFINED'],
+        ['MERGE', 'MERGE'],
+        ['TEMPTABLE', 'TEMPTABLE'],
+      ])
     }${select('security', t('安全属性', 'Security'), [['DEFINER', 'DEFINER'], ['INVOKER', 'INVOKER']])}</div>${
       field('select', 'SELECT', true)
     }</section>`;
@@ -1125,22 +1132,26 @@ function schemaAdditionalPreview(tab, editable) {
     }>${t('下一页', 'Next')}</button></p><button type="button" data-schema-example-op="return-table">${
       t('返回表结构', 'Back to table structure')
     }</button></section>`;
-  } else {content = ['columns', 'ddl_preview'].includes(tab.schemaDesign.section)
+  } else {
+    content = ['columns', 'ddl_preview'].includes(tab.schemaDesign.section)
       ? ''
       : tab.schemaDesign.section === 'options'
       ? `<section class="schema-section"><h3>${
         t('表选项', 'Table options')
       }</h3><div class="schema-table-scroll"><table class="schema-table schema-options"><tbody>${
-        [['engine', t('引擎', 'Engine')], ['charset', t('字符集', 'Character set')], [
-          'collation',
-          t('排序规则', 'Collation'),
-        ], ['options', t('其他选项', 'Other options')]].map(([key, label]) =>
+        [
+          ['engine', t('引擎', 'Engine')],
+          ['charset', t('字符集', 'Character set')],
+          ['collation', t('排序规则', 'Collation')],
+          ['options', t('其他选项', 'Other options')],
+        ].map(([key, label]) =>
           `<tr><th scope="row">${h(label)}</th><td><input data-schema-example="${key}" aria-label="${
             h(label)
           }" value="${h(s[key] || '')}"${frozen ? ' disabled' : ''}></td></tr>`
         ).join('')
       }</tbody></table></div></section>`
-      : schemaCollections(tab, !editable);}
+      : schemaCollections(tab, !editable);
+  }
   const destructive = tab.schemaDesign.original.some(original =>
     !tab.schemaDesign.columns.some(column => column.id === original.id)
   );
@@ -1257,10 +1268,12 @@ document.addEventListener('click', event => {
         (tab.schemaDesign.planPage || 1) + (el.dataset.schemaExampleOp === 'plan-next' ? 1 : -1),
       ),
     );
-  } else {tab.schemaExamples.page = Math.max(
+  } else {
+    tab.schemaExamples.page = Math.max(
       1,
       Math.min(2, tab.schemaExamples.page + (el.dataset.schemaExampleOp === 'next' ? 1 : -1)),
-    );}
+    );
+  }
   render();
 });
 

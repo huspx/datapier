@@ -183,9 +183,6 @@
   color: var(--t3);
   padding: 4px 10px;
 }
-.bp-small .sidebar:not(.compact) {
-  top: 0;
-}
 .cli-head {
   gap: 5px;
 }

@@ -189,7 +189,10 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     body = body.child(html::p(text("没有待处理的审批")).class("empty-note"));
                 }
             }
-            let mut list = html::div().class("mcp-list");
+            let mut list = html::div().key("approval-list").class("mcp-list");
+            if !app.native_ui.reduce_motion {
+                list = list.prop("transition", "layout");
+            }
             for item in &state.items {
                 let Some(id) = item["approval_id"].as_str() else {
                     continue;
@@ -235,6 +238,8 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     });
                 list = list.child(
                     html::div()
+                        .key(format!("approval-{id}"))
+                        .prop("motionKey", format!("approval-{id}"))
                         .class(if selected {
                             "mcp-approval-row active"
                         } else {
@@ -387,7 +392,10 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     body = body.child(html::p(text("没有待认证的连接")).class("empty-note"));
                 }
             }
-            let mut list = html::div().class("mcp-list");
+            let mut list = html::div().key("authentication-list").class("mcp-list");
+            if !app.native_ui.reduce_motion {
+                list = list.prop("transition", "layout");
+            }
             for item in &state.authentication {
                 let Some(id) = item["request_id"].as_str() else {
                     continue;
@@ -400,6 +408,8 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     .unwrap_or_else(|| text("未记录"));
                 list = list.child(
                     html::div()
+                        .key(format!("authentication-{id}"))
+                        .prop("motionKey", format!("authentication-{id}"))
                         .class("mcp-auth-row")
                         .child(
                             html::div()
@@ -420,6 +430,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                         )
                         .child(
                             ui::button(text("认证"))
+                                .key(format!("approval-auth-{id}"))
                                 .disabled(!allowed)
                                 .on_click(Msg::Action(format!("approval-authenticate:{id}"))),
                         ),
@@ -449,7 +460,17 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     body = body.child(html::p(text("没有可观察的任务")).class("empty-note"));
                 }
             }
-            let mut list = html::div().class("mcp-list");
+            let mut list = ui::table()
+                .key("agent-task-table")
+                .selectable(true)
+                .col(ui::Column::new("operation", text("操作")).grow(1.0))
+                .col(ui::Column::new("state", text("状态")))
+                .col(ui::Column::new("context", text("连接 / 数据库")).grow(1.0))
+                .on_select(|id| Msg::Action(format!("approval-observe-task:{id}")))
+                .on_activate(|id| Msg::Action(format!("approval-observe-task:{id}")));
+            if let Some(id) = &state.observed_task_id {
+                list = list.selected(id.clone());
+            }
             for task in &state.observed_tasks {
                 let Some(id) = task["id"].as_str() else {
                     continue;
@@ -459,46 +480,23 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     .as_ref()
                     .filter(|value| value["id"].as_str() == Some(id))
                     .unwrap_or(task);
-                list = list.child(
-                    html::button("")
-                        .class(if state.observed_task_id.as_deref() == Some(id) {
-                            "mcp-row active"
-                        } else {
-                            "mcp-row"
-                        })
-                        .attr(
-                            "aria-pressed",
-                            state.observed_task_id.as_deref() == Some(id),
+                list = list.row(
+                    ui::TableRow::new(id)
+                        .cell(
+                            "operation",
+                            details["method"]
+                                .as_str()
+                                .map(operation)
+                                .unwrap_or_else(|| text("Agent 任务")),
                         )
-                        .on_click(Msg::Action(format!("approval-observe-task:{id}")))
-                        .child(
-                            html::div()
-                                .class("mcp-row-content")
-                                .child(
-                                    html::div()
-                                        .class("mcp-row-title")
-                                        .child(html::strong(
-                                            if details["method"].as_str().is_some() {
-                                                operation(details["method"].as_str().unwrap_or(""))
-                                            } else {
-                                                text("Agent 任务")
-                                            },
-                                        ))
-                                        .child(
-                                            html::span(status(
-                                                task["state"].as_str().unwrap_or(""),
-                                            ))
-                                            .class("mcp-state"),
-                                        ),
-                                )
-                                .child(
-                                    html::span(if details["context"].is_object() {
-                                        connection(app, details)
-                                    } else {
-                                        timestamp_text(task.get("created_at"))
-                                    })
-                                    .class("mcp-subtitle"),
-                                ),
+                        .cell("state", status(task["state"].as_str().unwrap_or("")))
+                        .cell(
+                            "context",
+                            if details["context"].is_object() {
+                                connection(app, details)
+                            } else {
+                                timestamp_text(task.get("created_at"))
+                            },
                         ),
                 );
             }

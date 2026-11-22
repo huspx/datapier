@@ -4,6 +4,7 @@
 //! 权限或当前用户 SID 的 DACL。这里不把 PID、socket 文件或管道名称当作存活证明。
 
 use datapier_core::{AppError, Result};
+use fs2::FileExt;
 use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -45,6 +46,42 @@ pub fn root(path: &Path) -> Result<PathBuf> {
     {
         windows::private_root(path)
     }
+}
+
+/// 普通连接可并发准入；建立更新门禁时必须排除所有正在准入的连接。
+pub enum AdmissionMode {
+    Shared,
+    #[cfg(any(target_os = "macos", all(test, unix)))]
+    Exclusive,
+}
+
+/// 与更新进程共享的准入锁；阻断记录存在时必须由恢复流程处理。
+pub fn update_admission(root: &Path, mode: AdmissionMode) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("update-admission.lock"))?;
+    match mode {
+        AdmissionMode::Shared => FileExt::try_lock_shared(&lock),
+        #[cfg(any(target_os = "macos", all(test, unix)))]
+        AdmissionMode::Exclusive => lock.try_lock_exclusive(),
+    }
+    .map_err(|error| {
+        if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+            AppError::new("update_in_progress", "数据目录正在更新")
+        } else {
+            error.into()
+        }
+    })?;
+    if root.join("update-gate.json").exists() {
+        return Err(AppError::new(
+            "update_recovery_required",
+            "更新尚未完成，须先恢复或人工处理",
+        ));
+    }
+    Ok(lock)
 }
 /// 为已规范化的数据目录构造当前用户的短端点名，并检查 Unix 运行目录权限。
 ///
@@ -423,9 +460,25 @@ impl Listener {
 }
 #[cfg(windows)]
 pub async fn connect(name: &str) -> Result<Stream> {
-    Ok(Box::new(
-        tokio::net::windows::named_pipe::ClientOptions::new().open(name)?,
-    ))
+    use std::time::Duration;
+    use tokio::{net::windows::named_pipe::ClientOptions, time};
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    let options = ClientOptions::new();
+    let deadline = time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match options.open(name) {
+            Ok(stream) => return Ok(Box::new(stream)),
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                    && time::Instant::now() < deadline =>
+            {
+                // 并发客户端可能先占用当前实例，等待监听端接入后创建下一实例。
+                time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
