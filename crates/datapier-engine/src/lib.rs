@@ -61,6 +61,10 @@ pub fn default_data_dir() -> Result<PathBuf> {
         .map(|p| p.data_local_dir().to_owned())
         .ok_or_else(|| AppError::new("io", "无法确定用户数据目录"))
 }
+/// 验证并规范化更新器使用的数据目录，遵循与 Engine 一致的权限约束。
+pub fn update_data_root(path: &Path) -> Result<PathBuf> {
+    platform::root(path)
+}
 /// 以指定数据目录运行共享 Engine，直到无人会话的收尾期限结束。
 ///
 /// 返回目录、存储或 IPC 错误；已有实例持锁时，候选进程正常退出。
@@ -118,6 +122,11 @@ impl Client {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut next_spawn = tokio::time::Instant::now();
         loop {
+            // 准入检查与更新阶段共用 OS 锁；服务端握手还会再次原子检查。
+            drop(platform::update_admission(
+                &root,
+                platform::AdmissionMode::Shared,
+            )?);
             let error = match platform::connect(&endpoint).await {
                 Ok(stream) => {
                     match tokio::time::timeout(

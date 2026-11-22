@@ -45,7 +45,7 @@ async fn schema_one_migrates_without_creating_result_cache() {
             .fetch_one(&mut *store.pool.acquire().await.unwrap())
             .await
             .unwrap(),
-        5
+        6
     );
     assert!(!root.join("cache.sqlite3").exists());
     assert!(!root.join("values").exists());
@@ -185,7 +185,7 @@ async fn incomplete_or_newer_schema_is_rejected_without_repair() {
                 .unwrap();
         }
         if newer {
-            sqlx::query("PRAGMA user_version=6")
+            sqlx::query("PRAGMA user_version=7")
                 .execute(&mut connection)
                 .await
                 .unwrap();
@@ -205,7 +205,7 @@ async fn incomplete_or_newer_schema_is_rejected_without_repair() {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-        assert_eq!(version, if newer { 6 } else { 5 });
+        assert_eq!(version, if newer { 7 } else { 5 });
         let tables: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='project_binding_confirmations'").fetch_one(&mut connection).await.unwrap();
         assert_eq!(tables, if newer { 1 } else { 0 });
         connection.close().await.unwrap();
@@ -362,5 +362,162 @@ async fn shutdown_waits_for_detached_index_writer_to_close() {
         drained.await;
     }
     assert_eq!(std::fs::read(path).unwrap(), b"{\"complete\":true}");
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn local_project_revision_and_relationship_removal_are_atomic() {
+    let store = fixture().await;
+    let id = Uuid::new_v4();
+    let environment = Uuid::new_v4();
+    let profile = Uuid::new_v4();
+    let connection = Profile {
+        id: profile,
+        name: "fixture".into(),
+        revision: 1,
+        approval_policy: ApprovalPolicy::Dangerous,
+        provider: ProviderKind::Mysql,
+        access_mode: AccessMode::ReadOnly,
+        connection: ConnectionConfig::Direct(DirectConnection {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            username: "fixture".into(),
+            database: None,
+            redis_db: 0,
+            redis_databases_override: None,
+            tls: TlsConfig::default(),
+            visible_databases: None,
+            mysql: Default::default(),
+        }),
+    };
+    store.save_profile(&connection, None, false).await.unwrap();
+    let project = LocalProject {
+        id,
+        name: "本机项目".into(),
+        description: String::new(),
+        default_environment_id: Some(environment),
+        revision: 0,
+        roots: vec![LocalProjectRoot {
+            path: "/repo".into(),
+            identity: "identity".into(),
+        }],
+        environments: vec![LocalEnvironment {
+            id: environment,
+            name: "dev".into(),
+            environment_type: "dev".into(),
+            description: String::new(),
+            resources: vec![LocalResource {
+                profile_id: profile,
+                database: Some("sales".into()),
+                redis_db: None,
+                description: "用途".into(),
+                binding_status: String::new(),
+            }],
+        }],
+    };
+    let mut saved = store.local_project_save(&project, None).await.unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(
+        store.local_project_get(id).await.unwrap().environments[0].resources[0].profile_id,
+        profile
+    );
+    let mut duplicate = saved.clone();
+    duplicate.environments[0]
+        .resources
+        .push(saved.environments[0].resources[0].clone());
+    assert!(store.local_project_save(&duplicate, Some(1)).await.is_err());
+    assert_eq!(store.local_project_get(id).await.unwrap().revision, 1);
+    saved.environments[0].resources.push(LocalResource {
+        profile_id: profile,
+        database: Some("warehouse".into()),
+        redis_db: None,
+        description: String::new(),
+        binding_status: String::new(),
+    });
+    saved.name = "更新".into();
+    assert_eq!(
+        store
+            .local_project_save(&saved, Some(1))
+            .await
+            .unwrap()
+            .revision,
+        2
+    );
+    assert_eq!(
+        store
+            .local_project_save(&saved, Some(1))
+            .await
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    assert_eq!(store.local_project_get(id).await.unwrap().name, "更新");
+    assert_eq!(
+        store.local_project_get(id).await.unwrap().environments[0]
+            .resources
+            .len(),
+        2
+    );
+    assert_eq!(
+        store.local_project_delete(id, 1).await.unwrap_err().code,
+        "conflict"
+    );
+    store.local_project_delete(id, 2).await.unwrap();
+    assert!(
+        store
+            .project_bindings(id, &environment.to_string(), 0, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn schema_five_upgrade_preserves_legacy_binding_groups() {
+    let root =
+        std::env::temp_dir().join(format!("datapier-local-project-upgrade-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    let mut connection = SqliteConnectOptions::new()
+        .filename(root.join("datapier.sqlite3"))
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
+    for migration in [
+        include_str!("../../../migrations/0001_config.sql"),
+        include_str!("../../../migrations/0002_config.sql"),
+        include_str!("../../../migrations/0003_config.sql"),
+        include_str!("../../../migrations/0004_config.sql"),
+        include_str!("../../../migrations/0005_config.sql"),
+    ] {
+        sqlx::raw_sql(migration)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    let project = Uuid::new_v4();
+    let profile = Uuid::new_v4();
+    sqlx::query("INSERT INTO project_bindings VALUES(?,?,?,?,?,?)")
+        .bind(project.to_string())
+        .bind("legacy-free-group")
+        .bind("db")
+        .bind(profile.to_string())
+        .bind(r#"{"database":"sales","redis_db":null,"paths":{}}"#)
+        .bind(4_i64)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let store = Store::open(&root).await.unwrap();
+    let bindings = store
+        .project_bindings(project, "legacy-free-group", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].profile_id, profile);
+    assert_eq!(bindings[0].revision, 4);
+    assert_eq!(bindings[0].overrides.database.as_deref(), Some("sales"));
+    assert!(store.local_project_list().await.unwrap().is_empty());
     cleanup(store).await;
 }

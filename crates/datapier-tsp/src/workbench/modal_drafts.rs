@@ -6,6 +6,7 @@ pub(crate) struct ModalDraft {
     kind: String,
     fields: Vec<(&'static str, String)>,
     sql: Option<Value>,
+    project: Option<Value>,
     ttl: RedisTtlPolicy,
     focus: String,
 }
@@ -58,6 +59,7 @@ impl App {
                 .collect(),
             sql: matches!(kind, "row" | "filters")
                 .then(|| self.workbench.sql_forms.draft_snapshot(kind)),
+            project: (kind == "project-local").then(|| self.project_form_snapshot()),
             ttl: self.workbench.ttl_policy,
             focus: self.focus.clone(),
         });
@@ -70,6 +72,12 @@ impl App {
             Some("settings") => self.settings_form_dirty(),
             Some("profile") if !self.archery.open => self.connection_draft_dirty(),
             Some("database-create") => false,
+            Some("project-local") => self
+                .workbench
+                .modal_draft
+                .as_ref()
+                .and_then(|draft| draft.project.as_ref())
+                .is_some_and(|baseline| *baseline != self.project_form_snapshot()),
             _ => self.workbench.modal_draft.as_ref().is_some_and(|draft| {
                 draft
                     .fields
@@ -99,7 +107,9 @@ impl App {
         match self.workbench.overlay.as_deref() {
             Some("profile") => self.connection_form_busy(),
             Some("settings") => {
-                self.settings_save_token.is_some() || !self.field("mcp-rule-pending").is_empty()
+                self.settings_save_token.is_some()
+                    || !self.field("mcp-rule-pending").is_empty()
+                    || self.native_ui.settings_busy()
             }
             Some("import" | "export" | "transfer") => self.operation_pending,
             Some("file") => self.file_open_pending.is_some(),
@@ -107,6 +117,7 @@ impl App {
                 .navigation_database_create()
                 .is_some_and(|form| form.busy || form.task.is_some()),
             Some("replace") => self.advanced_replace.busy(),
+            Some("project-local") => self.workbench.project.is_pending(),
             _ => false,
         }
     }

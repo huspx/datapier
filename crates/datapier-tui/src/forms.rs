@@ -123,10 +123,7 @@ pub fn direct(profile: Option<&Value>, default_policy: &Value) -> Form {
     let c = &p["connection"];
     let tls = &c["tls"];
     let mysql = &c["mysql"];
-    let timezone = mysql
-        .get("timezone")
-        .cloned()
-        .unwrap_or_else(|| json!("+00:00"));
+    let timezone = mysql.get("timezone").cloned().unwrap_or(Value::Null);
     let visible = match &c["visible_databases"] {
         Value::Null => "*".into(),
         Value::Array(a) => a

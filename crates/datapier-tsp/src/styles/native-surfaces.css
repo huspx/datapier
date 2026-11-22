@@ -130,7 +130,8 @@
   font-size: 11px;
 }
 .preview-parameter-row {
-  display: flex;
+  display: grid;
+  grid: auto / minmax(0, 24px) minmax(0, 72px) minmax(0, 42px) minmax(0, 1fr);
   flex: none;
   align-items: baseline;
   gap: 8px;
@@ -144,15 +145,10 @@
   background: var(--card);
   font-family: var(--sans);
 }
-.preview-parameter-row > span:first-child {
-  flex: 0 0 24px;
-}
 .preview-parameter-row > span:nth-child(2) {
-  flex: 0 0 72px;
   overflow-wrap: anywhere;
 }
 .preview-parameter-row > span:nth-child(3) {
-  flex: 0 0 42px;
   text-align: right;
 }
 .preview-parameter-row > :last-child {

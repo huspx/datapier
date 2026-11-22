@@ -27,8 +27,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod archery;
+mod completion;
 mod discovery;
 mod editing;
+mod local_project;
 mod mcp;
 mod operations;
 mod project;
@@ -53,6 +55,7 @@ struct Database {
     owner: Uuid,
     profile: Profile,
     database: Option<String>,
+    completion_context: completion::Context,
     redis_db: Option<u32>,
     capabilities: Mutex<model::Capabilities>,
     session: AsyncMutex<ProviderSession>,
@@ -109,6 +112,7 @@ struct State {
     mcp_owners: HashSet<Uuid>,
     contexts: HashMap<Uuid, ClientContext>,
     mcp: mcp::McpState,
+    completion: completion::CatalogState,
     windows: HashMap<String, WindowBinding>,
     client_cancels: HashMap<Uuid, CancellationToken>,
     event_senders: HashMap<Uuid, broadcast::Sender<EngineEvent>>,
@@ -142,6 +146,11 @@ impl State {
     }
 }
 struct Engine {
+    root: PathBuf,
+    #[cfg(target_os = "macos")]
+    instance_lock: Arc<std::fs::File>,
+    update_stop: CancellationToken,
+    update_done: Mutex<Option<PathBuf>>,
     id: Uuid,
     store: Store,
     state: Mutex<State>,
@@ -227,6 +236,7 @@ fn redact(value: &mut Value) {
 
 pub async fn run(root: PathBuf) -> Result<()> {
     let root = platform::root(&root)?;
+    let admission = platform::update_admission(&root, platform::AdmissionMode::Shared)?;
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -247,7 +257,13 @@ pub async fn run(root: PathBuf) -> Result<()> {
     store.transfer_recover().await?;
 
     store.recover_edit_files().await?;
+    drop(admission);
     let engine = Arc::new(Engine {
+        root: root.clone(),
+        #[cfg(target_os = "macos")]
+        instance_lock: Arc::new(lock),
+        update_stop: CancellationToken::new(),
+        update_done: Mutex::new(None),
         id: Uuid::new_v4(),
         store,
         send_gate: Arc::new(AsyncMutex::new(())),
@@ -257,6 +273,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
             mcp_owners: HashSet::new(),
             contexts: HashMap::new(),
             mcp: Default::default(),
+            completion: Default::default(),
             windows: HashMap::new(),
             client_cancels: HashMap::new(),
             event_senders: HashMap::new(),
@@ -293,6 +310,7 @@ pub async fn run(root: PathBuf) -> Result<()> {
     let mut editing_cleanup: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
+            _ = engine.update_stop.cancelled() => break,
             accepted = listener.accept() => {
                 let stream = accepted?;
                 let owner = Uuid::new_v4();
@@ -366,11 +384,139 @@ pub async fn run(root: PathBuf) -> Result<()> {
     {
         let _ = std::fs::remove_file(endpoint);
     }
-    drop(lock);
+    // 等待所有客户端和后台任务释放 Store，不能先释放实例锁再结束写入。
+    while Arc::strong_count(&engine) > 1 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    engine.store.pool.close().await;
+    let handoff_done = engine.update_done.lock().unwrap().take();
+    drop(engine);
+    if let Some(done) = handoff_done {
+        std::fs::write(done, b"released")?;
+    }
     Ok(())
 }
 
 impl Engine {
+    /// 仅允许空闲 Engine 把原锁的同一 open file description 交给有限更新进程。
+    #[cfg(target_os = "macos")]
+    async fn update_handoff(self: &Arc<Self>, owner: Uuid, params: Value) -> Result<Value> {
+        let id: Uuid =
+            optional(&params, "handoff_id")?.ok_or_else(|| AppError::invalid("缺少交接身份"))?;
+        let state_dir: PathBuf =
+            optional(&params, "state_dir")?.ok_or_else(|| AppError::invalid("缺少状态目录"))?;
+        let plugin_dir: PathBuf = optional(&params, "plugin_dir")?
+            .ok_or_else(|| AppError::invalid("缺少 plugin 目录"))?;
+        let state_digest: String = optional(&params, "state_digest")?
+            .ok_or_else(|| AppError::invalid("缺少更新状态摘要"))?;
+        if state_digest.len() != 64 || !state_digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(AppError::invalid("更新状态摘要无效"));
+        }
+        let state_dir = std::fs::canonicalize(state_dir)?;
+        let plugin_dir = std::fs::canonicalize(plugin_dir)?;
+        if state_dir.starts_with(&self.root)
+            || self.root.starts_with(&state_dir)
+            || plugin_dir.starts_with(&self.root)
+            || self.root.starts_with(&plugin_dir)
+            || state_dir.starts_with(&plugin_dir)
+            || plugin_dir.starts_with(&state_dir)
+        {
+            return Err(AppError::invalid("更新目录互相重叠"));
+        }
+        let admission = platform::update_admission(&self.root, platform::AdmissionMode::Exclusive)?;
+        {
+            let mut state = self.state.lock().unwrap();
+            if !state.accepting
+                || state.contexts.len() != 1
+                || !state
+                    .contexts
+                    .get(&owner)
+                    .is_some_and(|c| c.kind == model::ClientKind::WindowBridge)
+                || !state.clients.is_empty()
+                || !state.tasks.is_empty()
+                || !state.databases.is_empty()
+                || !state.workspace_uploads.is_empty()
+                || state.archery.has_persistent_operations()
+            {
+                return Err(AppError::new(
+                    "update_busy",
+                    "仍有客户端、会话或任务，不能交接实例锁",
+                ));
+            }
+            state.accepting = false;
+        }
+        let gate_path = self.root.join("update-gate.json");
+        let ready = state_dir.join(format!("handoff-{id}.ready"));
+        let done = state_dir.join(format!("handoff-{id}.done"));
+        let mut created_gate = false;
+        let result = async {
+            let mut gate = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&gate_path)?;
+            created_gate = true;
+            serde_json::to_writer(
+                &mut gate,
+                &json!({"phase":"handoff","id":id.to_string(),"state_digest":state_digest}),
+            )?;
+            gate.sync_all()?;
+            std::fs::File::open(&self.root)?.sync_all()?;
+            let inherited = self.instance_lock.try_clone()?;
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
+            command
+                .arg("--data-dir")
+                .arg(&self.root)
+                .arg("plugin-update")
+                .arg("--action")
+                .arg("apply")
+                .arg("--plugin-dir")
+                .arg(&plugin_dir)
+                .arg("--state-dir")
+                .arg(&state_dir)
+                .arg("--worker")
+                .arg("--handoff-id")
+                .arg(id.to_string())
+                .stdin(std::process::Stdio::from(inherited))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut child = command.spawn()?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            while !ready.exists() {
+                if child.try_wait()?.is_some() || tokio::time::Instant::now() >= deadline {
+                    let _ = child.kill().await;
+                    return Err(AppError::new(
+                        "update_handoff_failed",
+                        "更新进程未证明锁所有权",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if child.try_wait()?.is_some() {
+                return Err(AppError::new("update_handoff_failed", "锁交接进程已退出"));
+            }
+            *self.update_done.lock().unwrap() = Some(done);
+            self.update_stop.cancel();
+            Ok(json!({"handoff_id":id,"accepted":true}))
+        }
+        .await;
+        if result.is_err() {
+            if created_gate {
+                let _ = std::fs::remove_file(gate_path);
+            }
+            self.state.lock().unwrap().accepting = true;
+        }
+        drop(admission);
+        result
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    async fn update_handoff(self: &Arc<Self>, _owner: Uuid, _params: Value) -> Result<Value> {
+        Err(AppError::new(
+            "update_unavailable",
+            "当前平台未验证连续锁交接",
+        ))
+    }
     #[cfg(test)]
     fn register(&self, owner: Uuid) -> bool {
         self.register_with(
@@ -383,6 +529,11 @@ impl Engine {
         )
     }
     fn register_with(&self, owner: Uuid, context: ClientContext) -> bool {
+        let Ok(_admission) =
+            platform::update_admission(&self.root, platform::AdmissionMode::Shared)
+        else {
+            return false;
+        };
         let mut state = self.state.lock().unwrap();
         if !state.accepting {
             return false;

@@ -2,9 +2,19 @@ use super::*;
 
 fn input(app: &App, key: &str, label: &str) -> Node<Msg> {
     let field = field(app, &app.transfer_key(key), label);
-    if ["columns", "mapping", "types", "definer-map"]
-        .iter()
-        .any(|part| key.contains(part))
+    if [
+        "columns",
+        "mapping",
+        "types",
+        "definer-map",
+        "output",
+        "report-path",
+    ]
+    .iter()
+    .any(|part| key.contains(part))
+        || key
+            .strip_prefix("file-")
+            .is_some_and(|index| index.parse::<usize>().is_ok())
     {
         html::div().class("workbench-wide").child(field).into()
     } else {
@@ -51,9 +61,482 @@ fn connection(app: &App, key: &str, label: &str) -> Node<Msg> {
     let mut options = vec![("", "请选择连接")];
     let ids: Vec<_> = app.profiles.iter().map(|p| p.id.to_string()).collect();
     for (profile, id) in app.profiles.iter().zip(&ids) {
-        options.push((id.as_str(), profile.name.as_str()));
+        let redis = profile.provider == datapier_core::model::ProviderKind::Redis;
+        if !profile.is_archery() && redis == (app.field(&app.transfer_key("provider")) == "redis") {
+            options.push((id.as_str(), profile.name.as_str()));
+        }
     }
     select(app, key, label, &options)
+}
+fn database_select(app: &App, side: &str, redis: bool) -> Node<Msg> {
+    let key = format!("{side}-{}", if redis { "redis-db" } else { "database" });
+    let label = match (side, redis) {
+        ("source", false) => "来源数据库",
+        ("source", true) => "来源 Redis DB",
+        (_, false) => "目标数据库",
+        _ => "目标 Redis DB",
+    };
+    let entry = app
+        .workbench
+        .transfer
+        .catalog
+        .get(&format!("{side}:databases"));
+    let names: Vec<&str> = entry
+        .and_then(|entry| entry.value.as_ref())
+        .and_then(|value| value["databases"].as_array())
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut options = vec![("", "请选择数据库")];
+    options.extend(names.iter().map(|name| (*name, *name)));
+    let current = app.field(&app.transfer_key(&key));
+    if !current.is_empty() && !names.contains(&current) {
+        options.push((current, current));
+    }
+    let mut wrapper = html::div()
+        .class("transfer-catalog-field")
+        .child(select(app, &key, label, &options));
+    if let Some(entry) = entry {
+        if entry.token.is_some() {
+            wrapper = wrapper.child(html::span(crate::i18n::tr("正在加载数据库…").into_owned()));
+        }
+        if let Some(error) = &entry.error {
+            wrapper = wrapper
+                .child(html::span(error.clone()).class("field-error"))
+                .child(icon_button(
+                    "repeat",
+                    "重试加载数据库",
+                    &format!("transfer-catalog-retry:{side}:databases"),
+                ));
+        }
+    }
+    wrapper.into()
+}
+fn object_select(
+    app: &App,
+    key: &str,
+    label: &str,
+    side: &str,
+    kind: &str,
+    allow_new: bool,
+) -> Node<Msg> {
+    let index = key.rsplit('-').next().unwrap_or("0");
+    let field_side = if side == "destination" {
+        "target"
+    } else {
+        side
+    };
+    let override_key = format!("object-{field_side}-db-{index}");
+    let selected = if key.starts_with("file-") {
+        ""
+    } else {
+        app.field(&app.transfer_key(&override_key))
+    };
+    let database = if !selected.is_empty() {
+        selected
+    } else if side == "source" && app.field(&app.transfer_key("mode")) == "sql_restore" {
+        ""
+    } else {
+        app.field(&app.transfer_key(&format!("{side}-database")))
+    };
+    let catalog_key = format!("{side}:objects:{kind}:{database}");
+    let entry = app.workbench.transfer.catalog.get(&catalog_key);
+    let resources = entry
+        .and_then(|entry| entry.value.as_ref())
+        .and_then(|value| value["resources"].as_array());
+    let mut names: Vec<&str> = resources
+        .into_iter()
+        .flatten()
+        .filter(|item| item["kind"].as_str() == Some(kind))
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    if side == "source" && app.field(&app.transfer_key("mode")) == "sql_restore" {
+        names = (0..app.workbench.transfer.files)
+            .filter_map(|i| {
+                app.workbench
+                    .transfer
+                    .catalog
+                    .get(&format!("input:{i}"))
+                    .filter(|entry| {
+                        app.transfer_input_params(i)
+                            .ok()
+                            .is_some_and(|params| params == entry.signature)
+                    })
+            })
+            .filter_map(|entry| entry.value.as_ref())
+            .flat_map(|value| value["objects"].as_array().into_iter().flatten())
+            .filter(|item| {
+                item["kind"].as_str() == Some(kind)
+                    && (database.is_empty() || item["database"].as_str() == Some(database))
+            })
+            .filter_map(|item| item["name"].as_str())
+            .collect();
+    }
+    let current = app.field(&app.transfer_key(key));
+    if !current.is_empty() && !names.contains(&current) {
+        names.push(current);
+    }
+    let mut options = vec![("", "请选择对象")];
+    options.extend(names.iter().map(|name| (*name, *name)));
+    if allow_new {
+        options.push(("__transfer_new__", "新建…"));
+    }
+    let control = select(app, key, label, &options);
+    let mut wrapper = html::div().class("transfer-catalog-field").child(control);
+    if let Some(entry) = entry {
+        if entry.token.is_some() {
+            wrapper = wrapper.child(html::span(crate::i18n::tr("正在加载对象…").into_owned()));
+        }
+        if let Some(error) = &entry.error {
+            wrapper = wrapper
+                .child(html::span(error.clone()).class("field-error"))
+                .child(icon_button(
+                    "repeat",
+                    "重试加载对象",
+                    &format!("transfer-objects-load:{side}:{kind}:{database}"),
+                ));
+        }
+        if entry
+            .value
+            .as_ref()
+            .is_some_and(|page| page["complete"] == false && page["cursor"].is_string())
+        {
+            wrapper = wrapper.child(button(
+                "加载更多对象",
+                &format!("transfer-objects-more:{side}:{kind}:{database}"),
+            ));
+        }
+    }
+    if entry.is_none()
+        && !(side == "source" && app.field(&app.transfer_key("mode")) == "sql_restore")
+    {
+        wrapper = wrapper.child(button(
+            "读取对象",
+            &format!("transfer-objects-load:{side}:{kind}:{database}"),
+        ));
+    }
+    wrapper.into()
+}
+fn object_database_select(app: &App, index: usize, side: &str) -> Node<Msg> {
+    if app.workbench.transfer.project_mode {
+        return html::span(crate::i18n::tr("数据库由项目绑定确定").into_owned())
+            .class("muted")
+            .into();
+    }
+    let field_side = if side == "destination" {
+        "target"
+    } else {
+        side
+    };
+    let key = format!("object-{field_side}-db-{index}");
+    let label = if side == "source" {
+        "来源对象数据库"
+    } else {
+        "目标对象数据库"
+    };
+    let mut names: Vec<&str> = app
+        .workbench
+        .transfer
+        .catalog
+        .get(&format!("{side}:databases"))
+        .and_then(|entry| entry.value.as_ref())
+        .and_then(|value| value["databases"].as_array())
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if side == "source" && app.field(&app.transfer_key("mode")) == "sql_restore" {
+        names = (0..app.workbench.transfer.files)
+            .filter_map(|i| {
+                app.workbench
+                    .transfer
+                    .catalog
+                    .get(&format!("input:{i}"))
+                    .filter(|entry| {
+                        app.transfer_input_params(i)
+                            .ok()
+                            .is_some_and(|params| params == entry.signature)
+                    })
+            })
+            .filter_map(|entry| entry.value.as_ref())
+            .flat_map(|value| value["objects"].as_array().into_iter().flatten())
+            .filter_map(|object| object["database"].as_str())
+            .collect();
+    }
+    names.sort_unstable();
+    names.dedup();
+    let mut values = vec![("", "使用所选数据库")];
+    values.extend(names.iter().map(|name| (*name, *name)));
+    let current = app.field(&app.transfer_key(&key));
+    if !current.is_empty() && !names.contains(&current) {
+        values.push((current, current));
+    }
+    select(app, &key, label, &values)
+}
+fn column_mapping(app: &App, group: &str, index: usize) -> Node<Msg> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let source = app.field(&app.transfer_key(&format!("object-source-{index}")));
+    let target = app.field(&app.transfer_key(&format!(
+        "{}-target-{index}",
+        if group == "file" { "file" } else { "object" }
+    )));
+    let source_override = app.field(&app.transfer_key(&format!("object-source-db-{index}")));
+    let target_override = if group == "file" {
+        ""
+    } else {
+        app.field(&app.transfer_key(&format!("object-target-db-{index}")))
+    };
+    let source_db = if !source_override.is_empty() {
+        source_override
+    } else if app.field(&app.transfer_key("mode")) == "sql_restore" {
+        ""
+    } else {
+        app.field(&app.transfer_key("source-database"))
+    };
+    let target_db = if target_override.is_empty() {
+        app.field(&app.transfer_key("destination-database"))
+    } else {
+        target_override
+    };
+    let source_columns = if group == "file" {
+        app.workbench
+            .transfer
+            .catalog
+            .get(&format!("input:{index}"))
+            .filter(|entry| {
+                app.transfer_input_params(index)
+                    .ok()
+                    .is_some_and(|params| params == entry.signature)
+            })
+            .and_then(|entry| entry.value.as_ref())
+            .and_then(|value| value["columns"].as_array())
+    } else if app.field(&app.transfer_key("mode")) == "sql_restore" {
+        (0..app.workbench.transfer.files)
+            .filter_map(|i| {
+                app.workbench
+                    .transfer
+                    .catalog
+                    .get(&format!("input:{i}"))
+                    .filter(|entry| {
+                        app.transfer_input_params(i)
+                            .ok()
+                            .is_some_and(|params| params == entry.signature)
+                    })
+            })
+            .filter_map(|entry| entry.value.as_ref())
+            .flat_map(|value| value["objects"].as_array().into_iter().flatten())
+            .find(|object| {
+                object["name"] == source
+                    && (source_db.is_empty() || object["database"] == source_db)
+            })
+            .and_then(|object| object["columns"].as_array())
+    } else {
+        app.workbench
+            .transfer
+            .catalog
+            .get(&format!("source:columns:{source_db}:{source}"))
+            .and_then(|entry| entry.value.as_ref())
+            .and_then(|value| value["columns"].as_array())
+    };
+    let target_columns = app
+        .workbench
+        .transfer
+        .catalog
+        .get(&format!("destination:columns:{target_db}:{target}"))
+        .and_then(|entry| entry.value.as_ref())
+        .and_then(|value| value["columns"].as_array());
+    let mapping = crate::transfer_workbench::parse_mapping(
+        app.field(&app.transfer_key(&format!("{group}-mapping-{index}"))),
+    )
+    .unwrap_or_default();
+    let mut result = html::div()
+        .class("transfer-mapping")
+        .child(html::strong(crate::i18n::tr("字段映射").into_owned()));
+    for (side, name, database) in [
+        ("source", source, source_db),
+        ("destination", target, target_db),
+    ] {
+        if side == "source"
+            && (group == "file" || app.field(&app.transfer_key("mode")) == "sql_restore")
+        {
+            continue;
+        }
+        if name.is_empty() {
+            continue;
+        }
+        let entry = app
+            .workbench
+            .transfer
+            .catalog
+            .get(&format!("{side}:columns:{database}:{name}"));
+        if let Some(error) = entry.and_then(|entry| entry.error.as_ref()) {
+            result = result.child(
+                html::div()
+                    .class("transfer-actions")
+                    .child(html::span(error.clone()).class("field-error"))
+                    .child(icon_button(
+                        "repeat",
+                        "重试加载字段",
+                        &format!("transfer-columns-retry:{side}:{group}:{index}"),
+                    )),
+            );
+        } else if entry.is_none() {
+            result = result.child(html::div().class("transfer-actions").child(button(
+                "读取字段",
+                &format!("transfer-columns-retry:{side}:{group}:{index}"),
+            )));
+        }
+    }
+    if source_columns.is_none() {
+        return result
+            .child(html::span(crate::i18n::tr("请先读取来源字段").into_owned()).class("muted"))
+            .into();
+    }
+    for column in source_columns
+        .into_iter()
+        .flatten()
+        .filter(|column| group != "object" || column["generated"] != true)
+    {
+        let Some(name) = column["name"].as_str() else {
+            continue;
+        };
+        let encoded = URL_SAFE_NO_PAD.encode(name);
+        let select_key = format!("transfer-map-{group}-{index}-{encoded}");
+        let open_key = select_key.clone();
+        let action_key = format!("transfer-map:{group}:{index}:{encoded}:");
+        let selected = match mapping.get(name) {
+            Some(target) if target == name => "".to_owned(),
+            Some(target) => target.clone(),
+            None if group == "object" && !mapping.is_empty() => "\0".to_owned(),
+            None => String::new(),
+        };
+        let mut control = ui::select()
+            .key(select_key.clone())
+            .aria(name.to_owned())
+            .value(selected)
+            .open(app.workbench.generic_select.as_deref() == Some(select_key.as_str()))
+            .on_toggle(move |collapsed| {
+                Msg::Action(format!("select-open:{open_key}:{}", !collapsed))
+            })
+            .option(ui::SelectOption::new(
+                "",
+                crate::i18n::tr("默认同名").into_owned(),
+            ));
+        if group == "object" {
+            control = control.option(ui::SelectOption::new(
+                "\0",
+                crate::i18n::tr("不复制此字段").into_owned(),
+            ));
+        }
+        for target in target_columns
+            .into_iter()
+            .flatten()
+            .filter(|column| column["generated"] != true)
+            .filter_map(|column| column["name"].as_str())
+        {
+            control = control.option(ui::SelectOption::new(target, target));
+        }
+        result = result.child(
+            ui::field(name.to_owned()).child(control.on_change(move |change| {
+                let target = change.value.as_str().unwrap_or_default();
+                Msg::Action(format!("{action_key}{}", URL_SAFE_NO_PAD.encode(target)))
+            })),
+        );
+    }
+    result.into()
+}
+fn redis_key_selection(app: &App) -> Node<Msg> {
+    let entry = app.workbench.transfer.catalog.get("source:objects");
+    let mut list = html::div()
+        .class("transfer-key-list")
+        .child(html::strong(crate::i18n::tr("选择来源 key").into_owned()));
+    if let Some(entry) = entry {
+        if let Some(error) = &entry.error {
+            list = list.child(
+                html::div()
+                    .class("transfer-actions")
+                    .child(html::span(error.clone()).class("field-error"))
+                    .child(icon_button(
+                        "repeat",
+                        "重试加载 key",
+                        "transfer-catalog-retry:source:objects",
+                    )),
+            );
+        }
+        if let Some(resources) = entry
+            .value
+            .as_ref()
+            .and_then(|value| value["resources"].as_array())
+        {
+            for item in resources {
+                let Some(key) = item["key_b64"].as_str() else {
+                    continue;
+                };
+                let name = item["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("空 key");
+                let checked = app
+                    .workbench
+                    .transfer
+                    .redis_keys
+                    .as_ref()
+                    .is_some_and(|keys| keys.contains(key));
+                let action = format!("transfer-redis-key:{key}");
+                list = list.child(
+                    html::label()
+                        .child(
+                            html::checkbox("transfer-redis-key", name.to_owned())
+                                .checked(checked)
+                                .on_change(move |_| Msg::Action(action.clone())),
+                        )
+                        .child(html::span(name.to_owned())),
+                );
+            }
+        }
+        if entry.token.is_some() {
+            list = list.child(html::span(crate::i18n::tr("正在加载 key…").into_owned()));
+        }
+        if entry
+            .value
+            .as_ref()
+            .is_some_and(|value| value["complete"] == false && value["cursor"].is_string())
+        {
+            list = list.child(button("加载更多", "transfer-catalog-more:source"));
+        }
+    } else {
+        list = list.child(button("读取 key", "transfer-catalog-retry:source:objects"));
+    }
+    list.into()
+}
+fn filter_column_select(app: &App, index: usize, filter: usize) -> Node<Msg> {
+    let object = app.field(&app.transfer_key(&format!("object-source-{index}")));
+    let override_db = app.field(&app.transfer_key(&format!("object-source-db-{index}")));
+    let database = if override_db.is_empty() {
+        app.field(&app.transfer_key("source-database"))
+    } else {
+        override_db
+    };
+    let entry = app
+        .workbench
+        .transfer
+        .catalog
+        .get(&format!("source:columns:{database}:{object}"));
+    let names: Vec<&str> = entry
+        .and_then(|entry| entry.value.as_ref())
+        .and_then(|value| value["columns"].as_array())
+        .map(|columns| {
+            columns
+                .iter()
+                .filter_map(|column| column["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let key = format!("object-filter-column-{index}-{filter}");
+    let mut options = vec![("", "请选择字段")];
+    options.extend(names.iter().map(|name| (*name, *name)));
+    let current = app.field(&app.transfer_key(&key));
+    if !current.is_empty() && !names.contains(&current) {
+        options.push((current, current));
+    }
+    select(app, &key, "过滤字段", &options)
 }
 
 fn detail_node(value: &Value, key: &str) -> Node<Msg> {
@@ -173,8 +656,16 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
     };
     let mode = app.field(&app.transfer_key("mode"));
     let redis = app.field(&app.transfer_key("provider")) == "redis";
+    let picker_open =
+        app.workbench.generic_select.as_deref().is_some_and(|key| {
+            key.starts_with("field-transfer-") || key.starts_with("transfer-map-")
+        });
     let mut root = html::div()
-        .class("body detail-panel transfer-panel")
+        .class(if picker_open {
+            "body detail-panel transfer-panel transfer-picker-open"
+        } else {
+            "body detail-panel transfer-panel"
+        })
         .key("transfer-workbench")
         .attr("role", "region")
         .attr("aria-label", crate::i18n::tr("数据交换与迁移").into_owned());
@@ -207,26 +698,46 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
     };
     let source = endpoint_summary("source");
     let destination = endpoint_summary("destination");
-    root = root.child(
-        html::div()
-            .class("transfer-summary advanced-facts")
-            .child(crate::advanced::fact(
-                "来源",
-                if source.is_empty() {
-                    crate::i18n::tr("未选择连接").into_owned()
-                } else {
-                    source
-                },
-            ))
-            .child(crate::advanced::fact(
-                "目标",
-                if destination.is_empty() {
-                    crate::i18n::tr("未选择连接").into_owned()
-                } else {
-                    destination
-                },
-            )),
-    );
+    let file_summary = if matches!(mode, "import" | "sql_restore") {
+        (0..app.workbench.transfer.files)
+            .map(|i| app.field(&app.transfer_key(&format!("file-{i}"))))
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else if matches!(mode, "export" | "sql_dump") {
+        app.field(&app.transfer_key("output")).to_owned()
+    } else {
+        String::new()
+    };
+    let mut summary = html::div()
+        .class("transfer-summary advanced-facts")
+        .child(crate::advanced::fact(
+            "来源",
+            if source.is_empty() {
+                crate::i18n::tr("未选择连接").into_owned()
+            } else {
+                source
+            },
+        ))
+        .child(crate::advanced::fact(
+            "目标",
+            if destination.is_empty() {
+                crate::i18n::tr("未选择连接").into_owned()
+            } else {
+                destination
+            },
+        ));
+    if mode != "copy" {
+        summary = summary.child(crate::advanced::fact(
+            "文件路径",
+            if file_summary.is_empty() {
+                crate::i18n::tr("未选择文件").into_owned()
+            } else {
+                file_summary
+            },
+        ));
+    }
+    root = root.child(summary);
     let mut tabs = ui::tabs().key("transfer-tabs").active(stage.to_owned());
     for (id, title) in [
         ("source", "来源与目标"),
@@ -301,21 +812,11 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         } else {
             if matches!(mode, "copy" | "export" | "sql_dump") {
                 body = body.child(connection(app, "source-profile", "来源连接"));
-                if !redis {
-                    body = body.child(input(app, "source-database", "来源数据库"));
-                }
-                if redis {
-                    body = body.child(input(app, "source-redis-db", "来源 Redis DB"));
-                }
+                body = body.child(database_select(app, "source", redis));
             }
             if matches!(mode, "copy" | "import" | "sql_restore") {
                 body = body.child(connection(app, "destination-profile", "目标连接"));
-                if !redis {
-                    body = body.child(input(app, "destination-database", "目标数据库"));
-                }
-                if redis {
-                    body = body.child(input(app, "destination-redis-db", "目标 Redis DB"));
-                }
+                body = body.child(database_select(app, "destination", redis));
             }
         }
         if mode == "export" {
@@ -328,7 +829,8 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         }
         if matches!(mode, "import" | "sql_restore") {
             for i in 0..app.workbench.transfer.files {
-                body = body
+                let mut file = html::div().class("transfer-group");
+                file = file
                     .child(html::strong(format!(
                         "{} {}",
                         crate::i18n::tr("输入文件"),
@@ -336,7 +838,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     )))
                     .child(input(app, &format!("file-{i}"), "文件路径"));
                 if mode == "import" {
-                    body = body
+                    file = file
                         .child(select(
                             app,
                             &format!("file-format-{i}"),
@@ -378,13 +880,16 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                             "同步已有表结构",
                             &[("false", "否"), ("true", "是")],
                         ));
-                    body = body
-                        .child(input(app, &format!("file-target-{i}"), "目标表"))
-                        .child(input(
+                    file = file
+                        .child(object_select(
                             app,
-                            &format!("file-mapping-{i}"),
-                            "字段映射（源=目标或 JSON 对象）",
+                            &format!("file-target-{i}"),
+                            "目标表",
+                            "destination",
+                            "table",
+                            true,
                         ))
+                        .child(column_mapping(app, "file", i))
                         .child(input(
                             app,
                             &format!("file-types-{i}"),
@@ -399,7 +904,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                         app.field(&app.transfer_key(&format!("file-types-{i}"))),
                     ) {
                         if !columns.is_empty() {
-                            body = body.child(html::span(
+                            file = file.child(html::span(
                                 crate::i18n::tr("文件元数据可能不完整，生成的结构仅供确认。")
                                     .into_owned(),
                             ));
@@ -412,7 +917,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                                 crate::transfer_workbench::column_default_key(i, name, "kind");
                             let value =
                                 crate::transfer_workbench::column_default_key(i, name, "value");
-                            body = body.child(html::strong(name.to_owned())).child(select(
+                            file = file.child(html::strong(name.to_owned())).child(select(
                                 app,
                                 &kind,
                                 "列默认值类型",
@@ -428,15 +933,43 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                                 app.field(&app.transfer_key(&kind)),
                                 "literal" | "expression"
                             ) {
-                                body = body.child(input(app, &value, "默认值内容"));
+                                file = file.child(input(app, &value, "默认值内容"));
                             }
                         }
                     }
                 }
+                let entry = app.workbench.transfer.catalog.get(&format!("input:{i}"));
+                let current = app.transfer_input_params(i).ok();
+                let valid = entry.is_some_and(|entry| current.as_ref() == Some(&entry.signature));
+                let mut inspect = html::div().class("transfer-actions").child(button(
+                    "读取文件对象与字段",
+                    &format!("transfer-input-inspect:{i}"),
+                ));
+                if let Some(entry) = entry {
+                    if entry.token.is_some() && valid {
+                        inspect = inspect
+                            .child(html::span(crate::i18n::tr("正在读取文件…").into_owned()));
+                    } else if let Some(error) = &entry.error {
+                        inspect = inspect.child(html::span(error.clone()).class("field-error"));
+                    } else if entry.value.is_some() && valid {
+                        inspect = inspect.child(html::span(
+                            crate::i18n::tr("已读取文件对象与字段").into_owned(),
+                        ));
+                    }
+                }
+                file = file.child(inspect);
+                body = body.child(file);
             }
-            body = body
-                .child(button("添加文件", "transfer-ui-file-add"))
-                .child(button("移除末尾文件", "transfer-ui-file-remove"));
+            body = body.child(
+                html::div()
+                    .class("transfer-actions")
+                    .child(icon_button("plus", "添加文件", "transfer-ui-file-add"))
+                    .child(icon_button(
+                        "trash",
+                        "移除末尾文件",
+                        "transfer-ui-file-remove",
+                    )),
+            );
         }
         if matches!(mode, "export" | "sql_dump") {
             body = body.child(input(app, "output", "输出文件路径"));
@@ -453,7 +986,9 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         ));
         if !redis && matches!(mode, "copy" | "export" | "sql_dump" | "sql_restore") {
             for i in 0..app.workbench.transfer.objects {
-                body = body
+                let mut object = html::div().class("transfer-group");
+                let kind = app.field(&app.transfer_key(&format!("object-kind-{i}")));
+                object = object
                     .child(html::strong(format!(
                         "{} {}",
                         crate::i18n::tr(if mode == "sql_restore" {
@@ -476,35 +1011,25 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                             ("event", "事件"),
                         ],
                     ))
-                    .child(input(
+                    .child(object_database_select(app, i, "source"))
+                    .child(object_select(
                         app,
-                        &format!("object-source-db-{i}"),
-                        if mode == "sql_restore" {
-                            "来源对象数据库（与 SQL 中的数据库一致）"
-                        } else {
-                            "来源对象数据库（空则使用来源库）"
-                        },
+                        &format!("object-source-{i}"),
+                        "来源对象",
+                        "source",
+                        kind,
+                        false,
                     ))
-                    .child(input(app, &format!("object-source-{i}"), "来源对象"))
-                    .child(input(
-                        app,
-                        &format!("object-target-db-{i}"),
-                        "目标对象数据库（空则使用目标库）",
-                    ))
-                    .child(input(
+                    .child(object_database_select(app, i, "destination"))
+                    .child(object_select(
                         app,
                         &format!("object-target-{i}"),
-                        if mode == "sql_restore" {
-                            "目标对象名称（留空保留原名）"
-                        } else {
-                            "目标对象"
-                        },
+                        "目标对象",
+                        "destination",
+                        kind,
+                        true,
                     ))
-                    .child(input(
-                        app,
-                        &format!("object-mapping-{i}"),
-                        "字段映射（源=目标或 JSON 对象）",
-                    ))
+                    .child(column_mapping(app, "object", i))
                     .child(input(
                         app,
                         &format!("object-types-{i}"),
@@ -531,12 +1056,9 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     .unwrap_or(1)
                 {
                     let filter = html::div()
+                        .class("transfer-filter")
                         .key(format!("transfer-filter-{i}-{j}"))
-                        .child(input(
-                            app,
-                            &format!("object-filter-column-{i}-{j}"),
-                            "过滤字段",
-                        ))
+                        .child(filter_column_select(app, i, j))
                         .child(select(
                             app,
                             &format!("object-filter-op-{i}-{j}"),
@@ -577,20 +1099,30 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                             &format!("object-filter-value-{i}-{j}"),
                             "过滤值",
                         ))
-                        .child(button(
+                        .child(icon_button(
+                            "trash",
                             "移除过滤条件",
                             &format!("transfer-ui-filter-remove:{i}:{j}"),
                         ));
-                    body = body.child(filter);
+                    object = object.child(filter);
                 }
-                body = body.child(button(
+                object = object.child(html::div().class("transfer-actions").child(icon_button(
+                    "plus",
                     "添加过滤条件",
                     &format!("transfer-ui-filter-add:{i}"),
-                ));
+                )));
+                body = body.child(object);
             }
-            body = body
-                .child(button("添加对象", "transfer-ui-object-add"))
-                .child(button("移除末尾对象", "transfer-ui-object-remove"));
+            body = body.child(
+                html::div()
+                    .class("transfer-actions")
+                    .child(icon_button("plus", "添加对象", "transfer-ui-object-add"))
+                    .child(icon_button(
+                        "trash",
+                        "移除末尾对象",
+                        "transfer-ui-object-remove",
+                    )),
+            );
         }
         if redis {
             body = body
@@ -602,11 +1134,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 ))
                 .child(
                     if app.field(&app.transfer_key("redis-selection")) == "keys" {
-                        input(
-                            app,
-                            "redis-keys",
-                            "Redis key Base64（逗号分隔；空串表示空 key）",
-                        )
+                        redis_key_selection(app)
                     } else {
                         input(app, "pattern", "Redis key 匹配模式")
                     },
@@ -713,9 +1241,6 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         {
             body = body.child(html::p(crate::i18n::tr("尚未准备").into_owned()).class("muted"));
         }
-        if app.workbench.transfer.obsolete_plan.is_some() {
-            body = body.child(button("丢弃计划", "transfer-ui-discard"));
-        }
         if let Some(plan) = &app.workbench.transfer.plan {
             body = body
                 .child(html::strong(
@@ -757,12 +1282,21 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     )));
                 }
             }
+            let mut sections = ui::tabs()
+                .key("transfer-preview-sections")
+                .active(app.workbench.transfer.plan_section.clone());
+            for (id, title) in [
+                ("items", "结构与对象"),
+                ("samples", "数据样本"),
+                ("diagnostics", "诊断"),
+            ] {
+                sections = sections.tab(id, crate::i18n::tr(title).into_owned());
+            }
             body = body
                 .child(button("刷新准备状态", "transfer-ui-refresh-plan"))
-                .child(button("丢弃计划", "transfer-ui-discard"))
-                .child(button("结构与对象", "transfer-ui-section:items"))
-                .child(button("数据样本", "transfer-ui-section:samples"))
-                .child(button("诊断", "transfer-ui-section:diagnostics"));
+                .child(
+                    sections.on_select(|value| Msg::Action(format!("transfer-ui-section:{value}"))),
+                );
             if app.workbench.transfer.chunk_offset > 0 {
                 body = body
                     .child(html::span(
@@ -930,8 +1464,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                     "retry-not-sent",
                     "续作未发送项",
                     &[("true", "是"), ("false", "否")],
-                ))
-                .child(button("再次准备失败范围", "transfer-ui-retry"));
+                ));
         }
         if let Some(page) = &app.workbench.transfer.items {
             body = body.child(html::strong(crate::i18n::tr("逐项结果").into_owned()));
@@ -959,6 +1492,11 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             )
         }) {
             footer = footer.child(button("取消执行（已提交部分保留）", "transfer-ui-cancel"));
+        }
+        if app.workbench.transfer.run.is_some() {
+            footer = footer
+                .child(html::span("").class("spacer"))
+                .child(button("再次准备失败范围", "transfer-ui-retry"));
         }
         return root.child(footer).into();
     }
@@ -989,5 +1527,32 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             .key(action)
             .on_click(Msg::Action(action.into())),
     );
-    root.child(footer).into()
+    root = root.child(footer);
+    if app.workbench.transfer.new_target.is_some() {
+        let content = html::div()
+            .class("transfer-group")
+            .child(input(app, "new-target-name", "目标对象名称"))
+            .child(input(
+                app,
+                "new-target-types",
+                "目标类型（字段=类型或 JSON 数组）",
+            ));
+        let footer = html::div()
+            .class("transfer-actions")
+            .child(button("取消", "transfer-new-target-cancel"))
+            .child(button("确认", "transfer-new-target-save"));
+        let overlay: Node<Msg> = ui::overlay()
+            .modal(true)
+            .head(crate::i18n::tr("新建目标对象").into_owned())
+            .end(icon_button("x", "关闭对话框", "transfer-new-target-cancel"))
+            .foot(Node::from(footer))
+            .child(content)
+            .into();
+        root = root.child(
+            html::div()
+                .class(format!("modal-layer {}", app.viewport_class()))
+                .child(overlay),
+        );
+    }
+    root.into()
 }

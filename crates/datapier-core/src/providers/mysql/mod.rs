@@ -31,6 +31,25 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// 与查询连接分离的只读目录连接配置。
+#[derive(Clone)]
+pub struct CompletionContext {
+    options: MySqlConnectOptions,
+    timeout: Duration,
+}
+
+impl CompletionContext {
+    pub async fn catalog(
+        &self,
+        request: &CompletionRequest,
+        after: Option<&str>,
+    ) -> Result<CompletionPage> {
+        let mut connection =
+            connect_initialized(&self.options, AccessMode::ReadOnly, self.timeout).await?;
+        catalog::completion(&mut connection, request, after).await
+    }
+}
+
 /// 一个查询会话拥有独立物理连接，SQL 和显式事务在该连接上顺序执行。
 /// 浏览和变更使用单独连接，编辑令牌只在此会话内有效。
 pub struct MysqlSession {
@@ -116,6 +135,13 @@ impl MysqlSession {
             recipes: HashMap::new(),
             transaction: Some(false),
         })
+    }
+    /// 冻结连接选项供补全独立建连，不获取查询会话锁。
+    pub fn completion_context(&self) -> CompletionContext {
+        CompletionContext {
+            options: self.options.clone(),
+            timeout: self.connect_timeout,
+        }
     }
     pub fn profile(&self) -> &Profile {
         &self.profile

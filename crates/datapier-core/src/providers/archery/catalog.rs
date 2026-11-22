@@ -102,6 +102,139 @@ async fn names(
     Ok(result)
 }
 
+/// 平台目录没有可证明的分页和完整性；每次响应先检查大小，再按名称本地分页。
+pub(super) async fn completion(
+    context: &super::CompletionContext,
+    request: &crate::model::CompletionRequest,
+    after: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<crate::model::CompletionPage> {
+    use crate::model::{CompletionItem, CompletionPage, CompletionScope, ProviderKind};
+    if context.profile.provider != ProviderKind::Mysql {
+        return Err(AppError::new(
+            "capability_unavailable",
+            "仅 MySQL 支持关系目录",
+        ));
+    }
+    let session = ArcherySession {
+        profile: context.profile.clone(),
+        auth: context.auth.clone(),
+        database: context.database.clone(),
+        capabilities: context.profile.capabilities(),
+        closed: false,
+    };
+    let binding = session
+        .profile
+        .archery()
+        .ok_or_else(|| AppError::invalid("不是 Archery 连接"))?;
+    let mut completeness = "unknown";
+    let mut reason = Some("平台目录可能受权限过滤或截断".to_string());
+    let mut items = Vec::new();
+    if request.scope == CompletionScope::Databases {
+        completeness = "complete";
+        reason = None;
+        for name in &binding.databases {
+            items.push(CompletionItem {
+                kind: "database".into(),
+                database: Some(name.clone()),
+                relation: None,
+                name: name.clone(),
+                data_type: None,
+                comment: None,
+            });
+        }
+    } else {
+        let database = selected_database(&session, request.database.as_deref())?;
+        let response = session
+            .auth
+            .get(
+                "instance/instance_resource/",
+                &[
+                    ("instance_id", binding.instance_id.to_string()),
+                    ("resource_type", "table".into()),
+                    ("db_name", database.to_owned()),
+                ],
+                cancel,
+            )
+            .await?;
+        if serde_json::to_vec(&response)?.len() > 8 * 1024 * 1024 {
+            return Err(AppError::new(
+                "response_too_large",
+                "平台目录响应超过大小限制",
+            ));
+        }
+        let data = web_data(response)?;
+        let names = data
+            .as_array()
+            .ok_or_else(|| protocol("Archery 资源列表不是数组"))?;
+        if request.scope == CompletionScope::Relations {
+            for name in names {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| protocol("Archery 资源名称不是字符串"))?;
+                identifier(name)?;
+                items.push(CompletionItem {
+                    kind: "unknown".into(),
+                    database: Some(database.to_owned()),
+                    relation: None,
+                    name: name.to_owned(),
+                    data_type: None,
+                    comment: None,
+                });
+            }
+        } else {
+            let relation = request
+                .relation
+                .as_deref()
+                .ok_or_else(|| AppError::invalid("缺少关系名称"))?;
+            identifier(relation)?;
+            if !names.iter().any(|name| name.as_str() == Some(relation)) {
+                return Err(AppError::new(
+                    "catalog_incomplete",
+                    "平台目录未包含该对象，无法确认对象是否存在",
+                ));
+            }
+            let result = query::completion_columns(&session, database, relation, cancel).await?;
+            completeness = self::completeness(&result);
+            reason = (completeness != "complete").then(|| "平台字段结果可能被截断或脱敏".into());
+            let positions = positions(&result, &["Field", "Type", "Comment"])?;
+            for row in &result.rows {
+                let name = text(row, positions[0])?;
+                identifier(name)?;
+                items.push(CompletionItem {
+                    kind: "column".into(),
+                    database: Some(database.to_owned()),
+                    relation: Some(relation.to_owned()),
+                    name: name.to_owned(),
+                    data_type: Some(text(row, positions[1])?.to_owned()),
+                    comment: optional_text(row, positions[2])?,
+                });
+            }
+        }
+    }
+    let prefix = request.prefix.to_lowercase();
+    items.retain(|item| {
+        let mut name = item.name.chars().flat_map(char::to_lowercase);
+        prefix
+            .chars()
+            .all(|character| name.next() == Some(character))
+            && after.is_none_or(|after| item.name.as_str() > after)
+    });
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    if items.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        return Err(protocol("Archery 目录名称重复"));
+    }
+    let more = items.len() > request.limit;
+    items.truncate(request.limit);
+    let next_cursor = more.then(|| items.last().unwrap().name.clone());
+    Ok(CompletionPage {
+        items,
+        completeness: completeness.into(),
+        next_cursor,
+        reason,
+    })
+}
+
 pub(super) async fn list(
     session: &ArcherySession,
     params: Json,

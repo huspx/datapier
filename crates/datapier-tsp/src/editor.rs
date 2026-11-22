@@ -771,21 +771,6 @@ fn format_checked_range(
     Ok(formatted)
 }
 
-/// 从 SQL 关键词和调用方缓存的目录名称中补全，按大小写无关方式排序去重。
-pub fn completions(prefix: &str, catalog: &[String]) -> Vec<String> {
-    let lower = prefix.to_lowercase();
-    let mut items: Vec<String> = KEYWORDS
-        .iter()
-        .copied()
-        .map(str::to_owned)
-        .chain(catalog.iter().cloned())
-        .filter(|item| item.to_lowercase().starts_with(&lower))
-        .collect();
-    items.sort_by_key(|item| item.to_lowercase());
-    items.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    items
-}
-
 #[cfg(test)]
 #[path = "../tests/unit/editor.rs"]
 mod tests;

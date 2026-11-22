@@ -6,10 +6,18 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[test]
-fn mysql_options_preserve_legacy_defaults_and_reject_unsafe_values() {
+fn mysql_options_default_to_server_timezone_and_reject_unsafe_values() {
     let legacy = json!({"host":"localhost","port":3306});
     let mut direct: DirectConnection = serde_json::from_value(legacy).unwrap();
-    assert_eq!(direct.mysql.timezone.as_deref(), Some("+00:00"));
+    assert_eq!(direct.mysql.timezone, None);
+    let missing_timezone: DirectConnection =
+        serde_json::from_value(json!({"host":"localhost","port":3306,"mysql":{}})).unwrap();
+    assert_eq!(missing_timezone.mysql.timezone, None);
+    let explicit: DirectConnection = serde_json::from_value(
+        json!({"host":"localhost","port":3306,"mysql":{"timezone":"+00:00"}}),
+    )
+    .unwrap();
+    assert_eq!(explicit.mysql.timezone.as_deref(), Some("+00:00"));
     assert_eq!(direct.mysql.connect_timeout_seconds, None);
     direct.mysql.timezone = None;
     direct.mysql.connect_timeout_seconds = Some(15);

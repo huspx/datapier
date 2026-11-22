@@ -11,6 +11,7 @@ mod clipboard;
 #[cfg(test)]
 #[path = "../tests/unit/close_regression.rs"]
 mod close_regression;
+mod completion;
 mod connections;
 mod editing_files;
 mod editor;
@@ -19,6 +20,7 @@ mod grid;
 mod i18n;
 mod input;
 mod menus;
+mod native_ui;
 mod navigation;
 mod project_layout;
 mod project_workbench;
@@ -69,6 +71,7 @@ enum Msg {
     Action(String),
     Focus(String),
     CliResize(f64),
+    QueryResize(f64),
     Edit(String, usize, usize, String, usize, usize),
     Undo(String),
     Profile(usize),
@@ -77,7 +80,7 @@ enum Msg {
     Cell(u64, usize, bool),
     CellOpen(u64, usize),
     Row(u64, usize),
-    Complete(String, usize, usize),
+    CompletionAccept(Uuid, usize),
     CopyText(String),
     CopyRedisValue,
     CopyGrid,
@@ -333,6 +336,7 @@ struct App {
     viewport_width: u32,
     // 高度偏好属于当前 UI 工作区会话，切标签与收起 CLI 都不覆盖它。
     cli_share: f64,
+    query_share: f64,
     navigation: navigation::NavigationState,
     icon_blobs: Option<IconBlobs>,
     settings: AppSettings,
@@ -347,6 +351,7 @@ struct App {
     redis_keys: redis_key_selection::RedisKeySelection,
     redis_key_delete: redis_selection::RedisKeyDeleteState,
     approvals: approval::ApprovalState,
+    native_ui: native_ui::NativeUiState,
 }
 fn tsp_error(error: tern_sdk::Error) -> AppError {
     AppError::new("tsp", error.to_string())

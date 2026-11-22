@@ -74,6 +74,12 @@ impl App {
     // 异步响应先按 tab 和 generation 路由，任务、分页等再核对各自的 ID，
     // 避免迟到响应覆盖切换后的上下文；处理后台 tab 后恢复原活动 tab。
     pub(super) fn routed_response(&mut self, mut response: Response, backend: &Backend) {
+        if response.tag.starts_with("completion.unsubscribe/") {
+            if let Err(error) = response.result {
+                self.status = i18n::UiMessage::raw(error.to_string());
+            }
+            return;
+        }
         if response.tag.starts_with("resource.scan.discard/") {
             match response.result {
                 Ok(value) if value.get("discarded").and_then(Value::as_bool) == Some(true) => {}
@@ -269,11 +275,33 @@ impl App {
                 if response.tag.contains(":advanced-value/") {
                     self.advanced_value_release_stale_preview(backend, &response.result);
                 }
+                if tag.starts_with("transfer-catalog/")
+                    && let Ok(value) = &response.result
+                    && let Some(session) =
+                        value.get("session_id").filter(|session| !session.is_null())
+                {
+                    let _ = backend.request(
+                        "transfer-catalog-close",
+                        "connection.close",
+                        json!({"session_id":session}),
+                    );
+                }
                 return;
             };
             if self.tab_is_closing(id) {
                 if response.tag.contains(":advanced-value/") {
                     self.advanced_value_release_stale_preview(backend, &response.result);
+                }
+                if tag.starts_with("transfer-catalog/")
+                    && let Ok(value) = &response.result
+                    && let Some(session) =
+                        value.get("session_id").filter(|session| !session.is_null())
+                {
+                    let _ = backend.request(
+                        "transfer-catalog-close",
+                        "connection.close",
+                        json!({"session_id":session}),
+                    );
                 }
                 return;
             }
@@ -292,6 +320,9 @@ impl App {
                     || self.replace_response(&tag, &response.result, backend)
                     || self.redis_row_delete_response(&tag, &response.result)
                 {
+                } else if tag.starts_with("completion/") {
+                    response.tag = tag;
+                    self.completion_response(response);
                 } else if let Some(token) = tag.strip_prefix("change.preview/") {
                     self.change_preview_response(token, &response.result);
                 } else if let Some(token) = tag.strip_prefix("diagnostics.task/") {

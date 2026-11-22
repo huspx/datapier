@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Clone, Default)]
+pub(super) struct TransferCatalog {
+    pub token: Option<Uuid>,
+    pub value: Option<Value>,
+    pub signature: Value,
+    pub error: Option<String>,
+    pub session: Option<Value>,
+}
+
 /// 每个标签独立持有准备轮次；输入变化后绝不提交旧计划。
 #[derive(Clone, Default)]
 pub(super) struct TransferWorkbench {
@@ -33,6 +42,9 @@ pub(super) struct TransferWorkbench {
     pub object_filters: Vec<usize>,
     pub confirmations: std::collections::BTreeSet<String>,
     pub project_mode: bool,
+    pub catalog: BTreeMap<String, TransferCatalog>,
+    pub new_target: Option<String>,
+    pub redis_keys: Option<std::collections::BTreeSet<String>>,
 }
 impl TransferWorkbench {
     pub fn invalidate(&mut self) {
@@ -69,6 +81,218 @@ impl App {
     fn transfer_set(&mut self, name: &str, value: impl Into<String>) {
         let key = self.transfer_key(name);
         self.field_set(&key, value);
+    }
+    pub(super) fn transfer_input_changed(&mut self, name: &str) {
+        let Some(key) = name.strip_prefix(&format!("transfer-{}-file-", self.tabs[self.active].id))
+        else {
+            return;
+        };
+        let index = if let Ok(index) = key.parse::<usize>() {
+            Some(index)
+        } else {
+            key.rsplit_once('-').and_then(|(part, index)| {
+                matches!(
+                    part,
+                    "format"
+                        | "encoding"
+                        | "delimiter"
+                        | "header"
+                        | "columns"
+                        | "null-marker"
+                        | "backslash"
+                        | "binary-columns"
+                )
+                .then(|| index.parse::<usize>().ok())
+                .flatten()
+            })
+        };
+        if let Some(index) = index {
+            self.workbench
+                .transfer
+                .catalog
+                .remove(&format!("input:{index}"));
+            self.transfer_set(&format!("file-mapping-{index}"), "");
+            if self.transfer_value("mode") == "sql_restore" {
+                for object in 0..self.workbench.transfer.objects {
+                    self.transfer_set(&format!("object-source-{object}"), "");
+                    self.transfer_set(&format!("object-source-db-{object}"), "");
+                    self.transfer_set(&format!("object-mapping-{object}"), "");
+                }
+            }
+        }
+    }
+    fn transfer_catalog_load(
+        &mut self,
+        backend: &Backend,
+        side: &str,
+        scope: &str,
+        target: Option<Value>,
+    ) {
+        self.transfer_catalog_page(backend, side, scope, target, false);
+    }
+    fn transfer_catalog_page(
+        &mut self,
+        backend: &Backend,
+        side: &str,
+        scope: &str,
+        target: Option<Value>,
+        more: bool,
+    ) {
+        let project = self.workbench.transfer.project_mode;
+        let connection = self
+            .transfer_value(&format!(
+                "{side}-{}",
+                if project { "alias" } else { "profile" }
+            ))
+            .to_owned();
+        if connection.is_empty() {
+            return;
+        }
+        let database = target
+            .as_ref()
+            .and_then(|target| target["database"].as_str())
+            .filter(|database| !database.is_empty())
+            .unwrap_or_else(|| self.transfer_value(&format!("{side}-database")))
+            .to_owned();
+        let redis_db = self
+            .transfer_value(&format!("{side}-redis-db"))
+            .parse::<u32>()
+            .ok();
+        let endpoint = if project {
+            json!({"connection_alias":connection})
+        } else {
+            json!({"profile_id":connection,"database":if database.is_empty() { None } else { Some(database.clone()) },"redis_db":redis_db})
+        };
+        let kind = if scope == "objects" {
+            target.as_ref().and_then(|target| target["kind"].as_str())
+        } else {
+            None
+        };
+        let key = if let Some(kind) = kind {
+            format!("{side}:{scope}:{kind}:{database}")
+        } else if let Some(name) = target.as_ref().and_then(|target| target["name"].as_str()) {
+            format!("{side}:{scope}:{database}:{name}")
+        } else {
+            format!("{side}:{scope}")
+        };
+        let (cursor, session) = if more {
+            let Some(entry) = self.workbench.transfer.catalog.get(&key) else {
+                return;
+            };
+            if entry.token.is_some() {
+                return;
+            }
+            (
+                entry
+                    .value
+                    .as_ref()
+                    .and_then(|value| value.get("cursor"))
+                    .cloned(),
+                entry.session.clone(),
+            )
+        } else {
+            if let Some(session) = self
+                .workbench
+                .transfer
+                .catalog
+                .get(&key)
+                .and_then(|entry| entry.session.clone())
+            {
+                let _ = backend.request(
+                    "transfer-catalog-close",
+                    "connection.close",
+                    json!({"session_id":session}),
+                );
+            }
+            (None, None)
+        };
+        let token = Uuid::new_v4();
+        let entry = self
+            .workbench
+            .transfer
+            .catalog
+            .entry(key.clone())
+            .or_default();
+        if !more {
+            *entry = TransferCatalog::default();
+        }
+        entry.token = Some(token);
+        entry.error = None;
+        let params = json!({"endpoint":endpoint,"provider":self.transfer_value("provider"),"scope":scope,
+            "target":if scope == "objects" { None } else { target.as_ref() },"kind":kind,
+            "cursor":cursor,"session_id":session,
+            "project_id":if project { self.workbench.project.project.as_ref().map(|project| &project["id"]) } else { None },
+            "binding_group":self.workbench.project.binding_group});
+        let tag = format!(
+            "{}:{}:transfer-catalog/{token}",
+            self.tabs[self.active].id, self.generation
+        );
+        if let Err(error) = backend.request(tag, "transfer.catalog", params) {
+            let entry = self.workbench.transfer.catalog.get_mut(&key).unwrap();
+            entry.token = None;
+            entry.error = Some(error.to_string());
+        }
+    }
+    pub(super) fn transfer_input_params(&self, i: usize) -> std::result::Result<Value, String> {
+        let get = |part: &str| self.transfer_value(&format!("file-{part}-{i}"));
+        let path = self.transfer_value(&format!("file-{i}"));
+        if path.trim().is_empty() {
+            return Err("请选择输入文件".into());
+        }
+        let columns: Vec<String> =
+            serde_json::from_str(get("columns")).map_err(|e| e.to_string())?;
+        let binary: Vec<String> =
+            serde_json::from_str(get("binary-columns")).map_err(|e| e.to_string())?;
+        let format = if self.transfer_value("mode") == "sql_restore" {
+            "sql"
+        } else {
+            get("format")
+        };
+        let input = json!({"path":path,"format":format,"csv":{"encoding":get("encoding"),"delimiter":get("delimiter"),"header":get("header")=="true","columns":columns,"null_marker":get("null-marker"),"backslash_escape":get("backslash")=="true","binary_columns":binary}});
+        let endpoint = self
+            .workbench
+            .transfer
+            .project_mode
+            .then(|| json!({"connection_alias":self.transfer_value("destination-alias")}));
+        Ok(
+            json!({"input":input,"provider":self.transfer_value("provider"),"endpoint":endpoint,
+            "project_id":if self.workbench.transfer.project_mode { self.workbench.project.project.as_ref().map(|project| &project["id"]) } else { None },
+            "binding_group":self.workbench.project.binding_group}),
+        )
+    }
+    fn transfer_input_load(&mut self, backend: &Backend, i: usize) {
+        let key = format!("input:{i}");
+        let params = match self.transfer_input_params(i) {
+            Ok(params) => params,
+            Err(error) => {
+                self.workbench.transfer.catalog.insert(
+                    key,
+                    TransferCatalog {
+                        error: Some(error),
+                        ..Default::default()
+                    },
+                );
+                return;
+            }
+        };
+        let token = Uuid::new_v4();
+        self.workbench.transfer.catalog.insert(
+            key.clone(),
+            TransferCatalog {
+                token: Some(token),
+                signature: params.clone(),
+                ..Default::default()
+            },
+        );
+        let tag = format!(
+            "{}:{}:transfer-input/{token}",
+            self.tabs[self.active].id, self.generation
+        );
+        if let Err(error) = backend.request(tag, "transfer.input.inspect", params) {
+            let entry = self.workbench.transfer.catalog.get_mut(&key).unwrap();
+            entry.token = None;
+            entry.error = Some(error.to_string());
+        }
     }
     fn transfer_field_error(&mut self, (field, message): (String, String)) {
         self.workbench.transfer.stage = if field.starts_with("object-")
@@ -150,6 +374,110 @@ impl App {
         result: &Result<Value>,
         backend: &Backend,
     ) -> bool {
+        if let Some(token) = tag
+            .strip_prefix("transfer-input/")
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            let key = self
+                .workbench
+                .transfer
+                .catalog
+                .iter()
+                .find_map(|(key, entry)| (entry.token == Some(token)).then(|| key.clone()));
+            if let Some(key) = key {
+                let i = key
+                    .strip_prefix("input:")
+                    .and_then(|i| i.parse::<usize>().ok());
+                let current = i.and_then(|i| self.transfer_input_params(i).ok());
+                if current.as_ref()
+                    != self
+                        .workbench
+                        .transfer
+                        .catalog
+                        .get(&key)
+                        .map(|entry| &entry.signature)
+                {
+                    self.workbench.transfer.catalog.remove(&key);
+                    return true;
+                }
+                if let (Some(i), Ok(value)) = (i, result) {
+                    if self.transfer_value("mode") == "import"
+                        && self.transfer_value(&format!("file-format-{i}")) == "csv"
+                        && self.transfer_value(&format!("file-header-{i}")) == "false"
+                        && self.transfer_value(&format!("file-columns-{i}")) == "[]"
+                        && let Some(columns) = value["columns"].as_array()
+                    {
+                        let names: Vec<_> = columns
+                            .iter()
+                            .filter_map(|column| column["name"].as_str())
+                            .collect();
+                        self.transfer_set(&format!("file-columns-{i}"), json!(names).to_string());
+                    }
+                    let signature = self.transfer_input_params(i).unwrap_or_default();
+                    if let Some(entry) = self.workbench.transfer.catalog.get_mut(&key) {
+                        entry.token = None;
+                        entry.signature = signature;
+                        entry.value = Some(value.clone());
+                    }
+                } else if let Some(entry) = self.workbench.transfer.catalog.get_mut(&key) {
+                    entry.token = None;
+                    if let Err(error) = result {
+                        entry.error = Some(error.to_string());
+                    }
+                }
+            }
+            return true;
+        }
+        if let Some(token) = tag
+            .strip_prefix("transfer-catalog/")
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            if let Some(entry) = self
+                .workbench
+                .transfer
+                .catalog
+                .values_mut()
+                .find(|entry| entry.token == Some(token))
+            {
+                entry.token = None;
+                match result {
+                    Ok(value) if value["catalog"]["state"] == "unknown" => {
+                        entry.error = Some(
+                            value["catalog"]["reason"]
+                                .as_str()
+                                .unwrap_or("数据库发现失败")
+                                .to_owned(),
+                        );
+                    }
+                    Ok(value) => {
+                        let mut page = value["catalog"].clone();
+                        if let (Some(previous), Some(next)) = (
+                            entry.value.as_ref().and_then(|v| v["resources"].as_array()),
+                            page["resources"].as_array(),
+                        ) {
+                            let mut resources = previous.clone();
+                            resources.extend(next.iter().cloned());
+                            page["resources"] = json!(resources);
+                        }
+                        entry.session = value.get("session_id").filter(|id| !id.is_null()).cloned();
+                        entry.value = Some(page);
+                    }
+                    Err(error) => {
+                        entry.session = None;
+                        entry.error = Some(error.to_string());
+                    }
+                }
+            } else if let Ok(value) = result
+                && let Some(session) = value.get("session_id").filter(|id| !id.is_null())
+            {
+                let _ = backend.request(
+                    "transfer-catalog-close",
+                    "connection.close",
+                    json!({"session_id":session}),
+                );
+            }
+            return true;
+        }
         let Some(token) = tag
             .strip_prefix("transfer-ui/")
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -542,7 +870,7 @@ impl App {
             }
             let target_name = get(&format!("object-target-{i}"));
             let source_db = match get(&format!("object-source-db-{i}")) {
-                db if db.is_empty() => get("source-database"),
+                db if db.is_empty() && mode != "sql_restore" => get("source-database"),
                 db => db,
             };
             let target_db = match get(&format!("object-target-db-{i}")) {
@@ -565,8 +893,16 @@ impl App {
                 ));
             }
             let kind = get(&format!("object-kind-{i}"));
-            let mappings = parse_mapping(&get(&format!("object-mapping-{i}")))
+            let mut mappings = parse_mapping(&get(&format!("object-mapping-{i}")))
                 .map_err(|e| (format!("object-mapping-{i}"), e))?;
+            let explicitly_selected = !mappings.is_empty();
+            mappings.retain(|_, target| target != "\0");
+            if explicitly_selected && mappings.is_empty() {
+                return Err((
+                    format!("object-mapping-{i}"),
+                    "请至少选择一个来源字段".into(),
+                ));
+            }
             if mappings
                 .values()
                 .collect::<std::collections::BTreeSet<_>>()
@@ -641,10 +977,22 @@ impl App {
         }
         // 空 Base64 是合法的空字节 key；选择模式决定空文本的含义。
         let keys: Vec<_> = if get("redis-selection") == "keys" {
-            self.transfer_value("redis-keys")
-                .split(',')
-                .map(|s| s.trim().to_owned())
-                .collect()
+            let keys: Vec<_> = self
+                .workbench
+                .transfer
+                .redis_keys
+                .as_ref()
+                .map(|keys| keys.iter().cloned().collect())
+                .unwrap_or_else(|| {
+                    self.transfer_value("redis-keys")
+                        .split(',')
+                        .map(|s| s.trim().to_owned())
+                        .collect()
+                });
+            if keys.is_empty() {
+                return Err(("redis-keys".into(), "请至少选择一个 key".into()));
+            }
+            keys
         } else {
             Vec::new()
         };
@@ -815,6 +1163,12 @@ impl App {
                 })
                 .unwrap_or_default(),
         );
+        self.workbench.transfer.redis_keys = spec["redis"]["keys_b64"].as_array().map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        });
         self.transfer_set(
             "source-prefix",
             spec["redis"]["source_prefix_b64"].as_str().unwrap_or(""),
@@ -1028,6 +1382,8 @@ impl App {
                 self.transfer_action(&format!("transfer-new:{mode}"), backend);
                 self.transfer_set("redis-selection", "keys");
                 self.transfer_set("redis-keys", key);
+                self.workbench.transfer.redis_keys =
+                    Some(std::iter::once(key.to_owned()).collect());
                 self.transfer_set("pattern", "");
                 self.transfer_set("source-redis-db", database);
                 self.transfer_set("destination-redis-db", database);
@@ -1090,6 +1446,19 @@ impl App {
             }
             self.dirty = true;
             if name.starts_with("transfer-project-new:") {
+                for session in self
+                    .workbench
+                    .transfer
+                    .catalog
+                    .values_mut()
+                    .filter_map(|entry| entry.session.take())
+                {
+                    let _ = backend.request(
+                        "transfer-catalog-close",
+                        "connection.close",
+                        json!({"session_id":session}),
+                    );
+                }
                 self.workbench.transfer = TransferWorkbench::default();
             }
             let profile = self.profile.clone();
@@ -1197,6 +1566,8 @@ impl App {
                 self.transfer_set("object-source-0", &target.name);
                 self.transfer_set("object-target-0", &target.name);
             }
+            self.transfer_catalog_load(backend, "source", "databases", None);
+            self.transfer_catalog_load(backend, "destination", "databases", None);
             return true;
         }
         if let Some(rest) = name.strip_prefix("field:transfer-") {
@@ -1211,9 +1582,200 @@ impl App {
                         self.field_set(&value_field, "");
                     }
                 }
+                let key = field
+                    .strip_prefix(&format!("transfer-{}-", self.tabs[self.active].id))
+                    .unwrap_or("")
+                    .to_owned();
+                if value == "__transfer_new__" {
+                    self.transfer_set("new-target-name", "");
+                    let index = key.rsplit('-').next().unwrap_or("0");
+                    let group = if key.starts_with("file-") {
+                        "file"
+                    } else {
+                        "object"
+                    };
+                    let types = self
+                        .transfer_value(&format!("{group}-types-{index}"))
+                        .to_owned();
+                    self.transfer_set("new-target-types", types);
+                    self.workbench.transfer.new_target = Some(key);
+                    self.workbench.generic_select = None;
+                    let focus = self.transfer_key("new-target-name");
+                    self.focus = focus.clone();
+                    self.workbench.focus_request = Some(format!("input-{focus}"));
+                    return true;
+                }
+                let changed = self.field(&field) != value;
                 self.field_set(&field, value);
                 self.changed_field(&field);
                 self.workbench.generic_select = None;
+                if changed {
+                    if key == "redis-selection" && value == "keys" {
+                        self.workbench.transfer.redis_keys = Some(Default::default());
+                    }
+                    for side in ["source", "destination"] {
+                        let connection_changed = key == format!("{side}-profile")
+                            || key == format!("{side}-alias")
+                            || key == "provider";
+                        let database_changed =
+                            key == format!("{side}-database") || key == format!("{side}-redis-db");
+                        if connection_changed || database_changed {
+                            if side == "source" {
+                                self.workbench.transfer.redis_keys = Some(Default::default());
+                            }
+                            for session in self
+                                .workbench
+                                .transfer
+                                .catalog
+                                .iter()
+                                .filter(|(name, _)| name.starts_with(&format!("{side}:")))
+                                .filter_map(|(_, entry)| entry.session.as_ref())
+                            {
+                                let _ = backend.request(
+                                    "transfer-catalog-close",
+                                    "connection.close",
+                                    json!({"session_id":session}),
+                                );
+                            }
+                            self.workbench.transfer.catalog.retain(|name, _| {
+                                !name.starts_with(&format!("{side}:"))
+                                    || (!connection_changed && name == &format!("{side}:databases"))
+                            });
+                            if connection_changed {
+                                if key == "provider" {
+                                    self.transfer_set(&format!("{side}-profile"), "");
+                                    self.transfer_set(&format!("{side}-alias"), "");
+                                }
+                                self.transfer_set(&format!("{side}-database"), "");
+                                self.transfer_set(&format!("{side}-redis-db"), "");
+                                self.transfer_catalog_load(backend, side, "databases", None);
+                            } else if self.transfer_value("provider") == "mysql" {
+                                self.transfer_catalog_load(
+                                    backend,
+                                    side,
+                                    "objects",
+                                    Some(json!({"kind":"table"})),
+                                );
+                            }
+                            for i in 0..self.workbench.transfer.objects {
+                                self.transfer_set(
+                                    &format!(
+                                        "object-{}-{i}",
+                                        if side == "source" { "source" } else { "target" }
+                                    ),
+                                    "",
+                                );
+                                self.transfer_set(&format!("object-mapping-{i}"), "");
+                            }
+                            if side == "destination" {
+                                for i in 0..self.workbench.transfer.files {
+                                    self.transfer_set(&format!("file-target-{i}"), "");
+                                    self.transfer_set(&format!("file-mapping-{i}"), "");
+                                }
+                            }
+                        }
+                    }
+                    if let Some(index) = key
+                        .strip_prefix("object-kind-")
+                        .and_then(|value| value.parse::<usize>().ok())
+                    {
+                        for part in ["source", "target", "mapping"] {
+                            self.transfer_set(&format!("object-{part}-{index}"), "");
+                        }
+                        for side in ["source", "destination"] {
+                            if !self.workbench.transfer.catalog.contains_key(&format!(
+                                "{side}:objects:{value}:{}",
+                                self.transfer_value(&format!("{side}-database"))
+                            )) {
+                                self.transfer_catalog_load(
+                                    backend,
+                                    side,
+                                    "objects",
+                                    Some(json!({"kind":value})),
+                                );
+                            }
+                        }
+                    }
+                    for (prefix, side, part) in [
+                        ("object-source-db-", "source", "source"),
+                        ("object-target-db-", "destination", "target"),
+                    ] {
+                        if let Some(index) = key
+                            .strip_prefix(prefix)
+                            .and_then(|value| value.parse::<usize>().ok())
+                        {
+                            self.transfer_set(&format!("object-{part}-{index}"), "");
+                            self.transfer_set(&format!("object-mapping-{index}"), "");
+                            let kind = self
+                                .transfer_value(&format!("object-kind-{index}"))
+                                .to_owned();
+                            self.transfer_catalog_load(
+                                backend,
+                                side,
+                                "objects",
+                                Some(json!({"kind":kind,"database":value})),
+                            );
+                        }
+                    }
+                    for (prefix, side) in [
+                        ("object-source-", "source"),
+                        ("object-target-", "destination"),
+                        ("file-target-", "destination"),
+                    ] {
+                        if let Some(index) = key
+                            .strip_prefix(prefix)
+                            .and_then(|value| value.parse::<usize>().ok())
+                        {
+                            if !value.is_empty() {
+                                let kind = if prefix == "file-target-" {
+                                    "table"
+                                } else {
+                                    self.transfer_value(&format!("object-kind-{index}"))
+                                };
+                                let database = if prefix == "file-target-" {
+                                    ""
+                                } else {
+                                    self.transfer_value(&format!(
+                                        "object-{}-db-{index}",
+                                        if side == "source" { "source" } else { "target" }
+                                    ))
+                                };
+                                let target = json!({"name":value,"kind":kind,"database":if database.is_empty() { None } else { Some(database) },"key_b64":null});
+                                if matches!(kind, "table" | "view")
+                                    && !(side == "source"
+                                        && self.transfer_value("mode") == "sql_restore")
+                                {
+                                    self.transfer_catalog_load(
+                                        backend,
+                                        side,
+                                        "columns",
+                                        Some(target),
+                                    );
+                                }
+                            }
+                            if prefix == "file-target-" {
+                                self.transfer_set(&format!("file-mapping-{index}"), "");
+                            } else {
+                                self.transfer_set(&format!("object-mapping-{index}"), "");
+                            }
+                            if prefix == "object-source-" {
+                                let count = self
+                                    .workbench
+                                    .transfer
+                                    .object_filters
+                                    .get(index)
+                                    .copied()
+                                    .unwrap_or(0);
+                                for filter in 0..count {
+                                    self.transfer_set(
+                                        &format!("object-filter-column-{index}-{filter}"),
+                                        "",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -1223,7 +1785,236 @@ impl App {
                 "source" | "objects" | "policy" | "preview" | "report"
             ) {
                 self.workbench.transfer.stage = stage.into();
+                if (stage == "objects" || stage == "source")
+                    && self.transfer_value("provider") == "mysql"
+                {
+                    for side in ["source", "destination"] {
+                        if !self.workbench.transfer.catalog.contains_key(&format!(
+                            "{side}:objects:table:{}",
+                            self.transfer_value(&format!("{side}-database"))
+                        )) {
+                            self.transfer_catalog_load(
+                                backend,
+                                side,
+                                "objects",
+                                Some(json!({"kind":"table"})),
+                            );
+                        }
+                    }
+                }
                 self.focus.clear();
+            }
+            return true;
+        }
+        if let Some((side, scope)) = name
+            .strip_prefix("transfer-catalog-retry:")
+            .and_then(|value| value.split_once(':'))
+        {
+            if matches!(side, "source" | "destination") && matches!(scope, "databases" | "objects")
+            {
+                self.transfer_catalog_load(backend, side, scope, None);
+            }
+            return true;
+        }
+        if let Some(side) = name.strip_prefix("transfer-catalog-more:") {
+            if matches!(side, "source" | "destination") {
+                self.transfer_catalog_page(backend, side, "objects", None, true);
+            }
+            return true;
+        }
+        if let Some(rest) = name.strip_prefix("transfer-objects-load:") {
+            let mut parts = rest.splitn(3, ':');
+            if let (Some(side @ ("source" | "destination")), Some(kind), Some(database)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                self.transfer_catalog_load(
+                    backend,
+                    side,
+                    "objects",
+                    Some(json!({"kind":kind,"database":database})),
+                );
+            }
+            return true;
+        }
+        if let Some(rest) = name.strip_prefix("transfer-objects-more:") {
+            let mut parts = rest.splitn(3, ':');
+            if let (Some(side @ ("source" | "destination")), Some(kind), Some(database)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                self.transfer_catalog_page(
+                    backend,
+                    side,
+                    "objects",
+                    Some(json!({"kind":kind,"database":database})),
+                    true,
+                );
+            }
+            return true;
+        }
+        if let Some(key) = name.strip_prefix("transfer-redis-key:") {
+            let keys = self
+                .workbench
+                .transfer
+                .redis_keys
+                .get_or_insert_with(Default::default);
+            if !keys.remove(key) {
+                keys.insert(key.to_owned());
+            }
+            self.workbench.transfer.invalidate();
+            return true;
+        }
+        if let Some(rest) = name.strip_prefix("transfer-columns-retry:") {
+            let mut parts = rest.split(':');
+            if let (
+                Some(side @ ("source" | "destination")),
+                Some(group @ ("file" | "object")),
+                Some(index),
+            ) = (parts.next(), parts.next(), parts.next())
+            {
+                let part = if side == "source" { "source" } else { "target" };
+                let object = self
+                    .transfer_value(&format!("{group}-{part}-{index}"))
+                    .to_owned();
+                let database = if group == "file" {
+                    String::new()
+                } else {
+                    self.transfer_value(&format!("object-{part}-db-{index}"))
+                        .to_owned()
+                };
+                let kind = if group == "file" {
+                    "table".to_owned()
+                } else {
+                    self.transfer_value(&format!("object-kind-{index}"))
+                        .to_owned()
+                };
+                if !object.is_empty() {
+                    self.transfer_catalog_load(backend, side, "columns", Some(json!({"name":object,"kind":kind,"database":if database.is_empty(){None}else{Some(database)},"key_b64":null})));
+                }
+            }
+            return true;
+        }
+        if let Some(i) = name
+            .strip_prefix("transfer-input-inspect:")
+            .and_then(|i| i.parse::<usize>().ok())
+        {
+            if i < self.workbench.transfer.files {
+                self.transfer_input_load(backend, i);
+            }
+            return true;
+        }
+        if let Some(rest) = name.strip_prefix("transfer-map:") {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let mut parts = rest.splitn(4, ':');
+            if let (Some(group @ ("file" | "object")), Some(index), Some(source), Some(target)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+                && let (Ok(source), Ok(target)) = (
+                    URL_SAFE_NO_PAD.decode(source),
+                    URL_SAFE_NO_PAD.decode(target),
+                )
+                && let (Ok(source), Ok(target)) =
+                    (String::from_utf8(source), String::from_utf8(target))
+            {
+                let key = format!("{group}-mapping-{index}");
+                let mut mapping = parse_mapping(self.transfer_value(&key)).unwrap_or_default();
+                if group == "object" {
+                    if mapping.is_empty() {
+                        let source_object = self.transfer_value(&format!("object-source-{index}"));
+                        let override_db = self.transfer_value(&format!("object-source-db-{index}"));
+                        let restore = self.transfer_value("mode") == "sql_restore";
+                        let database = if !override_db.is_empty() {
+                            override_db
+                        } else if restore {
+                            ""
+                        } else {
+                            self.transfer_value("source-database")
+                        };
+                        let columns = if restore {
+                            (0..self.workbench.transfer.files)
+                                .filter_map(|i| {
+                                    self.workbench
+                                        .transfer
+                                        .catalog
+                                        .get(&format!("input:{i}"))
+                                        .filter(|entry| {
+                                            self.transfer_input_params(i)
+                                                .ok()
+                                                .is_some_and(|params| params == entry.signature)
+                                        })
+                                })
+                                .filter_map(|entry| entry.value.as_ref())
+                                .flat_map(|value| value["objects"].as_array().into_iter().flatten())
+                                .find(|object| {
+                                    object["name"] == source_object
+                                        && (database.is_empty() || object["database"] == database)
+                                })
+                                .and_then(|object| object["columns"].as_array())
+                        } else {
+                            self.workbench
+                                .transfer
+                                .catalog
+                                .get(&format!("source:columns:{database}:{source_object}"))
+                                .and_then(|entry| entry.value.as_ref())
+                                .and_then(|value| value["columns"].as_array())
+                        };
+                        if let Some(columns) = columns {
+                            for column in
+                                columns.iter().filter(|column| column["generated"] != true)
+                            {
+                                if let Some(name) = column["name"].as_str() {
+                                    mapping.insert(name.to_owned(), name.to_owned());
+                                }
+                            }
+                        }
+                    }
+                    let mapped = if target.is_empty() {
+                        source.clone()
+                    } else {
+                        target
+                    };
+                    mapping.insert(source, mapped);
+                } else if target.is_empty() {
+                    mapping.remove(&source);
+                } else {
+                    mapping.insert(source, target);
+                }
+                self.transfer_set(&key, json!(mapping).to_string());
+                self.workbench.transfer.invalidate();
+                self.workbench.generic_select = None;
+            }
+            return true;
+        }
+        if name == "transfer-new-target-cancel" {
+            if let Some(key) = self.workbench.transfer.new_target.take() {
+                let focus = self.transfer_key(&key);
+                self.focus = focus.clone();
+                self.workbench.focus_request = Some(format!("input-{focus}"));
+            }
+            return true;
+        }
+        if name == "transfer-new-target-save" {
+            let value = self.transfer_value("new-target-name").trim().to_owned();
+            if value.is_empty() {
+                self.field_error(
+                    &self.transfer_key("new-target-name"),
+                    i18n::UiMessage::local("目标对象名称不能为空"),
+                );
+            } else if let Some(key) = self.workbench.transfer.new_target.take() {
+                let index = key.rsplit('-').next().unwrap_or("0");
+                let group = if key.starts_with("file-") {
+                    "file"
+                } else {
+                    "object"
+                };
+                let types = self.transfer_value("new-target-types").to_owned();
+                self.transfer_set(&format!("{group}-types-{index}"), types);
+                self.transfer_set(&key, value);
+                if let Some(index) = key.strip_prefix("object-target-") {
+                    self.transfer_set(&format!("object-create-{index}"), "true");
+                }
+                self.workbench.transfer.invalidate();
+                let focus = self.transfer_key(&key);
+                self.focus = focus.clone();
+                self.workbench.focus_request = Some(format!("input-{focus}"));
             }
             return true;
         }
@@ -1730,7 +2521,7 @@ fn transfer_selectable_item(item: &Value) -> bool {
             && item["source"].is_object()
             && item["target"].is_object())
 }
-fn parse_mapping(text: &str) -> std::result::Result<BTreeMap<String, String>, String> {
+pub(super) fn parse_mapping(text: &str) -> std::result::Result<BTreeMap<String, String>, String> {
     if text.trim_start().starts_with('{') {
         let mappings: BTreeMap<String, String> =
             serde_json::from_str(text).map_err(|_| "映射必须是 JSON 字符串对象".to_owned())?;

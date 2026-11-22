@@ -20,7 +20,7 @@ use rmcp::{
         PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
         ToolAnnotations,
     },
-    service::{RequestContext, RoleServer},
+    service::{NotificationContext, RequestContext, RoleServer},
     transport::stdio,
 };
 use serde_json::{Map, Value, json};
@@ -376,6 +376,9 @@ fn validate(spec: &Spec, args: &Map<String, Value>) -> std::result::Result<(), E
 struct Adapter {
     engine: Client,
     approvals: Arc<Mutex<HashMap<String, String>>>,
+    project_roots: Vec<String>,
+    environment: Option<String>,
+    roots_gate: Arc<tokio::sync::Mutex<()>>,
 }
 fn response(value: Value, error: bool) -> CallToolResponse {
     let value = if value.is_object() {
@@ -399,7 +402,48 @@ fn response(value: Value, error: bool) -> CallToolResponse {
     result.structured_content = Some(value);
     result.into()
 }
+impl Adapter {
+    #[allow(deprecated)]
+    async fn refresh_roots(&self, context: NotificationContext<RoleServer>) {
+        // 顺序应用 roots 通知，避免较早的慢响应覆盖较新的仓库上下文。
+        let _guard = self.roots_gate.lock().await;
+        let supports_roots = context
+            .peer
+            .peer_info()
+            .is_some_and(|info| info.capabilities.roots.is_some());
+        let (roots, source) = if supports_roots {
+            match context.peer.list_roots().await {
+                Ok(result) => (
+                    result
+                        .roots
+                        .into_iter()
+                        .map(|root| root.uri)
+                        .collect::<Vec<_>>(),
+                    "roots",
+                ),
+                Err(_) => (Vec::new(), "roots_error"),
+            }
+        } else if self.project_roots.is_empty() {
+            (Vec::new(), "unknown")
+        } else {
+            (self.project_roots.clone(), "explicit")
+        };
+        let _ = self
+            .engine
+            .request(
+                "mcp.context.update",
+                json!({"roots":roots,"source":source,"environment":self.environment}),
+            )
+            .await;
+    }
+}
 impl ServerHandler for Adapter {
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        self.refresh_roots(context).await;
+    }
+    async fn on_roots_list_changed(&self, context: NotificationContext<RoleServer>) {
+        self.refresh_roots(context).await;
+    }
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         // 2026-07-28 禁止 server-to-client 请求；本服务依赖原生 elicitation。
         Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
@@ -476,7 +520,26 @@ impl ServerHandler for Adapter {
 }
 
 /// 启动 MCP stdio 服务；上游断开或收到中断时关闭独立 Engine 客户端会话。
-pub async fn run(root: PathBuf, allow_connections: Vec<Uuid>) -> Result<()> {
+pub async fn run(
+    root: PathBuf,
+    allow_connections: Vec<Uuid>,
+    project_roots: Vec<PathBuf>,
+    environment: Option<String>,
+) -> Result<()> {
+    let project_roots = project_roots
+        .into_iter()
+        .map(|path| {
+            let absolute = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()?.join(path)
+            };
+            absolute
+                .into_os_string()
+                .into_string()
+                .map_err(|_| AppError::invalid("项目路径不是 UTF-8"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let engine = Client::connect_with(
         &root,
         ClientOptions {
@@ -489,6 +552,9 @@ pub async fn run(root: PathBuf, allow_connections: Vec<Uuid>) -> Result<()> {
     let adapter = Adapter {
         engine: engine.clone(),
         approvals: Arc::new(Mutex::new(HashMap::new())),
+        project_roots,
+        environment,
+        roots_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
     let service = match adapter.serve(stdio()).await {
         Ok(service) => service,

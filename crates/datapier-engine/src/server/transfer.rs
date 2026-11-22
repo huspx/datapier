@@ -9,6 +9,8 @@ use datapier_core::{
 };
 use std::sync::atomic::AtomicUsize;
 
+mod catalog;
+
 const TTL: Duration = Duration::from_secs(300);
 const GLOBAL_BUDGET: usize = 64 * 1024 * 1024;
 const PAGE: usize = 768 * 1024;
@@ -125,10 +127,16 @@ fn sql_object_selection(
 #[derive(Default)]
 pub(super) struct TransferState {
     plans: HashMap<Uuid, PlanEntry>,
+    catalogs: HashMap<Uuid, catalog::CatalogLease>,
 }
 impl TransferState {
+    pub(super) fn forget_catalog(&mut self, id: Uuid) {
+        self.catalogs.remove(&id);
+    }
+
     /// 客户端离开时释放未被任务持有的计划；运行任务仍计入预算直至结束。
     pub(super) fn remove_owner(&mut self, owner: Uuid) {
+        self.catalogs.retain(|_, lease| lease.owner != owner);
         self.plans.retain(|_, entry| {
             if entry.owner != owner {
                 true
@@ -663,6 +671,8 @@ impl Engine {
             }
         }
         match method {
+            "transfer.catalog" => self.transfer_catalog(owner, &params).await,
+            "transfer.input.inspect" => self.transfer_input_inspect(owner, &params).await,
             "transfer.prepare" => {
                 let mut spec: TransferSpec = model::param(&params, "spec")?;
                 let _binding_guard = self.transfer_binding_guard(&params).await?;

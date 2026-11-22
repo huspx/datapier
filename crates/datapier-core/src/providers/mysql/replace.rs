@@ -813,8 +813,29 @@ pub(super) async fn read(s: &mut MysqlSession, params: Json) -> Result<Json> {
     let items: Vec<_> = plan.items[offset..end].iter().map(|i| -> Result<Json> {
         let (before, before_len) = json_window(&i.change.before, 0, 768)?;
         let (after, after_len) = json_window(&i.change.values, 0, 768)?;
+        // 旧值包含整行，可能因其他列过大而截断；单独保留发生替换的文本前缀。
+        let mut budget = 768usize;
+        let mut text_changes = Vec::new();
+        for (name, new) in &i.change.values {
+            let (Some(Value::Text(old)), Value::Text(new)) = (i.change.before.get(name), new) else {
+                continue;
+            };
+            let overhead = name.len().saturating_add(64);
+            if budget < overhead.saturating_add(8) { break; }
+            budget -= overhead;
+            let limit = budget / 2;
+            fn prefix(text: &str, limit: usize) -> &str {
+                let mut end = text.len().min(limit);
+                while !text.is_char_boundary(end) { end -= 1; }
+                &text[..end]
+            }
+            let before = prefix(old, limit);
+            let after = prefix(new, limit);
+            budget -= before.len() + after.len();
+            text_changes.push(json!({"column":name,"before":before,"after":after,"complete":before.len() == old.len() && after.len() == new.len()}));
+        }
         let brief = |v: &[u8], total: usize| json!({"base64":STANDARD.encode(v),"byte_len":total,"complete":v.len() == total,"encoding":"typed_json"});
-        Ok(json!({"id":i.id,"key":i.change.key,"before":brief(&before, before_len),"after":brief(&after, after_len),"matches":i.matches,"selected":!i.excluded,"collision":false}))
+        Ok(json!({"id":i.id,"key":i.change.key,"before":brief(&before, before_len),"after":brief(&after, after_len),"text_changes_complete":text_changes.len() == i.change.values.len(),"text_changes":text_changes,"matches":i.matches,"selected":!i.excluded,"collision":false}))
     }).collect::<Result<_>>()?;
     Ok(
         json!({"summary":plan.summary(id)?,"items":items,"offset":offset,"next_offset":(end < plan.items.len()).then_some(end),"revision":plan.revision,"digest":plan.digest()?,"plan_digest":plan.digest()?}),

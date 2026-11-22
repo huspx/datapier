@@ -1,7 +1,7 @@
 //! 导入文件的分块校验与不覆盖发布。
 //!
 //! 指纹只保存摘要，不保存数据；消费者收到的字节来自已校验的同一个缓冲区。
-mod csv;
+pub(crate) mod csv;
 mod json;
 mod raw;
 mod reader;

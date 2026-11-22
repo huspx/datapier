@@ -373,6 +373,19 @@ impl Engine {
     }
     fn emit_auth_state(&self, server_id: Uuid, auth_state: &str, generation: u64) {
         let mut state = self.state.lock().unwrap();
+        let profiles: Vec<_> = state
+            .databases
+            .values()
+            .filter(|db| {
+                db.profile
+                    .archery()
+                    .is_some_and(|source| source.server_id == server_id)
+            })
+            .map(|db| db.profile.id)
+            .collect();
+        for profile in profiles {
+            state.completion.invalidate_profile(profile);
+        }
         state.event_seq += 1;
         let event = EngineEvent {
             seq: state.event_seq,

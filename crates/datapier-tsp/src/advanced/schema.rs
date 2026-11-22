@@ -1873,6 +1873,23 @@ impl SchemaEditor {
             let mut section = html::div()
                 .class("advanced-section")
                 .child(html::strong(tr("变更预览").into_owned()));
+            // 视图 SELECT 与触发器正文在基线和冻结草稿中都存在；ALTER 等步骤不是新定义。
+            if let (Some(snapshot), Some(definition)) = (&self.snapshot, &self.definition) {
+                let bodies = match (&snapshot.definition, definition) {
+                    (SchemaDefinition::View(old), SchemaDefinition::View(new)) => {
+                        Some((&old.select, &new.select))
+                    }
+                    (SchemaDefinition::Trigger(old), SchemaDefinition::Trigger(new)) => {
+                        Some((&old.body, &new.body))
+                    }
+                    _ => None,
+                };
+                if let Some((before, after)) = bodies {
+                    section = section
+                        .child(html::strong("定义正文对比 / Definition body comparison"))
+                        .child(super::text_diff(before, after, "definition.sql"));
+                }
+            }
             if let Some(steps) = preview.get("steps").and_then(Value::as_array) {
                 for step in steps {
                     if let Some(sql) = step.get("sql").and_then(Value::as_str) {

@@ -29,11 +29,7 @@ pub(super) fn header(app: &App) -> Node<Msg> {
         );
     }
     if redis && app.profile.is_some() {
-        context = context.child(
-            html::div()
-                .class("db-picker")
-                .child(redis_db_picker(app, false)),
-        );
+        context = context.child(html::div().class("db-picker").child(redis_db_picker(app)));
     }
     if let Some(profile) = &app.profile {
         context = context

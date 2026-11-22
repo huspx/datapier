@@ -344,8 +344,27 @@ fn summaries(snapshot: &ProjectSnapshot) -> Vec<Value> {
 fn snapshot_json(snapshot: &ProjectSnapshot) -> Value {
     json!({"project_id":snapshot.manifest.id,"manifest":snapshot.manifest,"root":snapshot.root,"digests":snapshot.digests,"file_summaries":summaries(snapshot),"files":{}})
 }
-fn change_summaries(preview: &ProjectSavePreview) -> Vec<Value> {
-    preview.changes.iter().map(|c| json!({"path":c.path,"old_digest":c.old_digest,"new_digest":c.new_digest,"old_bytes":c.old_content.as_ref().map(String::len),"new_bytes":c.new_content.as_ref().map(String::len)})).collect()
+fn change_summaries(preview: &ProjectSavePreview, comparisons: bool) -> Vec<Value> {
+    // 正文与摘要共用 IPC 额度；只发送有界 UTF-8 前缀，且明确标记截断。
+    let mut remaining = 64 * 1024;
+    preview.changes.iter().map(|c| {
+        let mut item = json!({"path":c.path,"old_digest":c.old_digest,"new_digest":c.new_digest,"old_bytes":c.old_content.as_ref().map(String::len),"new_bytes":c.new_content.as_ref().map(String::len)});
+        if comparisons && c.path.to_ascii_lowercase().ends_with(".sql") && remaining >= 8 {
+            let limit = (remaining / 2).min(8 * 1024);
+            fn excerpt(content: Option<&str>, limit: usize) -> (&str, bool) {
+                content.map(|text| {
+                    let mut end = text.len().min(limit);
+                    while !text.is_char_boundary(end) { end -= 1; }
+                    (&text[..end], end == text.len())
+                }).unwrap_or(("", true))
+            }
+            let (old, old_complete) = excerpt(c.old_content.as_deref(), limit);
+            let (new, new_complete) = excerpt(c.new_content.as_deref(), limit);
+            remaining -= old.len() + new.len();
+            item["comparison"] = json!({"before":old,"after":new,"complete":old_complete && new_complete});
+        }
+        item
+    }).collect()
 }
 fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:x}", base16ct::HexDisplay(&Sha256::digest(bytes)))
@@ -382,7 +401,7 @@ fn windows_entry_identity(path: &Path, directory: bool) -> std::io::Result<Strin
 }
 
 // 目录被删除并在同一路径重建时不能继承旧目录的授权。
-fn binding_root_identity(root: &str) -> Result<String> {
+pub(super) fn binding_root_identity(root: &str) -> Result<String> {
     let metadata = std::fs::symlink_metadata(root)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AppError::new("binding_required", "项目目录身份已变化"));
@@ -1411,7 +1430,7 @@ impl Engine {
                         .await?,
                 );
                 let plan_id = Uuid::new_v4();
-                let response = json!({"plan_id":plan_id,"revision":1,"digest":preview.digest,"changes":change_summaries(&preview)});
+                let response = json!({"plan_id":plan_id,"revision":1,"digest":preview.digest,"changes":change_summaries(&preview, true)});
                 let mut state = self.state.lock().unwrap();
                 if !state.clients.contains(&owner)
                     || !state
@@ -2300,7 +2319,7 @@ impl Engine {
                         &stage.preview.digest,
                         &action,
                     ))?);
-                    let changes = change_summaries(&stage.preview);
+                    let changes = change_summaries(&stage.preview, false);
                     {
                         let mut state = self.state.lock().unwrap();
                         if !state.clients.contains(&owner) {

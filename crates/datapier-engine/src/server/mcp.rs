@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 mod access;
 mod authentication;
 mod catalog;
+mod context;
 mod execution;
 mod results;
 
@@ -21,9 +22,11 @@ pub(super) struct McpState {
     pages: HashMap<(Uuid, Uuid, usize), Vec<u64>>,
     auth_attempts: HashSet<(Uuid, Uuid, u64, u64)>,
     authentication: HashMap<(Uuid, Uuid), AuthenticationRequest>,
+    contexts: HashMap<Uuid, context::ProjectContext>,
 }
 impl McpState {
     pub(super) fn disconnect(&mut self, owner: Uuid) {
+        self.contexts.remove(&owner);
         self.sessions.retain(|_, session| session.owner != owner);
         self.gates.retain(|id, _| self.sessions.contains_key(id));
         self.approvals.retain(|_, route| route.owner != owner);
@@ -177,12 +180,13 @@ impl Engine {
             return Err(AppError::invalid("不接受内部参数"));
         }
         let result = match method {
+            "mcp.context.update" => self.mcp_context_update(owner, &params).await,
             "mcp.get_server_info" => {
                 let settings = self.store.settings().await?;
                 Ok(
                     json!({"version":env!("CARGO_PKG_VERSION"),"engine_id":self.id,"protocol_version":crate::protocol::VERSION,
                     "capabilities":{"tools":true,"transport":"stdio","transactions":true},
-                    "limits":settings.limits,"fine_grained_access":settings.mcp.fine_grained_access}),
+                    "limits":settings.limits,"fine_grained_access":settings.mcp.fine_grained_access,"project_context":self.mcp_project_context(owner).await?}),
                 )
             }
             "mcp.list_connections" => self.mcp_connections(owner, &params).await,

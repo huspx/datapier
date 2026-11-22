@@ -192,6 +192,9 @@ fn settings_display_group<'a>(group: &'a str, key: &str) -> &'a str {
 }
 
 pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
+    if kind == "project-local" {
+        return super::project_workbench::local_dialog(app);
+    }
     let title = crate::i18n::tr(match kind {
         "profile" => {
             if app.archery.server_only {
@@ -1049,6 +1052,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 .attr("aria-label", crate::i18n::tr("设置").into_owned());
             for (tab, label) in [
                 ("general", "常规"),
+                ("updates", "更新"),
                 ("editing", "编辑与文件"),
                 ("archery", "Archery 服务器"),
                 ("mcp", "MCP"),
@@ -1075,11 +1079,15 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             let settings_ready = app.settings_loaded && app.field("settings-reload") != "true";
             let mut settings_layout = html::div().class("settings-grid");
             if settings_ready && current_tab != "archery" {
-                let status = if app.settings_save_token.is_some() {
+                let status = if app.native_ui.settings_reloading() {
+                    "加载中…"
+                } else if app.settings_save_token.is_some() || app.native_ui.settings_busy() {
                     "全局设置保存中…"
-                } else if !app.field("settings-error").is_empty() {
+                } else if !app.field("settings-error").is_empty()
+                    || app.native_ui.policy_error.is_some()
+                {
                     "全局设置保存失败"
-                } else if app.settings_form_dirty() {
+                } else if app.settings_global_form_dirty() || app.native_ui.settings_dirty() {
                     "全局设置有未保存修改"
                 } else {
                     "全局设置已保存"
@@ -1122,6 +1130,9 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                             .child(language),
                     ),
                 );
+            }
+            if settings_ready && current_tab == "updates" {
+                settings_layout = settings_layout.child(crate::native_ui::update_settings(app));
             }
             if settings_ready && current_tab == "editing" {
                 let mut panel = settings_section("编辑限制");
@@ -1560,6 +1571,16 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                         .attr("role", "alert"),
                 );
             }
+            if current_tab != "archery"
+                && current_tab != "updates"
+                && let Some(error) = &app.native_ui.policy_error
+            {
+                panel = panel.child(
+                    html::p(error.clone())
+                        .class("form-submit-error")
+                        .attr("role", "alert"),
+                );
+            }
             if settings_ready && mcp {
                 let mut rules = html::div()
                     .class("settings-section settings-section-wide")
@@ -1895,6 +1916,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     ui::button(crate::i18n::tr("重新加载设置").into_owned())
                         .disabled(
                             app.settings_save_token.is_some()
+                                || app.native_ui.request.is_some()
                                 || app.field("settings-reload") == "true",
                         )
                         .on_click(Msg::Action("settings-reload".into())),
@@ -1908,7 +1930,13 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 footer = footer.child(
                     ui::button(crate::i18n::tr("保存全局设置").into_owned())
                         .variant(ui::ButtonVariant::Primary)
-                        .disabled(!settings_ready || app.settings_save_token.is_some())
+                        .disabled(
+                            !settings_ready
+                                || app.settings_save_token.is_some()
+                                || app.native_ui.settings_busy()
+                                || (app.native_ui.settings_dirty()
+                                    && app.native_ui.request.is_some()),
+                        )
                         .on_click(Msg::Action("settings-save".into())),
                 );
             }
@@ -2107,8 +2135,7 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                     .on_click(Msg::Action("overlay-close-discard".into())),
             );
     }
-    let picker_open = app.navigation.form_redis_db_menu
-        || app.workbench.cell_fields_open
+    let picker_open = app.workbench.cell_fields_open
         || app.workbench.sql_forms.open_select.is_some()
         || app.workbench.generic_select.is_some();
     // SDK 把 slot 移到 body 之后；正文显式命名，焦点路径不依赖构建顺序。

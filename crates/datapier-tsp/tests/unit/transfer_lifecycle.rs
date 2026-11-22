@@ -279,3 +279,50 @@ fn invalid_redis_key_and_numeric_filter_focus_object_fields() {
         app.transfer_key("object-filter-value-0-0")
     );
 }
+
+#[test]
+fn object_mapping_preserves_default_columns_and_rejects_empty_projection() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let (backend, _, _) = Backend::scripted();
+    let mut app = restore_app(&backend);
+    app.transfer_set("mode", "copy");
+    app.transfer_set("source-profile", Uuid::new_v4().to_string());
+    app.transfer_set("source-database", "source_db");
+    app.transfer_set("destination-database", "target_db");
+    app.transfer_set("object-source-0", "orders");
+    app.transfer_set("object-target-0", "archive");
+    app.workbench.transfer.catalog.insert(
+        "source:columns:source_db:orders".into(),
+        TransferCatalog {
+            value: Some(json!({"columns":[{"name":"id"},{"name":"email"},{"name":"total"}]})),
+            ..Default::default()
+        },
+    );
+    let action = |source: &str, target: &str| {
+        format!(
+            "transfer-map:object:0:{}:{}",
+            URL_SAFE_NO_PAD.encode(source),
+            URL_SAFE_NO_PAD.encode(target)
+        )
+    };
+    app.transfer_action(&action("id", "order_id"), &backend);
+    assert_eq!(
+        app.transfer_spec().unwrap()["objects"][0]["columns"],
+        json!([
+            {"source":"email","target":"email"},
+            {"source":"id","target":"order_id"},
+            {"source":"total","target":"total"}
+        ])
+    );
+    app.transfer_action(&action("email", "\0"), &backend);
+    assert_eq!(
+        app.transfer_spec().unwrap()["objects"][0]["columns"],
+        json!([
+            {"source":"id","target":"order_id"},
+            {"source":"total","target":"total"}
+        ])
+    );
+    app.transfer_action(&action("id", "\0"), &backend);
+    app.transfer_action(&action("total", "\0"), &backend);
+    assert_eq!(app.transfer_spec().unwrap_err().0, "object-mapping-0");
+}

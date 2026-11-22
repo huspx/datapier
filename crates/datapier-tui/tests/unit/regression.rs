@@ -12,8 +12,7 @@ fn set(form: &mut forms::Form, key: &str, value: &str) {
 #[test]
 fn direct_mysql_options_roundtrip_and_validate() {
     let mut form = forms::direct(None, &json!("dangerous"));
-    assert_eq!(form.get("mysql_timezone"), "+00:00");
-    set(&mut form, "mysql_timezone", "");
+    assert_eq!(form.get("mysql_timezone"), "");
     set(&mut form, "mysql_connect_timeout_seconds", "10");
     set(&mut form, "mysql_query_timeout_seconds", "86400");
     let profile = forms::direct_value(&form).unwrap();
@@ -27,6 +26,12 @@ fn direct_mysql_options_roundtrip_and_validate() {
     );
     let mut edited = forms::direct(Some(&profile), &json!("off"));
     assert_eq!(edited.get("mysql_timezone"), "");
+    let mut explicit = profile.clone();
+    explicit["connection"]["mysql"]["timezone"] = json!("+00:00");
+    assert_eq!(
+        forms::direct(Some(&explicit), &json!("off")).get("mysql_timezone"),
+        "+00:00"
+    );
     assert_eq!(edited.get("mysql_connect_timeout_seconds"), "10");
     set(&mut edited, "mysql_query_timeout_seconds", "86401");
     assert!(forms::direct_value(&edited).is_err());

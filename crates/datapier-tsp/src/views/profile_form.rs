@@ -173,14 +173,40 @@ pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
         }
         form = form.child(databases);
     } else {
-        form = form.child(
-            ui::field(crate::i18n::tr("默认 DB").into_owned()).child(redis_db_picker(app, true)),
-        );
-        form = form.child(field(
-            app,
-            "redis_databases_override",
-            "Redis DB 数量覆盖（1–4294967295；留空为自动探测）",
-        ));
+        let state = &app.navigation.form_redis_discovery;
+        let mut databases = html::div()
+            .class("profile-databases")
+            .child(field(app, "redis_db", "默认 DB"))
+            .child(field(
+                app,
+                "redis_databases_override",
+                "Redis DB 数量覆盖（1–4294967295；留空为自动探测）",
+            ))
+            .child(
+                html::div().class("toolbar").child(
+                    ui::button(
+                        crate::i18n::tr(if state.loading {
+                            "加载中…"
+                        } else {
+                            "探测数据库"
+                        })
+                        .into_owned(),
+                    )
+                    .disabled(app.connection_form_busy() || state.loading)
+                    .on_click(Msg::Action("form-redis-db-detect".into())),
+                ),
+            );
+        if state.loading {
+            databases = databases
+                .child(html::span(crate::i18n::tr("正在探测数据库").into_owned()).class("muted"));
+        } else if let Some(error) = &state.error {
+            databases = databases.child(html::span(error.clone()).class("form-submit-error"));
+        } else if let (Some(first), Some(last)) = (state.databases.first(), state.databases.last())
+        {
+            databases =
+                databases.child(html::span(format!("DB {first} – DB {last}")).class("muted"));
+        }
+        form = form.child(databases);
     }
     let read_only = app.field("access") == "read_only";
     form = form.child(

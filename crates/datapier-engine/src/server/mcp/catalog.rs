@@ -96,7 +96,9 @@ impl Engine {
     pub(super) async fn mcp_connections(&self, owner: Uuid, params: &Value) -> Result<Value> {
         let provider = optional::<String>(params, "provider")?;
         let source = optional::<String>(params, "source")?;
-        let filters = json!({"provider":provider,"source":source});
+        let project_context = self.mcp_project_context(owner).await?;
+        let filters =
+            json!({"provider":provider,"source":source,"project_context":project_context});
         let start = self.catalog_position(owner, "connections", Uuid::nil(), params, &filters)?;
         let mut items = Vec::new();
         for profile in self.store.profiles().await? {
@@ -158,8 +160,20 @@ impl Engine {
                 }
                 None => "ready".to_owned(),
             };
-            items.push(json!({"connection_id":profile.id,"name":profile.name,"provider":profile.provider,"source":source_name,"access":if writable {"read_write"} else {"read_only"},"auth_state":auth_state}));
+            let recommendation = Self::mcp_recommendations(&project_context, profile.id);
+            items.push(json!({"connection_id":profile.id,"name":profile.name,"provider":profile.provider,"source":source_name,"access":if writable {"read_write"} else {"read_only"},"auth_state":auth_state,"recommendation":recommendation}));
         }
+        items.sort_by(|a, b| {
+            b["recommendation"]
+                .as_array()
+                .map_or(0, Vec::len)
+                .cmp(&a["recommendation"].as_array().map_or(0, Vec::len))
+                .then_with(|| {
+                    a["connection_id"]
+                        .as_str()
+                        .cmp(&b["connection_id"].as_str())
+                })
+        });
         self.catalog_page(
             CatalogScope {
                 owner,
@@ -183,7 +197,9 @@ impl Engine {
         let id: Uuid = model::param(params, "connection_id")?;
         let profile = self.mcp_profile(owner, id).await?;
         let refresh = optional::<bool>(params, "refresh")?.unwrap_or(false);
-        let filters = json!({"refresh":refresh});
+        let project_context = self.mcp_project_context(owner).await?;
+        let mut recommendation = Self::mcp_recommendations(&project_context, id);
+        let filters = json!({"refresh":refresh,"project_context":project_context});
         let start = self.catalog_position(owner, "databases", id, params, &filters)?;
         if refresh && profile.is_archery() {
             let auth = self.mcp_auth(owner, &json!({"connection_id":id})).await?;
@@ -214,7 +230,31 @@ impl Engine {
                 items.push(json!(name));
             }
         }
-        self.catalog_page(CatalogScope { owner, operation: "databases", resource: id }, filters, start, items, "databases", json!({"state":discovery["state"],"source":discovery["source"],"configured_count":discovery["configured_count"],"reason":discovery["reason"]})).await
+        recommendation.retain(|r| {
+            let name = r["database"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| r["redis_db"].as_u64().map(|db| db.to_string()));
+            name.as_ref().is_none_or(|name| {
+                items
+                    .iter()
+                    .any(|item| item.as_str() == Some(name.as_str()))
+            })
+        });
+        items.sort_by(|a, b| {
+            let rank = |item: &Value| {
+                recommendation.iter().any(|r| {
+                    r["database"] == *item
+                        || r["redis_db"]
+                            .as_u64()
+                            .is_some_and(|db| item.as_str() == Some(db.to_string().as_str()))
+                })
+            };
+            rank(b)
+                .cmp(&rank(a))
+                .then_with(|| a.as_str().cmp(&b.as_str()))
+        });
+        self.catalog_page(CatalogScope { owner, operation: "databases", resource: id }, filters, start, items, "databases", json!({"state":discovery["state"],"source":discovery["source"],"configured_count":discovery["configured_count"],"reason":discovery["reason"],"recommendation":recommendation})).await
     }
 
     pub(super) async fn mcp_open(self: &Arc<Self>, owner: Uuid, params: &Value) -> Result<Value> {

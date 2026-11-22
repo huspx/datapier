@@ -272,6 +272,9 @@ impl App {
             self.advanced_value_action("advanced-value-close", backend);
             return;
         }
+        if self.native_ui_action(name, backend) {
+            return;
+        }
         if self.approval_action(name, backend) {
             return;
         }

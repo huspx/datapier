@@ -669,7 +669,11 @@ impl App {
         {
             self.workbench.field_error = None;
         }
-        if name.starts_with("transfer-") {
+        if name.starts_with("transfer-")
+            && !name.ends_with("-new-target-name")
+            && !name.ends_with("-new-target-types")
+        {
+            self.transfer_input_changed(name);
             self.workbench.transfer.invalidate();
         }
         if name.starts_with("project-") {
@@ -852,6 +856,7 @@ impl App {
             last_poll: Instant::now(),
             viewport_width: 0,
             cli_share: 0.35,
+            query_share: 0.4,
             navigation: navigation::NavigationState::default(),
             icon_blobs: None,
             settings: AppSettings::default(),
@@ -865,6 +870,7 @@ impl App {
             redis_keys: Default::default(),
             redis_key_delete: Default::default(),
             approvals: Default::default(),
+            native_ui: Default::default(),
             window_data_dir: None,
             last_settings_poll: Instant::now(),
         }

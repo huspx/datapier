@@ -13,6 +13,7 @@ pub struct QueryUiState {
     pub redis_scan_complete: bool,
     pub redis_scan_limited: bool,
     pub redis_scan_failed: bool,
+    pub(super) completion: completion::CompletionState,
 }
 
 #[derive(Clone)]
@@ -244,6 +245,10 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
                 .disabled(!enabled)
                 .on_click(Msg::Action("current".into())),
         )
+        .child(
+            ui::button(tr("SQL 补全").into_owned())
+                .on_click(Msg::Action("query-completion".into())),
+        )
         .child(plan);
     if archery
         && app
@@ -418,6 +423,13 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 "query-select-all",
                 Msg::QueryMenu(tab, "query-select-all".into(), anchor, cursor, expected),
             );
+    } else {
+        input = input
+            .actions(ui::Actions::new().menu(ui::MenuItem::new(
+                "query-completion",
+                tr("SQL 补全").into_owned(),
+            )))
+            .on_action("query-completion", Msg::Action("query-completion".into()));
     }
     let mut panel = html::div().class("sql-editor");
     if let Err(reason) = statements {
@@ -428,33 +440,7 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         );
     }
     panel = panel.child(html::div().class("query-scroll").child(gutter).child(input));
-    let mut completion = html::div().class("completion");
-    if let Some(byte) = editor::utf16_to_byte(&query.text, query.cursor) {
-        let before = &query.text[..byte];
-        let start = before
-            .char_indices()
-            .rev()
-            .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        let prefix = &before[start..];
-        if !prefix.is_empty() {
-            let catalog: Vec<String> = app
-                .resources
-                .iter()
-                .map(|resource| resource.name.clone())
-                .collect();
-            let from = before[..start].encode_utf16().count();
-            for item in editor::completions(prefix, &catalog).into_iter().take(8) {
-                completion = completion.child(
-                    ui::button(item.clone())
-                        .variant(ui::ButtonVariant::Quiet)
-                        .size(ui::ButtonSize::Sm)
-                        .on_click(Msg::Complete(item, from, query.cursor)),
-                );
-            }
-        }
-    }
-    panel.child(completion).into()
+    panel.into()
 }
 
 fn restore_menu_selection(

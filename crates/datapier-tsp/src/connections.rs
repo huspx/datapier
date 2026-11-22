@@ -12,7 +12,7 @@ pub(super) const PROFILE_DEFAULTS: &[(&str, &str)] = &[
     ("user", ""),
     ("password", ""),
     ("database", ""),
-    ("mysql_timezone", "+00:00"),
+    ("mysql_timezone", ""),
     ("mysql_connect_timeout_seconds", ""),
     ("mysql_query_timeout_seconds", ""),
     ("redis_db", "0"),
@@ -80,7 +80,6 @@ impl App {
             return;
         }
         self.navigation_form_open(profile.as_ref());
-        self.navigation.form_redis_db_menu = false;
         self.workbench.profile_error = None;
         self.workbench.field_error = None;
         self.form_editing = profile.is_some();

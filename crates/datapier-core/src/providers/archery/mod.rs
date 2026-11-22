@@ -11,6 +11,33 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 pub use totp::{generate_totp, validate_totp_uri};
 
+/// 已选范围和共享认证槽的不可变快照；不触发登录或重放用户查询。
+#[derive(Clone)]
+pub struct CompletionContext {
+    profile: Profile,
+    auth: Arc<AuthSlot>,
+    database: String,
+}
+
+impl CompletionContext {
+    pub async fn generation(&self) -> Result<u64> {
+        let status = self.auth.status().await;
+        if status.state != "ready" {
+            return Err(AppError::new("auth_required", "请先恢复 Archery 认证"));
+        }
+        Ok(status.generation)
+    }
+
+    pub async fn catalog(
+        &self,
+        request: &CompletionRequest,
+        after: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<CompletionPage> {
+        catalog::completion(self, request, after, cancel).await
+    }
+}
+
 /// 绑定一个已经选择的远端实例和数据库，不代表专属数据库连接。
 pub struct ArcherySession {
     pub(super) profile: Profile,
@@ -63,6 +90,13 @@ impl ArcherySession {
     }
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+    pub fn completion_context(&self) -> CompletionContext {
+        CompletionContext {
+            profile: self.profile.clone(),
+            auth: self.auth.clone(),
+            database: self.database.clone(),
+        }
     }
     pub async fn close(&mut self) -> Result<()> {
         self.closed = true;

@@ -7,6 +7,63 @@ use uuid::Uuid;
 
 const PAGE_SIZE: u64 = 20;
 
+// 页面摘要只在完整时解码，避免将截断的 typed JSON 当成实际值。
+fn comparison_bytes(value: &Value) -> Option<Vec<u8>> {
+    if value.get("complete")?.as_bool()? {
+        STANDARD.decode(value.get("base64")?.as_str()?).ok()
+    } else {
+        None
+    }
+}
+
+fn text_comparisons(item: &Value) -> Vec<(String, String, String)> {
+    if item["before"]["encoding"] == "typed_json" {
+        let (Some(before), Some(after)) = (
+            item.get("before").and_then(comparison_bytes),
+            item.get("after").and_then(comparison_bytes),
+        ) else {
+            return Vec::new();
+        };
+        let (Ok(Value::Object(before)), Ok(Value::Object(after))) = (
+            serde_json::from_slice::<Value>(&before),
+            serde_json::from_slice::<Value>(&after),
+        ) else {
+            return Vec::new();
+        };
+        after
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let old = before.get(&name)?;
+                if old["type"] != "text" || value["type"] != "text" {
+                    return None;
+                }
+                Some((
+                    name,
+                    old["value"].as_str()?.to_owned(),
+                    value["value"].as_str()?.to_owned(),
+                ))
+            })
+            .collect()
+    } else {
+        fn text_prefix(value: &Value) -> Option<String> {
+            let bytes = STANDARD.decode(value.get("base64")?.as_str()?).ok()?;
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => Some(text.to_owned()),
+                Err(error) if error.error_len().is_none() && value["complete"] == false => Some(
+                    std::str::from_utf8(&bytes[..error.valid_up_to()])
+                        .ok()?
+                        .to_owned(),
+                ),
+                Err(_) => None,
+            }
+        }
+        match (text_prefix(&item["before"]), text_prefix(&item["after"])) {
+            (Some(before), Some(after)) => vec![(String::new(), before, after)],
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// 显示少量真实目标，避免大型选集或筛选值撑满工作台。
 fn scope_summary(items: &[Value]) -> String {
     const MAX_ITEMS: usize = 3;
@@ -1104,6 +1161,43 @@ pub(crate) fn view(state: &ReplaceState) -> Node<Msg> {
                             format!("replace:detail:{key}:{index}"),
                             busy,
                         ));
+                    }
+                }
+            }
+            if let Some(changes) = item.get("text_changes").and_then(Value::as_array) {
+                for change in changes {
+                    if let (Some(name), Some(before), Some(after)) = (
+                        change["column"].as_str(),
+                        change["before"].as_str(),
+                        change["after"].as_str(),
+                    ) {
+                        row = row.child(html::strong(name.to_owned()));
+                        row = row.child(super::text_diff(before, after, ""));
+                        if change["complete"] != true {
+                            row = row.child(
+                                html::span("仅显示有界前缀 / Showing bounded prefixes only")
+                                    .class("notice"),
+                            );
+                        }
+                    }
+                }
+                if item["text_changes_complete"] != true {
+                    row = row.child(
+                        html::span("部分列超出预览额度 / Some columns exceed the preview budget")
+                            .class("notice"),
+                    );
+                }
+            } else {
+                for (name, before, after) in text_comparisons(item) {
+                    if !name.is_empty() {
+                        row = row.child(html::strong(name));
+                    }
+                    row = row.child(super::text_diff(&before, &after, ""));
+                    if item["before"]["complete"] == false || item["after"]["complete"] == false {
+                        row = row.child(
+                            html::span("仅显示有界前缀 / Showing bounded prefixes only")
+                                .class("notice"),
+                        );
                     }
                 }
             }

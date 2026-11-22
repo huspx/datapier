@@ -15,6 +15,22 @@ pub(super) fn history_panel(app: &App) -> Node<Msg> {
         list = list
             .child(html::p(crate::i18n::tr("没有匹配的历史记录").into_owned()).class("empty-note"));
     } else {
+        // 行身份仍引用原始页下标；原生表格负责展示，选择与正文读取仍由应用持有。
+        let mut table = ui::table()
+            .key("query-history-table")
+            .selectable(true)
+            .col(
+                ui::Column::new("text", crate::i18n::tr("命令预览").into_owned())
+                    .grow(1.0)
+                    .mono(true)
+                    .priority(2.0),
+            )
+            .col(ui::Column::new("context", crate::i18n::tr("详情").into_owned()).priority(1.0))
+            .on_select(|id| Msg::Action(format!("history-select:{id}")))
+            .on_activate(|id| Msg::Action(format!("history-select:{id}")));
+        if let Some(selected) = history.selected {
+            table = table.selected(selected.to_string());
+        }
         for (index, item) in history.items.iter().enumerate() {
             let text = crate::application::archery_history_text(item).unwrap_or("");
             let metadata = if history.visible {
@@ -30,28 +46,21 @@ pub(super) fn history_panel(app: &App) -> Node<Msg> {
                     task_state_text(item.get("state").and_then(Value::as_str).unwrap_or(""))
                 )
             };
-            list = list.child(
-                html::button("")
-                    .class(if history.selected == Some(index) {
-                        "history-item active"
-                    } else {
-                        "history-item"
-                    })
-                    .child(
-                        html::span(
-                            text.lines()
-                                .next()
-                                .unwrap_or("")
-                                .chars()
-                                .take(160)
-                                .collect::<String>(),
-                        )
-                        .class("history-summary"),
+            table = table.row(
+                ui::TableRow::new(index.to_string())
+                    .cell(
+                        "text",
+                        text.lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(160)
+                            .collect::<String>(),
                     )
-                    .child(html::span(metadata).class("history-meta"))
-                    .on_click(Msg::Action(format!("history-select:{index}"))),
+                    .cell("context", metadata),
             );
         }
+        list = list.child(table);
     }
     let mut preview = html::div().class("history-preview").child(html::strong(
         crate::i18n::tr(if app.is_redis() {

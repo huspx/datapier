@@ -127,6 +127,7 @@ impl Engine {
             database: Some(database.clone()),
             redis_db,
             capabilities: Mutex::new(profile.capabilities()),
+            completion_context: completion::Context::from_session(&session),
             session: AsyncMutex::new(session),
             closing: AtomicBool::new(false),
         });
