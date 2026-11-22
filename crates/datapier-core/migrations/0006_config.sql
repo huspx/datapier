@@ -20,13 +20,25 @@ CREATE TABLE local_project_environments (
 );
 ALTER TABLE project_bindings ADD COLUMN description TEXT NOT NULL DEFAULT '';
 ALTER TABLE project_bindings ADD COLUMN profile_identity TEXT;
-CREATE TRIGGER local_binding_insert AFTER INSERT ON project_bindings BEGIN
-  UPDATE local_projects SET revision = revision + 1 WHERE id = NEW.project_id AND EXISTS (SELECT 1 FROM local_project_environments WHERE id = NEW.binding_group AND project_id = NEW.project_id);
+CREATE TRIGGER local_binding_insert AFTER INSERT ON project_bindings
+BEGIN
+  UPDATE local_projects
+  SET revision = revision + 1
+  WHERE id = NEW.project_id
+    AND EXISTS (SELECT 1 FROM local_project_environments WHERE id = NEW.binding_group AND project_id = NEW.project_id);
 END;
-CREATE TRIGGER local_binding_update AFTER UPDATE ON project_bindings BEGIN
-  UPDATE local_projects SET revision = revision + 1 WHERE id = NEW.project_id AND EXISTS (SELECT 1 FROM local_project_environments WHERE id = NEW.binding_group AND project_id = NEW.project_id);
+CREATE TRIGGER local_binding_update AFTER UPDATE ON project_bindings
+BEGIN
+  UPDATE local_projects
+  SET revision = revision + 1
+  WHERE id = NEW.project_id
+    AND EXISTS (SELECT 1 FROM local_project_environments WHERE id = NEW.binding_group AND project_id = NEW.project_id);
 END;
-CREATE TRIGGER local_binding_delete AFTER DELETE ON project_bindings BEGIN
-  UPDATE local_projects SET revision = revision + 1 WHERE id = OLD.project_id AND EXISTS (SELECT 1 FROM local_project_environments WHERE id = OLD.binding_group AND project_id = OLD.project_id);
+CREATE TRIGGER local_binding_delete AFTER DELETE ON project_bindings
+BEGIN
+  UPDATE local_projects
+  SET revision = revision + 1
+  WHERE id = OLD.project_id
+    AND EXISTS (SELECT 1 FROM local_project_environments WHERE id = OLD.binding_group AND project_id = OLD.project_id);
 END;
 PRAGMA user_version = 6;

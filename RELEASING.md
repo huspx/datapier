@@ -29,7 +29,7 @@ python3 scripts/version.py --check-release
 
 ### Python 3.15 工具环境
 
-开发发布脚本使用 Python 3.15，仅依赖标准库。CI 通过 `actions/setup-python@v7` 配置 `python-version: '3.15'`，跟随该分支补丁版本，架构随原生 runner；短命令使用 Bash，架构检查和二进制 smoke 直接使用 Python。开发环境、格式化与回归命令见[贡献指南](CONTRIBUTING.md#开发环境)，工具契约见[0.1.1 技术方案](docs/technical-design-0.1.1.md#24-开发与发布工具)。
+开发发布脚本使用 Python 3.15，仅依赖标准库。CI 通过 `actions/setup-python@v7.1.0` 配置 `python-version: '3.15'`，跟随该分支补丁版本，架构随原生 runner；短命令使用 Bash，架构检查和二进制 smoke 直接使用 Python。开发环境、格式化与回归命令见[贡献指南](CONTRIBUTING.md#开发环境)，工具契约见[0.1.1 技术方案](docs/technical-design-0.1.1.md#24-开发与发布工具)。
 
 版本读取、源码 plugin 同步及只读发布检查统一由 `scripts/version.py` 提供；单目标组包和六目标汇总分别使用 `package-target.py` 和 `assemble-release.py`。`draft_release.py` 负责准备草稿、原生 job 直接上传及从草稿资源汇总，使用 Python 标准库调用 GitHub REST API。Windows 用户安装器继续使用系统自带 Windows PowerShell 5.1，Unix 安装器使用 `/bin/sh`；安装与运行 Datapier 无需 Python，开发与组包无需 `pwsh`。
 
@@ -78,18 +78,18 @@ Release 名称统一为 `Datapier <Version>`，tag 保持 `v<Version>`，例如�
 
 | runner | target |
 |---|---|
-| macos-15-intel | x86_64-apple-darwin |
-| macos-15 | aarch64-apple-darwin |
-| ubuntu-24.04 | x86_64-unknown-linux-gnu |
-| ubuntu-24.04-arm | aarch64-unknown-linux-gnu |
-| windows-2022 | x86_64-pc-windows-msvc |
-| windows-11-arm | aarch64-pc-windows-msvc |
+| macos-26-intel | x86_64-apple-darwin |
+| macos-26 | aarch64-apple-darwin |
+| ubuntu-26.04 | x86_64-unknown-linux-gnu |
+| ubuntu-26.04-arm | aarch64-unknown-linux-gnu |
+| windows-2025-vs2026 | x86_64-pc-windows-msvc |
+| windows-11-vs2026-arm | aarch64-pc-windows-msvc |
 
 独立 `format` job 的职责与变更文件范围见[贡献指南的代码格式化](CONTRIBUTING.md#代码格式化)，并执行根版本、源码 plugin 和 CHANGELOG 的只读发布检查。format 与 native job 均显式使用 Rust 1.100.0；每个 native job 检出代码、安装对应 target，Linux 安装构建依赖，核对 runner 原生架构，运行 workspace 默认测试，再构建 release 可执行文件、执行 `--version` smoke 并调用单目标组包脚本。PR 与非 main 手动运行到此结束，归档随 runner 清理，不上传 Actions artifact 或 Release 资源。
 
 main 的 `prepare-release` 在格式检查成功后创建或刷新 `Datapier <Version>` 草稿，tag 为 `v<Version>`，清理该版本的六个目标归档和 plugin 包，保留人工附加附件；六个 `native-release` job 各上传一个目标归档。所有目标成功后，`bundle` 从相同草稿鉴权下载六个归档，验证资源及 GitHub 提供的可用 SHA-256，生成内嵌归档与程序摘要的 `datapier-plugin-<version>.zip` 并上传，最后标记构建完成，Release 仍保持草稿。流程生成六个归档和一个 plugin 包，共七个附件；人工附加附件不计入此集合，失败时不能把部分资源视为完整交付。草稿资源需要授权访问，正式下载 URL 要到维护者发布后才公开可用。
 
-官方 Actions 使用 Node.js 24 运行时的 `actions/checkout@v7` 与 `actions/setup-python@v7`；当前流程不再调用 `actions/upload-artifact` 或 `actions/download-artifact`。六目标仍使用 GitHub 托管的原生 runner。
+六目标使用 GitHub 免费标准 Runner。升级镜像后须核对实际归档的运行要求：Linux 读取 ELF 版本依赖并记录所需的最高 `GLIBC_*`，macOS 读取 Mach-O 的部署目标，Windows 核对系统及 MSVC 运行库，在拟声明的最低环境执行安装和启动 smoke。以实际产物和运行证据为准。
 
 也可在各目标原生机器上，从仓库根目录执行对应 release 构建和组包。以下示例只处理本机对应的单个 target；将 `target` 替换为上表中的实际目标，运行验收范围按[发布前检查](#发布前检查)执行。六个归档必须均来自同一最终提交，为每次发布使用干净的输出目录，避免混入旧 `dist` 或其他提交的文件。
 

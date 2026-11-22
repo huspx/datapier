@@ -102,7 +102,7 @@ tar -xzf /absolute/path/to/datapier-0.5.0-TARGET.tar.gz -C /absolute/path/to/ins
 | Linux | x86-64、arm64 | GNU／glibc |
 | Windows | x86-64、arm64 | MSVC |
 
-六种组合作为实现与构建目标保留；实际构建、打包及运行结果须按候选提交核对。CI 配置使用 macOS 15、Ubuntu 24.04、Windows Server 2022／Windows 11 ARM runner；这些是构建基线，尚未验证更低系统版本。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
+六种组合作为原生构建目标。CI 使用 macOS 26、Ubuntu 26.04、Windows Server 2025／Windows 11 Arm64（Visual Studio 2026）的 GitHub 免费标准 Runner。Runner 镜像是构建基线，产物的最低系统与 glibc 要求按候选归档及实际运行验证记录。Linux 构建依赖 `pkg-config`、`libdbus-1-dev`，系统凭据使用 Secret Service；TLS 使用 Rustls，SQLite 随程序构建。
 
 Datapier 0.5.0 的完整 Tern 集成需要 **Tern 0.9.29 或更新**，Rust SDK 固定为 **0.2.0**；实际环境与覆盖范围见 [0.5.0 验收记录](docs/technical-design-0.5.0.md#8-验收矩阵与验证方式)。直连数据库支持 MySQL 5.7／8.0／8.4、Redis 6.2／7.2／8.0 单节点，数据库服务可以运行在独立服务器上。
 
