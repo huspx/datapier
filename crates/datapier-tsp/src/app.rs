@@ -872,6 +872,8 @@ impl App {
             approvals: Default::default(),
             native_ui: Default::default(),
             window_data_dir: None,
+            query_base: None,
+            path_picker: None,
             last_settings_poll: Instant::now(),
         }
     }

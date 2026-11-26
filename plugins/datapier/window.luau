@@ -1,6 +1,39 @@
 local bootstrap = require("./lib/bootstrap")
 local window_bridge = require("./lib/window_bridge")
 
+local opening = {}
+local request_number = 0
+local latest_valid = {}
+
+local function source_in_tab(cx, pane, tab)
+  local belongs = false
+  for _, host in ipairs(cx.hosts:list()) do
+    if host.kind == "local" then
+      for _, id in ipairs(host.panes) do
+        if id == pane then
+          belongs = true
+        end
+      end
+    end
+  end
+  if not belongs then
+    return false
+  end
+  for _, info in ipairs(cx.session:panes()) do
+    if info.pane == pane and info.tab == tab and info.exited == nil then
+      return true
+    end
+  end
+  return false
+end
+
+local function source_error(cx)
+  cx:toast(
+    "error",
+    "Datapier",
+    "来源 block 不可用，请返回本机 block 重试 / Source block is unavailable; return to a local block and try again"
+  )
+end
 window_bridge.start()
 
 tern.timer(0, function(cx)
@@ -96,19 +129,99 @@ tern.files.button({
       )
       return
     end
-    local payload = tern.base64.encode(tern.json.encode({ host = "localhost", path = files.root }))
-    if not window_bridge.navigate(cx, "datapier-project-path:" .. payload) then
-      cx:toast(
-        "info",
-        "Datapier",
-        if english
-          then "Open the workbench first, then select the directory again"
-          else "请先打开工作台，然后再次选择目录"
-      )
-      bootstrap.start(cx)
+    local source = bootstrap.source(cx)
+    if not source then
+      source_error(cx)
+      return
     end
+    local tab, pane, root = source.tab, source.pane, files.root
+    request_number += 1
+    local request = request_number
+    bootstrap.valid_directory(root, function(fresh, valid)
+      if not fresh then
+        if not valid then
+          cx:toast("error", "Datapier", "目录无效 / The directory is invalid")
+        end
+        return
+      end
+      if not valid then
+        fresh:toast("error", "Datapier", "目录无效 / The directory is invalid")
+        return
+      end
+      if request < (latest_valid[tab] or 0) then
+        return
+      end
+      if not source_in_tab(fresh, pane, tab) then
+        source_error(fresh)
+        return
+      end
+      latest_valid[tab] = request
+      local payload = tern.base64.encode(tern.json.encode({ host = "localhost", path = root }))
+      local action = "datapier-project-path:" .. payload
+      local pending = opening[tab]
+      if
+        pending
+        and pending.pane
+        and (tern.now() > pending.until_ms or not source_in_tab(fresh, pending.pane, tab))
+      then
+        opening[tab] = nil
+        pending = nil
+      end
+      if pending then
+        pending.action = action
+        if not pending.pane and not source_in_tab(fresh, pending.target, tab) then
+          pending.target = pane
+          pending.options.target = pane
+        end
+        if pending.pane then
+          if not window_bridge.navigate(fresh, action, tab) then
+            window_bridge.navigate_when_ready(pending.pane, action, tab)
+          end
+        end
+        return
+      end
+      if window_bridge.navigate(fresh, action, tab) then
+        return
+      end
+      pending = { action = action, target = pane }
+      pending.options = {
+        cwd = root,
+        target = pane,
+        before_launch = function(checked)
+          if not source_in_tab(checked, pending.target, tab) then
+            source_error(checked)
+            return false
+          end
+          if window_bridge.navigate(checked, pending.action, tab) then
+            return false
+          end
+          return true
+        end,
+      }
+      opening[tab] = pending
+      bootstrap.start(fresh, function(started)
+        if opening[tab] ~= pending then
+          return
+        end
+        if not started then
+          opening[tab] = nil
+          return
+        end
+        pending.pane = started
+        pending.until_ms = tern.now() + 30000
+        window_bridge.navigate_when_ready(started, pending.action, tab)
+      end, pending.options)
+    end)
   end,
 })
+
+tern.on("pane_closed", function(ev)
+  for tab, pending in pairs(opening) do
+    if pending.pane == ev.pane then
+      opening[tab] = nil
+    end
+  end
+end)
 
 tern.carly.export("open", { sig = "open()", doc = "打开 Datapier 工作台" }, function(cx)
   bootstrap.start(cx)

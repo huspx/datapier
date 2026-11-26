@@ -91,6 +91,19 @@ fn version(value: &str) -> Option<[u64; 3]> {
     Some(result)
 }
 
+fn ensure_target_version(target: &str) -> Result<()> {
+    let target = version(target).ok_or_else(|| AppError::invalid("目标版本无效"))?;
+    let current =
+        version(env!("CARGO_PKG_VERSION")).ok_or_else(|| AppError::invalid("当前版本无效"))?;
+    if target < current {
+        return Err(AppError::new(
+            "update_downgrade",
+            "请安装当前版本或更新版本",
+        ));
+    }
+    Ok(())
+}
+
 fn target() -> Option<String> {
     let arch = match std::env::consts::ARCH {
         "aarch64" => "aarch64",
@@ -281,6 +294,12 @@ async fn run_inner(
             "update_incompatible",
             "当前程序与 plugin 版本不一致",
         ));
+    }
+    if matches!(action, "schedule" | "download" | "apply")
+        && handoff_id.is_none()
+        && let Some(target) = state.target_version.as_deref()
+    {
+        ensure_target_version(target)?;
     }
     if action == "schedule" {
         if !cfg!(target_os = "macos") {
@@ -473,6 +492,14 @@ async fn check(state: &mut State, time: u64) -> Result<()> {
         .map_err(|e| AppError::new("network", e.to_string()))?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         state.last_success = time;
+        if let Some(target) = state.target_version.as_deref()
+            && let Err(error) = ensure_target_version(target)
+        {
+            state.target_version = None;
+            state.staged_dir = None;
+            state.apply_after_exit = false;
+            return Err(error);
+        }
         if state.target_version.as_deref().and_then(version) <= version(env!("CARGO_PKG_VERSION")) {
             state.target_version = None;
             state.staged_dir = None;
@@ -541,6 +568,7 @@ async fn check(state: &mut State, time: u64) -> Result<()> {
     let candidate = version(tag).ok_or_else(|| AppError::invalid("Release 版本无效"))?;
     let current =
         version(env!("CARGO_PKG_VERSION")).ok_or_else(|| AppError::invalid("当前版本无效"))?;
+    ensure_target_version(tag)?;
     let target = target().ok_or_else(|| AppError::invalid("不支持的平台"))?;
     let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
     let names = [
@@ -692,9 +720,7 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
             .target_version
             .clone()
             .ok_or_else(|| AppError::invalid("没有可下载的目标版本"))?;
-        if version(&ver).is_none() {
-            return Err(AppError::invalid("目标版本无效"));
-        }
+        ensure_target_version(&ver)?;
         let plugin_hash = state
             .plugin_digest
             .clone()

@@ -674,7 +674,16 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                 || app.field("binary_columns") != "[]";
             let mut form = html::div()
                 .class("transfer-form")
-                .child(field(app, "path", "文件路径"))
+                .child(controls::path_field(
+                    app,
+                    "path",
+                    "文件路径",
+                    match kind {
+                        "export" => &[("save", "", "浏览…")],
+                        "import" => &[("file", "csv,json", "浏览…")],
+                        _ => &[("file", "csv,json", "浏览…"), ("save", "", "选择保存位置")],
+                    },
+                ))
                 .child(choices(
                     app,
                     "format",
@@ -777,7 +786,21 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
             }
         }
         "file" => {
-            panel = panel.child(field(app, "path", "文件路径"));
+            panel = panel.child(controls::path_field(
+                app,
+                "path",
+                "文件路径",
+                &[("file", "sql", "浏览…"), ("save", "", "选择保存位置")],
+            ));
+            if let Some(base) = &app.query_base {
+                panel = panel.child(
+                    html::p(i18n::format_message(
+                        "相对路径基于 {directory}",
+                        &[("directory", &base.to_string_lossy())],
+                    ))
+                    .class("muted"),
+                );
+            }
             footer = footer
                 .child(button("打开", "file-open"))
                 .child(button("保存", "file-save"));
@@ -1420,7 +1443,12 @@ pub(crate) fn overlay(app: &App, kind: &str) -> Node<Msg> {
                                     .on_click(Msg::Action("editing-files-export".into())),
                             ),
                     );
-                    panel = panel.child(field(app, "editing_file_path", "导出路径"));
+                    panel = panel.child(controls::path_field(
+                        app,
+                        "editing_file_path",
+                        "导出路径",
+                        &[("save", "", "浏览…")],
+                    ));
                     if app.editing_files.confirm_cleanup {
                         if let Some(frozen) = &app.editing_files.cleanup_target {
                             let path = frozen["relative_dir"].as_str().unwrap_or("");

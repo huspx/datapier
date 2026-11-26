@@ -642,6 +642,14 @@ impl App {
                     self.field_error("path", i18n::UiMessage::key("请填写路径"));
                     return;
                 }
+                let path =
+                    match path_picker::query_path(self.query_base.as_deref(), self.field("path")) {
+                        Ok(path) => path,
+                        Err(message) => {
+                            self.field_error("path", message);
+                            return;
+                        }
+                    };
                 let method = if name == "file-open" {
                     "file.open"
                 } else {
@@ -662,7 +670,7 @@ impl App {
                     backend,
                     &tag,
                     method,
-                    json!({"path":self.field("path"),"text":self.tabs[self.active].query.text}),
+                    json!({"path":path,"text":self.tabs[self.active].query.text}),
                 );
             }
             "export" => {

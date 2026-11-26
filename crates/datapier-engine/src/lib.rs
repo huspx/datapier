@@ -29,6 +29,7 @@ pub struct ClientOptions {
     pub workspace: String,
     pub allow_connections: Vec<Uuid>,
     pub start_engine: bool,
+    pub engine_cwd: Option<PathBuf>,
 }
 
 impl Default for ClientOptions {
@@ -38,6 +39,7 @@ impl Default for ClientOptions {
             workspace: "default".into(),
             allow_connections: Vec::new(),
             start_engine: true,
+            engine_cwd: None,
         }
     }
 }
@@ -158,7 +160,7 @@ impl Client {
                 ));
             }
             if tokio::time::Instant::now() >= next_spawn {
-                platform::spawn(&root)?;
+                platform::spawn(&root, options.engine_cwd.as_deref())?;
                 next_spawn = tokio::time::Instant::now() + Duration::from_millis(500);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

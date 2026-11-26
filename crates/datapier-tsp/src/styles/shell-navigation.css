@@ -25,6 +25,25 @@
   font-family: var(--sans);
   font-size: 13px;
 }
+/* 根节点的背景点击用于收起说明；它自身仍是普通工作台背景。 */
+.layout.sf-act,
+.layout .sf-button[aria-disabled="true"],
+.layout span.sf-button.off,
+.layout button:disabled {
+  cursor: default;
+}
+.datapier-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.datapier-path-row > .sf-input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.datapier-path-row > .sf-button {
+  flex: none;
+}
 .sidebar {
   box-sizing: border-box;
   width: 224px;

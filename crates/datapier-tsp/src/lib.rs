@@ -22,6 +22,7 @@ mod input;
 mod menus;
 mod native_ui;
 mod navigation;
+mod path_picker;
 mod project_layout;
 mod project_workbench;
 mod query_ui;
@@ -269,6 +270,8 @@ struct IconBlobs {
 struct App {
     workspace_id: String,
     window_data_dir: Option<PathBuf>,
+    query_base: Option<PathBuf>,
+    path_picker: Option<path_picker::Picker>,
     revision: u64,
     workspace_loaded: bool,
     workspace_load: Option<workspace_load::WorkspaceLoad>,

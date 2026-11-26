@@ -60,7 +60,12 @@ async fn window_bridge_item(root: PathBuf, payload: Value) -> Result<Value> {
 
 /// 在调用线程运行同步 TSP 界面，Session 始终由该线程独占。
 /// Engine IPC 在独立 Tokio 线程运行；终端不可用、保存未确认或 TSP 失败时返回错误。
-pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
+pub fn run(
+    root: PathBuf,
+    workspace_id: String,
+    query_base: Option<PathBuf>,
+    engine_cwd: Option<PathBuf>,
+) -> Result<()> {
     let options = Options::new()
         .app("Datapier")
         .version(env!("CARGO_PKG_VERSION"))
@@ -86,9 +91,10 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
     } else {
         std::env::current_dir()?.join(&root)
     };
-    let mut backend = Backend::start(root, workspace_id.clone(), waker)?;
+    let mut backend = Backend::start(root, workspace_id.clone(), engine_cwd, waker)?;
     let mut app = App::new(workspace_id);
     app.window_data_dir = Some(window_data_dir);
+    app.query_base = query_base;
     let window_nonce = Uuid::new_v4();
     let mut window_node = None;
     let mut window_bound = false;
@@ -162,6 +168,10 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
         changed |= app.navigation_poll_create_database(&backend);
         clipboard.observe_redis_context(&app);
         while let Some(mut reply) = backend.receive() {
+            if let Some(request) = reply.tag.strip_prefix(path_picker::REPLY_PREFIX) {
+                changed |= app.path_picker_reply(&backend, request, reply.result);
+                continue;
+            }
             if reply.tag == "window.bind" {
                 window_bound = reply
                     .result
@@ -307,6 +317,7 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
                 css = next_css;
             }
             app.reconcile_modal_focus();
+            app.reconcile_path_picker();
             let focus_request = app.take_focus_request();
             let tab_layout = app.tabs.get(app.active).map(|tab| {
                 (
@@ -384,7 +395,23 @@ pub fn run(root: PathBuf, workspace_id: String) -> Result<()> {
             {
                 changed |= app.native_ui_action(&action.act, &backend);
             }
+            Ok(Some(Input::Msg(Msg::Action(action), _)))
+                if action.starts_with(path_picker::OPEN_PREFIX) =>
+            {
+                changed |= app.open_path_picker(&action, &backend);
+            }
+            Ok(Some(Input::Event(event))) if app.path_picker_event(&event, &backend) => {
+                changed = true;
+            }
+            Ok(Some(Input::Msg(_, _))) if app.path_picker.is_some() => {}
+            Ok(Some(Input::Key(key))) if app.path_picker.is_some() => {
+                app.path_picker_key(&key, &backend);
+                changed = true;
+            }
             Ok(Some(Input::Msg(_, _) | Input::Key(_))) if app.workspace_switch_pending() => {}
+            Ok(Some(Input::Key(key))) if app.path_picker_shortcut(&key, &backend) => {
+                changed = true;
+            }
             Ok(Some(Input::Msg(message, event))) => {
                 if window_bound
                     && !matches!(message, Msg::Focus(_))

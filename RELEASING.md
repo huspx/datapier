@@ -12,7 +12,7 @@
 
 ## 版本号与关联文件
 
-根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前本地候选版本为 `0.5.0`，不代表已正式发布。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本；修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本，不手工编辑锁文件。组包当前支持无前导零的三段数字版本，不支持预发布后缀。
+根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前候选为 `0.5.1`。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本。修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本。组包支持无前导零的三段数字版本。
 
 修改根版本后，先同步源码 plugin，再更新 CHANGELOG 对应版本章节并运行只读发布检查。源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。PR 与 main 的 CI 均执行同一检查，草稿准备、上传和汇总入口也会在访问 GitHub 前检查；plugin 版本不一致、CHANGELOG 首个章节不匹配根版本、版本章节重复或当前章节缺少实际变更条目时失败。检查不会修改文件，也不查询或推断线上发布状态。
 
@@ -61,6 +61,10 @@ python3 scripts/version.py --check-release
 ### 0.5.0 发布准备核对
 
 当前候选使用 IPC v6／配置 schema 6，升级与回退要求见 [README](README.md) 和[技术方案](docs/technical-design-0.5.0.md#9-风险待验证项与交付状态)。正式发布前核对最终提交及六目标 CI、同次构建的七个附件，并在 macOS arm64 验证候选包安装、更新与运行；从 0.4 首次升级须手工备份。发布后另核对 `v0.5.0`、实际提交、附件和 digest，并从正式下载地址验证安装；未执行前不记为通过。
+
+### 0.5.1 发布准备核对
+
+核对最终提交的六目标 CI 和同次构建的七个附件。在 macOS arm64 使用对应候选包验证路径选择、Files 分屏和目录归属、共享 Engine、鼠标反馈与受管 MCP 升级保护。记录候选身份与实际覆盖范围，发布后从公开 URL 复验校验和安装。[0.5.1 验收矩阵](docs/technical-design-0.5.1.md#5-验收矩阵)
 
 ## PR 与合并
 

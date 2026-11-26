@@ -950,6 +950,11 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         .on_click(Msg::Action("result-info-dismiss".into()))
         .child(resource_panel(app))
         .child(content);
+    if let Some(picker) = app.path_picker_view() {
+        return View::new()
+            .main(vec![Node::from(layout)])
+            .layer(vec![picker]);
+    }
     let mut layer = if app.approvals.open {
         vec![approval::panel(app)]
     } else {

@@ -4,7 +4,7 @@
 
 Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接、资源浏览、查询和数据编辑体验，同时保留不同数据库的数据模型与操作语义。
 
-当前 0.5.0 候选支持 **MySQL 与 Redis** 直连及 Archery 只读来源，提供 Rust TSP／Tern 工作台、普通终端 TUI 和 MCP stdio；共享 Engine 独立于界面。数据库采用内置 provider 扩展，PostgreSQL、MongoDB 为后续方向。正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准，当前版本契约见 [0.5.0 技术方案](technical-design-0.5.0.md)。
+当前 0.5.1 候选支持 **MySQL 与 Redis** 直连及 Archery 只读来源，提供 Rust TSP／Tern 工作台、普通终端 TUI 和 MCP stdio。共享 Engine 独立于界面。数据库采用内置 provider 扩展，PostgreSQL、MongoDB 为后续方向。正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准，本版契约见 [0.5.1 技术方案](technical-design-0.5.1.md)。
 
 目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**。当前候选原生运行证据来自 macOS arm64；六目标构建、默认测试和打包结果须按对应提交的 CI 核对，其他五目标尚无完整运行验收，历史记录不能代替本候选验证。
 
@@ -292,6 +292,13 @@ Archery 是受控数据库访问来源，保留 MySQL／Redis 类型、平台权
 
 **验收方向：** SQL 补全验证候选及撤销，Tern MCP 验证配置保护及真实 agent，项目验证仓库、环境、推荐和权限。更新验证两段下载、校验、安全退出、备份和失败恢复。O1—O23 全部纳入验收，完整功能以 Tern 0.9.29／SDK 0.2.0 为最低基线；schema 6 与 IPC v6 的兼容和回退按实际运行证据核对。
 
+### 4.6 0.5.1 Tern 路径与工作台交互
+
+- 本机项目目录随 Datapier pane 启动保存，用于查询文件的相对路径。Files 快捷入口在当前 tab 定位或分屏打开工作台。
+- 常用本机路径入口通过 Tern 原生选择器选择文件、多个文件、目录或保存位置。表单继续接受手输路径。
+- 分离 Tern pane 与 Engine 的工作目录，保持受管 MCP 和工作台共享 Engine。更新入口拒绝降级并提示版本。
+- 工作台背景、可点击项、输入和拖拽手柄按各自语义显示鼠标形状。验收以 [0.5.1 技术方案](technical-design-0.5.1.md#5-验收矩阵)为准。
+
 
 ## 5. 开发环境与质量标准
 
@@ -305,7 +312,7 @@ Luau 由 Tern 内嵌执行，不要求单独安装 Luau runtime。修改启动 p
 
 ### 5.2 验证标准
 
-各版本按交付范围推进，不绑定未经评估的日历日期。当前 0.5.0 是本地候选，正式发布仍须满足对应提交的验收与发布条件。
+各版本按交付范围推进。0.5.1 正式发布前须核对对应提交的验收结果和发布产物。
 
 | 验证场景 | 输入与预期结果 |
 |---|---|

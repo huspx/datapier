@@ -23,6 +23,7 @@ local english = false
 local glimpsed = {}
 local update_attempts = {}
 local bound_panes = {}
+local bound_nonces = {}
 local apply_roots = {}
 local apply_checks = {}
 
@@ -373,6 +374,7 @@ end
 local function forget_pane(pane)
   local data_dir = bound_panes[pane]
   bound_panes[pane] = nil
+  bound_nonces[pane] = nil
   update_status_seen[pane] = nil
   local prefix = tostring(pane) .. ":"
   for _, entries in ipairs({ seen, editor_attempts, glimpsed, update_attempts }) do
@@ -450,11 +452,15 @@ local function consume_batch(cx, response, nodes)
     if current and current.nonce == entry.node.nonce and current.data_dir == entry.node.data_dir then
       if item.bound == true and item.nonce == current.nonce then
         bound_panes[entry.pane] = current.data_dir
+        bound_nonces[entry.pane] = current.nonce
         english = current.english
         local navigation = pending_navigation[entry.pane]
         if navigation then
           pending_navigation[entry.pane] = nil
-          if tern.now() <= navigation.until_ms then
+          local info = cx.session:pane(entry.pane)
+          if navigation.tab and (not info or info.tab ~= navigation.tab) then
+            cx:toast("error", "Datapier", "工作台已离开原标签页 / The workbench has left the original tab")
+          elseif tern.now() <= navigation.until_ms then
             cx.session:event(entry.pane, { ev = "action", id = current.id, act = navigation.action })
           end
         end
@@ -464,6 +470,7 @@ local function consume_batch(cx, response, nodes)
         handle_update(cx, entry.pane, current)
       else
         bound_panes[entry.pane] = nil
+        bound_nonces[entry.pane] = nil
         seen[tostring(entry.pane) .. ":" .. current.nonce] = nil
       end
     end
@@ -630,19 +637,38 @@ local function tick(cx)
   timer = tern.timer(5000, tick)
 end
 
-function M.navigate_when_ready(pane, action)
+local function clear_tab_navigation(tab)
+  if tab then
+    for pane, navigation in pairs(pending_navigation) do
+      if navigation.tab == tab then
+        pending_navigation[pane] = nil
+      end
+    end
+  end
+end
+
+function M.navigate_when_ready(pane, action, tab)
   if type(pane) == "number" then
-    pending_navigation[pane] = { action = action, until_ms = tern.now() + 30000 }
+    clear_tab_navigation(tab)
+    pending_navigation[pane] = { action = action, tab = tab, until_ms = tern.now() + 30000 }
     candidates[pane] = true
   end
 end
 
-function M.navigate(cx, action)
+function M.navigate(cx, action, tab)
+  local eligible = {}
+  if tab then
+    for _, info in ipairs(cx.session:panes()) do
+      if info.tab == tab then
+        eligible[info.pane] = true
+      end
+    end
+  end
   local focused = cx.session:focused()
-  local pane = focused and bridge_node(cx, focused) and focused or nil
+  local pane = focused and (not tab or eligible[focused]) and bridge_node(cx, focused) and focused or nil
   if not pane then
     for candidate in pairs(candidates) do
-      if bridge_node(cx, candidate) then
+      if (not tab or eligible[candidate]) and bridge_node(cx, candidate) then
         pane = candidate
         break
       end
@@ -653,7 +679,13 @@ function M.navigate(cx, action)
   end
   local node = bridge_node(cx, pane)
   cx.layout:focus(pane)
-  cx.session:event(pane, { ev = "action", id = node.id, act = action })
+  clear_tab_navigation(tab)
+  if bound_panes[pane] and bound_nonces[pane] == node.nonce then
+    pending_navigation[pane] = nil
+    cx.session:event(pane, { ev = "action", id = node.id, act = action })
+  else
+    M.navigate_when_ready(pane, action, tab)
+  end
   return true
 end
 

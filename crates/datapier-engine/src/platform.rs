@@ -116,7 +116,7 @@ pub fn endpoint(root: &Path) -> Result<String> {
     }
 }
 /// 启动 Engine 候选并隔离客户端 stdio；成功只表示进程已创建，不表示握手就绪。
-pub fn spawn(root: &Path) -> Result<()> {
+pub fn spawn(root: &Path, engine_cwd: Option<&Path>) -> Result<()> {
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("engine")
         .arg("--data-dir")
@@ -124,6 +124,9 @@ pub fn spawn(root: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(cwd) = engine_cwd {
+        cmd.current_dir(cwd);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

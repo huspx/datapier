@@ -9,6 +9,121 @@ local active = true
 local generation = 0
 local gate_timer = nil
 
+local function absolute(path)
+  if type(path) ~= "string" or path:find("\0", 1, true) or not utf8.len(path) then
+    return false
+  end
+  if tern.runtime.os == "windows" then
+    return path:match("^%a:[/\\]") ~= nil or path:match("^\\\\[^\\]+\\[^\\]+") ~= nil
+  end
+  return path:sub(1, 1) == "/"
+end
+
+local function quote(value)
+  return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function powershell_quote(value)
+  return "'" .. value:gsub("'", "''") .. "'"
+end
+
+local function encoded_powershell(script)
+  local units = {}
+  for _, code in utf8.codes(script) do
+    if code >= 0x10000 then
+      code -= 0x10000
+      local high = 0xD800 + math.floor(code / 0x400)
+      table.insert(units, string.char(high % 256, math.floor(high / 256)))
+      code = 0xDC00 + code % 0x400
+    end
+    table.insert(units, string.char(code % 256, math.floor(code / 256)))
+  end
+  return tern.base64.encode(table.concat(units))
+end
+
+local function powershell()
+  local root = tern.getenv("SystemRoot")
+  if not absolute(root) or not root:match("^%a:[/\\][%w%._/\\%-]+$") then
+    error("无法确认 Windows 系统目录")
+  end
+  return root .. "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+end
+
+function M.valid_directory(path, callback)
+  if not absolute(path) then
+    callback(nil, false)
+    return
+  end
+  local ok, problem = pcall(function()
+    local argv
+    if tern.runtime.os == "windows" then
+      local script = "if (Test-Path -LiteralPath "
+        .. powershell_quote(path)
+        .. " -PathType Container) { exit 0 } else { exit 1 }"
+      argv = { powershell(), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_powershell(script) }
+    else
+      argv = { "/bin/test", "-d", path }
+    end
+    tern.process.run(argv, { timeout_ms = 10000 }, function(result, fresh)
+      callback(fresh, result.status == 0)
+    end)
+  end)
+  if not ok then
+    tern.log.warn("Datapier 目录检查失败: " .. tostring(problem))
+    callback(nil, false)
+  end
+end
+
+function M.source(cx)
+  local pane = cx.session:focused()
+  if not pane then
+    return nil
+  end
+  local local_pane = false
+  for _, host in ipairs(cx.hosts:list()) do
+    if host.kind == "local" then
+      for _, id in ipairs(host.panes) do
+        if id == pane then
+          local_pane = true
+        end
+      end
+    end
+  end
+  if not local_pane then
+    return nil
+  end
+  for _, info in ipairs(cx.session:panes()) do
+    if info.pane == pane and info.tab then
+      return info
+    end
+  end
+  return nil
+end
+
+local function command(binary, data_dir, cwd)
+  if not absolute(binary) or not absolute(data_dir) or (cwd and not absolute(cwd)) then
+    error("启动路径必须是绝对 UTF-8 路径")
+  end
+  local args = { binary, "--data-dir-b64", tern.base64.encode(data_dir), "tsp", "--plugin-cache-engine" }
+  if cwd then
+    table.insert(args, "--query-base-b64")
+    table.insert(args, tern.base64.encode(cwd))
+  end
+  if tern.runtime.os == "windows" then
+    local quoted = {}
+    for _, arg in ipairs(args) do
+      table.insert(quoted, powershell_quote(arg))
+    end
+    local script = "& " .. table.concat(quoted, " ") .. "; exit $LASTEXITCODE"
+    return powershell() .. " -NoProfile -NonInteractive -EncodedCommand " .. encoded_powershell(script)
+  end
+  local quoted = {}
+  for _, arg in ipairs(args) do
+    table.insert(quoted, quote(arg))
+  end
+  return table.concat(quoted, " ")
+end
+
 function M.executable()
   if not verified_directory then
     return nil
@@ -102,34 +217,130 @@ function M.prepare(cx, ready, quiet)
   end
 end
 
-function M.start(cx, started_pane)
-  M.prepare(cx, function(fresh, directory)
-    if not directory then
-      return
-    end
-    updater.allowed(fresh, M.executable(), function(checked, allowed, problem, _, data_dir)
-      if not allowed then
-        checked:toast("error", "Datapier 暂时无法启动", tostring(problem))
+local shell_names = {
+  sh = true,
+  bash = true,
+  zsh = true,
+  dash = true,
+  ksh = true,
+  fish = true,
+  nu = true,
+  elvish = true,
+  xonsh = true,
+  ["cmd.exe"] = true,
+  ["powershell.exe"] = true,
+  ["pwsh.exe"] = true,
+  pwsh = true,
+}
+
+local function shell_directory(cx, source, callback)
+  if not source or source.kind ~= "terminal" or source.at_prompt ~= true or not absolute(source.cwd) then
+    callback(cx, nil)
+    return
+  end
+  local ok = pcall(function()
+    tern.process.run(
+      { "tern", "process", tostring(source.pane), "--json" },
+      { timeout_ms = 5000 },
+      function(result, fresh)
+        local decoded, data = pcall(tern.json.decode, result.stdout)
+        local child = decoded and type(data) == "table" and data.child or nil
+        local foreground = decoded and type(data) == "table" and data.foreground or nil
+        local name = type(child) == "table" and type(child.name) == "string" and child.name:lower() or ""
+        local valid = result.status == 0
+          and decoded
+          and type(data) == "table"
+          and data.pane == source.pane
+          and type(child) == "table"
+          and type(foreground) == "table"
+          and type(child.pid) == "number"
+          and child.pid > 0
+          and child.pid == foreground.pid
+          and shell_names[name] == true
+          and child.cwd == source.cwd
+          and foreground.cwd == source.cwd
+        callback(fresh, if valid then source.cwd else nil)
+      end
+    )
+  end)
+  if not ok then
+    callback(cx, nil)
+  end
+end
+
+function M.start(cx, started_pane, options)
+  options = options or {}
+  local source = M.source(cx)
+  local inherited = source and (source.kind == "file" or source.kind == "git") and source.cwd or nil
+  local function prepare(initial, cwd)
+    M.prepare(initial, function(fresh, directory)
+      if not directory then
+        if started_pane then
+          started_pane(nil)
+        end
         return
       end
-      local registered, reason = registration.register(checked, M.executable(), data_dir)
-      if not registered then
-        checked:toast("error", "Datapier MCP 登记失败", tostring(reason))
-      end
-      -- 新终端未必继承窗口环境；Base64 保留路径字符且不引入 shell 展开。
-      local program = if tern.runtime.os == "windows" then ".\\datapier.exe" else "./datapier"
-      local command = program .. " --data-dir-b64 " .. tern.base64.encode(data_dir) .. " tsp"
-      local started, pane = pcall(function()
-        return checked.hosts:terminal("local", { cwd = directory, command = command })
+      updater.allowed(fresh, M.executable(), function(checked, allowed, problem, _, data_dir)
+        if not allowed then
+          checked:toast("error", "Datapier 暂时无法启动", tostring(problem))
+          if started_pane then
+            started_pane(nil)
+          end
+          return
+        end
+        local registered, reason = registration.register(checked, M.executable(), data_dir)
+        if not registered then
+          checked:toast("error", "Datapier MCP 登记失败", tostring(reason))
+        end
+        if options.before_launch and not options.before_launch(checked) then
+          if started_pane then
+            started_pane(nil)
+          end
+          return
+        end
+        local started, pane = pcall(function()
+          local launch = { cwd = cwd or directory, command = command(M.executable(), data_dir, cwd) }
+          if options.target then
+            return checked.layout:split(options.target, "right", launch)
+          end
+          return checked.hosts:terminal("local", launch)
+        end)
+        if not started or not pane then
+          checked:toast(
+            "error",
+            "Datapier 启动失败 / Failed to start Datapier",
+            tostring(pane or "无法创建分屏 / Cannot create split")
+          )
+          if started_pane then
+            started_pane(nil)
+          end
+        elseif started_pane then
+          started_pane(pane)
+        end
       end)
-      if not started then
-        M.invalidate()
-        checked:toast("error", "Datapier 启动失败", tostring(pane))
-      elseif started_pane then
-        started_pane(pane)
-      end
     end)
-  end)
+  end
+  local function validate(initial, requested)
+    if requested then
+      M.valid_directory(requested, function(fresh, valid)
+        if options.cwd and not valid then
+          (fresh or initial):toast("error", "Datapier", "目录无效 / The directory is invalid")
+          if started_pane then
+            started_pane(nil)
+          end
+          return
+        end
+        prepare(fresh or initial, if valid then requested else nil)
+      end)
+    else
+      prepare(initial, nil)
+    end
+  end
+  if options.cwd or inherited then
+    validate(cx, options.cwd or inherited)
+  else
+    shell_directory(cx, source, validate)
+  end
 end
 
 function M.initialize(cx)
