@@ -1,7 +1,29 @@
 use super::*;
 
 fn input(app: &App, key: &str, label: &str) -> Node<Msg> {
-    let field = field(app, &app.transfer_key(key), label);
+    let field_name = app.transfer_key(key);
+    let input_file = key
+        .strip_prefix("file-")
+        .is_some_and(|index| index.parse::<usize>().is_ok());
+    let mode = app.field(&app.transfer_key("mode"));
+    let browse: &[(&str, &str, &str)] = if input_file {
+        if mode == "sql_restore" {
+            &[("file", "sql", "浏览…")]
+        } else {
+            &[("file", "csv,json", "浏览…")]
+        }
+    } else if key == "output" && app.transfer_output_directory() {
+        &[("directory", "", "浏览…")]
+    } else if matches!(key, "output" | "report-path") {
+        &[("save", "", "浏览…")]
+    } else {
+        &[]
+    };
+    let field = if browse.is_empty() {
+        field(app, &field_name, label)
+    } else {
+        controls::path_field(app, &field_name, label, browse)
+    };
     if [
         "columns",
         "mapping",
@@ -12,9 +34,7 @@ fn input(app: &App, key: &str, label: &str) -> Node<Msg> {
     ]
     .iter()
     .any(|part| key.contains(part))
-        || key
-            .strip_prefix("file-")
-            .is_some_and(|index| index.parse::<usize>().is_ok())
+        || input_file
     {
         html::div().class("workbench-wide").child(field).into()
     } else {
@@ -964,6 +984,18 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
                 html::div()
                     .class("transfer-actions")
                     .child(icon_button("plus", "添加文件", "transfer-ui-file-add"))
+                    .child(path_picker::browse_button(
+                        &app.transfer_key("file-0"),
+                        "multiple",
+                        if mode == "sql_restore" {
+                            "sql"
+                        } else {
+                            "csv,json"
+                        },
+                        "批量选择文件",
+                        app.workbench.transfer.pending.is_some()
+                            || app.workbench.transfer.queued_prepare.is_some(),
+                    ))
                     .child(icon_button(
                         "trash",
                         "移除末尾文件",
@@ -972,7 +1004,15 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
             );
         }
         if matches!(mode, "export" | "sql_dump") {
-            body = body.child(input(app, "output", "输出文件路径"));
+            body = body.child(input(
+                app,
+                "output",
+                if app.transfer_output_directory() {
+                    "输出目录"
+                } else {
+                    "输出文件路径"
+                },
+            ));
         }
     }
     if stage == "objects" {

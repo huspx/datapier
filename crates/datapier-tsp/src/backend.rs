@@ -435,7 +435,12 @@ async fn consume(
 impl Backend {
     /// 启动后台 runtime 和 Engine 连接；线程创建失败时返回错误。
     /// 连接和 runtime 的异步失败通过响应队列报告。
-    pub fn start(root: PathBuf, workspace: String, waker: Waker) -> Result<Self> {
+    pub fn start(
+        root: PathBuf,
+        workspace: String,
+        engine_cwd: Option<PathBuf>,
+        waker: Waker,
+    ) -> Result<Self> {
         let (commands, mut incoming) = mpsc::channel::<Request>(64);
         let (responses, receiver) = mpsc::channel::<Response>(64);
         let worker = thread::Builder::new()
@@ -461,6 +466,7 @@ impl Backend {
                         ClientOptions {
                             kind: datapier_core::model::ClientKind::Tsp,
                             workspace,
+                            engine_cwd,
                             ..ClientOptions::default()
                         },
                     )
@@ -569,6 +575,8 @@ impl Backend {
                                         }
                                         Err(error) => Err(error.into()),
                                     }
+                                } else if request.method == crate::path_picker::METHOD {
+                                    crate::path_picker::read_directory(request.params).await
                                 } else {
                                     client.request(&request.method, request.params).await
                                 };

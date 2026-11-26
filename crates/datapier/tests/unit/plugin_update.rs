@@ -18,6 +18,27 @@ fn release_versions_compare_numeric_components() {
 }
 
 #[test]
+fn rejects_downgrades_and_accepts_current_or_newer_versions() {
+    let current = env!("CARGO_PKG_VERSION");
+    let parts = version(current).unwrap();
+    assert!(ensure_target_version(current).is_ok());
+    assert!(ensure_target_version(&format!("{}.{}.{}", parts[0] + 1, 0, 0)).is_ok());
+    let lower = if parts[2] > 0 {
+        format!("{}.{}.{}", parts[0], parts[1], parts[2] - 1)
+    } else if parts[1] > 0 {
+        format!("{}.{}.0", parts[0], parts[1] - 1)
+    } else if parts[0] > 0 {
+        format!("{}.0.0", parts[0] - 1)
+    } else {
+        return;
+    };
+    let error = ensure_target_version(&lower).unwrap_err();
+    assert_eq!(error.code, "update_downgrade");
+    assert!(error.message.contains("请安装当前版本或更新版本"));
+    assert!(ensure_target_version("invalid").is_err());
+}
+
+#[test]
 fn status_uses_longer_of_interval_and_rate_limit() {
     let state = State {
         last_attempt: 100,

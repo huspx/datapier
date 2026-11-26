@@ -206,6 +206,18 @@ fn verify_stage(stage: &Path, state: &State) -> Result<PathBuf> {
         .target_version
         .as_deref()
         .ok_or_else(|| AppError::invalid("缺少目标版本"))?;
+    let manifest = fs::read_to_string(stage.join("datapier/plugin.toml"))?;
+    let versions: Vec<_> = manifest
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "version").then(|| value.trim().trim_matches('"'))
+        })
+        .collect();
+    if versions != [ver] {
+        return Err(AppError::invalid("暂存 plugin 与目标版本不匹配"));
+    }
+    super::ensure_target_version(ver)?;
     let target = target().ok_or_else(|| AppError::invalid("不支持的平台"))?;
     let cache = stage.join("cache").join(ver);
     let mut candidates = Vec::new();
@@ -549,6 +561,11 @@ pub(super) async fn run(
     inherited: Option<(File, File)>,
     handoff_id: Option<uuid::Uuid>,
 ) -> Result<()> {
+    let target_version = state
+        .target_version
+        .as_deref()
+        .ok_or_else(|| AppError::invalid("缺少目标版本"))?;
+    super::ensure_target_version(target_version)?;
     let root = datapier_engine::update_data_root(root)?;
     let plugin_dir = fs::canonicalize(plugin_dir)?;
     let state_dir = fs::canonicalize(state_dir)?;

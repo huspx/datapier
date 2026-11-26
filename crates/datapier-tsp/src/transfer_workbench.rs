@@ -86,6 +86,91 @@ impl App {
         let key = self.transfer_key(name);
         self.field_set(&key, value);
     }
+    pub(super) fn transfer_output_directory(&self) -> bool {
+        self.transfer_value("mode") == "export"
+            && self.transfer_value("provider") == "mysql"
+            && (0..self.workbench.transfer.objects)
+                .filter(|index| {
+                    !self
+                        .transfer_value(&format!("object-source-{index}"))
+                        .trim()
+                        .is_empty()
+                })
+                .nth(1)
+                .is_some()
+    }
+
+    fn transfer_file_defaults(&mut self, index: usize) {
+        for (field, value) in [
+            ("file", ""),
+            ("file-target", ""),
+            ("file-mapping", ""),
+            ("file-range", ""),
+            ("file-types", ""),
+            ("file-format", "csv"),
+            ("file-encoding", "utf-8"),
+            ("file-delimiter", ","),
+            ("file-header", "true"),
+            ("file-backslash", "true"),
+            ("file-null-marker", "\\N"),
+            ("file-columns", "[]"),
+            ("file-binary-columns", "[]"),
+            ("file-sync", "false"),
+        ] {
+            self.transfer_set(&format!("{field}-{index}"), value);
+        }
+    }
+
+    pub(super) fn append_transfer_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+    ) -> std::result::Result<(), i18n::UiMessage> {
+        use datapier_core::model::transfer::MAX_PLAN_ITEMS;
+        if self.workbench.transfer.pending.is_some()
+            || self.workbench.transfer.queued_prepare.is_some()
+        {
+            return Err(i18n::UiMessage::key("请求处理中，请稍候"));
+        }
+        let mut files = self.workbench.transfer.files;
+        // 初始空行尚无输入文件，沿用它的资源入口预填和选项；有路径的行原样保留。
+        let use_initial_row = files == 1 && self.transfer_value("file-0").trim().is_empty();
+        let additional = paths.len().saturating_sub(usize::from(use_initial_row));
+        if files.saturating_add(additional) > MAX_PLAN_ITEMS {
+            return Err(i18n::UiMessage::template(
+                "最多允许 {count} 个输入文件",
+                vec![("count", i18n::UiArg::Raw(MAX_PLAN_ITEMS.to_string()))],
+            ));
+        }
+        let paths = paths
+            .into_iter()
+            .map(|path| path.into_os_string().into_string())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| i18n::UiMessage::key("路径无法用 UTF-8 无损表示"))?;
+        let restore = self.transfer_value("mode") == "sql_restore";
+        for (offset, path) in paths.into_iter().enumerate() {
+            let index = if use_initial_row && offset == 0 {
+                0
+            } else {
+                let index = files;
+                self.transfer_file_defaults(index);
+                files += 1;
+                index
+            };
+            if !restore
+                && std::path::Path::new(&path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                self.transfer_set(&format!("file-format-{index}"), "json");
+            }
+            self.transfer_set(&format!("file-{index}"), path);
+        }
+        self.workbench.transfer.files = files;
+        self.workbench.transfer.invalidate();
+        self.dirty = true;
+        Ok(())
+    }
+
     pub(super) fn transfer_input_changed(&mut self, name: &str) {
         let Some(key) = name.strip_prefix(&format!("transfer-{}-file-", self.tabs[self.active].id))
         else {
@@ -292,11 +377,6 @@ impl App {
             self.workbench.transfer.files = 1;
             self.workbench.transfer.objects = 1;
             for key in [
-                "file-0",
-                "file-target-0",
-                "file-mapping-0",
-                "file-range-0",
-                "file-types-0",
                 "object-source-0",
                 "object-target-0",
                 "object-mapping-0",
@@ -310,15 +390,7 @@ impl App {
             ] {
                 self.transfer_set(key, "");
             }
-            self.transfer_set("file-format-0", "csv");
-            self.transfer_set("file-encoding-0", "utf-8");
-            self.transfer_set("file-delimiter-0", ",");
-            self.transfer_set("file-header-0", "true");
-            self.transfer_set("file-backslash-0", "true");
-            self.transfer_set("file-null-marker-0", "\\N");
-            self.transfer_set("file-columns-0", "[]");
-            self.transfer_set("file-binary-columns-0", "[]");
-            self.transfer_set("file-sync-0", "false");
+            self.transfer_file_defaults(0);
             self.transfer_set("definer-mode", "current_user");
             self.transfer_set("definer-map", "");
             self.transfer_set("triggers-confirmed", "false");
@@ -885,25 +957,11 @@ impl App {
         match name {
             "transfer-ui-file-add" => {
                 let i = self.workbench.transfer.files;
-                self.workbench.transfer.files += 1;
-                for key in [
-                    format!("file-{i}"),
-                    format!("file-target-{i}"),
-                    format!("file-mapping-{i}"),
-                    format!("file-range-{i}"),
-                    format!("file-types-{i}"),
-                ] {
-                    self.transfer_set(&key, "");
+                if i >= datapier_core::model::transfer::MAX_PLAN_ITEMS {
+                    return true;
                 }
-                self.transfer_set(&format!("file-format-{i}"), "csv");
-                self.transfer_set(&format!("file-encoding-{i}"), "utf-8");
-                self.transfer_set(&format!("file-delimiter-{i}"), ",");
-                self.transfer_set(&format!("file-header-{i}"), "true");
-                self.transfer_set(&format!("file-backslash-{i}"), "true");
-                self.transfer_set(&format!("file-null-marker-{i}"), "\\N");
-                self.transfer_set(&format!("file-columns-{i}"), "[]");
-                self.transfer_set(&format!("file-binary-columns-{i}"), "[]");
-                self.transfer_set(&format!("file-sync-{i}"), "false");
+                self.transfer_file_defaults(i);
+                self.workbench.transfer.files += 1;
                 self.workbench.transfer.invalidate();
             }
             "transfer-ui-object-add" => {

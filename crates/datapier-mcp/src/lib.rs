@@ -578,6 +578,7 @@ pub async fn run(
     allow_connections: Vec<Uuid>,
     project_roots: Vec<PathBuf>,
     environment: Option<String>,
+    engine_cwd: Option<PathBuf>,
 ) -> Result<()> {
     let project_roots = project_roots
         .into_iter()
@@ -598,6 +599,7 @@ pub async fn run(
         ClientOptions {
             kind: ClientKind::Mcp,
             allow_connections,
+            engine_cwd,
             ..Default::default()
         },
     )

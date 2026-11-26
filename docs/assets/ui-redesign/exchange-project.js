@@ -26,6 +26,8 @@ const xp = {
     conflict: 'stop',
     projectName: '订单测试',
     projectPath: '/example/orders',
+    archiveImportPath: '/repo/app/project.zip',
+    archiveExportPath: '/repo/app/project.zip',
     alias: 'orders',
     binding: 'Commerce / commerce',
     query: 'SELECT *\nFROM orders\nLIMIT 100;',
@@ -591,7 +593,9 @@ function xpProjectBody() {
       xpLabel('归档导入／导出', 'Archive import / export')
     }</h4><div class="xp-actions">${xpIcon('upload', '预览导入归档', 'Preview archive import', 'archive-import')}${
       xpIcon('download', '预览导出归档', 'Preview archive export', 'archive-export')
-    }</div></div><p>${
+    }</div></div><div class="xp-grid">${
+      xpField('archiveImportPath', '导入归档路径（示例）', 'Archive import path (example)')
+    }${xpField('archiveExportPath', '导出归档路径（示例）', 'Archive export path (example)')}</div><p>${
       xpLabel(
         '归档包含共享项目文件，不包含凭据或本机绑定。导入新目录后必须重新确认绑定；原目录重开沿用已确认绑定。',
         'Archives contain shared project files, never credentials or local bindings. Confirm bindings again after import into a new directory; reopening the original directory retains confirmed bindings.',

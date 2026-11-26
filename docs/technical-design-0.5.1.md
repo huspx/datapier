@@ -26,7 +26,7 @@
 
 ### 3.1 Tern 启动
 
-1. 在 `bootstrap.start` 开始时记录来源 pane、tab 和工作目录。命令面板、Carly 打开、待办缺少工作台时走 `hosts:terminal("local", …)`，新开本机 tab。普通入口通过公开宿主 API 检查来源 pane 和目录归属。pane 归属本机且路径在本机存在仍不足以确认 SSH 跳转后的目录归属。缺少归属信息时保守使用第 2 节的本机启动路径。[Window API](https://docs.stencil.so/tern/reference/api-window.md#sessions-and-hosts-cx)
+1. 在 `bootstrap.start` 开始时记录来源 pane、tab 和工作目录。命令面板、Carly 打开、待办缺少工作台时走 `hosts:terminal("local", …)`，新开本机 tab。终端来源已在本机提示符时，使用公开 CLI `tern process <pane> --json` 验证前台进程是该 pane 的 shell，并核对它的 OS cwd 与目录快照。原生文件及 Git block 按宿主确认归属。遇到 SSH 前台进程、未知 shell、CLI 不可用或目录快照无法核实，保守使用第 2 节的本机启动路径。[Window API](https://docs.stencil.so/tern/reference/api-window.md#sessions-and-hosts-cx)
 2. Files 项目按钮使用回调的 `files.host`、`files.root` 确认本机目录，其导航候选仅限发起操作的 tab。没有可用工作台时，通过 `cx.layout:split` 在该 tab 的本机来源 pane 旁打开，传入确认后的 `files.root`。异步校验完成后，复核来源 pane 仍在原 tab 且属于本机，并重新检查该 tab 是否已有工作台。同一 tab 的重复点击复用正在打开的 pane，使用最后一次有效的目录请求定位。复用 `navigate_when_ready`，让新 pane 完成桥接绑定后直接定位项目。来源失效或分屏失败时显示原因。[窗口入口](../plugins/datapier/window.luau) · [窗口导航桥接](../plugins/datapier/lib/window_bridge.luau) · [Tern 分屏 API](https://docs.stencil.so/tern/guides/layout.md#arranging-panes)
 3. 使用 `bootstrap.executable()` 返回的已校验绝对路径生成 `Launch.command`，将来源目录传给 `Launch.cwd`。继续传递更新门禁确认的 `--data-dir-b64`。有来源目录时，用内部 `tsp --query-base-b64` 传递同一份目录快照，避免登录 shell 的初始化过程影响查询基准。仅允许绝对 UTF-8 目录进入该参数，错误在启动边界报告。
 4. `Launch.command` 经登录 shell 解析。Unix 使用 shell 字面量引用，覆盖空格、单引号、反斜杠和 Unicode。Windows 使用可信系统目录中的 Windows PowerShell 5.1 绝对路径和 `-EncodedCommand`，由 UTF-16LE 编码的命令把已校验的绝对路径作为单个程序调用并传递退出码，外层兼容 `cmd` 和 PowerShell。项目 cwd 仅通过 `Launch.cwd` 传递，程序路径和参数均作为字面值处理。实际支持组合以对应候选上的运行验收为准。[Launch 参数](https://docs.stencil.so/tern/reference/api-window.md#launch) · [现有安装约定](../CONTRIBUTING.md#平台与安装)
@@ -75,6 +75,8 @@ TSP 启动时保存可选的查询基准目录，生命周期与 pane 一致。�
 
 在 TSP 后台异步读取本机目录并通过既有唤醒机制交回 UI。一次只读取当前目录，限制单次下发条目，超量时分批加载或提示缩小筛选范围。用请求代次和目录身份隔离连续导航回执。空目录、权限不足、目录变化和无法无损表示的路径有明确反馈。枚举、筛选和回填只操作路径。打开、保存、证书读取、导入、导出和覆盖仍由现有业务入口在用户确认后执行。该路径适用于插件和独立 `datapier tsp`，沿用现有 IPC、文件访问和项目目录校验。[TSP 后台](../crates/datapier-tsp/src/backend.rs) · [TSP 视图入口](../crates/datapier-tsp/src/views.rs) · [TLS 字段](../crates/datapier-tsp/src/views/profile_form.rs) · [单值文件表单](../crates/datapier-tsp/src/advanced/files.rs)
 
+路径输入与「浏览…」保持同一行。输入有焦点时可按 F4 打开首个选择入口，Shift+F4 打开同一字段的第二个入口。MCP 添加仓库时，选择器接替目录表单的交互并在关闭后恢复该表单和焦点。
+
 ## 4. 实施顺序
 
 | 步骤 | 对应文件与交付内容 |
@@ -103,4 +105,11 @@ TSP 启动时保存可选的查询基准目录，生命周期与 pane 一致。�
 | 路径选择器 | 在真实 Tern 中通过键盘及鼠标选择文件、批量选择、选择目录和保存位置。分别核对已有路径、来源目录和本机用户主目录。覆盖中文、空格、空目录、权限错误和取消。回填后读回实际 SQL、核对批量输入行和项目路径。浏览和取消期间文件与原表单值保持原状，选中后只按确认的范围回填，保存与覆盖仍走原流程 |
 | 回归 | 验证更新门禁、受管 MCP 登记与真实握手、外部编辑器交接，以及相对路径配置的 TLS 证书和数据交换仍按原有路径契约执行 |
 
-本文记录设计及通过标准。功能实现后记录实际运行结果及候选二进制身份。[测试与验证](../CONTRIBUTING.md#测试与验证) · [发布前检查](../RELEASING.md#发布前检查)
+### 5.1 本机候选验证
+
+- 使用源码候选 `datapier 0.5.1` 和隔离的 Tern daemon、数据目录、缓存及真实数据库。命令打开新 tab，Files 入口在当前 tab 复用或分屏定位，切换同目录的两个 pane 后 Files 根目录保持一致。带空格、单引号和中文的缓存及项目目录完成 TSP 启动。两个 pane 共用 Engine，分别打开并保存同名相对路径，读回不同的 SQL。原生选择器通过键盘导航、F4、鼠标选中和 Escape 返回表单。背景、可用和禁用按钮、SQL 编辑器分别观察到箭头、手形、箭头和文本光标。
+- 从受管 MCP 冷启动时实际 Engine cwd 为已校验程序所在目录。使用独立项目 cwd 启动第二客户端，实例 ID 与 PID 保持一致。手工启动的 Engine 也被复用。MCP initialize 成功，`tools/list` 返回 23 项。0.5.0 目标的下载、安排安装、应用及后台 worker 均返回 `update_downgrade`。
+- 受影响 crate 的 Clippy、555 项 Rust 单测和 25 项发布脚本测试通过。隔离 MySQL 5.7.42／8.0／8.4 和 Redis 6.2／7.2／8.0 通过基础回归。MySQL 8.4 与 Redis 8.0 均完成私有 CA 和主机身份验证。MySQL 完成十万行导入导出，Redis 完成百万 key 扫描。macOS Keychain 存取及清理通过。
+- 五个非本机目标的原生交互，包括 Windows 的 cmd 与 PowerShell 启动，按各自环境核对。最终发布包仍须验收。浏览器已验证路径选择稿的层级、焦点和布局。
+
+[测试与验证](../CONTRIBUTING.md#测试与验证) · [发布前检查](../RELEASING.md#发布前检查)

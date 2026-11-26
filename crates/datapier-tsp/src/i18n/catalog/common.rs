@@ -1,5 +1,51 @@
 //! 跨界面及动态路由共用的词条。
 pub(super) const ENTRIES: &[(&str, &str)] = &[
+    ("浏览…", "Browse…"),
+    ("选择文件", "Choose file"),
+    ("选择多个文件", "Choose multiple files"),
+    ("选择目录", "Choose folder"),
+    ("选择父目录", "Choose parent folder"),
+    ("选择保存位置", "Choose save location"),
+    ("按名称筛选", "Filter by name"),
+    ("上一级目录", "Parent folder"),
+    ("添加选中的文件", "Add selected files"),
+    ("使用所选路径", "Use selected path"),
+    (
+        "切换选中（已选 {count}）",
+        "Toggle selection ({count} selected)",
+    ),
+    ("当前目录没有可选项", "This folder has no selectable items"),
+    (
+        "目录条目过多，请缩小筛选范围",
+        "Too many entries. Narrow the filter.",
+    ),
+    (
+        "部分名称无法用 UTF-8 无损表示",
+        "Some names cannot be represented in UTF-8",
+    ),
+    (
+        "路径无法用 UTF-8 无损表示",
+        "The path cannot be represented in UTF-8",
+    ),
+    (
+        "无法确定本机用户主目录",
+        "Cannot determine the local home folder",
+    ),
+    ("无法读取目录：{error}", "Cannot read the folder: {error}"),
+    (
+        "请输入普通相对路径或完整的绝对路径",
+        "Enter a regular relative path or a full absolute path",
+    ),
+    (
+        "相对路径基于 {directory}",
+        "Relative paths start at {directory}",
+    ),
+    ("批量选择文件", "Choose files"),
+    (
+        "最多允许 {count} 个输入文件",
+        "At most {count} input files are allowed",
+    ),
+    ("输出目录", "Output folder"),
     (
         "选择项目和环境后关联数据库。",
         "Select a project and environment to associate a database.",

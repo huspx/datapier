@@ -1,6 +1,19 @@
 use super::*;
 fn input(app: &App, name: &str, label: &str) -> Node<Msg> {
-    let field = field(app, &app.project_key(name), label);
+    let field_name = app.project_key(name);
+    let browse: &[(&str, &str, &str)] = match name {
+        "path" => &[("directory", "", "浏览…"), ("parent", "", "选择父目录")],
+        "local-root" => &[("directory", "", "浏览…")],
+        "destination" => &[("parent", "", "浏览…")],
+        "archive" if app.workbench.project.project.is_none() => &[("file", "zip", "浏览…")],
+        "archive" | "artifact-path" => &[("save", "", "浏览…")],
+        _ => &[],
+    };
+    let field = if browse.is_empty() {
+        field(app, &field_name, label)
+    } else {
+        controls::path_field(app, &field_name, label, browse)
+    };
     if name == "query-text" {
         html::div().class("workbench-wide").child(field).into()
     } else {

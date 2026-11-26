@@ -230,25 +230,43 @@ pub(crate) fn view(state: &FileUi, writable: bool, value_ready: bool, dirty: boo
     }
     panel = panel.child(
         ui::field(tr("文件路径").into_owned()).child(
-            ui::input()
-                .variant(ui::InputVariant::Field)
-                .key("input-advanced-file-path")
-                .aria(tr("文件路径").into_owned())
-                .text(state.path.text.clone())
-                .cursor(state.path.cursor)
-                .anchor(state.path.anchor)
-                .on_focus(Msg::Focus("advanced-file-path".into()))
-                .on_undo(Msg::Undo("advanced-file-path".into()))
-                .on_edit(|e| {
-                    Msg::Edit(
-                        "advanced-file-path".into(),
-                        e.from,
-                        e.to,
-                        e.text.clone(),
-                        e.cursor,
-                        e.len,
-                    )
-                }),
+            html::div()
+                .class("datapier-path-row")
+                .child(
+                    ui::input()
+                        .variant(ui::InputVariant::Field)
+                        .key("input-advanced-file-path")
+                        .aria(tr("文件路径").into_owned())
+                        .text(state.path.text.clone())
+                        .cursor(state.path.cursor)
+                        .anchor(state.path.anchor)
+                        .on_focus(Msg::Focus("advanced-file-path".into()))
+                        .on_undo(Msg::Undo("advanced-file-path".into()))
+                        .on_edit(|e| {
+                            Msg::Edit(
+                                "advanced-file-path".into(),
+                                e.from,
+                                e.to,
+                                e.text.clone(),
+                                e.cursor,
+                                e.len,
+                            )
+                        }),
+                )
+                .child(crate::path_picker::browse_button(
+                    "advanced-file-path",
+                    "file",
+                    "",
+                    "浏览…",
+                    !ready || !writable,
+                ))
+                .child(crate::path_picker::browse_button(
+                    "advanced-file-path",
+                    "save",
+                    "",
+                    "选择保存位置",
+                    !ready,
+                )),
         ),
     );
     panel = panel.child(

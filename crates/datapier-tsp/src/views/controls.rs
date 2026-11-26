@@ -88,14 +88,29 @@ pub(super) fn page_button(icon: &str, label: &str, action: &str, enabled: bool) 
 }
 
 pub(super) fn field(app: &App, name: &str, label: &str) -> Node<Msg> {
-    field_control(app, name, label, None)
+    field_control(app, name, label, None, &[])
 }
 
 pub(super) fn field_with_hint(app: &App, name: &str, label: &str, hint: &str) -> Node<Msg> {
-    field_control(app, name, label, Some(hint))
+    field_control(app, name, label, Some(hint), &[])
 }
 
-fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node<Msg> {
+pub(super) fn path_field(
+    app: &App,
+    name: &str,
+    label: &str,
+    browse: &[(&str, &str, &str)],
+) -> Node<Msg> {
+    field_control(app, name, label, None, browse)
+}
+
+fn field_control(
+    app: &App,
+    name: &str,
+    label: &str,
+    hint: Option<&str>,
+    browse: &[(&str, &str, &str)],
+) -> Node<Msg> {
     let ed = if name == "cli_text" {
         &app.tabs[app.active].cli_query
     } else if name == "cell" {
@@ -226,35 +241,38 @@ fn field_control(app: &App, name: &str, label: &str, hint: Option<&str>) -> Node
             )
             .into()
     } else {
-        control
-            .child(
-                ui::input()
-                    .aria(accessible_label)
-                    .variant(ui::InputVariant::Field)
-                    .readonly(
-                        app.connection_form_busy()
-                            || (name == "mcp-rule-scope"
-                                && !app.field("mcp-rule-pending").is_empty())
-                            || (name.starts_with("transfer-")
-                                && (app.workbench.transfer.pending.is_some()
-                                    || app.workbench.transfer.queued_prepare.is_some()))
-                            || (name.starts_with("project-") && app.workbench.project.is_pending()),
-                    )
-                    .secret(matches!(
-                        name,
-                        "password" | "archery_otp" | "archery_totp_uri"
-                    ))
-                    .key(format!("input-{name}"))
-                    .text(display)
-                    .cursor(ed.cursor)
-                    .anchor(ed.anchor)
-                    .on_focus(Msg::Focus(f))
-                    .on_undo(Msg::Undo(u))
-                    .on_edit(move |e| {
-                        Msg::Edit(n.clone(), e.from, e.to, e.text.clone(), e.cursor, e.len)
-                    }),
-            )
-            .into()
+        let readonly = app.connection_form_busy()
+            || (name == "mcp-rule-scope" && !app.field("mcp-rule-pending").is_empty())
+            || (name.starts_with("transfer-")
+                && (app.workbench.transfer.pending.is_some()
+                    || app.workbench.transfer.queued_prepare.is_some()))
+            || (name.starts_with("project-") && app.workbench.project.is_pending());
+        let input = ui::input()
+            .aria(accessible_label)
+            .variant(ui::InputVariant::Field)
+            .readonly(readonly)
+            .secret(matches!(
+                name,
+                "password" | "archery_otp" | "archery_totp_uri"
+            ))
+            .key(format!("input-{name}"))
+            .text(display)
+            .cursor(ed.cursor)
+            .anchor(ed.anchor)
+            .on_focus(Msg::Focus(f))
+            .on_undo(Msg::Undo(u))
+            .on_edit(move |e| Msg::Edit(n.clone(), e.from, e.to, e.text.clone(), e.cursor, e.len));
+        if browse.is_empty() {
+            control.child(input).into()
+        } else {
+            let mut row = html::div().class("datapier-path-row").child(input);
+            for (mode, extensions, title) in browse {
+                row = row.child(path_picker::browse_button(
+                    name, mode, extensions, title, readonly,
+                ));
+            }
+            control.child(row).into()
+        }
     }
 }
 pub(super) fn choices(

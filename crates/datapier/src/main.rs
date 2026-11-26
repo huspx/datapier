@@ -34,6 +34,10 @@ enum Command {
         workspace: String,
         #[arg(long, hide = true)]
         window_bridge: bool,
+        #[arg(long, hide = true)]
+        plugin_cache_engine: bool,
+        #[arg(long, hide = true)]
+        query_base_b64: Option<String>,
         #[arg(long, hide = true, requires = "window_bridge")]
         bridge_stdin: bool,
     },
@@ -45,6 +49,8 @@ enum Command {
         project_roots: Vec<PathBuf>,
         #[arg(long)]
         environment: Option<String>,
+        #[arg(long, hide = true)]
+        plugin_cache_engine: bool,
     },
     /// 启动本机共享数据库内核
     Engine,
@@ -107,8 +113,18 @@ fn run() -> Result<()> {
         Command::Tsp {
             workspace,
             window_bridge: false,
+            plugin_cache_engine,
+            query_base_b64,
             ..
-        } => datapier_tsp::run(root, workspace),
+        } => {
+            let query_base = query_base_b64.map(decode_query_base).transpose()?;
+            datapier_tsp::run(
+                root,
+                workspace,
+                query_base,
+                plugin_engine_cwd(plugin_cache_engine)?,
+            )
+        }
         command => {
             // MCP stdout 仅承载协议；窗口桥接每行输出一个 JSON 回执。
             tracing_subscriber::fmt()
@@ -127,8 +143,16 @@ fn run() -> Result<()> {
                         allow_connections,
                         project_roots,
                         environment,
+                        plugin_cache_engine,
                     } => {
-                        datapier_mcp::run(root, allow_connections, project_roots, environment).await
+                        datapier_mcp::run(
+                            root,
+                            allow_connections,
+                            project_roots,
+                            environment,
+                            plugin_engine_cwd(plugin_cache_engine)?,
+                        )
+                        .await
                     }
                     Command::PluginUpdate {
                         action,
@@ -183,5 +207,83 @@ fn run() -> Result<()> {
                 }
             })
         }
+    }
+}
+
+fn plugin_engine_cwd(enabled: bool) -> Result<Option<PathBuf>> {
+    if !enabled {
+        return Ok(None);
+    }
+    let executable = std::env::current_exe()?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| datapier_core::AppError::invalid("无法确定程序缓存目录"))?;
+    if !directory.is_absolute() {
+        return Err(datapier_core::AppError::invalid(
+            "程序缓存目录必须是绝对路径",
+        ));
+    }
+    Ok(Some(directory.to_path_buf()))
+}
+
+fn decode_query_base(encoded: String) -> Result<PathBuf> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| datapier_core::AppError::invalid(error.to_string()))?;
+    let path = PathBuf::from(
+        String::from_utf8(bytes)
+            .map_err(|error| datapier_core::AppError::invalid(error.to_string()))?,
+    );
+    if !path.is_absolute() {
+        return Err(datapier_core::AppError::invalid(
+            "查询基准目录必须是绝对路径",
+        ));
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    #[test]
+    fn internal_query_base_requires_absolute_utf8_path() {
+        let path = std::env::current_dir().unwrap();
+        let encoded = STANDARD.encode(path.to_str().unwrap());
+        assert_eq!(decode_query_base(encoded).unwrap(), path);
+        assert!(decode_query_base(STANDARD.encode("relative/path")).is_err());
+        assert!(decode_query_base(STANDARD.encode([0xff])).is_err());
+        assert!(decode_query_base("!".into()).is_err());
+    }
+
+    #[test]
+    fn internal_engine_flag_is_available_on_tsp_and_mcp() {
+        assert!(matches!(
+            Arguments::try_parse_from([
+                "datapier",
+                "tsp",
+                "--plugin-cache-engine",
+                "--query-base-b64",
+                "Lw=="
+            ])
+            .unwrap()
+            .command,
+            Command::Tsp {
+                plugin_cache_engine: true,
+                query_base_b64: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            Arguments::try_parse_from(["datapier", "mcp", "--plugin-cache-engine"])
+                .unwrap()
+                .command,
+            Command::Mcp {
+                plugin_cache_engine: true,
+                ..
+            }
+        ));
     }
 }

@@ -75,7 +75,7 @@ function M.register(cx, binary, data_dir)
     return false, tostring(current_version)
   end
   if type(record) == "table" and newer(record.version, current_version) then
-    return false, "较新版本已管理 Datapier MCP 配置"
+    return false, "请升级 Datapier / Please upgrade Datapier: " .. table.concat(record.version, ".")
   end
   local ok, result = pcall(function()
     local entries = cx.settings:get("agents.mcp")
@@ -104,7 +104,7 @@ function M.register(cx, binary, data_dir)
     desired.env = env
     desired.transport = "stdio"
     desired.command = binary
-    desired.args = { "mcp" }
+    desired.args = { "mcp", "--plugin-cache-engine" }
     local next_startup = startup(desired)
     if same(current, next_startup) then
       if not same(record.startup, current) or record.pending ~= nil or record.version ~= current_version then

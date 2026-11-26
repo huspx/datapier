@@ -2,9 +2,9 @@
 
 面向开发者与 AI agent 的多数据库工作台。统一连接、资源浏览、查询和数据编辑体验，保留不同数据库的数据模型与操作语义。
 
-当前本地候选版本 **0.5.0** 提供 SQL 上下文补全、Tern MCP 自动登记、本机项目与环境及资源推荐、plugin 更新，并保留数据交换、迁移、SQL 备份恢复与 Git 项目。正式发布状态与下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
+当前本地候选版本 **0.5.1** 完善 Tern Files 项目入口、查询文件路径、路径选择与鼠标反馈，并延续 SQL 上下文补全、Tern 受管 MCP、本机项目与环境及 plugin 更新。正式发布状态与下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
 
-> 0.5.0 候选的已观察运行范围及待验收项见[验收记录](docs/technical-design-0.5.0.md#8-验收矩阵与验证方式)；其他五个目标的构建与运行须按对应提交的证据核对，不能视为完整验收。历史 Archery 验证范围见[运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
+> 0.5.1 候选的验收标准和运行范围见 [0.5.1 技术方案](docs/technical-design-0.5.1.md#5-验收矩阵)。历史 Archery 运行范围见 [0.1.1 运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
 
 ## 当前开发功能
 
@@ -43,10 +43,10 @@ plugin 默认检查正式版本并提示；自动下载和退出后自动安装�
 
 更新设置分别显示插件包和程序归档的实际下载进度，校验通过后显示已准备。待办 Widget 可直接进入待审批或待认证；项目文档支持只读并排预览和标题定位，文本变更可用原生 Diff 查看。
 
-需要独立运行时，取得与操作系统和架构匹配的二进制归档后手工解包。以下以已取得的 0.5.0 Unix tar.gz 归档为例；Windows 使用对应 zip 与 `datapier.exe`：
+需要独立运行时，取得与操作系统和架构匹配的二进制归档后手工解包。以下以 0.5.1 Unix tar.gz 归档为例；Windows 使用对应 zip 与 `datapier.exe`：
 
 ```sh
-tar -xzf /absolute/path/to/datapier-0.5.0-TARGET.tar.gz -C /absolute/path/to/install-directory
+tar -xzf /absolute/path/to/datapier-0.5.1-TARGET.tar.gz -C /absolute/path/to/install-directory
 /absolute/path/to/install-directory/datapier tui
 ```
 
@@ -73,7 +73,7 @@ tar -xzf /absolute/path/to/datapier-0.5.0-TARGET.tar.gz -C /absolute/path/to/ins
 
 ## 常用操作
 
-- **打开**：在 Tern 命令面板选择 `New Datapier block`；本地开发启动见贡献指南。
+- **打开工作台与文件**：`New Datapier block` 开新 tab。Files 的「Datapier MCP 项目」在本机当前 tab 定位已有工作台或分屏打开。查询、导入导出、项目和证书等表单可手输路径，也可用同行的「浏览…」选择。
 - **迁移与恢复**：在 Tern 工作台选择数据交换或 SQL 备份恢复，依次下拉选择连接、实际数据库与对象，字段映射从真实列中选择；输入文件先发现字段或 SQL 对象，新建目标进入独立表单。先准备并检查预览，再确认执行，完成后查看任务报告。失败或取消后先核对实际生效范围，再选择可续作的条目，不自动重放未知结果。
 - **项目共享**：创建项目后配置逻辑连接和查询，按环境绑定本机连接并显式保存；项目目录可交由 Git 管理，也可导出归档供其他工作区导入。外部文件变化触发冲突时先核对后再保存。
 - **MCP 数据库关联**：进入“项目 → MCP 项目”，选择项目和环境，点击“关联数据库”，在对话框中选择已有实例及 MySQL 数据库或 Redis DB；不填写资源别名。保存后返回当前环境清单，编辑和取消使用独立表单；“项目文件”保留 Git 查询与连接映射。
@@ -143,6 +143,7 @@ flowchart LR
 | 0.3.0 | 结构设计、可更新视图、批量修改与高级值编辑，能力已纳入当前候选 |
 | 0.4.0 | 数据交换、结构与数据迁移、SQL 备份恢复及 Git 项目 |
 | 0.5.0 | SQL 上下文补全、Tern MCP 自动登记、本机项目／环境与 MCP 资源推荐、plugin 更新及 O1—O23 Tern 集成优化 |
+| 0.5.1 | Tern Files 项目入口、查询路径隔离、原生路径选择与鼠标反馈 |
 
 后续版本尚未承诺发布日期；PostgreSQL／MongoDB 暂未绑定交付版本。
 
@@ -164,7 +165,7 @@ flowchart LR
 
 本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。
 
-当前候选实际执行的检查、数据库与 Tern 运行范围见 [0.5.0 验收记录](docs/technical-design-0.5.0.md#8-验收矩阵与验证方式)。历史版本运行记录不能替代当前候选验证；发布门禁见[发布指南](RELEASING.md#发布前检查)。
+当前候选的验收标准及运行范围见 [0.5.1 技术方案](docs/technical-design-0.5.1.md#5-验收矩阵)。发布门禁见 [发布指南](RELEASING.md#发布前检查)。
 
 ## 许可证
 

@@ -283,26 +283,37 @@ pub(super) fn wizard(app: &App) -> (html::El<Msg>, html::El<Msg>) {
             let editor = &app.fields["archery_ca"];
             form = form.child(
                 ui::field(crate::i18n::tr("CA 证书路径").into_owned()).child(
-                    ui::input()
-                        .variant(ui::InputVariant::Field)
-                        .aria(crate::i18n::tr("CA 证书路径").into_owned())
-                        .readonly(!https || busy)
-                        .key("input-archery_ca")
-                        .text(editor.text.clone())
-                        .cursor(editor.cursor)
-                        .anchor(editor.anchor)
-                        .on_focus(Msg::Focus("archery_ca".into()))
-                        .on_undo(Msg::Undo("archery_ca".into()))
-                        .on_edit(|e| {
-                            Msg::Edit(
-                                "archery_ca".into(),
-                                e.from,
-                                e.to,
-                                e.text.clone(),
-                                e.cursor,
-                                e.len,
-                            )
-                        }),
+                    html::div()
+                        .class("datapier-path-row")
+                        .child(
+                            ui::input()
+                                .variant(ui::InputVariant::Field)
+                                .aria(crate::i18n::tr("CA 证书路径").into_owned())
+                                .readonly(!https || busy)
+                                .key("input-archery_ca")
+                                .text(editor.text.clone())
+                                .cursor(editor.cursor)
+                                .anchor(editor.anchor)
+                                .on_focus(Msg::Focus("archery_ca".into()))
+                                .on_undo(Msg::Undo("archery_ca".into()))
+                                .on_edit(|e| {
+                                    Msg::Edit(
+                                        "archery_ca".into(),
+                                        e.from,
+                                        e.to,
+                                        e.text.clone(),
+                                        e.cursor,
+                                        e.len,
+                                    )
+                                }),
+                        )
+                        .child(path_picker::browse_button(
+                            "archery_ca",
+                            "file",
+                            "pem,crt,cer",
+                            "浏览…",
+                            busy,
+                        )),
                 ),
             );
             form = form.child(

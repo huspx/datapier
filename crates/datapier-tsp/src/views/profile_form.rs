@@ -292,12 +292,29 @@ pub(super) fn profile_form(app: &App) -> (html::El<Msg>, html::El<Msg>) {
             form = form.child(html::span(error.message.render().into_owned()).class("notice"));
         }
         if app.field("tls") == "true" {
-            form = form.child(field(app, "ca", "CA 证书路径")).child(
-                html::div()
-                    .class("form-grid")
-                    .child(field(app, "cert", "客户端证书路径"))
-                    .child(field(app, "key", "客户端私钥路径")),
-            );
+            form = form
+                .child(controls::path_field(
+                    app,
+                    "ca",
+                    "CA 证书路径",
+                    &[("file", "pem,crt,cer", "浏览…")],
+                ))
+                .child(
+                    html::div()
+                        .class("form-grid")
+                        .child(controls::path_field(
+                            app,
+                            "cert",
+                            "客户端证书路径",
+                            &[("file", "pem,crt,cer", "浏览…")],
+                        ))
+                        .child(controls::path_field(
+                            app,
+                            "key",
+                            "客户端私钥路径",
+                            &[("file", "pem,key,pk8", "浏览…")],
+                        )),
+                );
         }
     }
     panel = panel.child(form);
