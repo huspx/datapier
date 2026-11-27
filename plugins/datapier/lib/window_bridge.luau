@@ -1,5 +1,7 @@
 -- 窗口只证明 pane 仍持有 TSP 发出的 nonce；数据库内容不经过这里。
 local bootstrap = require("./bootstrap")
+local locale = require("./locale")
+local text = locale.text
 local document_preview = require("./document_preview")
 local updater = require("./updater")
 local M = {}
@@ -19,11 +21,11 @@ local update_poll_timer = nil
 local update_status_raw = nil
 local update_status_action = nil
 local update_status_seen = {}
-local english = false
 local glimpsed = {}
 local update_attempts = {}
 local bound_panes = {}
 local bound_nonces = {}
+local language_pane = nil
 local apply_roots = {}
 local apply_checks = {}
 
@@ -211,7 +213,7 @@ local function refresh_pending()
       end
     end
   end
-  pending = if next(seen) then { approvals = approvals, authentication = authentication, english = english } else nil
+  pending = if next(seen) then { approvals = approvals, authentication = authentication } else nil
   tern.chrome.refresh()
 end
 
@@ -415,7 +417,11 @@ local function apply_after_exit(cx, data_dir)
         apply_roots[data_dir] = nil
       end
       if not result or not result.ok then
-        later:toast("error", "Datapier 更新未应用", tostring(problem or (result and result.message)))
+        later:toast(
+          "error",
+          text("Datapier 更新未应用", "Datapier update was not applied"),
+          tostring(problem or (result and result.message))
+        )
       end
     end, data_dir)
   end, data_dir)
@@ -470,16 +476,24 @@ local function consume_batch(cx, response, nodes)
       if item.bound == true and item.nonce == current.nonce then
         bound_panes[entry.pane] = current.data_dir
         bound_nonces[entry.pane] = current.nonce
-        english = current.english
+        -- 后台 pane 可能仍显示旧设置。它不能覆盖最近聚焦的工作台语言。
+        if not language_pane or language_pane == entry.pane or cx.session:focused() == entry.pane then
+          language_pane = entry.pane
+          locale.observe(current.english)
+        end
         local navigation = pending_navigation[entry.pane]
         if navigation then
           pending_navigation[entry.pane] = nil
           local info = cx.session:pane(entry.pane)
           local source_valid = not navigation.source or local_source_in_tab(cx, navigation.source, navigation.tab)
           if navigation.tab and (not info or info.tab ~= navigation.tab or info.exited ~= nil) then
-            cx:toast("error", "Datapier", "工作台已离开原标签页 / The workbench has left the original tab")
+            cx:toast(
+              "error",
+              "Datapier",
+              text("工作台已离开原标签页", "The workbench has left the original tab")
+            )
           elseif not source_valid then
-            cx:toast("error", "Datapier", "来源 block 不可用 / Source block is unavailable")
+            cx:toast("error", "Datapier", text("来源 block 不可用", "Source block is unavailable"))
           elseif tern.now() <= navigation.until_ms then
             cx.session:event(entry.pane, { ev = "action", id = current.id, act = navigation.action })
           end
@@ -516,7 +530,7 @@ local function send_batch(cx)
   end)
   if not sent then
     stop_bridge()
-    cx:toast("error", "Datapier 窗口桥接失败", tostring(problem))
+    cx:toast("error", text("Datapier 窗口桥接失败", "Datapier window bridge failed"), tostring(problem))
   end
 end
 
@@ -618,7 +632,7 @@ local function sync(cx)
     end)
     if not started then
       stop_bridge()
-      fresh:toast("error", "Datapier 窗口桥接失败", tostring(problem))
+      fresh:toast("error", text("Datapier 窗口桥接失败", "Datapier window bridge failed"), tostring(problem))
       return
     end
     -- 每批收到回执后才推进，整个对账轮次共用同一个子进程。
@@ -725,6 +739,17 @@ function M.start()
   timer = tern.timer(0, tick)
   update_poll_timer = tern.timer(0, poll_update_status)
   document_preview.start()
+  tern.on("focus", function(_, cx)
+    local pane = cx.session:focused()
+    if pane and bound_nonces[pane] then
+      local node = bridge_node(cx, pane)
+      if node and bound_nonces[pane] == node.nonce then
+        language_pane = pane
+        locale.observe(node.english)
+        tern.chrome.refresh()
+      end
+    end
+  end)
   tern.on("pane_created", function(ev, cx)
     candidates[ev.pane] = true
     sync(cx)

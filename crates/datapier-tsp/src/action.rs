@@ -849,7 +849,8 @@ impl App {
                         == Some(true)
                         || change.get("field_expires_at_ms").is_some()
                 }) {
-                    self.status = "Hash 字段过期时间需要重新读取；请保留草稿并重新确认".into();
+                    self.status =
+                        i18n::UiMessage::key("Hash 字段过期时间需要重新读取；请保留草稿并重新确认");
                     return;
                 }
                 if redis.iter().any(|change| {
@@ -983,7 +984,7 @@ impl App {
                 }
                 if !self.is_redis() {
                     if !redis.is_empty() {
-                        self.status = "恢复草稿包含不匹配的 Redis 操作".into();
+                        self.status = i18n::UiMessage::key("恢复草稿包含不匹配的 Redis 操作");
                         return;
                     }
                     self.workspace_restore_start(backend, pending, rows);
@@ -1279,7 +1280,7 @@ impl App {
                 if self.workbench.overlay.as_deref() == Some("preview")
                     && self.change_preview_value().is_none()
                 {
-                    self.status = "预览已过期，请重新预览".into();
+                    self.status = i18n::UiMessage::key("预览已过期，请重新预览");
                     return;
                 }
                 match self.change_input() {

@@ -772,7 +772,7 @@ impl App {
                 self.operation_pending = false;
                 self.large = None;
                 let Some(task) = value.get("task_id").and_then(Value::as_str) else {
-                    self.status = "任务提交响应缺少任务 ID".into();
+                    self.status = i18n::UiMessage::key("任务提交响应缺少任务 ID");
                     return;
                 };
                 if self.tabs[self.active]
@@ -863,7 +863,7 @@ impl App {
                         .is_none_or(|items| !items.iter().any(|item| item.as_str().is_some()))
                     && !self.workbench.schema_invalidated_task
                 {
-                    self.status = "浏览任务完成但未返回结果".into();
+                    self.status = i18n::UiMessage::key("浏览任务完成但未返回结果");
                 }
                 if !stale_query
                     && !self.workbench.schema_invalidated_task
@@ -992,7 +992,7 @@ impl App {
                         if pending.generation != self.generation
                             || page.result.id.to_string() != pending.id
                         {
-                            self.status = "返回的结果与请求不匹配".into();
+                            self.status = i18n::UiMessage::key("返回的结果与请求不匹配");
                             return;
                         }
                         if self.has_live_drafts() {

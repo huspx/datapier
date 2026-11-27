@@ -704,4 +704,8 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
         "The project list has changed; refresh and locate the project again",
     ),
     ("项目定位结果无效", "The project location result is invalid"),
+    (
+        "副本 {workspace} 已保存；当前编辑或任务尚未结束，继续使用原工作区",
+        "Copy {workspace} was saved; editing or tasks are still in progress, so the original workspace remains active",
+    ),
 ];

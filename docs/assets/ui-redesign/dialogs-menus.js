@@ -615,7 +615,7 @@ function activateProvider(provider) {
       id: state.nextTab++,
       provider: 'mysql',
       query: true,
-      title: t('queryFile', { number: state.nextTab }),
+      title: t('numberedQueryFile', { number: state.nextTab }),
       sql: '',
       database: state.database,
     };

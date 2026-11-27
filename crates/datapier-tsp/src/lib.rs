@@ -354,6 +354,7 @@ struct App {
     icon_blobs: Option<IconBlobs>,
     settings: AppSettings,
     settings_loaded: bool,
+    settings_error: i18n::UiMessage,
     settings_epoch: u64,
     settings_save_token: Option<Uuid>,
     settings_unsaved: bool,

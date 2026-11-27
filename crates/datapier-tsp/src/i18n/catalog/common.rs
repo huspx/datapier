@@ -1,5 +1,58 @@
 //! 跨界面及动态路由共用的词条。
 pub(super) const ENTRIES: &[(&str, &str)] = &[
+    (
+        "任务提交响应缺少任务 ID",
+        "Task submission response is missing a task ID",
+    ),
+    (
+        "浏览任务完成但未返回结果",
+        "Browse task completed without returning results",
+    ),
+    (
+        "返回的结果与请求不匹配",
+        "The returned result does not match the request",
+    ),
+    (
+        "Hash 字段过期时间需要重新读取；请保留草稿并重新确认",
+        "Hash field expiration must be read again; keep the draft and confirm again",
+    ),
+    (
+        "恢复草稿包含不匹配的 Redis 操作",
+        "The restored draft contains mismatched Redis operations",
+    ),
+    (
+        "预览已过期，请重新预览",
+        "The preview has expired; preview again",
+    ),
+    (
+        "释放扫描游标失败: 响应无效",
+        "Failed to release scan cursor: invalid response",
+    ),
+    (
+        "任务响应与请求不匹配",
+        "The task response does not match the request",
+    ),
+    ("请先提交或丢弃草稿", "Submit or discard the draft first"),
+    (
+        "释放扫描游标失败: {error}",
+        "Failed to release scan cursor: {error}",
+    ),
+    (
+        "草稿尚未取得保护，请重试：{error}",
+        "Draft protection has not been confirmed. Retry: {error}",
+    ),
+    (
+        "草稿保护释放失败，将重试：{error}",
+        "Failed to release draft protection; will retry: {error}",
+    ),
+    (
+        "草稿未取得保护，请保留输入并重新打开基线或重试：{error}",
+        "Draft protection was not obtained. Keep your input and reopen the baseline or retry: {error}",
+    ),
+    (
+        "草稿保护确认无效，请重试",
+        "Draft protection confirmation is invalid. Retry.",
+    ),
     ("浏览…", "Browse…"),
     ("选择文件", "Choose file"),
     ("选择多个文件", "Choose multiple files"),

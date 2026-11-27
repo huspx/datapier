@@ -364,7 +364,10 @@ impl App {
                 "session_id":pending.session,"target":pending.target,"edit_token":pending.edit_token,"dirty":true,"revision":pending.revision})) {
                 Ok(()) => { pending.request = Some(token); pending.error = None; }
                 Err(error) => {
-                    self.status = i18n::UiMessage::raw(format!("草稿尚未取得保护，请重试：{error}"));
+                    self.status = i18n::UiMessage::template(
+                        "草稿尚未取得保护，请重试：{error}",
+                        vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                    );
                     pending.error = Some(error);
                 }
             }
@@ -432,7 +435,10 @@ impl App {
                 Ok(()) => release.request = Some(token),
                 Err(error) => {
                     release.retry_at = Instant::now() + Duration::from_secs(2);
-                    self.status = i18n::UiMessage::raw(format!("草稿保护释放失败，将重试：{error}"));
+                    self.status = i18n::UiMessage::template(
+                        "草稿保护释放失败，将重试：{error}",
+                        vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                    );
                 }
             }
         }
@@ -508,10 +514,13 @@ impl App {
                 Some(result.as_ref().err().cloned().unwrap_or_else(|| {
                     AppError::new("invalid_response", "草稿保护确认版本不匹配")
                 }));
-            self.status = i18n::UiMessage::raw(match result {
-                Err(error) => format!("草稿未取得保护，请保留输入并重新打开基线或重试：{error}"),
-                Ok(_) => "草稿保护确认无效，请重试".into(),
-            });
+            self.status = match result {
+                Err(error) => i18n::UiMessage::template(
+                    "草稿未取得保护，请保留输入并重新打开基线或重试：{error}",
+                    vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                ),
+                Ok(_) => i18n::UiMessage::key("草稿保护确认无效，请重试"),
+            };
             return true;
         }
         let mut pending = self.workbench.draft_scope_pending.take().unwrap();
@@ -876,6 +885,7 @@ impl App {
             icon_blobs: None,
             settings: AppSettings::default(),
             settings_loaded: false,
+            settings_error: Default::default(),
             settings_epoch: 0,
             settings_save_token: None,
             settings_unsaved: false,

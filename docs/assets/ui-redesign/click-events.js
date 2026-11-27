@@ -259,7 +259,7 @@ document.addEventListener('click', event => {
       id: state.nextTab++,
       database: state.database,
       query: true,
-      title: t('queryFile', { number: state.nextTab }),
+      title: t('numberedQueryFile', { number: state.nextTab }),
       sql: historySamples[state.historySelected].sql,
     };
     state.tabs.push(tab);
@@ -940,7 +940,7 @@ document.addEventListener('click', event => {
       state.provider = 'mysql';
       const tab = {
         id: state.nextTab++,
-        title: t('queryFile', { number: state.nextTab }),
+        title: t('numberedQueryFile', { number: state.nextTab }),
         query: true,
         sql: '',
         database: state.database,

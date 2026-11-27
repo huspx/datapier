@@ -13,7 +13,10 @@ impl App {
             "resource.scan.discard",
             json!({"session_id":session,"cursor":cursor}),
         ) {
-            self.status = i18n::UiMessage::raw(format!("释放扫描游标失败: {error}"));
+            self.status = i18n::UiMessage::template(
+                "释放扫描游标失败: {error}",
+                vec![("error", i18n::UiArg::Raw(error.to_string()))],
+            );
         }
     }
 
@@ -83,9 +86,12 @@ impl App {
         if response.tag.starts_with("resource.scan.discard/") {
             match response.result {
                 Ok(value) if value.get("discarded").and_then(Value::as_bool) == Some(true) => {}
-                Ok(_) => self.status = "释放扫描游标失败: 响应无效".into(),
+                Ok(_) => self.status = i18n::UiMessage::key("释放扫描游标失败: 响应无效"),
                 Err(error) => {
-                    self.status = i18n::UiMessage::raw(format!("释放扫描游标失败: {error}"))
+                    self.status = i18n::UiMessage::template(
+                        "释放扫描游标失败: {error}",
+                        vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                    )
                 }
             }
             return;
@@ -350,7 +356,7 @@ impl App {
                         if response.result.as_ref().is_ok_and(|value| {
                             value.get("id").and_then(Value::as_str) != Some(task)
                         }) {
-                            self.status = "任务响应与请求不匹配".into();
+                            self.status = i18n::UiMessage::key("任务响应与请求不匹配");
                         } else {
                             response.tag = "execution.get".into();
                             self.response(response, backend);

@@ -1,4 +1,5 @@
 local bootstrap = require("./lib/bootstrap")
+local text = require("./lib/locale").text
 local window_bridge = require("./lib/window_bridge")
 
 local opening = {}
@@ -31,7 +32,10 @@ local function source_error(cx)
   cx:toast(
     "error",
     "Datapier",
-    "来源 block 不可用，请返回本机 block 重试 / Source block is unavailable; return to a local block and try again"
+    text(
+      "来源 block 不可用，请返回本机 block 重试",
+      "Source block is unavailable; return to a local block and try again"
+    )
   )
 end
 window_bridge.start()
@@ -76,22 +80,21 @@ tern.chrome.widget("todos", {
   icon = "database",
   render = function()
     local counts = window_bridge.pending_counts()
-    local english = not counts or counts.english
-    local unknown = if english then "Unknown" else "未知"
-    local open = if english then "View" else "查看"
+    local unknown = text("未知", "Unknown")
+    local open = text("查看", "View")
     return {
       text = if counts then tostring(counts.approvals + counts.authentication) else "—",
       command = "plugin.datapier.todos",
       card = {
         {
           id = "approvals",
-          label = if english then "Pending approvals" else "待审批",
+          label = text("待审批", "Pending approvals"),
           text = if counts then tostring(counts.approvals) else unknown,
           actions = { { id = "view", label = open } },
         },
         {
           id = "authentication",
-          label = if english then "Pending authentication" else "待认证",
+          label = text("待认证", "Pending authentication"),
           text = if counts then tostring(counts.authentication) else unknown,
           actions = { { id = "view", label = open } },
         },
@@ -110,8 +113,6 @@ tern.files.button({
   title = "Datapier MCP 项目 / MCP projects",
   icon = "database",
   run = function(files, cx)
-    local counts = window_bridge.pending_counts()
-    local english = not counts or counts.english
     local local_host = false
     for _, host in ipairs(cx.hosts:list()) do
       if host.name == files.host and host.kind == "local" then
@@ -123,9 +124,7 @@ tern.files.button({
       cx:toast(
         "error",
         "Datapier",
-        if english
-          then "Cannot map the current Files directory to this computer"
-          else "无法将当前 Files 目录映射到本机"
+        text("无法将当前 Files 目录映射到本机", "Cannot map the current Files directory to this computer")
       )
       return
     end

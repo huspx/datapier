@@ -113,7 +113,7 @@ fn dirty_closed_settings_keep_revision_and_conflict_after_remote_refresh() {
         },
         &backend,
     );
-    assert!(app.field("settings-error").contains("conflict"));
+    assert!(app.settings_error.render().contains("conflict"));
     assert_eq!(app.field("settings-paging-sql_rows"), "123");
     assert!(app.settings_form_dirty());
 }
@@ -209,7 +209,7 @@ fn settings_tabs_keep_drafts_and_footer_saves_all_fields() {
     );
     app.application_action("settings-tab:mcp", &backend);
     assert_eq!(app.field("editing_plan_items"), "234");
-    assert!(app.field("settings-error").contains("conflict"));
+    assert!(app.settings_error.render().contains("conflict"));
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
         &backend,
     );
     assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
-    assert!(app.field("settings-error").contains("reload failed"));
+    assert!(app.settings_error.render().contains("reload failed"));
     app.application_action("settings-reload", &backend);
     assert!(requests.try_recv().is_err());
     app.application_action("settings-reload-confirm", &backend);
@@ -265,7 +265,7 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
     );
     assert_eq!(app.field("external_mode"), "disabled");
     assert_eq!(app.field("external_args"), "");
-    assert!(app.field("settings-error").is_empty());
+    assert!(app.settings_error.is_empty());
 }
 
 #[test]

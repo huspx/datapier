@@ -1,4 +1,5 @@
 -- 更新状态由原生进程持久化；窗口 VM 只负责调度，不能自行解除启动门禁。
+local text = require("./locale").text
 local M = {}
 local active = true
 
@@ -30,7 +31,12 @@ function M.run(cx, binary, action, force, callback, data_dir)
       end
       local decoded, value = pcall(tern.json.decode, result.stdout)
       if not decoded or type(value) ~= "table" then
-        callback(fresh, nil, result.stderr ~= "" and result.stderr or "更新程序返回无效状态")
+        callback(
+          fresh,
+          nil,
+          result.stderr ~= "" and result.stderr
+            or text("更新程序返回无效状态", "The updater returned an invalid status")
+        )
       else
         callback(fresh, value, if result.status ~= 0 then value.message else nil)
       end
@@ -47,13 +53,17 @@ function M.allowed(cx, binary, callback)
       callback(
         fresh,
         false,
-        problem or (state and state.message) or "无法确认更新门禁",
+        problem or (state and state.message) or text("无法确认更新门禁", "Could not confirm the update gate"),
         state and state.ok and state.state ~= "failed" and state.gate_blocked == true
       )
       return
     end
     if type(state.data_dir) ~= "string" or state.data_dir == "" then
-      callback(fresh, false, "更新程序未确认数据目录")
+      callback(
+        fresh,
+        false,
+        text("更新程序未确认数据目录", "The updater did not confirm the data directory")
+      )
       return
     end
     callback(fresh, true, nil, false, state.data_dir)
@@ -80,21 +90,33 @@ function M.schedule(cx, binary)
   M.run(cx, binary, "check", false, function(fresh, state, problem)
     if not state or not state.ok then
       if problem then
-        fresh:toast("error", "Datapier 更新检查失败", tostring(problem))
+        fresh:toast("error", text("Datapier 更新检查失败", "Datapier update check failed"), tostring(problem))
       end
       return
     end
     if state.state == "available" then
-      fresh:toast("info", "Datapier 有可用更新", tostring(state.message or state.target_version))
+      fresh:toast(
+        "info",
+        text("Datapier 有可用更新", "Datapier update available"),
+        tostring(state.message or state.target_version)
+      )
       if policy.auto_download then
         M.run(fresh, binary, "download", true, function(later, result, err)
           if not result or not result.ok then
-            later:toast("error", "Datapier 更新下载失败", tostring(err or (result and result.message)))
+            later:toast(
+              "error",
+              text("Datapier 更新下载失败", "Datapier update download failed"),
+              tostring(err or (result and result.message))
+            )
           end
           if result and result.ok and result.prepared and M.policy().auto_apply then
             M.run(later, binary, "apply", false, function(final, applied, failure)
               if not applied or not applied.ok then
-                final:toast("error", "Datapier 更新未应用", tostring(failure or (applied and applied.message)))
+                final:toast(
+                  "error",
+                  text("Datapier 更新未应用", "Datapier update was not applied"),
+                  tostring(failure or (applied and applied.message))
+                )
               end
             end, result.data_dir)
           end

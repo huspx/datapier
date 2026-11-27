@@ -1,5 +1,6 @@
 -- 薄启动入口：窗口只调度安装和终端启动，数据库状态与界面逻辑均由 Rust 持有。
 
+local text = require("./locale").text
 local updater = require("./updater")
 local registration = require("./mcp_registration")
 local M = {}
@@ -185,12 +186,16 @@ function M.prepare(cx, ready, quiet)
   elseif os == "macos" or os == "linux" then
     argv = { "/bin/sh", tern.plugin.dir .. "/install/unix.sh" }
   else
-    cx:toast("error", "Datapier 无法启动", "此平台不支持本机程序")
+    cx:toast(
+      "error",
+      text("Datapier 无法启动", "Cannot start Datapier"),
+      text("此平台不支持本机程序", "Native binaries are unavailable for this platform")
+    )
     finish(cx, nil)
     return
   end
   if not quiet then
-    cx:toast("info", "正在准备 Datapier")
+    cx:toast("info", text("正在准备 Datapier", "Preparing Datapier"))
   end
   -- 下载和解包放入异步子进程，既不阻塞窗口，也不受 Luau fetch 响应体大小限制。
   local ok, problem = pcall(function()
@@ -201,12 +206,20 @@ function M.prepare(cx, ready, quiet)
       local decoded, data = pcall(tern.json.decode, result.stdout)
       if result.status ~= 0 or not decoded or type(data) ~= "table" or not data.ok then
         local message = if decoded and type(data) == "table" then data.error else result.stderr
-        fresh:toast("error", "Datapier 安装失败", tostring(message or "安装脚本返回无效结果"))
+        fresh:toast(
+          "error",
+          text("Datapier 安装失败", "Datapier installation failed"),
+          tostring(message or text("安装脚本返回无效结果", "The installer returned an invalid result"))
+        )
         finish(fresh, nil)
         return
       end
       if type(data.cwd) ~= "string" or data.cwd == "" then
-        fresh:toast("error", "Datapier 安装失败", "安装脚本返回无效缓存目录")
+        fresh:toast(
+          "error",
+          text("Datapier 安装失败", "Datapier installation failed"),
+          text("安装脚本返回无效缓存目录", "The installer returned an invalid cache directory")
+        )
         finish(fresh, nil)
         return
       end
@@ -214,7 +227,7 @@ function M.prepare(cx, ready, quiet)
     end)
   end)
   if not ok then
-    cx:toast("error", "Datapier 安装失败", tostring(problem))
+    cx:toast("error", text("Datapier 安装失败", "Datapier installation failed"), tostring(problem))
     finish(cx, nil)
   end
 end
@@ -296,7 +309,7 @@ local function register_mcp(cx, binary, data_dir, finished)
       end
     end
     if problem then
-      window:toast("error", "Datapier MCP 登记失败", tostring(problem))
+      window:toast("error", text("Datapier MCP 登记失败", "Datapier MCP registration failed"), tostring(problem))
     end
     finish(window)
   end
@@ -307,7 +320,13 @@ local function register_mcp(cx, binary, data_dir, finished)
       if state and state.ok and type(state.command) == "string" then
         register(done, state.command)
       else
-        register(done, nil, failure or (state and state.message) or "受管入口准备失败")
+        register(
+          done,
+          nil,
+          failure
+            or (state and state.message)
+            or text("受管入口准备失败", "Could not prepare the managed command")
+        )
       end
     end, data_dir)
   end
@@ -327,7 +346,11 @@ function M.start(cx, started_pane, options)
       end
       updater.allowed(fresh, M.executable(), function(checked, allowed, problem, _, data_dir)
         if not allowed then
-          checked:toast("error", "Datapier 暂时无法启动", tostring(problem))
+          checked:toast(
+            "error",
+            text("Datapier 暂时无法启动", "Cannot start Datapier right now"),
+            tostring(problem)
+          )
           if started_pane then
             started_pane(nil)
           end
@@ -349,8 +372,8 @@ function M.start(cx, started_pane, options)
         if not started or not pane then
           checked:toast(
             "error",
-            "Datapier 启动失败 / Failed to start Datapier",
-            tostring(pane or "无法创建分屏 / Cannot create split")
+            text("Datapier 启动失败", "Failed to start Datapier"),
+            tostring(pane or text("无法创建分屏", "Cannot create split"))
           )
           if started_pane then
             started_pane(nil)
@@ -368,7 +391,7 @@ function M.start(cx, started_pane, options)
     if requested then
       M.valid_directory(requested, function(fresh, valid)
         if options.cwd and not valid then
-          (fresh or initial):toast("error", "Datapier", "目录无效 / The directory is invalid")
+          (fresh or initial):toast("error", "Datapier", text("目录无效", "The directory is invalid"))
           if started_pane then
             started_pane(nil)
           end
@@ -401,14 +424,14 @@ function M.command_entry(cx, remove)
         if not value or not value.ok then
           done:toast(
             "error",
-            "Datapier 命令行入口 / Datapier command entry",
-            tostring(problem or (value and value.message) or "操作失败 / Action failed")
+            text("Datapier 命令行入口", "Datapier command entry"),
+            tostring(problem or (value and value.message) or text("操作失败", "Action failed"))
           )
         elseif remove then
-          done:toast("info", "已移除命令行入口 / Command entry removed", "Datapier")
+          done:toast("info", text("已移除命令行入口", "Command entry removed"), "Datapier")
         else
           done:copy(value.command)
-          done:toast("info", "已复制 Datapier MCP 路径 / Datapier MCP path copied", value.command)
+          done:toast("info", text("已复制 Datapier MCP 路径", "Datapier MCP path copied"), value.command)
         end
       end
     )
@@ -430,7 +453,7 @@ function M.initialize(cx)
             end
           end)
         else
-          checked:toast("error", "Datapier 更新门禁", tostring(problem))
+          checked:toast("error", text("Datapier 更新门禁", "Datapier update gate"), tostring(problem))
         end
         return
       end
