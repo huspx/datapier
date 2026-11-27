@@ -104,7 +104,10 @@ fn restoring_mysql_row_keeps_protection_until_draft_can_be_saved() {
     let session = app.session.take();
     app.action("restore-pending", &backend);
     assert!(requests.try_recv().is_err());
-    assert!(app.status.render().contains("重新打开编辑基线"));
+    assert!(matches!(
+        app.status,
+        crate::i18n::UiMessage::Key("请先选择原目标并重新打开编辑基线")
+    ));
     app.session = session;
     app.action("restore-pending", &backend);
     let request = requests.try_recv().unwrap();

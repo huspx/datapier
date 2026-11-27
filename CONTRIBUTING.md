@@ -28,7 +28,7 @@ Changelog 按最后一个已发布版本比较：新功能在首次发布前的�
 
 - 使用 Rust／Cargo 1.100.0 及以上稳定版；workspace 使用 edition 2024，六个 crate 统一继承 `rust-version = 1.100`，CI 显式使用 Rust 1.100.0。macOS 可以使用 Homebrew 安装 Rust／Cargo，不强制引入 rustup；Linux 和 Windows 还需本地链接工具，Windows 使用 MSVC 构建工具及目标架构的链接库。
 - Linux 目标使用 GNU／glibc；现有 Ubuntu 原生构建配置安装 `pkg-config` 和 `libdbus-1-dev`。不同发行版使用对应的系统开发包。
-- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；版本约束及 features 以根 `Cargo.toml` 和各 crate 配置为准。当前使用 base64 0.23.1、sha2 0.11.1、sqlparser 0.64.0、resvg 0.50.0、rmcp 3.11.0、sqlx 0.9.1、zip 9.8.1；摘要十六进制显示使用 base16ct 1.0.0。官方 `tern-sdk` 精确固定为 registry 的 0.2.0。六种目标使用一致的锁文件，历史方案保留各自依赖版本。
+- 应用程序的 `Cargo.lock` 固定依赖并随源码提交；版本约束及 features 以根 `Cargo.toml` 和各 crate 配置为准。当前使用 base64 0.23.1、sha2 0.11.2、sqlparser 0.64.0、resvg 0.50.0、rmcp 3.12.0、sqlx 0.9.1、zip 9.8.2；摘要十六进制显示使用 base16ct 1.0.0。官方 `tern-sdk` 精确固定为 registry 的 0.2.0。六种目标使用一致的锁文件，历史方案保留各自依赖版本。
 - 产品版本的权威源、源码 plugin 同步命令和发布包派生方式见[发布指南的版本号与关联文件](RELEASING.md#版本号与关联文件)。普通 Cargo 构建不改写 plugin manifest；版本调整需运行同步与只读检查，并由 Cargo 更新锁文件。
 - 开发发布脚本及其回归使用 Python 3.15，仅依赖标准库；CI 显式配置该 minor 版本并跟随补丁更新。本地 macOS／Linux 可用 `python3`，Windows 可用已安装的 `python` 或 `py -3.15`。Datapier 安装和运行无需 Python；Windows 用户安装器仍使用系统自带 Windows PowerShell 5.1，日常开发与组包无需安装 `pwsh`。
 - 使用 Tern 验证真实 TSP 界面；Luau 由 Tern 内嵌执行，无须单独安装 Luau runtime。修改启动 plugin 时，可用目标版本的 `tern plugin types` 生成声明作参考；真实行为以 Tern 加载和启动为准。LSP 不是强制开发条件；格式化按[代码格式化](#代码格式化)执行。

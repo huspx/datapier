@@ -1210,49 +1210,6 @@ pub fn preview_page(
     Ok(&preview.changes[offset..offset.saturating_add(limit).min(preview.changes.len())])
 }
 
-/// 对指定差异的旧版或新版正文分块读取；None 表示该版本不存在。
-pub fn preview_content_chunk(
-    preview: &ProjectSavePreview,
-    index: usize,
-    new_content: bool,
-    offset: usize,
-    limit: usize,
-) -> Result<Option<(&str, Option<usize>)>> {
-    let change = preview
-        .changes
-        .get(index)
-        .ok_or_else(|| invalid("预览索引无效"))?;
-    let content = if new_content {
-        &change.new_content
-    } else {
-        &change.old_content
-    };
-    content
-        .as_deref()
-        .map(|s| text_chunk(s, offset, limit))
-        .transpose()
-}
-
-/// 枚举已经写入身份日志的归档导入 stage，供 Engine 领取和恢复。
-pub fn list_import_stages(staging_root: &Path) -> Result<Vec<ProjectImportStage>> {
-    let root = check_root(staging_root)?;
-    let mut stages = Vec::new();
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(id) = Uuid::parse_str(&name) else {
-            continue;
-        };
-        if entry.path().join("import.json").exists() {
-            stages.push(read_import_journal(&root, id)?);
-        }
-    }
-    stages.sort_by_key(|stage| stage.id);
-    Ok(stages)
-}
-
 /// 显式清理已领取的保存 stage；任何未知、替换或修改的文件都会阻止清理。
 pub fn cleanup_stage(staging_root: &Path, id: Uuid) -> Result<()> {
     let stage = read_stage(staging_root, id)?;

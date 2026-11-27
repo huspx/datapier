@@ -346,38 +346,6 @@ pub fn backup_footer(digest: &[u8]) -> String {
     format!("-- datapier-sql complete sha256={hex}\n")
 }
 
-/// 声明备份对象数量，零对象用于完整空库备份。
-pub fn backup_object_count(count: usize) -> String {
-    format!("-- datapier-objects count={count}\n")
-}
-
-/// 生成与预检器共享的对象清单行；名称按 UTF-8 字节编码。
-pub fn backup_object_marker(object: &DeclaredObject) -> Result<String> {
-    let kind = match object.kind {
-        SqlKind::Table => "table",
-        SqlKind::View => "view",
-        SqlKind::Trigger => "trigger",
-        SqlKind::Procedure => "procedure",
-        SqlKind::Function => "function",
-        SqlKind::Event => "event",
-        _ => return Err(AppError::invalid("不支持的备份对象类型")),
-    };
-    if object.database.is_empty()
-        || object.name.is_empty()
-        || (!object.schema && !object.data)
-        || (object.data && object.kind != SqlKind::Table)
-    {
-        return Err(AppError::invalid("非法备份对象清单"));
-    }
-    Ok(format!(
-        "-- datapier-object kind={kind} database={} name={} schema={} data={}\n",
-        &hex_literal(object.database.as_bytes())[2..],
-        &hex_literal(object.name.as_bytes())[2..],
-        u8::from(object.schema),
-        u8::from(object.data)
-    ))
-}
-
 /// 将类型化值编码为不依赖 NO_BACKSLASH_ESCAPES 的 MySQL 字面量。
 pub fn encode_literal(value: &Value) -> Result<String> {
     match value {
@@ -841,19 +809,6 @@ pub fn inspect(path: impl AsRef<Path>) -> Result<SqlIndex> {
     inspect_inner(path.as_ref(), None, None, &mut IndexBudget::new())
 }
 
-/// 使用指定文件编码预检；BOM 与指定编码冲突时拒绝。
-pub fn inspect_with_encoding(path: impl AsRef<Path>, encoding: &str) -> Result<SqlIndex> {
-    inspect_inner(path.as_ref(), Some(encoding), None, &mut IndexBudget::new())
-}
-
-/// 允许在哈希、解码及完整扫描期间取消预检。
-pub fn inspect_with_cancel(
-    path: impl AsRef<Path>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<SqlIndex> {
-    inspect_inner(path.as_ref(), None, Some(cancel), &mut IndexBudget::new())
-}
-
 /// 使用指定编码进行可取消预检。
 pub fn inspect_with_encoding_and_cancel(
     path: impl AsRef<Path>,
@@ -1144,27 +1099,6 @@ where
         index,
         statement,
         None,
-        &mut IndexBudget::new(),
-        callback,
-    )
-}
-
-/// 与 read_insert_statement 相同，并在读取输入块时检查取消。
-pub fn read_insert_statement_with_cancel<F>(
-    path: impl AsRef<Path>,
-    index: &SqlIndex,
-    statement: usize,
-    cancel: &tokio_util::sync::CancellationToken,
-    callback: F,
-) -> Result<()>
-where
-    F: FnMut(Option<&[String]>, Vec<Value>, u64) -> Result<()>,
-{
-    read_insert_inner(
-        path.as_ref(),
-        index,
-        statement,
-        Some(cancel),
         &mut IndexBudget::new(),
         callback,
     )

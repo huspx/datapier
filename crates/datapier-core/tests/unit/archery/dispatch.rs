@@ -1,6 +1,7 @@
 use super::*;
 use crate::{Store, execution::ExecutionSink, providers::archery::ArcherySession};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -99,17 +100,30 @@ async fn cancelling_query_waiting_for_service_permit_remains_unsent() {
     };
     let owner = Uuid::new_v4();
     let mut handles = Vec::new();
-    let mut ids = Vec::new();
-    let mut cancels = Vec::new();
-    for _ in 0..5 {
+    for index in 0..5 {
         let task = store
             .create_task(owner, "scope", "execution.start", json!({}), false)
             .await
             .unwrap();
-        ids.push(task.id);
         let cancel = CancellationToken::new();
         let sink = ExecutionSink::new(store.clone(), task.id)
             .with_dispatch_control(Arc::new(Mutex::new(())), cancel.clone());
+        if index == 4 {
+            tokio::time::timeout(Duration::from_secs(3), arrived.acquire_many(4))
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+            // 前四个请求仍持有许可；直接轮询第五个请求，确保它已在等待许可。
+            let form = [("sql_content", "SELECT 1".into())];
+            let mut pending =
+                std::pin::pin!(slot.post_execution::<Json>("query/", &form, true, &sink, &cancel));
+            assert!(futures_util::poll!(&mut pending).is_pending());
+            cancel.cancel();
+            assert_eq!(pending.await.unwrap_err().code, "cancelled");
+            assert!(!store.task(task.id).await.unwrap().sent);
+            break;
+        }
         let mut session = ArcherySession {
             capabilities: profile.capabilities(),
             profile: profile.clone(),
@@ -117,39 +131,17 @@ async fn cancelling_query_waiting_for_service_permit_remains_unsent() {
             database: "db".into(),
             closed: false,
         };
-        let task_cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
             session
                 .call(
                     "execution.run",
                     json!({"database":"db","text":"SELECT 1"}),
                     &sink,
-                    &task_cancel,
+                    &cancel,
                 )
                 .await
         }));
-        cancels.push(cancel);
-        if handles.len() == 4 {
-            tokio::time::timeout(Duration::from_secs(3), arrived.acquire_many(4))
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
-        }
     }
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while slot.busy.load(Ordering::Acquire) != 5 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    cancels[4].cancel();
-    assert_eq!(
-        handles.pop().unwrap().await.unwrap().unwrap_err().code,
-        "cancelled"
-    );
-    assert!(!store.task(ids[4]).await.unwrap().sent);
     assert_eq!(count.load(Ordering::Acquire), 4);
     release.add_permits(4);
     for handle in handles {

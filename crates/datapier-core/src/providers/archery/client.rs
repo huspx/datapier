@@ -7,10 +7,7 @@ use reqwest::{
 use serde::Serialize;
 use serde_json::Value as Json;
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -94,13 +91,6 @@ pub struct AuthSlot {
     state: Mutex<State>,
     gate: RwLock<()>,
     permits: Semaphore,
-    busy: AtomicUsize,
-}
-struct Busy<'a>(&'a AtomicUsize);
-impl Drop for Busy<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 impl AuthSlot {
     pub fn new(mut server: ArcheryServer) -> Result<Self> {
@@ -125,15 +115,7 @@ impl AuthSlot {
             }),
             gate: RwLock::new(()),
             permits: Semaphore::new(4),
-            busy: AtomicUsize::new(0),
         })
-    }
-    fn activity(&self) -> Busy<'_> {
-        self.busy.fetch_add(1, Ordering::AcqRel);
-        Busy(&self.busy)
-    }
-    pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::Acquire) != 0
     }
     /// 被动读取状态，并清除已经过期的认证挑战。
     pub async fn status(&self) -> AuthStatus {
@@ -438,7 +420,6 @@ impl AuthSlot {
         secret: String,
         cancel: &CancellationToken,
     ) -> Result<AuthStatus> {
-        let _activity = self.activity();
         let _gate = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), g = self.gate.write() => g };
         let http_tls = {
             let mut s = self.state.lock().await;
@@ -530,7 +511,6 @@ impl AuthSlot {
         }
     }
     pub async fn verify(&self, otp: String, cancel: &CancellationToken) -> Result<AuthStatus> {
-        let _activity = self.activity();
         let _gate = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), g = self.gate.write() => g };
         if otp.is_empty() || !otp.bytes().all(|b| b.is_ascii_digit()) {
             return Err(AppError::invalid("OTP 格式无效"));
@@ -581,7 +561,6 @@ impl AuthSlot {
         sink: Option<&ExecutionSink>,
         cancel: &CancellationToken,
     ) -> Result<T> {
-        let _activity = self.activity();
         let _gate = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), g = self.gate.read() => g };
         let _permit = tokio::select! { biased; _ = cancel.cancelled() => return Err(AppError::cancelled()), p = self.permits.acquire() => p.map_err(|_| AppError::new("internal", "请求额度已关闭"))? };
         let (transport, generation) = {
