@@ -314,6 +314,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("合并外部条目和正文", "Merge external entry and content"),
     ("保留本地条目和正文", "Keep local entry and content"),
     (
+        "缺少可保留的本地正文，请先从备份找回并填入草稿",
+        "No local content is available to keep. Restore it from a backup and add it to the draft first.",
+    ),
+    (
         "确认接受外部版本为新基线",
         "Accept external version as the new baseline",
     ),

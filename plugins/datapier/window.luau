@@ -1,4 +1,5 @@
 local bootstrap = require("./lib/bootstrap")
+local text = require("./lib/locale").text
 local window_bridge = require("./lib/window_bridge")
 
 local opening = {}
@@ -31,7 +32,10 @@ local function source_error(cx)
   cx:toast(
     "error",
     "Datapier",
-    "来源 block 不可用，请返回本机 block 重试 / Source block is unavailable; return to a local block and try again"
+    text(
+      "来源 block 不可用，请返回本机 block 重试",
+      "Source block is unavailable; return to a local block and try again"
+    )
   )
 end
 window_bridge.start()
@@ -76,22 +80,21 @@ tern.chrome.widget("todos", {
   icon = "database",
   render = function()
     local counts = window_bridge.pending_counts()
-    local english = not counts or counts.english
-    local unknown = if english then "Unknown" else "未知"
-    local open = if english then "View" else "查看"
+    local unknown = text("未知", "Unknown")
+    local open = text("查看", "View")
     return {
       text = if counts then tostring(counts.approvals + counts.authentication) else "—",
       command = "plugin.datapier.todos",
       card = {
         {
           id = "approvals",
-          label = if english then "Pending approvals" else "待审批",
+          label = text("待审批", "Pending approvals"),
           text = if counts then tostring(counts.approvals) else unknown,
           actions = { { id = "view", label = open } },
         },
         {
           id = "authentication",
-          label = if english then "Pending authentication" else "待认证",
+          label = text("待认证", "Pending authentication"),
           text = if counts then tostring(counts.authentication) else unknown,
           actions = { { id = "view", label = open } },
         },
@@ -110,8 +113,6 @@ tern.files.button({
   title = "Datapier MCP 项目 / MCP projects",
   icon = "database",
   run = function(files, cx)
-    local counts = window_bridge.pending_counts()
-    local english = not counts or counts.english
     local local_host = false
     for _, host in ipairs(cx.hosts:list()) do
       if host.name == files.host and host.kind == "local" then
@@ -123,9 +124,7 @@ tern.files.button({
       cx:toast(
         "error",
         "Datapier",
-        if english
-          then "Cannot map the current Files directory to this computer"
-          else "无法将当前 Files 目录映射到本机"
+        text("无法将当前 Files 目录映射到本机", "Cannot map the current Files directory to this computer")
       )
       return
     end
@@ -137,25 +136,19 @@ tern.files.button({
     local tab, pane, root = source.tab, source.pane, files.root
     request_number += 1
     local request = request_number
+    latest_valid[tab] = request
+    window_bridge.cancel_navigation(tab)
     bootstrap.valid_directory(root, function(fresh, valid)
+      if request ~= latest_valid[tab] then
+        return
+      end
       if not fresh then
-        if not valid then
-          cx:toast("error", "Datapier", "目录无效 / The directory is invalid")
-        end
-        return
-      end
-      if not valid then
-        fresh:toast("error", "Datapier", "目录无效 / The directory is invalid")
-        return
-      end
-      if request < (latest_valid[tab] or 0) then
         return
       end
       if not source_in_tab(fresh, pane, tab) then
         source_error(fresh)
         return
       end
-      latest_valid[tab] = request
       local payload = tern.base64.encode(tern.json.encode({ host = "localhost", path = root }))
       local action = "datapier-project-path:" .. payload
       local pending = opening[tab]
@@ -169,30 +162,32 @@ tern.files.button({
       end
       if pending then
         pending.action = action
-        if not pending.pane and not source_in_tab(fresh, pending.target, tab) then
-          pending.target = pane
-          pending.options.target = pane
-        end
+        pending.request = request
+        pending.target = pane
+        pending.options.target = pane
         if pending.pane then
-          if not window_bridge.navigate(fresh, action, tab) then
-            window_bridge.navigate_when_ready(pending.pane, action, tab)
+          if not window_bridge.navigate(fresh, action, tab, pane) then
+            window_bridge.navigate_when_ready(pending.pane, action, tab, pane)
           end
         end
         return
       end
-      if window_bridge.navigate(fresh, action, tab) then
+      if window_bridge.navigate(fresh, action, tab, pane) then
         return
       end
-      pending = { action = action, target = pane }
+      pending = { action = action, target = pane, request = request }
       pending.options = {
-        cwd = root,
+        cwd = if valid then root else nil,
         target = pane,
         before_launch = function(checked)
+          if pending.request ~= latest_valid[tab] then
+            return false
+          end
           if not source_in_tab(checked, pending.target, tab) then
             source_error(checked)
             return false
           end
-          if window_bridge.navigate(checked, pending.action, tab) then
+          if window_bridge.navigate(checked, pending.action, tab, pending.target) then
             return false
           end
           return true
@@ -209,7 +204,7 @@ tern.files.button({
         end
         pending.pane = started
         pending.until_ms = tern.now() + 30000
-        window_bridge.navigate_when_ready(started, pending.action, tab)
+        window_bridge.navigate_when_ready(started, pending.action, tab, pending.target)
       end, pending.options)
     end)
   end,
@@ -243,3 +238,25 @@ tern.command({
     bootstrap.start(cx)
   end,
 })
+
+for _, entry in ipairs({
+  {
+    id = "install-datapier-command",
+    title = "安装 Datapier 命令行入口 / Install Datapier command entry",
+    remove = false,
+  },
+  {
+    id = "remove-datapier-command",
+    title = "移除 Datapier 命令行入口 / Remove Datapier command entry",
+    remove = true,
+  },
+}) do
+  tern.command({
+    id = entry.id,
+    title = entry.title,
+    icon = "database",
+    run = function(cx)
+      bootstrap.command_entry(cx, entry.remove)
+    end,
+  })
+end

@@ -1,6 +1,7 @@
 //! 普通终端的数据源与设置管理界面。
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use datapier_core::locale::{Language, detect_system_language};
 use datapier_core::{AppError, Result, model::ClientKind};
 use datapier_engine::{Client, ClientOptions};
 use futures_util::StreamExt;
@@ -172,7 +173,7 @@ impl App {
             rules: vec![],
             cache: Value::Null,
             pending: 0,
-            english: false,
+            english: detect_system_language() == Language::En,
             confirm: String::new(),
             confirm_payload: Value::Null,
             confirm_cursor: 0,
@@ -389,11 +390,7 @@ impl App {
         self.english = match self.settings["language"].as_str() {
             Some("en") => true,
             Some("zh-CN") => false,
-            _ => !std::env::var("LC_ALL")
-                .or_else(|_| std::env::var("LANG"))
-                .unwrap_or_default()
-                .to_lowercase()
-                .starts_with("zh"),
+            _ => detect_system_language() == Language::En,
         };
     }
     fn selected(&self) -> Option<Value> {

@@ -5,7 +5,7 @@ use crate::protocol;
 use datapier_core::{AppError, Result};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 
 pub(super) async fn client(engine: Arc<Engine>, owner: Uuid, stream: platform::Stream) {
@@ -21,6 +21,9 @@ pub(super) async fn client_with_lease(
 ) {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::channel::<Value>(queue_capacity);
+    // 从接纳业务请求到响应入队前始终占用名额。
+    let admissions = Arc::new(Semaphore::new(queue_capacity));
+    let close_admission = Arc::new(Semaphore::new(1));
     let mut writer_task = tokio::spawn(async move {
         while let Some(value) = rx.recv().await {
             if let Err(error) = protocol::write(&mut writer, &value).await
@@ -135,9 +138,28 @@ pub(super) async fn client_with_lease(
                 }
                 continue;
             }
+            let admission = if method == "connection.close" {
+                &close_admission
+            } else {
+                &admissions
+            };
+            let permit = match admission.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    // 接纳名额用尽时立即反馈，控制帧和断连仍可处理。
+                    if tx
+                        .try_send(response(id, Err(AppError::new("busy", "客户端请求过多"))))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let engine = engine.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let result = engine.dispatch(owner, &method, params).await;
                 let _ = tx.send(response(id, result)).await;
             });

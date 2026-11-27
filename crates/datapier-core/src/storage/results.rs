@@ -92,6 +92,78 @@ impl ResultStore {
 fn missing() -> AppError {
     AppError::new("not_found", "结果不存在或已释放")
 }
+
+fn stage_large_values(
+    row: &mut [Value],
+    preview_limit: usize,
+    additions: &mut Vec<(Uuid, Vec<u8>)>,
+) -> Result<usize> {
+    let mut bytes = 0usize;
+    for value in row.iter_mut() {
+        let raw = serde_json::to_vec(value)?;
+        if raw.len() <= preview_limit || matches!(value, Value::Large { .. }) {
+            continue;
+        }
+        let id = Uuid::new_v4();
+        let size = raw.len();
+        let preview = value_preview(value, &raw, preview_limit);
+        let original_type = value_type(value).to_owned();
+        additions.push((id, raw));
+        *value = Value::Large {
+            id,
+            original_type,
+            bytes: size as u64,
+            preview,
+        };
+        bytes = bytes.saturating_add(size);
+    }
+    Ok(bytes.saturating_add(serde_json::to_vec(row)?.len()))
+}
+
+fn project_page(
+    meta: &ResultMeta,
+    input: &[Vec<Value>],
+    start: u64,
+    max_rows: usize,
+    max_bytes: usize,
+) -> Result<ResultPage> {
+    let mut size = serde_json::to_vec(meta)?.len();
+    let mut rows = Vec::new();
+    for row in input.iter().take(max_rows) {
+        let n = serde_json::to_vec(row)?.len() + 1;
+        if size + n <= max_bytes {
+            size += n;
+            rows.push(row.clone());
+            continue;
+        }
+        if !rows.is_empty() {
+            break;
+        }
+        let mut projected = row.clone();
+        for value in &mut projected {
+            if let Value::Large { preview, .. } = value {
+                preview.clear();
+            }
+        }
+        let n = serde_json::to_vec(&projected)?.len() + 1;
+        if size + n > max_bytes {
+            return Err(AppError::new("result_too_wide", "结果行超过响应预算"));
+        }
+        size += n;
+        rows.push(projected);
+    }
+    let end = start + rows.len() as u64;
+    let next = (end < meta.row_count
+        || (end > start && meta.summary.get("has_more").and_then(Json::as_bool) == Some(true)))
+    .then_some(end);
+    Ok(ResultPage {
+        result: meta.clone(),
+        rows,
+        start,
+        next,
+    })
+}
+
 impl Store {
     /// 主动回收超过空闲期限的结果及其关联资源。
     pub async fn expire_results(&self) -> Result<()> {
@@ -185,27 +257,11 @@ impl Store {
                 .sum::<usize>();
         for mut row in rows {
             let mut additions = Vec::new();
-            for value in &mut row {
-                let raw = serde_json::to_vec(value)?;
-                if raw.len() > settings.limits.value_preview_bytes
-                    && !matches!(value, Value::Large { .. })
-                {
-                    let value_id = Uuid::new_v4();
-                    let preview = value_preview(value, &raw, settings.limits.value_preview_bytes);
-                    let original_type = value_type(value).to_owned();
-                    let bytes = raw.len() as u64;
-                    additions.push((value_id, raw));
-                    *value = Value::Large {
-                        id: value_id,
-                        original_type,
-                        bytes,
-                        preview,
-                    };
-                }
-            }
-            let size = serde_json::to_vec(&row)?
-                .len()
-                .saturating_add(additions.iter().map(|(_, v)| v.len()).sum::<usize>());
+            let size = stage_large_values(
+                &mut row,
+                settings.limits.value_preview_bytes,
+                &mut additions,
+            )?;
             if used.saturating_add(size) > settings.limits.result_memory_bytes_per_client {
                 let result = state.entries.get_mut(&id).ok_or_else(missing)?;
                 result.limited = true;
@@ -337,47 +393,17 @@ impl Store {
         if start < result.base || start > result.meta.row_count {
             return Err(AppError::invalid("结果页已失效或超出范围"));
         }
-        let mut size = serde_json::to_vec(&result.meta)?.len();
-        let mut rows = Vec::new();
-        for row in result
-            .rows
-            .iter()
-            .skip((start - result.base) as usize)
-            .take(max_rows)
-        {
-            let mut projected = row.clone();
-            let mut n = serde_json::to_vec(&projected)?.len() + 1;
-            if size + n > max_bytes && rows.is_empty() {
-                for value in &mut projected {
-                    if let Value::Large { preview, .. } = value {
-                        preview.clear();
-                    }
-                }
-                n = serde_json::to_vec(&projected)?.len() + 1;
-            }
-            if size + n > max_bytes {
-                if rows.is_empty() {
-                    return Err(AppError::new("result_too_wide", "结果行超过响应预算"));
-                }
-                break;
-            }
-            size += n;
-            rows.push(projected);
-        }
-        let end = start + rows.len() as u64;
-        let next = (end < result.meta.row_count
-            || (end > start
-                && result.meta.summary.get("has_more").and_then(Json::as_bool) == Some(true)))
-        .then_some(end);
+        let page = project_page(
+            &result.meta,
+            &result.rows[(start - result.base) as usize..],
+            start,
+            max_rows,
+            max_bytes,
+        )?;
         if touch {
             result.touched = std::time::Instant::now();
         }
-        Ok(ResultPage {
-            result: result.meta.clone(),
-            rows,
-            start,
-            next,
-        })
+        Ok(page)
     }
     pub async fn result_pagination(
         &self,
@@ -514,22 +540,63 @@ impl Store {
         id: Uuid,
         start: u64,
         columns: Vec<Column>,
-        rows: Vec<Vec<Value>>,
+        mut rows: Vec<Vec<Value>>,
         summary: Json,
-    ) -> Result<()> {
-        {
-            let mut state = self.results.lock().await;
-            state.values.retain(|_, (owner, _)| *owner != id);
-            let r = state.entries.get_mut(&id).ok_or_else(missing)?;
-            r.rows.clear();
-            r.base = start;
-            r.meta.row_count = start;
-            r.meta.columns = columns;
-            r.bytes = serde_json::to_vec(&r.meta)?.len();
-            r.limited = false;
-            merge_summary(&mut r.meta.summary, summary);
+        (max_rows, max_bytes): (usize, usize),
+    ) -> Result<ResultPage> {
+        if !(1..=1000).contains(&max_rows) || !(1024..=1_048_576).contains(&max_bytes) {
+            return Err(AppError::invalid("分页预算无效"));
         }
-        self.append_rows(id, rows).await
+        let settings = self.settings().await?;
+        let mut state = self.results.lock().await;
+        let old = state.entries.get(&id).ok_or_else(missing)?;
+        let owner = old.owner;
+        let mut meta = old.meta.clone();
+        meta.columns = columns;
+        meta.row_count = start
+            .checked_add(rows.len() as u64)
+            .ok_or_else(|| AppError::invalid("分页范围无效"))?;
+        merge_summary(&mut meta.summary, summary);
+        let mut bytes = serde_json::to_vec(&meta)?.len();
+        let mut additions = Vec::new();
+        for row in &mut rows {
+            bytes = bytes.saturating_add(stage_large_values(
+                row,
+                settings.limits.value_preview_bytes,
+                &mut additions,
+            )?);
+        }
+        let used = state
+            .entries
+            .iter()
+            .filter(|(key, r)| **key != id && r.owner == owner)
+            .map(|(_, r)| r.bytes)
+            .sum::<usize>()
+            .saturating_add(
+                state
+                    .auxiliary
+                    .values()
+                    .filter(|(o, _)| *o == owner)
+                    .map(|(_, n)| *n)
+                    .sum::<usize>(),
+            );
+        if used.saturating_add(bytes) > settings.limits.result_memory_bytes_per_client {
+            return Err(AppError::new("resource_limit", "结果内存预算已用尽"));
+        }
+        let page = project_page(&meta, &rows, start, max_rows, max_bytes)?;
+        state.values.retain(|_, (result, _)| *result != id);
+        for (value_id, raw) in additions {
+            state.values.insert(value_id, (id, raw));
+        }
+        let result = state.entries.get_mut(&id).ok_or_else(missing)?;
+        result.rows = rows;
+        result.base = start;
+        result.meta = meta;
+        result.bytes = bytes;
+        result.limited = false;
+        result.touched = std::time::Instant::now();
+        result.notify.notify_waiters();
+        Ok(page)
     }
     pub async fn release_result(&self, id: Uuid) -> Result<()> {
         self.results.lock().await.remove(id);

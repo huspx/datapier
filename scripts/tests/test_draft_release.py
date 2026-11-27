@@ -302,11 +302,16 @@ class DraftReleaseTests(unittest.TestCase):
     if target.endswith("-windows-msvc"):
       with zipfile.ZipFile(path, "w") as package:
         package.writestr("datapier.exe", binary)
+        package.writestr("datapier-launcher.exe", b"launcher " + binary)
     else:
       with tarfile.open(path, "w:gz") as package:
         member = tarfile.TarInfo("datapier")
         member.size = len(binary)
         package.addfile(member, io.BytesIO(binary))
+        launcher = b"launcher " + binary
+        member = tarfile.TarInfo("datapier-launcher")
+        member.size = len(launcher)
+        package.addfile(member, io.BytesIO(launcher))
     return archive, path.read_bytes()
 
   def upload_all(self, release):
@@ -568,16 +573,23 @@ class DraftReleaseTests(unittest.TestCase):
     ) as plugin:
       self.assertEqual(plugin.read("datapier/release-sha256.txt"), manifest.encode())
       binary_manifest = ""
+      launcher_manifest = ""
       for target, (_, data) in expected.items():
         if target.endswith("-windows-msvc"):
           with zipfile.ZipFile(io.BytesIO(data)) as package:
             binary = package.read("datapier.exe")
+            launcher = package.read("datapier-launcher.exe")
         else:
           with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as package:
             binary = package.extractfile("datapier").read()
+            launcher = package.extractfile("datapier-launcher").read()
+        launcher_manifest += f"{hashlib.sha256(launcher).hexdigest()}  {target}\n"
         binary_manifest += f"{hashlib.sha256(binary).hexdigest()}  {target}\n"
       self.assertEqual(
         plugin.read("datapier/release-bin-sha256.txt"), binary_manifest.encode()
+      )
+      self.assertEqual(
+        plugin.read("datapier/release-launcher-sha256.txt"), launcher_manifest.encode()
       )
       self.assertEqual(
         plugin.read("datapier/release-url.txt"),

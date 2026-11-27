@@ -383,14 +383,25 @@ impl Engine {
                     && record.as_ref().is_some_and(|r| r.method == "change.submit")
                     && error
                         .details
+                        .get("rollback_confirmed")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    && error
+                        .details
                         .get("items")
                         .and_then(Value::as_array)
                         .is_some_and(|items| {
                             !items.is_empty()
+                                && items.iter().any(|item| {
+                                    item.get("status").and_then(Value::as_str)
+                                        == Some("rolled_back")
+                                })
                                 && items.iter().enumerate().all(|(index, item)| {
                                     item.get("index").and_then(Value::as_u64) == Some(index as u64)
-                                        && item.get("status").and_then(Value::as_str)
-                                            == Some("rolled_back")
+                                        && matches!(
+                                            item.get("status").and_then(Value::as_str),
+                                            Some("rolled_back" | "not_executed" | "unchanged")
+                                        )
                                 })
                         });
                 let unknown = record.as_ref().is_some_and(|r| r.sent && r.may_write)
@@ -819,7 +830,11 @@ impl Engine {
             let _operation = operation;
             let send_engine = Arc::downgrade(&engine);
             let send_db = db.clone();
-            let sink = ExecutionSink::new(engine.store.clone(), id)
+            let policy_revision = params
+                .get("_access_proof")
+                .and_then(|proof| proof.get("policy_revision"))
+                .and_then(Value::as_u64);
+            let mut sink = ExecutionSink::new(engine.store.clone(), id)
                 .with_dispatch_control(transition.clone(), cancel.clone())
                 .with_send_gate(
                     engine.send_gate.clone(),
@@ -846,6 +861,9 @@ impl Engine {
                     dispatch_revision,
                     engine.profile_lock(db.profile.id),
                 );
+            if let Some(revision) = policy_revision {
+                sink = sink.with_policy_revision(revision);
+            }
             let mut result = if cancel.is_cancelled() {
                 Err(AppError::cancelled())
             } else {

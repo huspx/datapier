@@ -2,7 +2,9 @@
 
 import hashlib
 import io
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -73,11 +75,16 @@ class ReleaseScriptsTest(unittest.TestCase):
       if windows:
         with zipfile.ZipFile(path, "w") as archive:
           archive.writestr("datapier.exe", payload)
+          archive.writestr("datapier-launcher.exe", b"launcher-" + payload)
       else:
         with tarfile.open(path, "w:gz") as archive:
           member = tarfile.TarInfo("datapier")
           member.size = len(payload)
           archive.addfile(member, io.BytesIO(payload))
+          launcher = b"launcher-" + payload
+          member = tarfile.TarInfo("datapier-launcher")
+          member.size = len(launcher)
+          archive.addfile(member, io.BytesIO(launcher))
 
   def test_check_is_read_only_and_sync_preserves_format(self):
     before = self.manifest.read_bytes()
@@ -170,13 +177,89 @@ class ReleaseScriptsTest(unittest.TestCase):
     binary.parent.mkdir(parents=True)
     binary.write_text('#!/bin/sh\necho "datapier 1.2.3"\n', encoding="utf-8")
     binary.chmod(0o755)
+    (binary.parent / "datapier-launcher").write_bytes(b"launcher")
     result = self.run_script("package-target.py", "--target", TARGETS[0])
     self.assertEqual(result.returncode, 0, result.stderr)
     archive_path = self.dist / f"datapier-1.2.3-{TARGETS[0]}.tar.gz"
     self.assertEqual(list(self.dist.iterdir()), [archive_path])
     with tarfile.open(archive_path, "r:gz") as archive:
-      self.assertEqual(archive.getnames(), ["datapier"])
+      self.assertEqual(archive.getnames(), ["datapier", "datapier-launcher"])
       self.assertEqual(archive.extractfile("datapier").read(), binary.read_bytes())
+
+  @unittest.skipIf(os.name == "nt", "fixture executable requires a POSIX shell")
+  def test_windows_package_requires_and_includes_launcher(self):
+    target = TARGETS[-1]
+    directory = self.root / "target" / target / "release"
+    directory.mkdir(parents=True)
+    binary = directory / "datapier.exe"
+    binary.write_text("#!/bin/sh\necho 'datapier 1.2.3'\n", encoding="utf-8")
+    binary.chmod(0o755)
+    result = self.run_script("package-target.py", "--target", target)
+    self.assertNotEqual(result.returncode, 0)
+    self.assertEqual(list(self.dist.iterdir()), [])
+    launcher = directory / "datapier-launcher.exe"
+    launcher.write_bytes(b"launcher")
+    result = self.run_script("package-target.py", "--target", target)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    with zipfile.ZipFile(self.dist / f"datapier-1.2.3-{target}.zip") as archive:
+      self.assertEqual(
+        set(archive.namelist()), {"datapier.exe", "datapier-launcher.exe"}
+      )
+      self.assertEqual(archive.read("datapier.exe"), binary.read_bytes())
+      self.assertEqual(archive.read("datapier-launcher.exe"), launcher.read_bytes())
+
+  @unittest.skipUnless(sys.platform == "linux", "fixture targets Linux")
+  def test_unix_installer_verifies_both_cached_executables(self):
+    machine = platform.machine().lower()
+    arch = {
+      "x86_64": "x86_64",
+      "amd64": "x86_64",
+      "aarch64": "aarch64",
+      "arm64": "aarch64",
+    }.get(machine)
+    if arch is None:
+      self.skipTest("unsupported architecture")
+    target = f"{arch}-unknown-linux-gnu"
+    install = self.plugin / "install"
+    install.mkdir()
+    shutil.copy2(
+      SCRIPTS.parent / "plugins/datapier/install/unix.sh", install / "unix.sh"
+    )
+    self.manifest.write_text('version = "1.2.3"\n', encoding="utf-8")
+    binary = b'#!/bin/sh\necho "datapier 1.2.3"\n'
+    launcher = b"verified launcher"
+    archive_path = self.dist / f"datapier-1.2.3-{target}.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+      for name, content in (("datapier", binary), ("datapier-launcher", launcher)):
+        member = tarfile.TarInfo(name)
+        member.size = len(content)
+        archive.addfile(member, io.BytesIO(content))
+    (self.plugin / "release-sha256.txt").write_text(
+      f"{hashlib.sha256(archive_path.read_bytes()).hexdigest()}  {archive_path.name}\n"
+    )
+    for name, content in (("bin", binary), ("launcher", launcher)):
+      (self.plugin / f"release-{name}-sha256.txt").write_text(
+        f"{hashlib.sha256(content).hexdigest()}  {target}\n"
+      )
+    env = os.environ.copy()
+    env.pop("DATAPIER_BINARY", None)
+    env.update(
+      DATAPIER_CACHE_DIR=str(self.root / "cache"),
+      DATAPIER_UPDATE_ARCHIVE=str(archive_path),
+    )
+    command = ["/bin/sh", str(install / "unix.sh"), "--locked"]
+    result = subprocess.run(
+      command, env=env, capture_output=True, text=True, check=False
+    )
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    cached = Path(json.loads(result.stdout)["cwd"])
+    self.assertEqual((cached / "datapier-launcher").read_bytes(), launcher)
+    (cached / "datapier-launcher").write_bytes(b"corrupt")
+    result = subprocess.run(
+      command, env=env, capture_output=True, text=True, check=False
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertFalse(json.loads(result.stdout)["ok"])
 
   def test_assembly_rejects_missing_archive_before_writing(self):
     self.artifacts()
@@ -195,7 +278,7 @@ class ReleaseScriptsTest(unittest.TestCase):
       extension = "zip" if windows else "tar.gz"
       path = self.dist / f"datapier-1.2.3-{target}.{extension}"
       original = path.read_bytes()
-      for case in cases:
+      for case in cases + ("missing-launcher",):
         with self.subTest(target=target, case=case):
           if case == "invalid-format":
             path.write_bytes(b"not an archive")
@@ -210,6 +293,8 @@ class ReleaseScriptsTest(unittest.TestCase):
               archive.writestr(member, b"binary")
               if case == "duplicate":
                 archive.writestr("datapier.exe", b"binary")
+              if case not in ("duplicate", "missing-launcher"):
+                archive.writestr("datapier-launcher.exe", b"launcher")
           else:
             with tarfile.open(path, "w:gz") as archive:
               member = tarfile.TarInfo("wrong" if case == "wrong-name" else "datapier")
@@ -223,6 +308,10 @@ class ReleaseScriptsTest(unittest.TestCase):
               if case == "duplicate":
                 member = tarfile.TarInfo("datapier")
                 archive.addfile(member, io.BytesIO())
+              if case not in ("duplicate", "missing-launcher"):
+                member = tarfile.TarInfo("datapier-launcher")
+                member.size = 8
+                archive.addfile(member, io.BytesIO(b"launcher"))
           result = self.run_script("assemble-release.py", "--repository", "owner/repo")
           self.assertNotEqual(result.returncode, 0)
           self.assertFalse((self.dist / "datapier-plugin-1.2.3.zip").exists())
@@ -257,6 +346,16 @@ class ReleaseScriptsTest(unittest.TestCase):
       sums = archive.read("datapier/release-sha256.txt").decode().splitlines()
       binary_sums = (
         archive.read("datapier/release-bin-sha256.txt").decode().splitlines()
+      )
+      launcher_sums = (
+        archive.read("datapier/release-launcher-sha256.txt").decode().splitlines()
+      )
+      self.assertEqual(
+        launcher_sums,
+        [
+          f"{hashlib.sha256(b'launcher-' + target.encode()).hexdigest()}  {target}"
+          for target in TARGETS
+        ],
       )
       self.assertEqual(len(sums), 6)
       self.assertEqual(len(binary_sums), 6)

@@ -69,6 +69,28 @@ fn split_editing_preserves_drafts_and_isolates_project_roots() {
 }
 
 #[test]
+fn split_sql_rejects_old_revision_and_other_tab_edit_events() {
+    let (id, a, b) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let mut app = App::new("layout-native".into());
+    project(&mut app, "/first", id, a, b);
+    apply(&mut app);
+    app.select_tab(0);
+    app.focus = "query".into();
+    let active = app.active;
+    let stale = app.sql_editor_name(active);
+    let other = app.sql_editor_name(if active == 0 { 1 } else { 0 });
+    assert!(app.resolve_sql_editor(other.clone(), false).is_none());
+    assert!(app.resolve_sql_editor(other, true).is_some());
+    app.select_tab(active);
+    app.tabs[active].query.edit(0..1, "S");
+    assert!(app.resolve_sql_editor(stale, false).is_none());
+    assert_eq!(
+        app.resolve_sql_editor(app.sql_editor_name(active), false),
+        Some("query".into())
+    );
+}
+
+#[test]
 fn workspace_restore_keeps_split_order_and_unsaved_query_text() {
     let (id, a, b) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     let mut app = App::new("layout-restore".into());

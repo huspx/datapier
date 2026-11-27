@@ -3,11 +3,15 @@ use std::ops::Range;
 
 /// 文本编辑状态；Tern 的 cursor 和 anchor 均为 UTF-16 code unit 偏移。
 /// undo 仅保存在当前进程，不随工作区序列化。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Editor {
     pub text: String,
     pub cursor: usize,
     pub anchor: usize,
+    #[serde(skip, default = "uuid::Uuid::new_v4")]
+    identity: uuid::Uuid,
+    #[serde(skip)]
+    revision: u64,
     #[serde(skip)]
     undo: Vec<Snapshot>,
 }
@@ -35,6 +39,12 @@ pub enum Key<'a> {
     Undo,
 }
 
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
 impl Editor {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
@@ -43,14 +53,21 @@ impl Editor {
             text,
             cursor,
             anchor: cursor,
+            identity: uuid::Uuid::new_v4(),
+            revision: 0,
             undo: Vec::new(),
         }
+    }
+
+    pub(crate) fn identity(&self) -> (uuid::Uuid, u64) {
+        (self.identity, self.revision)
     }
 
     pub fn selection(&self) -> Range<usize> {
         self.anchor.min(self.cursor)..self.anchor.max(self.cursor)
     }
 
+    #[cfg(test)]
     pub fn selected_text(&self) -> Option<&str> {
         let range = self.selection();
         if range.is_empty() {
@@ -87,6 +104,7 @@ impl Editor {
             return false;
         };
         self.text = old.text;
+        self.revision = self.revision.wrapping_add(1);
         self.cursor = old.cursor;
         self.anchor = old.anchor;
         true
@@ -108,9 +126,38 @@ impl Editor {
         }
         self.save_undo();
         self.text.replace_range(start..end, replacement);
+        self.revision = self.revision.wrapping_add(1);
         self.cursor = range.start + replacement.encode_utf16().count();
         self.anchor = self.cursor;
         true
+    }
+
+    /// 校验完整原生编辑后再修改，避免非法光标使正文与宿主状态分离。
+    pub fn native_edit(&mut self, range: Range<usize>, replacement: &str, cursor: usize) -> bool {
+        if range.start > range.end {
+            return false;
+        }
+        let Some(start) = utf16_to_byte(&self.text, range.start) else {
+            return false;
+        };
+        let Some(end) = utf16_to_byte(&self.text, range.end) else {
+            return false;
+        };
+        let replacement_len = replacement.encode_utf16().count();
+        let Some(replacement_end) = range.start.checked_add(replacement_len) else {
+            return false;
+        };
+        let valid_cursor = if cursor < range.start {
+            utf16_to_byte(&self.text[..start], cursor).is_some()
+        } else if cursor <= replacement_end {
+            utf16_to_byte(replacement, cursor - range.start).is_some()
+        } else {
+            utf16_to_byte(&self.text[end..], cursor - replacement_end).is_some()
+        };
+        if !valid_cursor || !self.edit(range, replacement) {
+            return false;
+        }
+        self.set_selection(cursor, cursor)
     }
 
     /// 在当前选区处理按键；shift 保留移动前的 anchor，非法位置返回 false。
@@ -578,42 +625,6 @@ pub fn validate_explain_selection_in(sql: &str, context: SqlContext) -> Result<(
     }
 }
 
-pub fn explain_selection_in(sql: &str, context: SqlContext) -> Result<String, String> {
-    validate_explain_selection_in(sql, context)?;
-    Ok(format!("EXPLAIN FORMAT=JSON {sql}"))
-}
-
-pub fn format_range_in(
-    text: &str,
-    range: Range<usize>,
-    context: SqlContext,
-) -> Result<String, String> {
-    match context {
-        SqlContext::Session(mode) => format_range(text, range, mode),
-        SqlContext::Stateless => {
-            // Validate the complete surrounding text as well as the selected output.
-            datapier_core::providers::mysql::stateless_statement_ranges(text)
-                .map_err(|error| error.message)?;
-            let start = utf16_to_byte(text, range.start).ok_or("SQL 选区无效")?;
-            let end = utf16_to_byte(text, range.end).ok_or("SQL 选区无效")?;
-            let selected = text.get(start..end).ok_or("SQL 选区无效")?;
-            if datapier_core::providers::mysql::stateless_statements(selected)
-                .map_err(|error| error.message)?
-                .is_empty()
-            {
-                return Err("选区没有完整的 SQL 语句".into());
-            }
-            // Core has proved that quote and escape rules are mode independent.
-            let mode = MysqlMode::default();
-            let formatted = format_checked_selection(selected, mode)?;
-            let formatted = format_checked_range(text, start, end, formatted, mode)?;
-            datapier_core::providers::mysql::stateless_statements(&formatted)
-                .map_err(|error| error.message)?;
-            Ok(formatted)
-        }
-    }
-}
-
 /// 验证单条可解释语句；用于控件状态时不构造执行文本。
 pub fn validate_explain_selection(sql: &str, mode: MysqlMode) -> Result<(), String> {
     if mode.ansi_quotes || mode.no_backslash_escapes {
@@ -640,135 +651,6 @@ fn validate_explain_ast(sql: &str) -> Result<(), String> {
         return Err("该语句不支持执行计划".into());
     }
     Ok(())
-}
-
-/// 仅接受格式化前后词法与 AST 均一致的结果，避免改写注释、占位符和 SQL 语义。
-pub fn format_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
-    if mode.ansi_quotes || mode.no_backslash_escapes {
-        return Err("当前 SQL 模式与格式化器不兼容".into());
-    }
-    if statements(sql, mode)?.is_empty() {
-        return Err("选区没有完整的 SQL 语句".into());
-    }
-    format_checked_selection(sql, mode)
-}
-
-fn format_checked_selection(sql: &str, mode: MysqlMode) -> Result<String, String> {
-    let before = tokenize(sql, mode)?;
-    // sqlformat 将任意 -- 视为注释；MySQL 要求后接空白或控制字符。
-    if before.windows(2).any(|pair| {
-        &sql[pair[0].start..pair[0].end] == "-"
-            && &sql[pair[1].start..pair[1].end] == "-"
-            && pair[0].end == pair[1].start
-    }) {
-        return Err("选区包含格式化器无法安全识别的减号".into());
-    }
-    let original_ast =
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, sql)
-            .map_err(|_| "选区不是可安全解析的完整 SQL")?;
-    let formatted = sqlformat::format(
-        sql,
-        &sqlformat::QueryParams::None,
-        &sqlformat::FormatOptions::default(),
-    );
-    let after = tokenize(&formatted, mode)?;
-    if before.len() != after.len()
-        || before
-            .iter()
-            .zip(&after)
-            .any(|(a, b)| a.kind != b.kind || sql[a.start..a.end] != formatted[b.start..b.end])
-    {
-        return Err("格式化结果改变了 SQL 词法内容".into());
-    }
-    // 一些 MySQL 运算符、变量、字符集前缀和函数依赖相邻字符之间有无空白。
-    for (a, b) in before.windows(2).zip(after.windows(2)) {
-        let left = &sql[a[0].start..a[0].end];
-        let right = &sql[a[1].start..a[1].end];
-        let punct = |text: &str| {
-            matches!(
-                text,
-                "@" | ":"
-                    | "."
-                    | "-"
-                    | "/"
-                    | "*"
-                    | "!"
-                    | "<"
-                    | ">"
-                    | "="
-                    | "|"
-                    | "&"
-                    | "^"
-                    | "%"
-                    | "+"
-                    | "~"
-            )
-        };
-        let sensitive = (punct(left) && punct(right))
-            || matches!(left, "@" | ":" | ".")
-            || right == "."
-            || matches!(
-                a[1].kind,
-                Some(HighlightKind::String | HighlightKind::Identifier)
-            )
-            || (right == "("
-                && left
-                    .bytes()
-                    .last()
-                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_'));
-        if sensitive && (a[0].end == a[1].start) != (b[0].end == b[1].start) {
-            return Err("格式化结果改变了 SQL 敏感的空白边界".into());
-        }
-    }
-    let result_ast =
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, &formatted)
-            .map_err(|_| "格式化结果无法安全解析")?;
-    if original_ast != result_ast {
-        return Err("格式化结果改变了 SQL 语义".into());
-    }
-    Ok(formatted)
-}
-
-/// 格式化时同时校验选区与外围文本的词法连接，避免破坏跨选区的 token。
-pub fn format_range(text: &str, range: Range<usize>, mode: MysqlMode) -> Result<String, String> {
-    let start = utf16_to_byte(text, range.start).ok_or("SQL 选区无效")?;
-    let end = utf16_to_byte(text, range.end).ok_or("SQL 选区无效")?;
-    let selected = text.get(start..end).ok_or("SQL 选区无效")?;
-    let formatted = format_selection(selected, mode)?;
-    format_checked_range(text, start, end, formatted, mode)
-}
-
-fn format_checked_range(
-    text: &str,
-    start: usize,
-    end: usize,
-    formatted: String,
-    mode: MysqlMode,
-) -> Result<String, String> {
-    let selected = &text[start..end];
-    let original = tokenize(text, mode)?;
-    let mut combined = String::with_capacity(text.len() - selected.len() + formatted.len());
-    combined.push_str(&text[..start]);
-    combined.push_str(&formatted);
-    combined.push_str(&text[end..]);
-    let updated = tokenize(&combined, mode)?;
-    if original.len() != updated.len()
-        || original
-            .iter()
-            .zip(&updated)
-            .any(|(a, b)| a.kind != b.kind || text[a.start..a.end] != combined[b.start..b.end])
-    {
-        return Err("格式化会改变选区边界处的 SQL".into());
-    }
-    // 选区边界相邻时，即使 tokenizer 恰好分出相同 token，也可能改变运算符或前缀。
-    for (a, b) in original.windows(2).zip(updated.windows(2)) {
-        if (a[0].end <= start && a[1].start >= start || a[0].end <= end && a[1].start >= end)
-            && (a[0].end == a[1].start) != (b[0].end == b[1].start)
-        {
-            return Err("格式化会改变选区边界处的空白".into());
-        }
-    }
-    Ok(formatted)
 }
 
 #[cfg(test)]

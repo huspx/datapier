@@ -211,6 +211,15 @@ impl App {
         }
     }
     pub(super) fn transfer_action(&mut self, name: &str, backend: &Backend) -> bool {
+        if (name.starts_with("transfer-new:")
+            || name.starts_with("transfer-project-new:")
+            || name.starts_with("transfer-redis:")
+            || name.starts_with("transfer-context:")
+            || name.starts_with("transfer-report-open:"))
+            && !self.finish_inline(true)
+        {
+            return true;
+        }
         if let Some(run_id) = name.strip_prefix("transfer-report-open:") {
             if Uuid::parse_str(run_id).is_ok() {
                 self.transfer_action("transfer-new:copy", backend);
@@ -321,6 +330,7 @@ impl App {
             }
             self.workbench.transfer.project_mode = project_mode;
             self.tabs[self.active].title = i18n::tr("数据交换与迁移").into_owned();
+            self.tabs[self.active].default_query_ordinal = None;
             self.view = "transfer-workbench".into();
             let provider = profile
                 .as_ref()
@@ -695,6 +705,7 @@ impl App {
                 keys.insert(key.to_owned());
             }
             self.workbench.transfer.invalidate();
+            self.dirty = true;
             return true;
         }
         if let Some(rest) = name.strip_prefix("transfer-columns-retry:") {

@@ -76,6 +76,89 @@ fn interrupted_preinstall_gate_is_recovered_only_with_instance_lock() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn abandoned_handoff_recovers_without_altering_installed_data() {
+    let fixture = std::env::temp_dir().join(format!("datapier-handoff-{}", uuid::Uuid::new_v4()));
+    let root = datapier_engine::update_data_root(&fixture.join("data")).unwrap();
+    let state = fixture.join("state/plugin-data/datapier");
+    let plugin = fixture.join("config/plugins/datapier");
+    for directory in [&state, &plugin] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let state = fs::canonicalize(state).unwrap();
+    let plugin = fs::canonicalize(plugin).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let gate = root.join("update-gate.json");
+    let marker = state.join(format!("handoff-{id}.done"));
+    let data = root.join("workspace");
+    let installed = plugin.join("plugin.toml");
+    fs::write(&data, b"original workspace").unwrap();
+    fs::write(&installed, b"original plugin").unwrap();
+    fs::write(&marker, b"").unwrap();
+    fixed_entry::write_record(
+        &gate,
+        &serde_json::json!({"phase":"handoff","id":id,"plugin_dir":plugin,"state_dir":state}),
+    )
+    .unwrap();
+    let owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(root.join("update-owner.lock"))
+        .unwrap();
+    owner.try_lock_exclusive().unwrap();
+    assert_eq!(
+        apply::recover(&root, &plugin, &state)
+            .await
+            .unwrap_err()
+            .code,
+        "update_busy"
+    );
+    drop(owner);
+    assert!(apply::recover(&root, &plugin, &fixture).await.is_err());
+    assert!(gate.exists());
+    apply::recover(&root, &plugin, &state).await.unwrap();
+    assert!(!gate.exists());
+    assert!(!marker.exists());
+    assert_eq!(fs::read(&data).unwrap(), b"original workspace");
+    assert_eq!(fs::read(&installed).unwrap(), b"original plugin");
+    fs::remove_dir_all(fixture).unwrap();
+}
+
+#[test]
+fn managed_entry_uses_settings_from_the_installed_plugin_config_root() {
+    let fixture = std::env::temp_dir().join(format!("datapier-managed-{}", uuid::Uuid::new_v4()));
+    let config = fixture.join("config");
+    let plugin = config.join("plugins/datapier");
+    let state = fixture.join("state/plugin-data/datapier");
+    let root = fixture.join("data");
+    for directory in [&plugin, &state, &root] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let root = fs::canonicalize(root).unwrap();
+    let entry = fixed_entry::Entry::managed(&state, true).unwrap().unwrap();
+    let settings = serde_json::json!({"agents":{"mcp":[{
+        "name":"datapier", "command":entry.command(), "transport":"stdio", "args":["mcp"],
+        "env":{"DATAPIER_DATA_DIR":root,"USER_FIELD":"preserved"}
+    }]}});
+    fixed_entry::write_record(&config.join("settings.json"), &settings).unwrap();
+    fixed_entry::write_record(
+        &state.join("kv.json"),
+        &serde_json::json!({"mcp_managed":{
+            "host":"local","data_dir":root,"startup":{
+                "command":entry.command(),"transport":"stdio","args":["mcp"],"data_dir":root
+            }
+        }}),
+    )
+    .unwrap();
+    assert_eq!(
+        managed_entry::readback(&state, &plugin, &root, Some(&entry)).unwrap(),
+        Some(settings)
+    );
+    drop(entry);
+    fs::remove_dir_all(fixture).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn progress_status_does_not_wait_for_download_lock() {
     let root =

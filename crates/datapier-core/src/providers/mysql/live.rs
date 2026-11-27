@@ -431,12 +431,11 @@ pub(super) async fn read(
     let (meta, rows, more) = fetch_page(s, &recipe, start, size, budget, cancel).await?;
     let previous = sink.store.result_meta(id).await?.summary;
     let summary = json!({"retrieval_mode":"live_page","has_more":more,"page_start":start,"total_rows":previous.get("total_rows"),"counted_at":previous.get("counted_at")});
-    sink.store
-        .replace_result_page(id, start, meta, rows, summary)
+    let page = sink
+        .store
+        .replace_result_page(id, start, meta, rows, summary, (size, max_bytes))
         .await?;
-    Ok(serde_json::to_value(
-        sink.store.result_page(id, start, size, max_bytes).await?,
-    )?)
+    Ok(serde_json::to_value(page)?)
 }
 
 pub(super) async fn count(

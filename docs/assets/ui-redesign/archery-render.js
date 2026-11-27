@@ -1,4 +1,24 @@
 'use strict';
+function archerySqlGutter() {
+  const parsed = scanSql(ap.sql);
+  return ap.sql.split('\n').map((_, index) => {
+    const entries = parsed.statements.map((statement, n) => ({ ...statement, n }))
+      .filter(statement => statement.line === index + 1);
+    return `<div class="gutter-line"><span class="gutter-number">${index + 1}</span>${
+      entries.map(statement =>
+        ab(
+          icon('play'),
+          `statement-sql:${statement.n}`,
+          `class="gutter-run" title="${
+            h(t('runStatementLines', { number: statement.n + 1, start: statement.line, end: statement.lastLine }))
+          }" aria-label="${
+            h(t('runStatementLines', { number: statement.n + 1, start: statement.line, end: statement.lastLine }))
+          }" ${ap.task === 'running' ? 'disabled' : ''}`,
+        )
+      ).join('')
+    }</div>`;
+  }).join('');
+}
 function renderArchery() {
   const i = ai.find(item => item.id === ap.instance),
     redis = i.provider === 'redis';
@@ -65,17 +85,23 @@ function renderArchery() {
             ['total', 'DECIMAL(10,2)', az('是', 'Yes'), 'NULL', '—', az('未提供', 'Not provided')],
           ])
         }</div><h3>${az('索引', 'Indexes')}</h3><div class="table-wrap">${
-          simpleTable([az('名称', 'Name'), az('字段', 'Columns'), az('类型', 'Type')], [[
-            'PRIMARY',
-            'id',
-            'PRIMARY KEY',
-          ]])
+          simpleTable(
+            [az('名称', 'Name'), az('字段', 'Columns'), az('类型', 'Type')],
+            [[
+              'PRIMARY',
+              'id',
+              'PRIMARY KEY',
+            ]],
+          )
         }</div><h3>${az('约束', 'Constraints')}</h3><div class="table-wrap">${
-          simpleTable([az('名称', 'Name'), az('类型', 'Type'), az('字段', 'Columns')], [[
-            'PRIMARY',
-            'PRIMARY KEY',
-            'id',
-          ]])
+          simpleTable(
+            [az('名称', 'Name'), az('类型', 'Type'), az('字段', 'Columns')],
+            [[
+              'PRIMARY',
+              'PRIMARY KEY',
+              'id',
+            ]],
+          )
         }</div><p class="muted small">${
           az('其他索引和约束信息未提供。', 'Other index and constraint information was not provided.')
         }</p>`
@@ -318,24 +344,24 @@ function renderArchery() {
       }</div></section>`;
     } else {
       content = `<section class="sql-workbench archery-query-workbench ${
-        ap.result ? 'has-sql-results' : ''
+        ap.result || ap.sqlRequest ? 'has-sql-results' : ''
       }"><div class="toolbar">${
         ab(
           icon('play') + ' ' + t('runAll'),
           'result',
           `class="primary row" ${ap.task === 'running' ? 'disabled' : ''}`,
         )
-      }${ab(t('runSelection'), 'selection', 'disabled')}${
+      }${
         ab(
           t('currentStatement'),
-          'result',
-          ap.task === 'running' ? 'disabled' : '',
+          'current-sql',
+          `title="${h(t('currentTarget'))}" ${ap.task === 'running' ? 'disabled' : ''}`,
         )
       }${
         ab(
           t('explainPlan'),
           'explain',
-          ap.task === 'running' ? 'disabled' : '',
+          `title="${h(t('explainTarget'))}" ${ap.task === 'running' ? 'disabled' : ''}`,
         )
       }${
         aib(
@@ -360,24 +386,26 @@ function renderArchery() {
       }${
         aib(
           'file-search',
-          az('检查上线 SQL（不执行）', 'Review SQL (does not execute)'),
+          az('检查全文（不执行）', 'Review all SQL (does not execute)'),
           'check',
           ap.task === 'running' ? 'disabled' : '',
         )
-      }</div><div class="sql-editor-wrap"><div class="sql-gutter"><div class="gutter-line current"><span class="gutter-number">1</span>${
-        ab(
-          icon('play'),
-          'result',
-          `class="gutter-run" ${ap.task === 'running' ? 'disabled' : ''}`,
-        )
-      }</div></div><div class="sql-input-surface"><textarea class="query-editor archery-editor" data-af="sql" wrap="off" spellcheck="false" aria-label="${
+      }</div><div class="sql-editor-wrap"><div class="sql-gutter"><div id="archery-sql-gutter">${archerySqlGutter()}</div></div><div class="sql-input-surface"><textarea class="query-editor archery-editor" data-af="sql" wrap="off" spellcheck="false" aria-label="${
         h(t('sqlQuery'))
       }">${h(ap.sql)}</textarea></div></div><div class="sql-editor-info"><span>${
-        h(status)
+        h(scanSql(ap.sql).error || t('explainTarget'))
       }</span><span class="spacer"></span><span>${
         az('示例预览 · 未发送请求', 'Example preview · no request sent')
       }</span></div>${
-        ap.result
+        ap.sqlRequest
+          ? `<section class="sql-results"><div class="sql-results-head"><strong>${
+            ap.review ? az('检查全文（不执行）', 'Review all SQL (does not execute)') : t('executionPreview')
+          }</strong><span class="spacer"></span><span class="tag warn">${t('notSent')}</span>${
+            ib('x', t('closeResults'), 'archery-close-preview')
+          }</div><pre class="sql-execution-text">${
+            highlightSql(ap.sqlRequest)
+          }</pre><div class="notice" style="margin:0 16px 12px">${t('exactSql')}</div></section>`
+          : ap.result
           ? `<section class="sql-results"><div class="sql-results-head"><strong>${
             ap.review ? az('SQL 检查', 'SQL review') : az('结果', 'Results')
           }</strong><span class="spacer"></span>${`<button type="button" class="icon-button" data-result-info popovertarget="archery-result-details" aria-haspopup="dialog" aria-expanded="false" aria-controls="archery-result-details" title="${

@@ -1,5 +1,58 @@
 //! 跨界面及动态路由共用的词条。
 pub(super) const ENTRIES: &[(&str, &str)] = &[
+    (
+        "任务提交响应缺少任务 ID",
+        "Task submission response is missing a task ID",
+    ),
+    (
+        "浏览任务完成但未返回结果",
+        "Browse task completed without returning results",
+    ),
+    (
+        "返回的结果与请求不匹配",
+        "The returned result does not match the request",
+    ),
+    (
+        "Hash 字段过期时间需要重新读取；请保留草稿并重新确认",
+        "Hash field expiration must be read again; keep the draft and confirm again",
+    ),
+    (
+        "恢复草稿包含不匹配的 Redis 操作",
+        "The restored draft contains mismatched Redis operations",
+    ),
+    (
+        "预览已过期，请重新预览",
+        "The preview has expired; preview again",
+    ),
+    (
+        "释放扫描游标失败: 响应无效",
+        "Failed to release scan cursor: invalid response",
+    ),
+    (
+        "任务响应与请求不匹配",
+        "The task response does not match the request",
+    ),
+    ("请先提交或丢弃草稿", "Submit or discard the draft first"),
+    (
+        "释放扫描游标失败: {error}",
+        "Failed to release scan cursor: {error}",
+    ),
+    (
+        "草稿尚未取得保护，请重试：{error}",
+        "Draft protection has not been confirmed. Retry: {error}",
+    ),
+    (
+        "草稿保护释放失败，将重试：{error}",
+        "Failed to release draft protection; will retry: {error}",
+    ),
+    (
+        "草稿未取得保护，请保留输入并重新打开基线或重试：{error}",
+        "Draft protection was not obtained. Keep your input and reopen the baseline or retry: {error}",
+    ),
+    (
+        "草稿保护确认无效，请重试",
+        "Draft protection confirmation is invalid. Retry.",
+    ),
     ("浏览…", "Browse…"),
     ("选择文件", "Choose file"),
     ("选择多个文件", "Choose multiple files"),
@@ -407,6 +460,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     (
         "临时结果释放未确认",
         "Temporary result release was not confirmed",
+    ),
+    (
+        "已请求取消，正在等待数据库确认；写入可能仍在执行",
+        "Cancellation requested. Waiting for database confirmation; writes may still be running.",
     ),
     (
         "大值草稿缺少受控文件登记",
@@ -1411,6 +1468,15 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("保存工作区并退出", "Save workspace and exit"),
     ("关闭弹窗或下拉", "Close dialog or dropdown"),
     ("执行选区或当前语句", "Run selection or current statement"),
+    (
+        "执行最后同步光标所在的语句；首次点击或拖选可能保留上次位置",
+        "Run the statement at the last synchronized cursor; the first click or a drag may retain its previous position",
+    ),
+    ("SQL 补全（仅供参考）", "SQL suggestions (reference only)"),
+    (
+        "宿主选区不可见，补全接受已禁用",
+        "Accepting suggestions is disabled because the host selection is unavailable",
+    ),
     ("复制 / 剪切", "Copy / Cut"),
     ("扩展文本选区", "Extend text selection"),
     ("移动单元格焦点", "Move cell focus"),

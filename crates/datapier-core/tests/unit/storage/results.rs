@@ -85,6 +85,41 @@ async fn live_page_replacement_invalidates_old_values() {
     let Value::Large { id, .. } = &page.rows[0][0] else {
         panic!("缺少引用")
     };
+    let error = store
+        .replace_result_page(
+            result,
+            100,
+            vec![],
+            vec![vec![Value::Text("x".repeat(100)); 100]],
+            json!({}),
+            (1, 1024),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "result_too_wide");
+    assert_eq!(
+        store.read_value(*id).await.unwrap(),
+        Value::Text("a".repeat(5000))
+    );
+    let mut settings = store.settings().await.unwrap();
+    settings.limits.result_memory_bytes_per_client = 1_048_576;
+    store.set_settings(&settings).await.unwrap();
+    let error = store
+        .replace_result_page(
+            result,
+            100,
+            vec![],
+            vec![vec![Value::Text("x".repeat(1_100_000))]],
+            json!({}),
+            (1, 16384),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "resource_limit");
+    assert_eq!(
+        store.read_value(*id).await.unwrap(),
+        Value::Text("a".repeat(5000))
+    );
     store
         .replace_result_page(
             result,
@@ -92,6 +127,7 @@ async fn live_page_replacement_invalidates_old_values() {
             vec![],
             vec![vec![Value::Integer("1".into())]],
             json!({"has_more": true}),
+            (1, 16384),
         )
         .await
         .unwrap();

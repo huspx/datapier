@@ -73,7 +73,7 @@ impl App {
                     return true;
                 }
                 if !cli && self.has_live_drafts() {
-                    self.status = "请先提交或丢弃草稿".into();
+                    self.status = UiMessage::key("请先提交或丢弃草稿");
                     return true;
                 }
                 let id = if cli {

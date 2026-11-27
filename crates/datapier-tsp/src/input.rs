@@ -2,6 +2,53 @@
 use super::*;
 
 impl App {
+    pub(super) fn sql_editor_key(&self, index: usize, split: bool) -> String {
+        let tab = &self.tabs[index];
+        let (identity, revision) = tab.query.identity();
+        let prefix = if split {
+            "project-query"
+        } else {
+            "query-editor"
+        };
+        format!("{prefix}-{}-{identity}-{revision}", tab.id)
+    }
+
+    pub(super) fn sql_editor_name(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        let (identity, revision) = tab.query.identity();
+        format!("sql-query:{}:{identity}:{revision}", tab.id)
+    }
+
+    pub(super) fn resolve_sql_editor(&mut self, name: String, focus: bool) -> Option<String> {
+        let Some(value) = name.strip_prefix("sql-query:") else {
+            return self.resolve_project_editor(name);
+        };
+        let mut parts = value.split(':');
+        let id = Uuid::parse_str(parts.next()?).ok()?;
+        let identity = Uuid::parse_str(parts.next()?).ok()?;
+        let revision = parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some()
+            || self.browse_result
+            || (self.view != "query" && self.target.is_some())
+        {
+            return None;
+        }
+        let index = self.tabs.iter().position(|tab| tab.id == id)?;
+        if self.tabs[index].query.identity() != (identity, revision) {
+            return None;
+        }
+        if !focus && (index != self.active || self.focus != "query") {
+            return None;
+        }
+        if self.project_split_editor_key().is_some() {
+            self.resolve_project_editor(format!("project-query:{id}"))
+        } else if index == self.active {
+            Some("query".into())
+        } else {
+            None
+        }
+    }
+
     pub(super) fn redis_operation(&self) -> std::result::Result<Value, i18n::UiMessage> {
         use base64::Engine as _;
         let value = |name: &str| -> std::result::Result<Value, i18n::UiMessage> {
@@ -117,13 +164,13 @@ impl App {
     pub(super) fn dispatch_guarded_editor_message(&mut self, message: Msg, backend: &Backend) {
         let message = match message {
             Msg::Edit(name, from, to, text, cursor, len) => {
-                let Some(name) = self.resolve_project_editor(name) else {
+                let Some(name) = self.resolve_sql_editor(name, false) else {
                     return;
                 };
                 Msg::Edit(name, from, to, text, cursor, len)
             }
             Msg::Undo(name) => {
-                let Some(name) = self.resolve_project_editor(name) else {
+                let Some(name) = self.resolve_sql_editor(name, false) else {
                     return;
                 };
                 Msg::Undo(name)
@@ -142,10 +189,26 @@ impl App {
         } else {
             None
         };
+        let epoch = self.query_edit_epoch;
+        let old_results = if matches!(&message, Msg::Edit(name, ..) | Msg::Undo(name) if name == "query")
+            && !self.browse_result
+        {
+            let mut ids = self.results.clone();
+            if let Some(pending) = &self.tabs[self.active].runtime.pending_result {
+                ids.extend(pending.results.iter().cloned());
+            }
+            ids
+        } else {
+            Vec::new()
+        };
         if !editing || self.draft_scope_ready() {
             self.dispatch_editor_message(message);
         } else {
             self.guard_draft_scope(backend, workbench::DraftScopeAction::Edit(message));
+        }
+        if self.query_edit_epoch != epoch && !self.browse_result {
+            self.release_stale_query_results(backend, old_results);
+            self.tabs[self.active].runtime.pending_result = None;
         }
         if self.workbench.scan_dirty
             && self.cursor.is_none()
@@ -160,6 +223,11 @@ impl App {
         if self.advanced_schema_edit(&message) || self.advanced_value_edit(&message) {
             return;
         }
+        if matches!(&message, Msg::Edit(name, ..) | Msg::Undo(name) if name == "row_search")
+            && !self.finish_inline(true)
+        {
+            return;
+        }
         if self.workbench.overlay.as_deref() == Some("profile") && self.connection_form_busy() {
             return;
         }
@@ -167,9 +235,8 @@ impl App {
             Msg::Edit(name, from, to, text, cursor, len) if self.modal_allows_field(&name) => {
                 if let Some(ed) = self.editor(&name)
                     && ed.text.encode_utf16().count() == len
-                    && ed.edit(from..to, &text)
+                    && ed.native_edit(from..to, &text, cursor)
                 {
-                    ed.set_selection(cursor, cursor);
                     if from != to || !text.is_empty() {
                         self.changed_field(&name);
                     } else {
@@ -197,6 +264,9 @@ impl App {
             return;
         }
         let name = self.focus.clone();
+        if name == "row_search" && !self.finish_inline(true) {
+            return;
+        }
         let edit = match key.name.as_str() {
             "backspace" => Some(EditKey::Backspace),
             "delete" => Some(EditKey::Delete),
@@ -254,7 +324,10 @@ impl App {
             self.focus = field.into();
         } else if key == "query-editor" {
             self.focus = "query".into();
-            return Some(self.project_split_editor_key().unwrap_or(key));
+            return Some(
+                self.project_split_editor_key()
+                    .unwrap_or_else(|| self.sql_editor_key(self.active, false)),
+            );
         } else if key == "cell-editor" {
             self.focus = "cell".into();
         } else if key == "grid" {

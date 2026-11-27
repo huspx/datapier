@@ -11,27 +11,41 @@ fn app(sql: &str) -> App {
 }
 
 #[test]
-fn acceptance_replaces_full_token_once_and_undo_restores_it() {
-    let mut app = app("SELect");
-    app.tabs[0].query.set_selection(3, 3);
-    assert!(app.completion_update(true));
-    let snapshot = app.workbench.query_ui.completion.current.as_ref().unwrap();
-    let id = snapshot.id;
-    let index = snapshot
-        .candidates
-        .iter()
-        .position(|item| item.name == "SELECT")
-        .unwrap();
-    app.completion_accept(id, index);
-    assert_eq!(app.tabs[0].query.text, "SELECT");
-    assert!(!app.completion_update(false));
-    assert!(app.workbench.query_ui.completion.current.is_none());
-    assert!(app.tabs[0].query.undo());
-    assert_eq!(app.tabs[0].query.text, "SELect");
+fn candidates_and_keys_do_not_modify_native_editor() {
+    for name in ["up", "down", "tab", "enter", "escape"] {
+        let mut with_completion = app("SELect");
+        let mut without_completion = app("SELect");
+        assert!(with_completion.tabs[0].query.set_selection(3, 3));
+        assert!(without_completion.tabs[0].query.set_selection(3, 3));
+        assert!(with_completion.completion_update(true));
+        let snapshot = with_completion
+            .workbench
+            .query_ui
+            .completion
+            .current
+            .as_ref()
+            .unwrap();
+        assert!(snapshot.candidates.iter().any(|item| item.name == "SELECT"));
+        let key = tern_sdk::Key::named(name);
+        with_completion.input_key(&key);
+        without_completion.input_key(&key);
+        assert_eq!(
+            with_completion.tabs[0].query.text,
+            without_completion.tabs[0].query.text
+        );
+        assert_eq!(
+            with_completion.tabs[0].query.cursor,
+            without_completion.tabs[0].query.cursor
+        );
+        assert_eq!(
+            with_completion.tabs[0].query.anchor,
+            without_completion.tabs[0].query.anchor
+        );
+    }
 }
 
 #[test]
-fn stale_candidate_cannot_edit_new_revision_or_new_list() {
+fn new_revision_replaces_stale_candidates() {
     let mut app = app("SEL");
     app.completion_update(true);
     let old_id = app
@@ -45,9 +59,9 @@ fn stale_candidate_cannot_edit_new_revision_or_new_list() {
     app.tabs[0].query.edit(0..3, "FRO");
     app.changed_field("query");
     app.completion_update(true);
-    app.completion_accept(old_id, 0);
+    let current = app.workbench.query_ui.completion.current.as_ref().unwrap();
+    assert_ne!(current.id, old_id);
     assert_eq!(app.tabs[0].query.text, "FRO");
-    assert!(app.workbench.query_ui.completion.current.is_some());
 }
 
 #[test]
@@ -135,7 +149,7 @@ fn archery_single_table_fields_remain_available() {
 }
 
 #[test]
-fn catalog_pages_are_reachable_and_acceptance_is_one_undo() {
+fn catalog_pages_remain_available_without_key_capture_or_acceptance() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = app("SELECT * FROM tbl_");
     app.completion_update(true);
@@ -149,15 +163,13 @@ fn catalog_pages_are_reachable_and_acceptance_is_one_undo() {
         result: Ok(json!({"request_id": first.params["request_id"], "context_generation":first.params["context_generation"], "catalog_generation":1, "items":items, "completeness":"partial", "next_cursor":"next-page"})),
     }, &backend);
 
-    for _ in 0..150 {
-        assert!(app.completion_key(&tern_sdk::Key::named("down")));
-    }
     let snapshot = app.workbench.query_ui.completion.current.as_ref().unwrap();
     assert_eq!(snapshot.candidates.len(), 50);
-    assert_eq!(snapshot.candidates[snapshot.selected].name, "tbl_150");
-    for _ in 0..50 {
-        assert!(app.completion_key(&tern_sdk::Key::named("down")));
-    }
+    assert_eq!(snapshot.candidates[0].name, "tbl_000");
+    assert_eq!(app.tabs[0].query.text, "SELECT * FROM tbl_");
+    let state = &mut app.workbench.query_ui.completion;
+    state.continuation = Some((state.pages[0].key.clone(), "next-page".into()));
+    state.deadline = Some(Instant::now());
     app.completion_poll(&backend);
     let next = requests.try_recv().unwrap();
     assert_eq!(next.params["cursor"], "next-page");
@@ -165,21 +177,14 @@ fn catalog_pages_are_reachable_and_acceptance_is_one_undo() {
         tag: next.tag,
         result: Ok(json!({"request_id":next.params["request_id"], "context_generation":next.params["context_generation"], "catalog_generation":1, "items":[{"name":"tbl_200","kind":"table"}], "completeness":"complete", "next_cursor":null})),
     }, &backend);
-    assert!(app.completion_key(&tern_sdk::Key::named("enter")));
-    assert_eq!(app.tabs[0].query.text, "SELECT * FROM `tbl_200`");
-    assert!(app.tabs[0].query.undo());
+    let snapshot = app.workbench.query_ui.completion.current.as_ref().unwrap();
+    assert!(
+        snapshot
+            .candidates
+            .iter()
+            .any(|item| item.name == "tbl_200")
+    );
     assert_eq!(app.tabs[0].query.text, "SELECT * FROM tbl_");
-    app.completion_update(true);
-    app.completion_poll(&backend);
-    let reopened = requests.try_recv().unwrap();
-    assert_eq!(reopened.params["scope"], "relations");
-    assert!(reopened.params["cursor"].is_null());
-    app.routed_response(Response {
-        tag: reopened.tag,
-        result: Ok(json!({"request_id":reopened.params["request_id"],"context_generation":reopened.params["context_generation"],"catalog_generation":1,"items":[{"name":"tbl_000","kind":"table"}],"completeness":"complete"})),
-    }, &backend);
-    assert!(app.completion_key(&tern_sdk::Key::named("enter")));
-    assert_eq!(app.tabs[0].query.text, "SELECT * FROM `tbl_000`");
 }
 
 #[test]
@@ -193,7 +198,9 @@ fn late_continuation_cannot_pollute_new_context() {
         tag: first.tag,
         result: Ok(json!({"request_id":first.params["request_id"], "context_generation":first.params["context_generation"], "catalog_generation":1, "items":[{"name":"tbl_000","kind":"table"}], "completeness":"partial", "next_cursor":"next-page"})),
     }, &backend);
-    assert!(app.completion_key(&tern_sdk::Key::named("down")));
+    let state = &mut app.workbench.query_ui.completion;
+    state.continuation = Some((state.pages[0].key.clone(), "next-page".into()));
+    state.deadline = Some(Instant::now());
     app.completion_poll(&backend);
     let continuation = requests.try_recv().unwrap();
     assert_eq!(continuation.params["cursor"], "next-page");
@@ -240,7 +247,7 @@ fn late_continuation_cannot_pollute_new_context() {
 }
 
 #[test]
-fn expired_catalog_is_refreshed_before_keyboard_navigation() {
+fn expired_catalog_is_refreshed_without_keyboard_capture() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = app("SELECT * FROM test.tbl_");
     app.completion_update(true);
@@ -252,7 +259,8 @@ fn expired_catalog_is_refreshed_before_keyboard_navigation() {
     }, &backend);
     app.workbench.query_ui.completion.pages[0].loaded = Instant::now() - CACHE_TTL;
 
-    assert!(app.completion_key(&tern_sdk::Key::named("down")));
+    app.input_key(&tern_sdk::Key::named("down"));
+    app.workbench.query_ui.completion.deadline = Some(Instant::now());
     app.completion_poll(&backend);
     let refreshed = requests.try_recv().unwrap();
     assert!(refreshed.params["cursor"].is_null());
@@ -260,6 +268,13 @@ fn expired_catalog_is_refreshed_before_keyboard_navigation() {
         tag: refreshed.tag,
         result: Ok(json!({"request_id":refreshed.params["request_id"],"context_generation":refreshed.params["context_generation"],"catalog_generation":2,"items":[{"name":"tbl_fresh","kind":"table"}],"completeness":"complete"})),
     }, &backend);
-    assert!(app.completion_key(&tern_sdk::Key::named("enter")));
-    assert_eq!(app.tabs[0].query.text, "SELECT * FROM test.`tbl_fresh`");
+    let snapshot = app.workbench.query_ui.completion.current.as_ref().unwrap();
+    assert!(
+        snapshot
+            .candidates
+            .iter()
+            .any(|item| item.name == "tbl_fresh")
+    );
+    app.input_key(&tern_sdk::Key::named("tab"));
+    assert_eq!(app.tabs[0].query.text, "SELECT * FROM test.tbl_");
 }

@@ -16,7 +16,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use super::{MysqlSession, quote_ident};
-use crate::providers::mysql::migration::MigrationBatchSource;
+use crate::providers::mysql::migration::write::MigrationBatchSource;
 use crate::{
     execution::{
         migration::TransferJournal,

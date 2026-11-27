@@ -209,7 +209,9 @@ impl App {
             return;
         }
         // 认证句柄释放属于内部清理，其 ACK 不能覆盖登录状态或结果详情。
-        if response.tag == "archery-release" {
+        if response.tag == "archery-release"
+            || (response.tag == "query-result-release" && response.result.is_ok())
+        {
             return;
         }
         // prepare 会消费上传句柄；失败后的兜底清理可能返回 not_found，不能覆盖保存原因。
@@ -252,6 +254,13 @@ impl App {
         let value = match response.result {
             Ok(v) => v,
             Err(e) => {
+                if response.tag == "query.info" {
+                    // 自动探测只影响当前语句定位，不覆盖查询已经显示的执行终态。
+                    self.workbench.sql_mode = None;
+                    self.workbench.server_version = None;
+                    self.workbench.lower_case_table_names = None;
+                    return;
+                }
                 self.archery_auth_required(Some(&e.code), &e.details, backend);
                 if response.tag == "connection.open"
                     && e.code == "auth_required"
@@ -274,6 +283,7 @@ impl App {
                     && self.archery.reauth_server.is_some()
                 {
                     self.archery.open_continuation = Some(open);
+                    self.archery.auto_open_auth = true;
                 }
                 if response.tag == "change.submit" {
                     self.redis_key_delete_submit_failed();
@@ -285,6 +295,9 @@ impl App {
                     self.current_pending = None;
                 } else if response.tag == "file.open" {
                     self.file_open_pending = None;
+                }
+                if response.tag == "execution.start" {
+                    self.workbench.writable_mysql_sql_task = false;
                 }
                 self.status = i18n::UiMessage::raw(e.to_string());
                 if response.tag == "connection.open" {
@@ -703,9 +716,6 @@ impl App {
                 self.workbench.lower_case_table_names = value["lower_case_table_names"]
                     .as_u64()
                     .and_then(|value| u8::try_from(value).ok());
-                if self.workbench.sql_mode.is_none() {
-                    self.status = i18n::UiMessage::key("数据库未返回 sql_mode，无法安全处理选区");
-                }
             }
             "current.info" => {
                 if let Some(settings) = application::mysql_mode(&value) {
@@ -762,7 +772,7 @@ impl App {
                 self.operation_pending = false;
                 self.large = None;
                 let Some(task) = value.get("task_id").and_then(Value::as_str) else {
-                    self.status = "任务提交响应缺少任务 ID".into();
+                    self.status = i18n::UiMessage::key("任务提交响应缺少任务 ID");
                     return;
                 };
                 if self.tabs[self.active]
@@ -805,6 +815,33 @@ impl App {
                     details["text"] = text.clone();
                 }
                 self.detail = details.to_string();
+                if self.workbench.mysql_cancel_requested
+                    && matches!(state, "queued" | "running" | "cancelling")
+                {
+                    self.status =
+                        i18n::UiMessage::key("已请求取消，正在等待数据库确认；写入可能仍在执行");
+                }
+                let stale_query = matches!(
+                    value["method"].as_str(),
+                    Some("execution.start" | "archery.sql_check")
+                ) && self
+                    .workbench
+                    .query_ui
+                    .result_epoch
+                    .is_some_and(|epoch| epoch != self.query_edit_epoch);
+                if stale_query {
+                    let ids = value
+                        .get("results")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    self.release_stale_query_results(backend, ids);
+                    self.tabs[self.active].runtime.pending_result = None;
+                    self.page_token = None;
+                }
                 self.set_detail_context("任务详情");
                 if matches!(
                     state,
@@ -826,9 +863,10 @@ impl App {
                         .is_none_or(|items| !items.iter().any(|item| item.as_str().is_some()))
                     && !self.workbench.schema_invalidated_task
                 {
-                    self.status = "浏览任务完成但未返回结果".into();
+                    self.status = i18n::UiMessage::key("浏览任务完成但未返回结果");
                 }
-                if !self.workbench.schema_invalidated_task
+                if !stale_query
+                    && !self.workbench.schema_invalidated_task
                     && !matches!(
                         state,
                         "failed" | "cancelled" | "wait_stopped" | "outcome_unknown"
@@ -873,6 +911,8 @@ impl App {
                     }
                 }
                 if !matches!(state, "queued" | "running" | "cancelling") {
+                    self.workbench.mysql_cancel_requested = false;
+                    self.workbench.writable_mysql_sql_task = false;
                     self.workbench.schema_invalidated_task = false;
                     self.task = None;
                     if !self.is_redis() && !self.browse_result {
@@ -952,7 +992,7 @@ impl App {
                         if pending.generation != self.generation
                             || page.result.id.to_string() != pending.id
                         {
-                            self.status = "返回的结果与请求不匹配".into();
+                            self.status = i18n::UiMessage::key("返回的结果与请求不匹配");
                             return;
                         }
                         if self.has_live_drafts() {
@@ -1065,6 +1105,7 @@ impl App {
                     self.changed_field("query");
                 }
             }
+            "execution.cancel" => {}
             "archery.history.cancel" => {}
             _ => {
                 self.detail = value.to_string();

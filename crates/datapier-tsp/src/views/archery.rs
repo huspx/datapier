@@ -2,6 +2,7 @@ use super::*;
 
 fn waiting_message(state: &crate::connections::archery::Wizard) -> Option<&'static str> {
     match state.pending.as_ref()?.1.as_str() {
+        "archery.server.list" if state.auto_open_auth => Some("正在登录或验证…"),
         "archery.auth.begin" | "archery.auth.verify" => Some("正在登录或验证…"),
         "archery.instances" => Some("正在加载实例…"),
         "archery.databases" => Some("正在加载数据库…"),

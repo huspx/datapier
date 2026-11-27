@@ -45,7 +45,9 @@ fn apply_draft_key(
 
 impl App {
     pub(super) fn field(&self, name: &str) -> &str {
-        if name == "cli_text" {
+        if name == "history_filter" {
+            &self.workbench.archery_history.draft.text
+        } else if name == "cli_text" {
             self.tabs
                 .get(self.active)
                 .map_or("", |tab| tab.cli_query.text.as_str())
@@ -58,6 +60,9 @@ impl App {
         }
     }
     pub(super) fn editor(&mut self, name: &str) -> Option<&mut Editor> {
+        if name == "history_filter" {
+            return Some(&mut self.workbench.archery_history.draft);
+        }
         if name == "replace-pattern" || name == "replace-replacement" {
             return self.replace_editor(name);
         }
@@ -84,7 +89,9 @@ impl App {
         }
         let text = text.into();
         let editor = Editor::new(text);
-        if name == "cli_text" {
+        if name == "history_filter" {
+            self.workbench.archery_history.draft = editor;
+        } else if name == "cli_text" {
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.cli_query = editor;
             }
@@ -357,7 +364,10 @@ impl App {
                 "session_id":pending.session,"target":pending.target,"edit_token":pending.edit_token,"dirty":true,"revision":pending.revision})) {
                 Ok(()) => { pending.request = Some(token); pending.error = None; }
                 Err(error) => {
-                    self.status = i18n::UiMessage::raw(format!("草稿尚未取得保护，请重试：{error}"));
+                    self.status = i18n::UiMessage::template(
+                        "草稿尚未取得保护，请重试：{error}",
+                        vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                    );
                     pending.error = Some(error);
                 }
             }
@@ -425,7 +435,10 @@ impl App {
                 Ok(()) => release.request = Some(token),
                 Err(error) => {
                     release.retry_at = Instant::now() + Duration::from_secs(2);
-                    self.status = i18n::UiMessage::raw(format!("草稿保护释放失败，将重试：{error}"));
+                    self.status = i18n::UiMessage::template(
+                        "草稿保护释放失败，将重试：{error}",
+                        vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                    );
                 }
             }
         }
@@ -501,10 +514,13 @@ impl App {
                 Some(result.as_ref().err().cloned().unwrap_or_else(|| {
                     AppError::new("invalid_response", "草稿保护确认版本不匹配")
                 }));
-            self.status = i18n::UiMessage::raw(match result {
-                Err(error) => format!("草稿未取得保护，请保留输入并重新打开基线或重试：{error}"),
-                Ok(_) => "草稿保护确认无效，请重试".into(),
-            });
+            self.status = match result {
+                Err(error) => i18n::UiMessage::template(
+                    "草稿未取得保护，请保留输入并重新打开基线或重试：{error}",
+                    vec![("error", i18n::UiArg::Raw(error.to_string()))],
+                ),
+                Ok(_) => i18n::UiMessage::key("草稿保护确认无效，请重试"),
+            };
             return true;
         }
         let mut pending = self.workbench.draft_scope_pending.take().unwrap();
@@ -599,6 +615,7 @@ impl App {
     fn sync_active_draft_scope(&mut self, backend: &Backend) {
         let current = self.draft_scope_context();
         let editing = self.has_live_drafts()
+            || self.restore_rows.is_some()
             || self.workbench.inline.is_some()
             || matches!(
                 self.workbench.overlay.as_deref(),
@@ -707,6 +724,12 @@ impl App {
         }
         if name == "query" {
             self.query_edit_epoch = self.query_edit_epoch.wrapping_add(1);
+            if self.focus == "query"
+                && (self.view == "query" || self.target.is_none())
+                && self.workbench.overlay.is_none()
+            {
+                self.workbench.focus_request = Some("query-editor".into());
+            }
             self.workbench.query_ui.menu_open = false;
             self.workbench.query_ui.executed = false;
         }
@@ -785,7 +808,8 @@ impl App {
             restore_focus_pending: false,
             workspace_interacted: false,
             tabs: vec![Tab {
-                title: crate::i18n::format_message("查询 {number}", &[("number", "1")]),
+                title: "查询 1".into(),
+                default_query_ordinal: Some(1),
                 query: Editor::new(""),
                 cli_query: Editor::default(),
                 profile_id: None,
@@ -861,6 +885,7 @@ impl App {
             icon_blobs: None,
             settings: AppSettings::default(),
             settings_loaded: false,
+            settings_error: Default::default(),
             settings_epoch: 0,
             settings_save_token: None,
             settings_unsaved: false,

@@ -127,9 +127,13 @@ impl Engine {
     pub(super) async fn mcp_connections(&self, owner: Uuid, params: &Value) -> Result<Value> {
         let provider = optional::<String>(params, "provider")?;
         let source = optional::<String>(params, "source")?;
-        let project_context = self.mcp_project_context(owner).await?;
-        let filters =
-            json!({"provider":provider,"source":source,"project_context":project_context});
+        let global = params.get("context_mode").and_then(Value::as_str) == Some("global");
+        let project_context = if global {
+            Value::Null
+        } else {
+            self.mcp_project_context(owner).await?
+        };
+        let filters = json!({"provider":provider,"source":source,"project_context":project_context,"global":global});
         let start = self.catalog_position(owner, "connections", Uuid::nil(), params, &filters)?;
         let mut items = Vec::new();
         for profile in self.store.profiles().await? {
@@ -228,9 +232,14 @@ impl Engine {
         let id: Uuid = model::param(params, "connection_id")?;
         let profile = self.mcp_profile(owner, id).await?;
         let refresh = optional::<bool>(params, "refresh")?.unwrap_or(false);
-        let project_context = self.mcp_project_context(owner).await?;
+        let global = params.get("context_mode").and_then(Value::as_str) == Some("global");
+        let project_context = if global {
+            Value::Null
+        } else {
+            self.mcp_project_context(owner).await?
+        };
         let mut recommendation = Self::mcp_recommendations(&project_context, id);
-        let filters = json!({"refresh":refresh,"project_context":project_context});
+        let filters = json!({"refresh":refresh,"project_context":project_context,"global":global});
         let start = self.catalog_position(owner, "databases", id, params, &filters)?;
         if refresh && profile.is_archery() {
             let auth = self.mcp_auth(owner, &json!({"connection_id":id})).await?;

@@ -261,8 +261,24 @@ impl Engine {
             }
         };
         let Some(password) = password else {
-            return Err(AppError::new("auth_required", "请输入 Archery 密码")
-                .with_details(Self::auth_response(&entry).await?));
+            let _guard = gate.lock().await;
+            {
+                let mut context = entry.context_operation.lock().unwrap();
+                let mut control = entry.controller.lock().unwrap();
+                if *context == Some(operation_id)
+                    && control.as_ref().is_some_and(|c| {
+                        c.owner == owner && c.auth_id == entry.id && c.token == credential_token
+                    })
+                {
+                    *context = None;
+                    *control = None;
+                }
+            }
+            self.emit_auth_changed(&entry).await;
+            return Err(AppError::new(
+                "auth_required",
+                "未保存 Archery 密码，请输入密码",
+            ));
         };
         let begin_token = {
             let mut controller = entry.controller.lock().unwrap();

@@ -706,19 +706,31 @@ async fn execute_plan(
         }
         _ => {}
     }
-    let verified = match (&expected_definition, &actual) {
-        (None, None) => true,
-        (Some(expected), Some(actual)) => {
-            actual.completeness.state == CompletenessState::Complete
-                && equivalent(
-                    expected,
-                    &actual.definition,
-                    plan.intent.target.database.as_deref().unwrap_or(""),
-                    creation_defaults.as_ref(),
-                )
-        }
-        _ => false,
+    let order_verified = if let Some(SchemaDefinition::Trigger(trigger)) = &expected_definition {
+        let names: std::result::Result<Vec<String>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? AND ACTION_TIMING=? AND EVENT_MANIPULATION=? ORDER BY ACTION_ORDER"
+        ).bind(&trigger.database).bind(&trigger.table).bind(&trigger.timing).bind(&trigger.event)
+            .fetch_all(&mut conn).await;
+        names.is_ok_and(|names| {
+            verify::trigger_order_matches(&names, &trigger.name, trigger.order.as_ref())
+        })
+    } else {
+        true
     };
+    let verified = order_verified
+        && match (&expected_definition, &actual) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => {
+                actual.completeness.state == CompletenessState::Complete
+                    && equivalent(
+                        expected,
+                        &actual.definition,
+                        plan.intent.target.database.as_deref().unwrap_or(""),
+                        creation_defaults.as_ref(),
+                    )
+            }
+            _ => false,
+        };
     Ok(
         json!({"state":if verified {"applied"} else {"verification_mismatch"},"steps":results,"snapshot":actual}),
     )

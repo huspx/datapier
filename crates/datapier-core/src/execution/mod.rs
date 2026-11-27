@@ -28,6 +28,7 @@ pub struct ExecutionSink {
     profile_dispatched: Arc<AtomicBool>,
     transfer_profiles: Vec<(Uuid, u64, Arc<Mutex<()>>)>,
     send_gate: Option<SendGate>,
+    policy_revision: Option<u64>,
     transfer_step: Option<(Uuid, u64)>,
     owner: Option<Uuid>,
 }
@@ -42,6 +43,7 @@ impl ExecutionSink {
             profile_dispatched: Arc::new(AtomicBool::new(false)),
             transfer_profiles: Vec::new(),
             send_gate: None,
+            policy_revision: None,
             transfer_step: None,
             owner: None,
         }
@@ -73,6 +75,11 @@ impl ExecutionSink {
         check: Arc<dyn Fn() -> Result<()> + Send + Sync>,
     ) -> Self {
         self.send_gate = Some((gate, check));
+        self
+    }
+    /// 在首次发送时复核冻结的 MCP 全局策略，调用方须使用共享发送门。
+    pub fn with_policy_revision(mut self, revision: u64) -> Self {
+        self.policy_revision = Some(revision);
         self
     }
     /// 绑定迁移步骤，使发送事实和逐项日志在同一持久化事务中提交。
@@ -195,6 +202,15 @@ impl ExecutionSink {
             }
             None => None,
         };
+        if let Some(revision) = self.policy_revision
+            && !self.profile_dispatched.load(Ordering::Acquire)
+            && self.store.settings().await?.revision != revision
+        {
+            return Err(AppError::new(
+                "invalidated",
+                "配置或策略已变化，请重新发起命令",
+            ));
+        }
         ensure_not_cancelled(&self.cancel)?;
         if let Some((run_id, ordinal)) = self.transfer_step {
             self.store

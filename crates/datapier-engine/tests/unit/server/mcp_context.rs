@@ -35,6 +35,7 @@ fn register_mcp(engine: &Engine) -> Uuid {
     owner
 }
 
+// 同一测试多次等待 RPC 时，避免将完整分派 future 内嵌到测试栈帧。
 fn request<'a>(
     engine: &'a Arc<Engine>,
     owner: Uuid,
@@ -47,7 +48,7 @@ fn request<'a>(
 async fn connections(engine: &Arc<Engine>, owner: Uuid) -> Vec<Value> {
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        engine.dispatch(owner, "mcp.list_connections", json!({})),
+        request(engine, owner, "mcp.list_connections", json!({})),
     )
     .await
     .expect("推荐不能等待 provider 建连")
@@ -94,7 +95,7 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
         (&root_a, project_a, "dev", &first),
         (&root_b, project_b, "staging", &second),
     ] {
-        engine.dispatch(controller, "local_project.save", json!({
+        request(&engine, controller, "local_project.save", json!({
             "expected_revision":null,
             "project":{
                 "id":project,"name":environment,"description":"","default_environment_id":null,"revision":0,
@@ -107,16 +108,16 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
     for (owner, directory, environment) in
         [(client_a, &root_a, "dev"), (client_b, &root_b, "staging")]
     {
-        engine
-            .dispatch(
-                owner,
-                "mcp.context.update",
-                json!({
-                    "roots":[directory.to_str().unwrap()],"source":"roots","environment":environment
-                }),
-            )
-            .await
-            .unwrap();
+        request(
+            &engine,
+            owner,
+            "mcp.context.update",
+            json!({
+                "roots":[directory.to_str().unwrap()],"source":"roots","environment":environment
+            }),
+        )
+        .await
+        .unwrap();
     }
 
     let a = connections(&engine, client_a).await;
@@ -151,8 +152,7 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
             .unwrap()
             .is_empty()
     );
-    let info = engine
-        .dispatch(client_a, "mcp.get_server_info", json!({}))
+    let info = request(&engine, client_a, "mcp.get_server_info", json!({}))
         .await
         .unwrap();
     assert_eq!(
@@ -162,6 +162,37 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
     assert_eq!(
         info["project_context"]["roots"][0]["environments"][0]["name"],
         "dev"
+    );
+    let global_info = request(
+        &engine,
+        client_a,
+        "mcp.get_server_info",
+        json!({"context_mode":"global"}),
+    )
+    .await
+    .unwrap();
+    assert!(global_info["project_context"].is_null());
+    let global = request(
+        &engine,
+        client_a,
+        "mcp.list_connections",
+        json!({"context_mode":"global"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        global["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["recommendation"].as_array().unwrap().is_empty())
+    );
+    let still_scoped = request(&engine, client_a, "mcp.get_server_info", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        still_scoped["project_context"]["roots"][0]["project_id"],
+        project_a.to_string()
     );
 
     request(
@@ -195,18 +226,17 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
         project_a.to_string()
     );
 
-    engine
-        .dispatch(
-            client_a,
-            "mcp.context.update",
-            json!({
-                "roots":[root_a.to_str().unwrap()],"source":"roots","environment":"missing"
-            }),
-        )
-        .await
-        .unwrap();
-    let missing = engine
-        .dispatch(client_a, "mcp.get_server_info", json!({}))
+    request(
+        &engine,
+        client_a,
+        "mcp.context.update",
+        json!({
+            "roots":[root_a.to_str().unwrap()],"source":"roots","environment":"missing"
+        }),
+    )
+    .await
+    .unwrap();
+    let missing = request(&engine, client_a, "mcp.get_server_info", json!({}))
         .await
         .unwrap();
     assert_eq!(
@@ -224,16 +254,16 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
         project_b.to_string()
     );
 
-    engine
-        .dispatch(
-            client_a,
-            "mcp.context.update",
-            json!({
-                "roots":[root_b.to_str().unwrap()],"source":"roots","environment":"staging"
-            }),
-        )
-        .await
-        .unwrap();
+    request(
+        &engine,
+        client_a,
+        "mcp.context.update",
+        json!({
+            "roots":[root_b.to_str().unwrap()],"source":"roots","environment":"staging"
+        }),
+    )
+    .await
+    .unwrap();
     let updated_a = connections(&engine, client_a).await;
     let unchanged_b = connections(&engine, client_b).await;
     assert_eq!(updated_a[0]["connection_id"], second.id.to_string());

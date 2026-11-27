@@ -19,11 +19,159 @@ fn mysql_rows() -> App {
     let mut app = app_for("mysql", "table", page);
     app.database = Some("db".into());
     app.result_id = Some(result_id);
-    app.schema = Some(json!({"keys":[["a"]],"engine":"InnoDB","columns":columns}));
+    app.schema = Some(json!({
+        "target":app.target,"keys":[["a"]],"ddl":"","engine":"InnoDB","columns":columns
+    }));
     let grid = app.grid.as_mut().unwrap();
     grid.select_row(0, 0, false, false).unwrap();
     grid.select_row(2, 0, false, true).unwrap();
     app
+}
+
+#[test]
+fn opening_workbenches_stages_inline_mysql_edits() {
+    for action in ["project-new", "transfer-new:copy"] {
+        let (backend, mut requests, _responses) = Backend::scripted();
+        let mut app = mysql_rows();
+        app.grid
+            .as_mut()
+            .unwrap()
+            .select(Cell { row: 0, column: 1 }, false)
+            .unwrap();
+        app.begin_inline(&backend);
+        let request = requests.try_recv().unwrap();
+        app.routed_response(
+            Response {
+                tag: request.tag,
+                result: Ok(json!({"revision":request.params["revision"]})),
+            },
+            &backend,
+        );
+        app.field_set("cell", "changed");
+        app.action(action, &backend);
+        assert_eq!(app.active, 1);
+        let grid = app.tabs[0].runtime.grid.as_ref().unwrap();
+        assert_eq!(
+            grid.value(Cell { row: 0, column: 1 }),
+            Some(&DataValue::Text("changed".into()))
+        );
+        assert!(!grid.edits().is_empty());
+    }
+}
+
+#[test]
+fn quit_stages_inline_edits_left_in_background_tabs() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = mysql_rows();
+    app.grid
+        .as_mut()
+        .unwrap()
+        .select(Cell { row: 0, column: 1 }, false)
+        .unwrap();
+    app.begin_inline(&backend);
+    let request = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
+    app.field_set("cell", "background");
+    app.create_query_tab();
+    app.request_quit(&backend);
+    let grid = app.tabs[0].runtime.grid.as_ref().unwrap();
+    assert_eq!(
+        grid.value(Cell { row: 0, column: 1 }),
+        Some(&DataValue::Text("background".into()))
+    );
+    assert!(!grid.edits().is_empty());
+}
+
+#[test]
+fn restoring_mysql_row_keeps_protection_until_draft_can_be_saved() {
+    let (backend, mut requests, _responses) = Backend::scripted();
+    let mut app = mysql_rows();
+    app.tabs[0].pending = json!({
+        "target": app.target,
+        "rows": [{
+            "operation":"update",
+            "key":{"a":DataValue::Text("1".into())},
+            "before":{},
+            "values":{"b":DataValue::Text("restored".into())}
+        }]
+    });
+    let session = app.session.take();
+    app.action("restore-pending", &backend);
+    assert!(requests.try_recv().is_err());
+    assert!(matches!(
+        app.status,
+        crate::i18n::UiMessage::Key("请先选择原目标并重新打开编辑基线")
+    ));
+    app.session = session;
+    app.action("restore-pending", &backend);
+    let request = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: request.tag,
+            result: Ok(json!({"revision":request.params["revision"]})),
+        },
+        &backend,
+    );
+    let browse = requests.try_recv().unwrap();
+    assert_eq!(browse.method, "resource.browse");
+    app.sync_draft_scope(&backend);
+    let task = Uuid::new_v4();
+    app.routed_response(
+        Response {
+            tag: browse.tag,
+            result: Ok(json!({"task_id":task})),
+        },
+        &backend,
+    );
+    app.workspace_restore_poll(&backend);
+    let poll = requests.try_recv().unwrap();
+    assert_eq!(poll.method, "execution.get");
+    let mut original = page(
+        &["a", "b"],
+        vec![vec![
+            DataValue::Text("1".into()),
+            DataValue::Text("first".into()),
+        ]],
+    );
+    original.result.summary = json!({"has_more":false});
+    app.routed_response(
+        Response {
+            tag: poll.tag,
+            result: Ok(json!({"id":task,"state":"succeeded","results":[original.result.id]})),
+        },
+        &backend,
+    );
+    let read = requests.try_recv().unwrap();
+    assert_eq!(read.method, "result.read");
+    app.routed_response(
+        Response {
+            tag: read.tag,
+            result: Ok(json!(original)),
+        },
+        &backend,
+    );
+    let release = requests.try_recv().unwrap();
+    assert_eq!(release.method, "result.release");
+    app.routed_response(
+        Response {
+            tag: release.tag,
+            result: Ok(json!({"released":true})),
+        },
+        &backend,
+    );
+    app.sync_draft_scope(&backend);
+    assert!(app.draft_scope_save_check().is_ok());
+    assert_eq!(
+        app.pending_rows[0].values["b"],
+        DataValue::Text("restored".into())
+    );
+    assert!(app.tabs[0].pending.is_null());
 }
 
 #[test]

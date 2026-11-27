@@ -81,13 +81,10 @@ enum Msg {
     Cell(u64, usize, bool),
     CellOpen(u64, usize),
     Row(u64, usize),
-    CompletionAccept(Uuid, usize),
     CopyText(String),
     CopyRedisValue,
     CopyGrid,
     GridMenu(Cell, menus::GridMenuAction),
-    QueryMenu(Uuid, String, usize, usize, String),
-    QueryCut(Uuid, String, usize, usize),
 }
 #[derive(Clone)]
 struct LargeLoad {
@@ -133,6 +130,8 @@ impl Default for BrowseSettings {
 #[derive(Clone, Serialize, Deserialize)]
 struct Tab {
     title: String,
+    #[serde(default)]
+    default_query_ordinal: Option<usize>,
     query: Editor,
     #[serde(default)]
     cli_query: Editor,
@@ -159,6 +158,17 @@ struct Tab {
     pending_live: bool,
     #[serde(skip)]
     runtime: TabRuntime,
+}
+
+impl Tab {
+    fn display_title(&self) -> String {
+        self.default_query_ordinal.map_or_else(
+            || self.title.clone(),
+            |number| {
+                crate::i18n::format_message("查询 {number}", &[("number", &number.to_string())])
+            },
+        )
+    }
 }
 #[derive(Clone)]
 struct DetailContext {
@@ -344,6 +354,7 @@ struct App {
     icon_blobs: Option<IconBlobs>,
     settings: AppSettings,
     settings_loaded: bool,
+    settings_error: i18n::UiMessage,
     settings_epoch: u64,
     settings_save_token: Option<Uuid>,
     settings_unsaved: bool,

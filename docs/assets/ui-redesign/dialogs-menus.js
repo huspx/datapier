@@ -451,27 +451,6 @@ function menu() {
       h(t('closeAll'))
     }</button></div>`;
   }
-  if (state.menu.kind === 'sql') {
-    const selected = queryTab()?.sql.slice(state.menu.start, state.menu.end)
-      || '';
-    return `<div class="context-menu" role="menu" aria-label="${
-      t('sqlMenu')
-    }" style="left:${state.menu.x}px;top:${state.menu.y}px"><div class="menu-caption">${
-      t('sqlSelection')
-    }</div><button role="menuitem" data-action="sql-menu-execute">${icon('play')} ${
-      t('executeSelectedSql')
-    }</button><button role="menuitem" data-action="sql-menu-explain" ${
-      explainableSelection(selected)
-        ? ''
-        : `disabled title="${t('explainLimit')}"`
-    }>${icon('chart')} ${t('explainPlan')}</button><button role="menuitem" data-action="sql-menu-format">${
-      icon('wand')
-    } ${t('formatSelection')}</button><hr><button role="menuitem" data-action="sql-menu-copy">${icon('copy')} ${
-      t('copy')
-    }</button><button role="menuitem" data-action="sql-menu-cut">${icon('scissors')} ${
-      t('cut')
-    }</button><button role="menuitem" data-action="sql-menu-all">${icon('selection')} ${t('selectAll')}</button></div>`;
-  }
   if (state.menu.kind === 'connection') {
     const provider = state.menu.provider,
       aid = state.menu.archeryId,
@@ -636,7 +615,7 @@ function activateProvider(provider) {
       id: state.nextTab++,
       provider: 'mysql',
       query: true,
-      title: t('queryFile', { number: state.nextTab }),
+      title: t('numberedQueryFile', { number: state.nextTab }),
       sql: '',
       database: state.database,
     };

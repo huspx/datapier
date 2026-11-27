@@ -12,7 +12,7 @@
 
 ## 版本号与关联文件
 
-根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前候选为 `0.5.1`。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本。修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本。组包支持无前导零的三段数字版本。
+根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前候选为 `0.5.2`。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本。修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本。组包支持无前导零的三段数字版本。
 
 修改根版本后，先同步源码 plugin，再更新 CHANGELOG 对应版本章节并运行只读发布检查。源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。PR 与 main 的 CI 均执行同一检查，草稿准备、上传和汇总入口也会在访问 GitHub 前检查；plugin 版本不一致、CHANGELOG 首个章节不匹配根版本、版本章节重复或当前章节缺少实际变更条目时失败。检查不会修改文件，也不查询或推断线上发布状态。
 
@@ -49,22 +49,26 @@ python3 scripts/version.py --check-release
 
 ## 发布前检查
 
-按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)完成适用检查，记录实际命令和结果。0.5.0 候选的证据见[验收记录](docs/technical-design-0.5.0.md#8-验收矩阵与验证方式)，六目标 CI 的构建与打包结果须按最终候选提交核对。必要的真实数据库、TSP、TLS、凭据及安装检查须针对候选提交核实；默认测试不包含默认忽略的真实数据库专项，构建结果与实际运行记录分别报告。
+按[开发规范中的测试与验证](CONTRIBUTING.md#测试与验证)完成适用检查并记录实际结果。当前候选范围见 [0.5.2 验收矩阵](docs/technical-design-0.5.2.md#5-实施顺序与验收)，六目标 CI 的构建与打包结果须按最终候选提交核对。默认测试不包含默认忽略的真实数据库专项，构建结果与实际运行记录分别报告。
 
 - 使用隔离的真实 MySQL 5.7／8.0／8.4 和 Redis 6.2／7.2／8.0 单节点，按实际版本验证连接、查询、编辑提交、导入导出、只读、并发冲突与取消；覆盖大整数、精确小数、NULL、二进制、普通空结果、多结果、写入断连不重放、Redis List 重复值、WATCH 与 TTL。数据库测试只创建并清理自身隔离资源，不使用生产数据或真实凭据作为样本。
 - 在实际 Tern 中验证完整交互，包括中文／emoji、选区、分页、大字段、草稿恢复、两个 UI、十万行全量导出及百万 key 增量扫描；观察 IPC、客户端退出及 Engine 收尾的进程和资源状态。验证 TLS 成功连接及错误 CA／身份拒绝、系统凭据存取和凭据服务不可用时的行为，确保日志、配置、导出和运行描述不含秘密。
 - 在 macOS arm64 验证干净安装、下载与 SHA-256 校验、缓存复用、启动、IPC 权限、Keychain 和退出恢复，记录系统、Tern、数据库及依赖版本。其他平台分别核对 Secret Service、Windows Named Pipe 当前用户权限及拒绝远程客户端、ConPTY／OSC 877、文件锁和 `.exe` 路径等相关实现及适用运行范围；不得将未执行的检查写为通过。
 - 核对 README 的安装、功能和平台描述与实际结果一致，保留 [MIT License](LICENSE) 及第三方分发要求。MySQL／Redis 单节点范围及不支持项目以 [README](README.md) 为准，不以配置或单一平台结果扩大支持声明。
 
-本轮要求的 macOS arm64 运行验收与构建结果应能关联具体候选二进制、构建产物和环境；其余五个平台的未执行项不作为本轮验收阻塞。详细场景见 [0.5.0 验收矩阵](docs/technical-design-0.5.0.md#8-验收矩阵与验证方式)及既有版本技术方案；系统通知与点击定位尚未验收。候选包和隔离下载源的安装验证不能写成正式下载地址已可用。
+本轮原生验收仅使用 macOS arm64，运行结果应能关联具体候选二进制、构建产物和环境。保留六目标构建与组包；其他目标的原生运行结果按实际情况记录。系统通知与点击定位尚未验收。候选包和隔离下载源的安装验证不能写成正式下载地址已可用。
 
 ### 0.5.0 发布准备核对
 
-当前候选使用 IPC v6／配置 schema 6，升级与回退要求见 [README](README.md) 和[技术方案](docs/technical-design-0.5.0.md#9-风险待验证项与交付状态)。正式发布前核对最终提交及六目标 CI、同次构建的七个附件，并在 macOS arm64 验证候选包安装、更新与运行；从 0.4 首次升级须手工备份。发布后另核对 `v0.5.0`、实际提交、附件和 digest，并从正式下载地址验证安装；未执行前不记为通过。
+0.5.0 使用 IPC v6／配置 schema 6；从 0.4 首次升级须手工备份。升级与回退见 [0.5.0 技术方案](docs/technical-design-0.5.0.md#9-风险待验证项与交付状态)。
 
 ### 0.5.1 发布准备核对
 
 核对最终提交的六目标 CI 和同次构建的七个附件。在 macOS arm64 使用对应候选包验证路径选择、Files 分屏和目录归属、共享 Engine、鼠标反馈与受管 MCP 升级保护。记录候选身份与实际覆盖范围，发布后从公开 URL 复验校验和安装。[0.5.1 验收矩阵](docs/technical-design-0.5.1.md#5-验收矩阵)
+
+### 0.5.2 发布准备核对
+
+核对六目标双程序归档、三个校验清单及同次构建的七个附件。按 [0.5.2 验收矩阵](docs/technical-design-0.5.2.md#5-实施顺序与验收)在 macOS arm64 检验 SQL 原生编辑、Files 导航、固定入口、更新和回滚。Windows x64 与 arm64 保留 launcher 检查，原生运行按实际环境记录。
 
 ## PR 与合并
 
@@ -110,9 +114,9 @@ repository='OWNER/REPO'
 python3 scripts/assemble-release.py --artifacts dist --repository "$repository"
 ```
 
-单目标脚本读取 `target/<target>/release/datapier`（Windows 为 `datapier.exe`），运行该程序的 `--version` 并拒绝与根版本不一致的二进制，再仅生成 `datapier-<version>-<target>.tar.gz`（Windows 为 `.zip`），因此应在对应目标的原生机器运行。汇总脚本要求六个仅含固定程序成员的归档，计算归档摘要并流式读取原程序计算摘要，仅生成 `datapier-plugin-<version>.zip`。公开附件摘要使用 GitHub 自动生成的 digest，不生成外部 `SHA256SUMS` 或独立 `.binary-sha256` 附件。核对 plugin zip 的 `datapier/` 目录内含 plugin 源文件、`LICENSE`、`release-url.txt`、`release-sha256.txt` 和 `release-bin-sha256.txt`；下载地址指向实际发布仓库和版本，两个清单分别记录六个归档文件名和六个 target 对应的 SHA-256。
+单目标脚本读取 `target/<target>/release/datapier` 和 `datapier-launcher`，Windows 程序名带 `.exe`。核对主程序 `--version`，将两项固定成员打入对应的 Unix tar.gz 或 Windows zip。汇总生成原有 `release-sha256.txt`、`release-bin-sha256.txt`，以及六目标的 `release-launcher-sha256.txt`。这些清单和 `release-url.txt` 随 plugin zip 发布，归档中的程序及 launcher 摘要均以原始成员流式计算。
 
-发布安装无需 Rust：安装器验证下载归档的 SHA-256 和唯一固定归档成员，解包后先核对程序 SHA-256，再执行版本检查并发布缓存；发布缓存按归档摘要隔离，每次启动前仍先核对程序 SHA-256，再执行 `--version`，摘要不匹配直接拒绝启动。`DATAPIER_BINARY` 本地开发模式按显式配置的源程序内容哈希缓存并校验副本。`DATAPIER_RELEASE_URL` 仅覆盖已打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录；发布核对时应同时确认默认下载地址和缓存行为。
+发布安装无需 Rust。安装器验证归档 SHA-256、两个固定成员及各自的 SHA-256，然后核对主程序版本并发布版本化缓存。`DATAPIER_BINARY` 开发安装沿用单程序内容摘要缓存。`DATAPIER_RELEASE_URL` 覆盖打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录。
 
 独立运行无需 plugin：将对应目标归档手工解包，直接运行 `datapier tui` 或作为 MCP stdio 程序使用；Tern 工作台运行 `datapier tsp`。用户示例见 [README](README.md#安装与运行)。候选包与正式线上附件的可用性应分别核实。
 
@@ -132,6 +136,33 @@ tern plugin list --json
 安装替换会触发 plugin 重载，随后首次启动会按该包内的版本、下载地址与摘要准备对应二进制。应核对 plugin 状态、程序版本与实际启动；替换成功不等于数据库或 MCP 已完成运行验收。不能只改下载 URL 或程序文件而保留旧 plugin 的版本及校验清单，也不将缺少发布清单的源码目录当成正式升级包。
 
 `--force` 不替换 linked 开发目录；开发模式通过更新显式链接的源码、构建匹配版本的程序并重载验证。Tern 的 `reload` 只重载本地文件；自动更新的校验、并发及恢复边界见[0.5.0 方案第 5.5 节](docs/technical-design-0.5.0.md#55-plugin-版本检查与自动更新边界)。
+
+### 已安装固定入口时手工更新或回滚
+
+退出所有 Datapier 客户端与 Engine，并停止外部 Agent 的 MCP 会话。保留一个本机 Tern 窗口，用于接收目标插件的加载确认。首次用 0.5.2 回滚前，等待该窗口将旧的受管 MCP 路径迁到固定入口。保留当前版本的真实 `datapier` 可执行文件用于协调。把目标 Release 的 plugin zip 和当前平台归档放到一个目录。将以下命令的 `--data-dir` 填为入口登记的数据目录。`--plugin-dir` 是 `tern plugin dir` 返回目录下的 `datapier`，`--state-dir` 是 Tern 的 `plugin-data/datapier`。保持与 Tern 相同的配置根及缓存设置。 [Tern 插件目录](https://docs.stencil.so/tern/reference/cli.md#tern-plugin-dir) · [Tern 插件状态目录](https://docs.stencil.so/tern/reference/api-shared.md#identity)
+
+```sh
+/absolute/path/to/datapier --data-dir /absolute/path/to/data plugin-switch \
+  --plugin-dir /absolute/path/to/tern/plugins/datapier \
+  --state-dir /absolute/path/to/tern/plugin-data/datapier \
+  --target-version 0.5.1 --package-dir /absolute/path/to/downloads
+```
+
+旧版若无法读取当前配置 schema，命令会在切换前拒绝。确认已导出需要保留的内容后，加 `--restore-data /absolute/path/to/pre-upgrade-backup` 指定一致的数据备份。切换期间保存当前数据和 plugin 的独立备份，并保持准入阻断。若进程中断，使用同一个真实二进制和目录参数，将 `--target-version`、`--package-dir` 及 `--restore-data` 替换为 `--recover`。恢复成功后，重新连接 Tern 和外部 Agent 中使用的 MCP，并核对版本和工具。Tern 已登记受管入口时，目标须为支持受管启动参数的 0.5.1 或更高版本。
+
+若更新在 `handoff` 阶段中断，`--recover` 在取得相关锁并核对目录后撤销启动门禁，沿用原安装和数据。macOS 自动下载先完成暂存与正式缓存的校验，标为已准备后可使用本机缓存安装。
+
+macOS 更新器在提交后读回 Tern 受管配置，核对已安装版本、launcher、缓存目标及进程引用，再回收已登记的旧暂存程序。保留当前及最近一次切换所需的程序、用户数据备份、共享安装缓存、早期暂存目录及开发缓存。若提示回收暂停，退出 Datapier 客户端和 Engine，使用真实二进制重试：
+
+```sh
+/absolute/path/to/datapier --data-dir /absolute/path/to/data plugin-update \
+  --action cache-clean --plugin-dir /absolute/path/to/tern/plugins/datapier \
+  --state-dir /absolute/path/to/tern/plugin-data/datapier
+```
+
+检查返回 JSON 的 `ok` 和 `message` 确认清理结果。
+
+主数据、系统凭据及早期结果缓存的处理方式见 [本机数据与自动写入](README.md#本机数据与自动写入)。
 
 
 ## 实际发布与发布后核对

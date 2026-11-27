@@ -66,18 +66,36 @@ fn archery_request_limit_uses_setting_until_explicitly_selected() {
 }
 
 #[test]
-fn plan_executes_selection_before_current_statement() {
+fn plan_ignores_old_selection_and_uses_cursor_statement() {
     let (backend, mut requests, _) = Backend::scripted();
-    let mut app = query_app("SELECT '中文😀;'; SELECT 2");
-    let end = "SELECT '中文😀;';".encode_utf16().count();
+    let sql = "SELECT '中文😀;'; SELECT 2";
+    let mut app = query_app(sql);
+    let end = sql.encode_utf16().count();
     assert!(app.tabs[0].query.set_selection(0, end));
     assert!(app.query_action("query-plan", &backend));
     let request = requests.try_recv().unwrap();
     assert_eq!(request.method, "execution.start");
-    assert_eq!(
-        request.params["text"],
-        "EXPLAIN FORMAT=JSON SELECT '中文😀;';"
-    );
+    assert_eq!(request.params["text"], "EXPLAIN FORMAT=JSON SELECT 2");
+}
+
+#[test]
+fn run_all_and_gutter_ignore_old_selection() {
+    let sql = "SELECT 1; SELECT 2";
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app(sql);
+    assert!(app.tabs[0].query.set_selection(0, 8));
+    app.action("run", &backend);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "execution.start");
+    assert_eq!(request.params["text"], sql);
+
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app(sql);
+    assert!(app.tabs[0].query.set_selection(0, 8));
+    assert!(app.query_action("query-statement:1", &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "execution.start");
+    assert_eq!(request.params["text"], "SELECT 2");
 }
 
 #[test]
@@ -102,7 +120,6 @@ fn plan_rejects_unsafe_targets_without_execution() {
         "",
         "-- comment only",
         "SELECT 'unfinished",
-        "SELECT 1; SELECT 2",
         "CREATE TABLE t (id int)",
         "/*! SELECT 1 */",
     ] {
@@ -141,21 +158,22 @@ fn plan_refuses_invalid_utf16_mode_session_and_running_task() {
 }
 
 #[test]
-fn context_format_undo_restores_reverse_selection() {
-    let mut query = editor::Editor::new("select '😀' from t");
-    let end = query.text.encode_utf16().count();
-    assert!(restore_menu_selection(
-        &mut query,
-        end,
-        0,
-        "select '😀' from t"
-    ));
-    let formatted =
-        editor::format_range(&query.text, query.selection(), editor::MysqlMode::default()).unwrap();
-    assert!(query.edit(query.selection(), &formatted));
-    assert!(query.undo());
-    assert_eq!((query.anchor, query.cursor), (end, 0));
-    assert_eq!(query.text, "select '😀' from t");
+fn obsolete_selection_actions_do_not_execute_or_edit() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = query_app("SELECT 1; SELECT 2");
+    assert!(app.tabs[0].query.set_selection(0, 8));
+    for action in [
+        "query-selection",
+        "query-explain",
+        "query-format",
+        "query-select-all",
+    ] {
+        assert!(!app.query_action(action, &backend));
+    }
+    app.action("selection", &backend);
+    assert!(requests.try_recv().is_err());
+    assert_eq!(app.tabs[0].query.text, "SELECT 1; SELECT 2");
+    assert_eq!((app.tabs[0].query.anchor, app.tabs[0].query.cursor), (0, 8));
 }
 
 #[test]
@@ -178,6 +196,31 @@ fn archery_plan_uses_stateless_context_and_selected_database() {
     let request = requests.try_recv().unwrap();
     assert_eq!(request.params["text"], "EXPLAIN FORMAT=JSON SELECT 2");
     assert_eq!(request.params["database"], "two");
+}
+
+#[test]
+fn archery_check_sends_full_text_despite_old_selection() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let sql = "SELECT 1; SELECT 2";
+    let mut app = query_app(sql);
+    app.profile = Some(
+        serde_json::from_value(json!({
+            "id": Uuid::new_v4(), "name": "Archery", "provider": "mysql",
+            "access_mode": "read_only", "connection": {
+                "kind": "archery", "server_id": Uuid::new_v4(), "instance_id": 1,
+                "instance_name": "mysql", "databases": ["one"], "default_database": "one"
+            }
+        }))
+        .unwrap(),
+    );
+    app.database = Some("one".into());
+    assert!(app.tabs[0].query.set_selection(0, 8));
+    assert!(app.application_action("archery-sql-check", &backend));
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.method, "archery.sql_check");
+    assert_eq!(request.params["text"], sql);
+    assert_eq!(request.params["database"], "one");
+    assert!(requests.try_recv().is_err());
 }
 
 #[test]

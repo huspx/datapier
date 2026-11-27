@@ -477,6 +477,11 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("执行全部", "Run all"),
     ("执行选区", "Run selection"),
     ("当前语句", "Current statement"),
+    (
+        "使用最后同步的光标；首次点击可能只聚焦，拖选可能保留上次位置",
+        "Uses the last synced cursor; the first click may only focus, and dragging may retain the previous position",
+    ),
+    ("检查全文（不执行）", "Check full SQL (without executing)"),
     ("取消执行", "Cancel execution"),
     ("查询结果只读", "Query results are read-only"),
     ("查看执行计划", "Explain"),
@@ -684,4 +689,23 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("放弃未确认输入", "Discard unconfirmed input"),
     ("重试草稿保护", "Retry draft protection"),
     ("清除未确认输入", "Clear unconfirmed input"),
+    (
+        "目录未关联项目",
+        "The directory is not associated with a project",
+    ),
+    (
+        "项目目录身份已改变",
+        "The project directory identity has changed",
+    ),
+    ("目录不可用", "The directory is unavailable"),
+    ("目录不在本机", "The directory is not on this host"),
+    (
+        "项目列表已变化，请刷新后重新定位",
+        "The project list has changed; refresh and locate the project again",
+    ),
+    ("项目定位结果无效", "The project location result is invalid"),
+    (
+        "副本 {workspace} 已保存；当前编辑或任务尚未结束，继续使用原工作区",
+        "Copy {workspace} was saved; editing or tasks are still in progress, so the original workspace remains active",
+    ),
 ];

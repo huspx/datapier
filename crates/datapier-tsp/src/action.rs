@@ -109,7 +109,6 @@ impl App {
                 | "sql-row-add"
                 | "delete-rows-confirm"
                 | "paste-confirm"
-                | "restore-pending"
                 | "submit"
                 | "advanced-value-patch"
                 | "advanced-value-stage"
@@ -381,7 +380,6 @@ impl App {
                 | "new-tab"
                 | "new-profile"
                 | "run"
-                | "selection"
                 | "current"
                 | "submit"
                 | "redis-submit"
@@ -555,13 +553,8 @@ impl App {
                     self.request(backend, method, method, json!({"session_id":s,"target":target,"filters":filters,"sort":sort,"workspace_id":self.workspace_id}));
                 }
             }
-            "run" | "selection" => {
-                let query = &self.tabs[self.active].query;
-                let text = if name == "selection" {
-                    query.selected_text().unwrap_or("").to_owned()
-                } else {
-                    query.text.clone()
-                };
+            "run" => {
+                let text = self.tabs[self.active].query.text.clone();
                 self.execute_query_text(text, backend);
             }
             "current" => {
@@ -595,12 +588,20 @@ impl App {
             }
             "cancel" => {
                 if let Some(task) = self.task.clone() {
-                    self.request(
-                        backend,
-                        "execution.cancel",
-                        "execution.cancel",
-                        json!({"task_id":task}),
+                    let tag = format!(
+                        "{}:{}:execution.cancel",
+                        self.tabs[self.active].id, self.generation
                     );
+                    match backend.request(tag, "execution.cancel", json!({"task_id":task})) {
+                        Ok(()) if self.workbench.writable_mysql_sql_task => {
+                            self.workbench.mysql_cancel_requested = true;
+                            self.status = i18n::UiMessage::key(
+                                "已请求取消，正在等待数据库确认；写入可能仍在执行",
+                            );
+                        }
+                        Ok(()) => {}
+                        Err(error) => self.status = i18n::UiMessage::raw(error.to_string()),
+                    }
                 }
             }
             "next" | "previous" => {
@@ -818,15 +819,24 @@ impl App {
                 }
             }
             "restore-pending" => {
-                let pending = self.tabs[self.active].pending.clone();
+                let pending = &self.tabs[self.active].pending;
                 if pending.is_null() {
                     self.status = "没有已恢复的编辑意图".into();
                     return;
                 }
-                if self.edit_token.is_none() || pending.get("target") != Some(&json!(self.target)) {
+                if self.session_id().is_none()
+                    || self.edit_token.is_none()
+                    || pending.get("target") != Some(&json!(self.target))
+                {
                     self.status = "请先选择原目标并重新打开编辑基线".into();
                     return;
                 }
+                if !self
+                    .guard_draft_scope(backend, workbench::DraftScopeAction::Action(name.into()))
+                {
+                    return;
+                }
+                let pending = self.tabs[self.active].pending.clone();
                 let redis = pending
                     .get("redis")
                     .and_then(Value::as_array)
@@ -839,7 +849,8 @@ impl App {
                         == Some(true)
                         || change.get("field_expires_at_ms").is_some()
                 }) {
-                    self.status = "Hash 字段过期时间需要重新读取；请保留草稿并重新确认".into();
+                    self.status =
+                        i18n::UiMessage::key("Hash 字段过期时间需要重新读取；请保留草稿并重新确认");
                     return;
                 }
                 if redis.iter().any(|change| {
@@ -973,7 +984,7 @@ impl App {
                 }
                 if !self.is_redis() {
                     if !redis.is_empty() {
-                        self.status = "恢复草稿包含不匹配的 Redis 操作".into();
+                        self.status = i18n::UiMessage::key("恢复草稿包含不匹配的 Redis 操作");
                         return;
                     }
                     self.workspace_restore_start(backend, pending, rows);
@@ -1269,7 +1280,7 @@ impl App {
                 if self.workbench.overlay.as_deref() == Some("preview")
                     && self.change_preview_value().is_none()
                 {
-                    self.status = "预览已过期，请重新预览".into();
+                    self.status = i18n::UiMessage::key("预览已过期，请重新预览");
                     return;
                 }
                 match self.change_input() {

@@ -247,8 +247,31 @@ impl App {
         let state = if value.as_object().is_some_and(|v| v.is_empty()) {
             None
         } else {
+            let legacy_titles: Vec<bool> = value["tabs"]
+                .as_array()
+                .map(|tabs| {
+                    tabs.iter()
+                        .map(|tab| tab.get("default_query_ordinal").is_none())
+                        .collect()
+                })
+                .unwrap_or_default();
             let mut state = serde_json::from_value::<Workspace>(value)?;
-            for tab in &mut state.tabs {
+            for (index, tab) in state.tabs.iter_mut().enumerate() {
+                if legacy_titles.get(index).copied().unwrap_or(false)
+                    && tab.project_query.is_none()
+                    && tab.browse.target.is_none()
+                    && !matches!(
+                        tab.workbench_draft["view"].as_str(),
+                        Some("project-workbench" | "transfer-workbench")
+                    )
+                {
+                    tab.default_query_ordinal = tab
+                        .title
+                        .strip_prefix("查询 ")
+                        .or_else(|| tab.title.strip_prefix("Query "))
+                        .and_then(|number| number.parse::<usize>().ok())
+                        .filter(|number| *number > 0);
+                }
                 let draft = &tab.workbench_draft;
                 if let Some(fields) = draft["fields"].as_object() {
                     let project_prefix = format!("project-{}-", tab.id);
@@ -268,6 +291,9 @@ impl App {
                     serde_json::from_value(draft["transfer_files"].clone()).unwrap_or_default();
                 workbench.project.section =
                     draft["project_section"].as_str().unwrap_or("").to_owned();
+                workbench.project.git_query_edit = draft["project_git_query_edit"]
+                    .as_bool()
+                    .unwrap_or(workbench.project.unsaved && workbench.project.section == "queries");
                 workbench.transfer.files =
                     draft["transfer_files_count"].as_u64().unwrap_or(0) as usize;
                 workbench.transfer.objects =
@@ -275,6 +301,22 @@ impl App {
                 workbench.transfer.object_filters =
                     serde_json::from_value(draft["transfer_object_filters"].clone())
                         .unwrap_or_default();
+                workbench.transfer.redis_keys =
+                    if let Some(value) = draft.get("transfer_redis_keys") {
+                        serde_json::from_value(value.clone()).ok().flatten()
+                    } else {
+                        let key = format!("transfer-{}-redis-keys", tab.id);
+                        let text = self
+                            .fields
+                            .get(&key)
+                            .map(|field| field.text.as_str())
+                            .unwrap_or("");
+                        Some(if text.is_empty() {
+                            Default::default()
+                        } else {
+                            text.split(',').map(|key| key.trim().to_owned()).collect()
+                        })
+                    };
                 workbench.transfer.stage =
                     draft["transfer_stage"].as_str().unwrap_or("").to_owned();
                 workbench.transfer.project_mode =

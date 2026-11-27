@@ -134,6 +134,12 @@ document.addEventListener('input', event => {
   ) return;
   const key = event.target.dataset.af;
   ap[key] = event.target.value;
+  if (key === 'sql') {
+    ap.sqlCursor = event.target.selectionEnd;
+    ap.sqlRequest = '';
+    const gutter = document.getElementById('archery-sql-gutter');
+    if (gutter) gutter.innerHTML = archerySqlGutter();
+  }
   // 认证绑定改变后清空旧平台候选，避免把旧实例与 DB 带入新服务。
   const bindingChanged = ['url', 'username', 'ca'].includes(key)
     && ap.step !== 'login';
@@ -163,14 +169,26 @@ document.addEventListener('input', event => {
     if (typeof pos === 'number') field?.setSelectionRange(pos, pos);
   }
 }, true);
-document.addEventListener('select', event => {
+document.addEventListener('selectionchange', () => {
+  const input = document.activeElement;
   if (
-    previewSource !== 'archery' || !event.target.matches('.archery-editor')
-  ) return;
-  const button = document.querySelector('[data-archery="selection"]');
-  if (button) {
-    button.disabled = ap.task === 'running'
-      || event.target.selectionStart === event.target.selectionEnd;
+    previewSource === 'archery' && input?.matches('.archery-editor')
+    && input.selectionStart === input.selectionEnd
+  ) ap.sqlCursor = input.selectionEnd;
+});
+document.addEventListener('scroll', event => {
+  if (event.target.matches?.('.archery-editor')) {
+    const gutter = document.getElementById('archery-sql-gutter');
+    if (gutter) gutter.style.transform = `translateY(${-event.target.scrollTop}px)`;
+  }
+}, true);
+document.addEventListener('keydown', event => {
+  if (
+    event.target.matches?.('.archery-editor') && event.key === 'Enter'
+    && (event.metaKey || event.ctrlKey)
+  ) {
+    event.preventDefault();
+    document.querySelector(`[data-archery="${event.shiftKey ? 'result' : 'current-sql'}"]`)?.click();
   }
 }, true);
 document.addEventListener('change', event => {
@@ -845,7 +863,7 @@ document.addEventListener('click', event => {
     }
     if (
       JSON.stringify(archeryConnections.filter(v => v.server === serverId))
-        !== JSON.stringify(managementBaseline)
+      !== JSON.stringify(managementBaseline)
     ) {
       toast(
         az(
@@ -954,13 +972,22 @@ document.addEventListener('click', event => {
         'The example preview does not read files.',
       ),
     );
-  } else if (action === 'explain') {
-    toast(
-      az(
-        '示例预览没有执行计划，未发送请求。',
-        'No execution plan in this preview; no request sent.',
-      ),
-    );
+  } else if (['explain', 'current-sql', 'statement-sql'].includes(action)) {
+    const parsed = scanSql(ap.sql);
+    const statement = action === 'statement-sql'
+      ? parsed.statements[Number(id)]
+      : parsed.statements.find(s => ap.sqlCursor >= s.scopeStart && ap.sqlCursor <= s.scopeEnd);
+    if (!statement) {
+      toast(parsed.error || t('noCurrentSql'));
+      return;
+    }
+    const sql = ap.sql.slice(statement.start, statement.end);
+    if (action === 'explain' && !explainableSelection(sql)) {
+      toast(t('explainLimit'));
+      return;
+    }
+    ap.sqlRequest = action === 'explain' ? 'EXPLAIN FORMAT=JSON\n' + sql : sql;
+    ap.review = false;
   } else if (action === 'instance') {
     switchArcheryInstance(id, db);
     serverId = id;
@@ -972,8 +999,13 @@ document.addEventListener('click', event => {
       archeryHistoryOwner = `${id}:${db}`;
     }
   } else if (action === 'check') {
+    if (!ap.sql.trim()) {
+      toast(t('noCurrentSql'));
+      return;
+    }
     ap.view = 'query';
     ap.review = true;
+    ap.sqlRequest = ap.sql;
     ap.result = true;
     ap.reviewDetail = false;
   } else if (['query', 'schema', 'ddl', 'history'].includes(action)) {
@@ -991,7 +1023,7 @@ document.addEventListener('click', event => {
     ap.view = action === 'query' && ap.view === 'history'
       ? (ap.historyReturn || 'query')
       : action;
-  } else if (action === 'result' || action === 'selection') {
+  } else if (action === 'result') {
     ap.result = true;
     ap.review = false;
     ap.task = 'idle';
@@ -1014,6 +1046,11 @@ document.addEventListener('click', event => {
         ),
       });
     } else {
+      if (!ap.sql.trim()) {
+        toast(t('noCurrentSql'));
+        return;
+      }
+      ap.sqlRequest = ap.sql;
       ap.executedLimit = ap.requestLimit;
       ap.cachedRows = archeryQuerySamples.slice(0, ap.executedLimit);
       ap.resultPage = 0;

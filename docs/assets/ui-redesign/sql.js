@@ -184,10 +184,8 @@ function queryPanel(tab) {
     tab.execution || tab.resultFixture ? 'has-sql-results' : ''
   }"><div class="toolbar"><button class="primary row" data-action="sql-all">${icon('play')} ${
     t('runAll')
-  }</button><button class="button" data-action="sql-selection" disabled>${
-    t('runSelection')
-  }</button><button data-action="sql-current">${t('currentStatement')}</button><button data-action="sql-completion">${
-    az('SQL 补全', 'SQL completion')
+  }</button><button data-action="sql-current" title="${h(t('currentTarget'))}">${
+    t('currentStatement')
   }</button><button class="button" data-action="sql-explain" title="${h(t('explainTarget'))}">${
     t('explainPlan')
   }</button>${ib('stop', t('cancelExecution'), 'cancel', 'disabled')}${ib('history', t('queryHistory'), 'history')}${
@@ -250,10 +248,6 @@ function syncSqlEditor() {
     line: before.split('\n').length,
     column: Array.from(before.split('\n').at(-1)).length + 1,
   });
-  $('[data-action="sql-selection"]').disabled = !tab.sql.slice(
-    tab.sqlStart,
-    tab.sqlEnd,
-  ).trim();
   $('[data-action="sql-current"]').disabled = !parsed.statements.some(s =>
     tab.sqlEnd >= s.scopeStart && tab.sqlEnd <= s.scopeEnd
   );
@@ -267,9 +261,11 @@ function syncSqlEditor() {
 function rememberSqlSelection() {
   const input = $('#sql-query'), tab = queryTab();
   if (!input || !tab || document.activeElement !== input) return;
-  tab.sqlStart = input.selectionStart;
-  tab.sqlEnd = input.selectionEnd;
-  tab.sqlDirection = input.selectionDirection;
+  if (input.selectionStart === input.selectionEnd) {
+    tab.sqlStart = input.selectionStart;
+    tab.sqlEnd = input.selectionEnd;
+    tab.sqlDirection = input.selectionDirection;
+  }
   syncSqlEditor();
 }
 function syncSqlScroll() {
@@ -281,12 +277,6 @@ function syncSqlScroll() {
     .scrollTop}px)`;
 }
 function explainTarget(tab, parsed = scanSql(tab.sql)) {
-  const selected = tab.sql.slice(tab.sqlStart, tab.sqlEnd);
-  if (selected.trim()) {
-    return explainableSelection(selected)
-      ? selected
-      : '';
-  }
   if (parsed.error) return '';
   const current = parsed.statements.find(s => tab.sqlEnd >= s.scopeStart && tab.sqlEnd <= s.scopeEnd);
   const sql = current ? tab.sql.slice(current.start, current.end) : '';
@@ -297,13 +287,8 @@ function requestSql(scope, index) {
   if (!tab) return;
   const parsed = scanSql(tab.sql);
   let sql = '', labelKey = '', labelValues = {};
-  if (scope === 'selection') {
-    sql = tab.sql.slice(tab.sqlStart, tab.sqlEnd);
-    labelKey = 'executeSelectedSql';
-  } else if (scope === 'explain-selection' || scope === 'explain') {
-    const selected = scope === 'explain-selection'
-      ? tab.sql.slice(tab.sqlStart, tab.sqlEnd)
-      : explainTarget(tab, parsed);
+  if (scope === 'explain') {
+    const selected = explainTarget(tab, parsed);
     if (!explainableSelection(selected)) {
       toast(t('explainLimit'));
       return;
@@ -313,7 +298,7 @@ function requestSql(scope, index) {
   } else if (scope === 'all') {
     sql = tab.sql;
     labelKey = 'executeAllSql';
-  } else {
+  } else if (scope === 'current' || scope === 'statement') {
     const statement = scope === 'current'
       ? parsed.statements.find(s => tab.sqlEnd >= s.scopeStart && tab.sqlEnd <= s.scopeEnd)
       : parsed.statements[index];
@@ -328,7 +313,7 @@ function requestSql(scope, index) {
       start: statement.line,
       end: statement.lastLine,
     };
-  }
+  } else return;
   if (!sql.trim()) {
     toast(t('noSelectedSql'));
     return;

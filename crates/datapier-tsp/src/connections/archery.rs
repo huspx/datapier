@@ -51,6 +51,8 @@ pub(crate) struct Wizard {
     pub return_overlay: Option<String>,
     pub(crate) open_capture: Option<OpenContinuation>,
     pub(crate) open_continuation: Option<OpenContinuation>,
+    pub(crate) auto_open_auth: bool,
+    pub(crate) auto_reauth: bool,
     pub(crate) connection_auth_error: Option<(Uuid, u64, Uuid)>,
     pub deferred_delete: bool,
 }
@@ -411,6 +413,7 @@ impl App {
         self.archery_action("archery-open", backend);
         self.archery.return_overlay = previous;
         self.archery.reauth_server = Some(server_id);
+        self.archery.auto_reauth = self.session.is_some();
         self.archery.auth_dialog = true;
         self.workbench.overlay = Some("archery-auth".into());
         self.workbench.focus_request = Some("input-password".into());

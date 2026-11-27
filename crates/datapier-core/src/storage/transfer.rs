@@ -716,28 +716,6 @@ impl Store {
         }
         Ok(items)
     }
-    /// 绑定组内每个 alias 按 revision 乐观并发控制。
-    pub async fn project_save_binding(
-        &self,
-        binding: &ProjectBinding,
-        expected_revision: u64,
-    ) -> Result<u64> {
-        bounded(&binding.binding_group)?;
-        bounded(&binding.connection_alias)?;
-        let payload = json_bounded(&binding.overrides)?;
-        let next = integer(expected_revision.checked_add(1).ok_or_else(conflict)?)?;
-        let result = if expected_revision == 0 {
-            sqlx::query("INSERT INTO project_bindings(project_id,binding_group,connection_alias,profile_id,database_json,revision) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING")
-                .bind(binding.project_id.to_string()).bind(&binding.binding_group).bind(&binding.connection_alias).bind(binding.profile_id.to_string()).bind(payload).bind(next).execute(&mut *self.pool.acquire().await?).await?
-        } else {
-            sqlx::query("UPDATE project_bindings SET profile_id=?,database_json=?,revision=? WHERE project_id=? AND binding_group=? AND connection_alias=? AND revision=?")
-                .bind(binding.profile_id.to_string()).bind(payload).bind(next).bind(binding.project_id.to_string()).bind(&binding.binding_group).bind(&binding.connection_alias).bind(integer(expected_revision)?).execute(&mut *self.pool.acquire().await?).await?
-        };
-        if result.rows_affected() != 1 {
-            return Err(conflict());
-        }
-        Ok(next as u64)
-    }
     /// 一次绑定操作中的所有 alias 共同提交，任意 revision 冲突回滚整组。
     pub async fn project_save_bindings(
         &self,

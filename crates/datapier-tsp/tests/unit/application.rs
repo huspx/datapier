@@ -113,7 +113,7 @@ fn dirty_closed_settings_keep_revision_and_conflict_after_remote_refresh() {
         },
         &backend,
     );
-    assert!(app.field("settings-error").contains("conflict"));
+    assert!(app.settings_error.render().contains("conflict"));
     assert_eq!(app.field("settings-paging-sql_rows"), "123");
     assert!(app.settings_form_dirty());
 }
@@ -209,7 +209,7 @@ fn settings_tabs_keep_drafts_and_footer_saves_all_fields() {
     );
     app.application_action("settings-tab:mcp", &backend);
     assert_eq!(app.field("editing_plan_items"), "234");
-    assert!(app.field("settings-error").contains("conflict"));
+    assert!(app.settings_error.render().contains("conflict"));
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
         &backend,
     );
     assert_eq!(app.field("external_args"), "--wait\n{file}\n{file}");
-    assert!(app.field("settings-error").contains("reload failed"));
+    assert!(app.settings_error.render().contains("reload failed"));
     app.application_action("settings-reload", &backend);
     assert!(requests.try_recv().is_err());
     app.application_action("settings-reload-confirm", &backend);
@@ -265,7 +265,7 @@ fn settings_invalid_editor_and_failed_reload_preserve_drafts() {
     );
     assert_eq!(app.field("external_mode"), "disabled");
     assert_eq!(app.field("external_args"), "");
-    assert!(app.field("settings-error").is_empty());
+    assert!(app.settings_error.is_empty());
 }
 
 #[test]
@@ -473,16 +473,19 @@ fn sql_task_auth_required_opens_relogin_without_replaying_query() {
     assert_eq!(app.archery.reauth_server, Some(server_id));
     assert_eq!(app.session_id(), session);
     assert_eq!(app.tabs[app.active].query.text, "SELECT 1");
-    assert_eq!(requests.try_recv().unwrap().method, "archery.server.list");
-    let operation = Uuid::new_v4();
-    app.archery.pending = Some((operation, "archery.auth.begin".into()));
-    let tag = format!(
-        "archery-ui/{}/{}/archery.auth.begin",
-        app.archery.epoch, operation
-    );
+    let list = requests.try_recv().unwrap();
+    assert_eq!(list.method, "archery.server.list");
+    app.archery_response(Response {
+        tag: list.tag,
+        result: Ok(json!({"servers":[{"id":server_id,"name":"fixture","base_url":"https://example.test/","username":"fixture","http_tls":{},"revision":1,"credential_mode":"keyring","totp_mode":"manual"}]})),
+    }, &backend);
+    let login = requests.try_recv().unwrap();
+    assert_eq!(login.method, "archery.auth.begin");
+    assert!(login.params["password"].is_null());
+    assert_eq!(login.params["candidate"], false);
     app.archery_response(
         Response {
-            tag,
+            tag: login.tag,
             result: Ok(json!({"auth_id":"auth-id","state":"ready","auth_generation":1})),
         },
         &backend,
@@ -516,7 +519,29 @@ fn redis_task_auth_required_stops_cli_and_preserves_command_for_relogin() {
     assert_eq!(app.archery.reauth_server, Some(server_id));
     assert_eq!(app.session_id(), session);
     assert_eq!(app.field("cli_text"), "GET 'kept key'");
-    assert_eq!(requests.try_recv().unwrap().method, "archery.server.list");
+    let list = requests.try_recv().unwrap();
+    assert_eq!(list.method, "archery.server.list");
+    app.archery_response(Response {
+        tag: list.tag,
+        result: Ok(json!({"servers":[{"id":server_id,"name":"fixture","base_url":"https://example.test/","username":"fixture","http_tls":{},"revision":1,"credential_mode":"keyring","totp_mode":"manual"}]})),
+    }, &backend);
+    let login = requests.try_recv().unwrap();
+    assert_eq!(login.method, "archery.auth.begin");
+    assert!(login.params["password"].is_null());
+    app.archery_response(
+        Response {
+            tag: login.tag,
+            result: Err(AppError::new(
+                "credentials_unavailable",
+                "missing credentials",
+            )),
+        },
+        &backend,
+    );
+    assert_eq!(app.archery.state, "auth_required");
+    assert!(app.archery.auth_dialog);
+    assert_eq!(app.session_id(), session);
+    assert_eq!(app.field("cli_text"), "GET 'kept key'");
     assert!(requests.try_recv().is_err());
 }
 

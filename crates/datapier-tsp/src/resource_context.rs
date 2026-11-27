@@ -163,6 +163,7 @@ impl App {
         self.scan_token = None;
         self.database = target.database.clone().or_else(|| self.database.clone());
         self.tabs[self.active].title = target.name.clone();
+        self.tabs[self.active].default_query_ordinal = None;
         self.target = Some(target);
         self.edit_token = None;
         self.schema = None;

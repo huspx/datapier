@@ -295,10 +295,12 @@ impl App {
                 .as_ref()
                 .map(|keys| keys.iter().cloned().collect())
                 .unwrap_or_else(|| {
-                    self.transfer_value("redis-keys")
-                        .split(',')
-                        .map(|s| s.trim().to_owned())
-                        .collect()
+                    let text = self.transfer_value("redis-keys");
+                    if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        text.split(',').map(|s| s.trim().to_owned()).collect()
+                    }
                 });
             if keys.is_empty() {
                 return Err(("redis-keys".into(), "请至少选择一个 key".into()));

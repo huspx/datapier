@@ -14,34 +14,30 @@ try {
     $values = [regex]::Matches($top, '(?m)^[ \t]*version[ \t]*=[ \t]*"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"[ \t]*(?:#.*)?\r?$')
     if ($keys.Count -ne 1 -or $values.Count -ne 1) { throw '插件版本缺失、重复或无效' }
     $version = $values[0].Groups[1].Value
-    # GetNativeSystemInfo 取得硬件架构，避免在 ARM Windows 的兼容进程中误选 x86 包。
+    # 模拟进程也使用系统返回的 nativeMachine 选择目标架构。
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class DatapierNative
 {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SYSTEM_INFO
-    {
-        public ushort architecture, reserved;
-        public uint pageSize;
-        public IntPtr minimum, maximum, mask;
-        public uint processors, type, granularity;
-        public ushort level, revision;
-    }
-
     [DllImport("kernel32.dll")]
-    public static extern void GetNativeSystemInfo(out SYSTEM_INFO info);
+    public static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
 }
 '@
-    $info = New-Object DatapierNative+SYSTEM_INFO
-    [DatapierNative]::GetNativeSystemInfo([ref]$info)
-    # Win32 PROCESSOR_ARCHITECTURE_AMD64=9、ARM64=12，不根据当前 PowerShell 位数猜测。
-    $arch = switch ($info.architecture) {
-        9 {
+    [uint16]$processMachine = 0
+    [uint16]$nativeMachine = 0
+    if (![DatapierNative]::IsWow64Process2([DatapierNative]::GetCurrentProcess(), [ref]$processMachine, [ref]$nativeMachine)) {
+        throw [System.ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    # IMAGE_FILE_MACHINE_AMD64=0x8664、ARM64=0xaa64。
+    $arch = switch ($nativeMachine) {
+        0x8664 {
             'x86_64'
         }
-        12 {
+        0xaa64 {
             'aarch64'
         }
         default {
@@ -94,7 +90,8 @@ public static class DatapierNative
     } else {
         $manifest = Join-Path $plugin 'release-sha256.txt'
         $binaryManifest = Join-Path $plugin 'release-bin-sha256.txt'
-        if (!(Test-Path -LiteralPath $manifest -PathType Leaf) -or !(Test-Path -LiteralPath $binaryManifest -PathType Leaf)) {
+        $launcherManifest = Join-Path $plugin 'release-launcher-sha256.txt'
+        if (!(Test-Path -LiteralPath $manifest -PathType Leaf) -or !(Test-Path -LiteralPath $binaryManifest -PathType Leaf) -or !(Test-Path -LiteralPath $launcherManifest -PathType Leaf)) {
             throw '此插件尚未打包发布校验清单；请设置 DATAPIER_BINARY 使用本地程序'
         }
         $file = "datapier-$version-$target.zip"
@@ -112,8 +109,16 @@ public static class DatapierNative
             throw '发布校验清单缺少唯一的程序 SHA256'
         }
         $binaryHash = $binaryLines[0].Substring(0, 64)
+        $launcherLines = @(Get-Content -LiteralPath $launcherManifest | Where-Object {
+            $_ -match ('^([0-9a-f]{64})  ' + [regex]::Escape($target) + '$')
+        })
+        if ($launcherLines.Count -ne 1) {
+            throw '发布校验清单缺少唯一的 launcher SHA256'
+        }
+        $launcherHash = $launcherLines[0].Substring(0, 64)
         $parent = Join-Path $cache $version
-        $dest = Join-Path $parent "$target-$digest"
+        # 新清单使用独立目录，旧版只含 datapier.exe 的缓存不可冒充完整缓存。
+        $dest = Join-Path $parent "$target-$digest-$launcherHash"
         if (!(Test-Path -LiteralPath (Join-Path $dest 'datapier.exe'))) {
             $archive = Join-Path $tmp 'package.zip'
             if ($env:DATAPIER_UPDATE_ARCHIVE) {
@@ -133,22 +138,29 @@ public static class DatapierNative
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() -ne $digest) {
                 throw '发布文件 SHA256 不匹配'
             }
-            # 不信任 ZIP 中的相对路径；仅接受唯一的固定文件，再核对程序自身摘要。
+            # 只接受两个固定名称且唯一的普通文件，不使用归档提供的路径。
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
             try {
-                if ($zip.Entries.Count -ne 1 -or $zip.Entries[0].FullName -cne 'datapier.exe') {
-                    throw '发布压缩包内容无效'
+                $names = @('datapier.exe', 'datapier-launcher.exe')
+                if ($zip.Entries.Count -ne 2) { throw '发布压缩包内容无效' }
+                foreach ($name in $names) {
+                    $entries = @($zip.Entries | Where-Object { $_.FullName -ceq $name })
+                    if ($entries.Count -ne 1) { throw '发布压缩包内容无效' }
+                    $mode = ($entries[0].ExternalAttributes -shr 16) -band 0xF000
+                    if ($mode -ne 0 -and $mode -ne 0x8000) { throw '发布压缩包成员不是普通文件' }
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
+                        $entries[0], (Join-Path $tmp $name)
+                    )
                 }
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
-                    $zip.Entries[0],
-                    (Join-Path $tmp 'datapier.exe')
-                )
             } finally {
                 $zip.Dispose()
             }
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $tmp 'datapier.exe')).Hash.ToLowerInvariant() -ne $binaryHash) {
                 throw '发布程序 SHA256 不匹配'
+            }
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $tmp 'datapier-launcher.exe')).Hash.ToLowerInvariant() -ne $launcherHash) {
+                throw '发布 launcher SHA256 不匹配'
             }
             $output = & (Join-Path $tmp 'datapier.exe') --version
             if ($LASTEXITCODE -ne 0 -or "$output".Trim() -ne "datapier $version") {
@@ -158,6 +170,12 @@ public static class DatapierNative
             [System.IO.Directory]::CreateDirectory($parent) | Out-Null
             [System.IO.Directory]::Move($tmp, $dest)
             $tmp = $null
+        }
+    }
+    if (!$env:DATAPIER_BINARY) {
+        $cachedLauncher = Join-Path $dest 'datapier-launcher.exe'
+        if (!(Test-Path -LiteralPath $cachedLauncher -PathType Leaf) -or (Get-FileHash -Algorithm SHA256 -LiteralPath $cachedLauncher).Hash.ToLowerInvariant() -ne $launcherHash) {
+            throw '缓存 launcher 校验失败，请移除对应缓存目录后重试'
         }
     }
     $cached = Join-Path $dest 'datapier.exe'

@@ -15,6 +15,23 @@ fn utf16_selection_edit_and_undo_preserve_unicode() {
 }
 
 #[test]
+fn native_edit_checks_result_cursor_before_changing_text_or_undo() {
+    let mut editor = Editor::new("中😀文");
+    assert!(!editor.native_edit(1..3, "😀", 2));
+    assert_eq!(editor.text, "中😀文");
+    assert!(!editor.undo());
+    assert!(!editor.native_edit(2..3, "x", 2));
+    assert_eq!(editor.text, "中😀文");
+    assert!(editor.native_edit(1..3, "好", 2));
+    assert_eq!(editor.text, "中好文");
+    assert_eq!(editor.cursor, 2);
+    assert!(editor.undo());
+    assert_eq!(editor.text, "中😀文");
+    assert!(editor.native_edit(0..0, "", 3));
+    assert_eq!(editor.cursor, 3);
+}
+
+#[test]
 fn shift_selection_tracks_utf16_across_chinese_and_emoji() {
     let mut editor = Editor::new("中😀文");
     assert!(editor.key(Key::Left, true));
@@ -135,15 +152,14 @@ fn statement_gutter_ranges_follow_tokens_and_utf16() {
 }
 
 #[test]
-fn explain_and_format_are_safe_for_selection_and_undo() {
+fn explain_is_limited_to_one_safe_statement() {
     let mode = MysqlMode::default();
-    assert_eq!(
-        explain_selection_in("SELECT 1", SqlContext::Session(mode)).unwrap(),
-        "EXPLAIN FORMAT=JSON SELECT 1"
-    );
-    assert!(explain_selection_in("SELECT 1; SELECT 2", SqlContext::Session(mode)).is_err());
+    assert!(validate_explain_selection_in("SELECT 1", SqlContext::Session(mode)).is_ok());
     assert!(
-        explain_selection_in(
+        validate_explain_selection_in("SELECT 1; SELECT 2", SqlContext::Session(mode)).is_err()
+    );
+    assert!(
+        validate_explain_selection_in(
             "DELETE FROM t",
             SqlContext::Session(MysqlMode {
                 ansi_quotes: true,
@@ -152,18 +168,6 @@ fn explain_and_format_are_safe_for_selection_and_undo() {
         )
         .is_err()
     );
-    let mut editor = Editor::new("前;select '😀', ? from t;后");
-    let start = "前;".encode_utf16().count();
-    let end = "前;select '😀', ? from t".encode_utf16().count();
-    editor.set_selection(start, end);
-    let formatted = format_range(&editor.text, editor.selection(), mode).unwrap();
-    assert!(formatted.contains("'😀'") && formatted.contains('?'));
-    editor.edit(editor.selection(), &formatted);
-    assert!(editor.text.starts_with("前;") && editor.text.ends_with(";后"));
-    assert!(editor.undo());
-    assert_eq!(editor.text, "前;select '😀', ? from t;后");
-    assert!(format_selection("SELECT 1 /*! hint */", mode).is_err());
-    assert!(format_selection("SELECT 1--2", mode).is_err());
 }
 
 #[test]
@@ -184,28 +188,15 @@ fn stateless_ranges_and_current_statement_use_utf16() {
 }
 
 #[test]
-fn stateless_explain_and_format_reject_mode_dependent_input() {
+fn stateless_explain_rejects_mode_dependent_input() {
     let context = SqlContext::Stateless;
-    assert_eq!(
-        explain_selection_in("SELECT '😀'", context).unwrap(),
-        "EXPLAIN FORMAT=JSON SELECT '😀'"
-    );
-    assert!(explain_selection_in("SELECT 1; SELECT 2", context).is_err());
+    assert!(validate_explain_selection_in("SELECT '😀'", context).is_ok());
+    assert!(validate_explain_selection_in("SELECT 1; SELECT 2", context).is_err());
     for sql in [r#"SELECT "x""#, r"SELECT 'a\b'", "SELECT 1 /* comment */"] {
         assert!(statements_in(sql, context).is_err(), "{sql}");
-        assert!(explain_selection_in(sql, context).is_err(), "{sql}");
         assert!(
-            format_range_in(sql, 0..sql.encode_utf16().count(), context).is_err(),
+            validate_explain_selection_in(sql, context).is_err(),
             "{sql}"
         );
     }
-    let mut editor = Editor::new("SELECT 1;select '😀' from t;SELECT 2");
-    let start = "SELECT 1;".encode_utf16().count();
-    let end = "SELECT 1;select '😀' from t".encode_utf16().count();
-    assert!(editor.set_selection(end, start));
-    let formatted = format_range_in(&editor.text, editor.selection(), context).unwrap();
-    assert!(editor.edit(editor.selection(), &formatted));
-    assert!(editor.undo());
-    assert_eq!(editor.text, "SELECT 1;select '😀' from t;SELECT 2");
-    assert_eq!((editor.anchor, editor.cursor), (end, start));
 }

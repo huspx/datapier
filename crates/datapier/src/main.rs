@@ -56,7 +56,7 @@ enum Command {
     Engine,
     /// 检查和管理已安装的 plugin 更新
     PluginUpdate {
-        #[arg(long, value_parser = ["check", "download", "schedule", "apply", "status"])]
+        #[arg(long, value_parser = ["check", "download", "schedule", "apply", "status", "entry-install", "entry-remove", "managed-entry", "cache-clean"])]
         action: String,
         #[arg(long)]
         plugin_dir: PathBuf,
@@ -68,6 +68,21 @@ enum Command {
         worker: bool,
         #[arg(long, hide = true, requires = "worker")]
         handoff_id: Option<Uuid>,
+    },
+    /// 使用本机发布包安全切换插件版本，或恢复中断的切换
+    PluginSwitch {
+        #[arg(long)]
+        plugin_dir: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, requires = "package_dir", conflicts_with = "recover")]
+        target_version: Option<String>,
+        #[arg(long, requires = "target_version", conflicts_with = "recover")]
+        package_dir: Option<PathBuf>,
+        #[arg(long, requires = "target_version")]
+        restore_data: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["target_version", "package_dir", "restore_data"])]
+        recover: bool,
     },
     #[command(hide = true)]
     UpdateLockProbe,
@@ -167,6 +182,32 @@ fn run() -> Result<()> {
                         )
                         .await;
                         println!("{}", serde_json::to_string(&value)?);
+                        Ok(())
+                    }
+                    Command::PluginSwitch {
+                        plugin_dir,
+                        state_dir,
+                        target_version,
+                        package_dir,
+                        restore_data,
+                        recover,
+                    } => {
+                        let plan = if recover {
+                            plugin_update::Switch::Recover
+                        } else if let (Some(version), Some(package)) = (target_version, package_dir)
+                        {
+                            plugin_update::Switch::Install {
+                                version,
+                                package,
+                                restore_data,
+                            }
+                        } else {
+                            return Err(datapier_core::AppError::invalid(
+                                "请指定 --target-version 和 --package-dir，或使用 --recover",
+                            ));
+                        };
+                        plugin_update::switch(plan, &plugin_dir, &state_dir, &root).await?;
+                        println!("Datapier 插件切换已确认");
                         Ok(())
                     }
                     Command::UpdateLockProbe => plugin_update::probe(&root),

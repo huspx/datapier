@@ -137,6 +137,7 @@ pub fn run(
     let mut quitting = false;
     let mut clipboard = clipboard::Clipboard::default();
     let mut revealed_tab = None;
+    let mut focused_sql = None;
     let mut pane_visible = true;
     let mut native_state = "";
     let mut retained_value_sources = std::collections::BTreeSet::new();
@@ -332,6 +333,23 @@ pub fn run(
             let view = views::render_window(&app, Some(window_nonce));
             window_node = focus_node_id(&view, "layout");
             let focus = focus_request.map(|key| focus_node_id(&view, &key));
+            let next_sql_focus = if app.focus == "query"
+                && app.workbench.overlay.is_none()
+                && app.path_picker.is_none()
+                && !app.tabs.is_empty()
+            {
+                let key = app
+                    .project_split_editor_key()
+                    .unwrap_or_else(|| app.sql_editor_key(app.active, false));
+                focus_node_id(&view, &key)
+            } else {
+                None
+            };
+            let sql_focus_changed = focused_sql != next_sql_focus;
+            if sql_focus_changed && focused_sql.is_some() {
+                // SDK 的 render 可能在新帧中冲刷先前排队的焦点。先取消旧节点的请求。
+                session.focus(surface, None).map_err(tsp_error)?;
+            }
             // 新资源标题可能晚于建 tab 到达；内容焦点请求也须重新保证标签可见。
             // 仅切换或布局变化时滚动，保留用户手动浏览其他标签的位置。
             let tab_id = reveal
@@ -348,7 +366,10 @@ pub fn run(
             session.render(surface, view).map_err(tsp_error)?;
             if let Some(id) = focus {
                 session.focus(surface, id.as_deref()).map_err(tsp_error)?;
+            } else if sql_focus_changed && let Some(id) = next_sql_focus.as_deref() {
+                session.focus(surface, Some(id)).map_err(tsp_error)?;
             }
+            focused_sql = next_sql_focus;
             if let Some(id) = tab_id {
                 session
                     .reveal(surface, &id, tern_sdk::wire::RevealAt::Nearest)
@@ -473,9 +494,6 @@ pub fn run(
                     Msg::Action(name) if name == "cli-copy" => {
                         clipboard.copy_cli(&mut app, &backend)
                     }
-                    Msg::Action(name) if name == "query-completion" => {
-                        app.completion_update(true);
-                    }
                     Msg::Action(name) => app.action(&name, &backend),
                     Msg::CliResize(share) => app.resize_cli(share),
                     Msg::QueryResize(share) => {
@@ -491,12 +509,6 @@ pub fn run(
                             app.workbench.focus_request = Some(String::new());
                             clipboard.copy_grid(&mut app, &backend);
                         }
-                    }
-                    Msg::QueryMenu(tab, action, start, end, text) => {
-                        app.query_menu(tab, &action, start, end, &text, &backend);
-                    }
-                    Msg::QueryCut(tab, text, start, end) => {
-                        clipboard.cut(&mut app, &mut session, tab, start..end, &text)?;
                     }
                     Msg::GridMenu(cell, menus::GridMenuAction::CopyCells) => {
                         if app.prepare_grid_cell_copy(cell) {
@@ -532,12 +544,16 @@ pub fn run(
                         }
                     }
                     Msg::Focus(name) => {
-                        let Some(name) = app.resolve_project_editor(name) else {
+                        let Some(name) = app.resolve_sql_editor(name, true) else {
                             continue;
                         };
                         if app.modal_allows_field(&name) {
                             app.focus = name;
-                            if app.focus == "cli_height" {
+                            if app.focus == "query" {
+                                let query = &mut app.tabs[app.active].query;
+                                query.set_selection(query.cursor, query.cursor);
+                                app.workbench.focus_request = Some("query-editor".into());
+                            } else if app.focus == "cli_height" {
                                 // split 的键盘由程序处理，先清除宿主输入字段的 native editing。
                                 app.workbench.focus_request = Some(String::new());
                             } else if let tern_sdk::Event::Focus(f) = event {
@@ -577,7 +593,6 @@ pub fn run(
                             app.page(&backend, start);
                         }
                     }
-                    Msg::CompletionAccept(id, index) => app.completion_accept(id, index),
                     Msg::Cell(row, column, extend) => {
                         if !app.finish_inline(true) {
                             changed = true;
@@ -592,8 +607,16 @@ pub fn run(
                         }
                     }
                     Msg::CellOpen(row, column) => {
-                        if let Some(grid) = &mut app.grid {
-                            let _ = grid.select(Cell { row, column }, false);
+                        if !app.finish_inline(true) {
+                            changed = true;
+                            continue;
+                        }
+                        if let Some(grid) = &mut app.grid
+                            && let Err(error) = grid.select(Cell { row, column }, false)
+                        {
+                            app.status = workbench::grid_error(error);
+                            changed = true;
+                            continue;
                         }
                         if app.is_redis() {
                             app.workbench_redis_edit(&backend);
@@ -669,35 +692,13 @@ pub fn run(
                     && !app.is_redis()
                     && app.workbench.overlay.is_none()
                 {
-                    if key.name == "enter" && i18n::multi_select_modifier(key.meta, key.ctrl) {
-                        let action = if key.shift {
-                            "run"
-                        } else if app.tabs[app.active].query.selected_text().is_some() {
-                            "selection"
-                        } else {
-                            "current"
-                        };
-                        app.action(action, &backend);
-                        changed = true;
-                        continue;
-                    }
-                    if app.completion_key(&key) {
-                        changed = true;
-                        continue;
-                    }
-                    if (key.name == "c" || key.name == "x")
-                        && i18n::multi_select_modifier(key.meta, key.ctrl)
-                    {
-                        let query = &app.tabs[app.active].query;
-                        if let Some(text) = query.selected_text().map(str::to_owned) {
-                            if key.name == "x" {
-                                let tab = app.tabs[app.active].id;
-                                let range = query.selection();
-                                clipboard.cut(&mut app, &mut session, tab, range, &text)?;
-                            } else {
-                                clipboard.copy(&mut app, &mut session, &text)?;
-                            }
-                        }
+                    let current = if cfg!(target_os = "macos") {
+                        "meta+enter"
+                    } else {
+                        "ctrl+enter"
+                    };
+                    if key.is("f5") || key.is(current) {
+                        app.action(if key.is("f5") { "run" } else { "current" }, &backend);
                         changed = true;
                         continue;
                     }
@@ -794,6 +795,16 @@ pub fn run(
                                 key.name.as_str(),
                                 "backspace" | "delete" | "paste" | "enter"
                             ));
+                    let epoch = app.query_edit_epoch;
+                    let old_results = if app.focus == "query" && !app.browse_result {
+                        let mut ids = app.results.clone();
+                        if let Some(pending) = &app.tabs[app.active].runtime.pending_result {
+                            ids.extend(pending.results.iter().cloned());
+                        }
+                        ids
+                    } else {
+                        Vec::new()
+                    };
                     if !editing || app.draft_scope_ready() {
                         app.input_key(&key);
                     } else {
@@ -801,6 +812,10 @@ pub fn run(
                             &backend,
                             workbench::DraftScopeAction::Key(app.focus.clone(), key.clone()),
                         );
+                    }
+                    if app.query_edit_epoch != epoch && !app.browse_result {
+                        app.release_stale_query_results(&backend, old_results);
+                        app.tabs[app.active].runtime.pending_result = None;
                     }
                     if app.workbench.scan_dirty
                         && app.cursor.is_none()

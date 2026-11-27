@@ -70,26 +70,6 @@ document.addEventListener('contextmenu', event => {
     render();
     return;
   }
-  if (event.target.id === 'sql-query') {
-    const input = event.target, tab = queryTab();
-    const start = input.selectionStart, end = input.selectionEnd;
-    if (!tab || !input.value.slice(start, end).trim()) return;
-    event.preventDefault();
-    tab.sqlStart = start;
-    tab.sqlEnd = end;
-    const area = $('#app').getBoundingClientRect();
-    state.menu = {
-      kind: 'sql',
-      tabId: tab.id,
-      start,
-      end,
-      x: Math.max(4, Math.min(event.clientX - area.left, area.width - 264)),
-      y: Math.max(4, Math.min(event.clientY - area.top, area.height - 260)),
-    };
-    document.querySelector('.context-menu')?.remove();
-    $('#app').insertAdjacentHTML('beforeend', menu());
-    return;
-  }
   const connection = event.target.closest('.connection[data-provider]');
   if (connection) {
     event.preventDefault();
@@ -162,13 +142,6 @@ document.addEventListener('contextmenu', event => {
   render();
 });
 document.addEventListener('mousedown', event => {
-  if (
-    event.button === 2 && event.target.id === 'sql-query'
-    && event.target.selectionStart !== event.target.selectionEnd
-  ) {
-    // 浏览器会在 contextmenu 之前移动光标；先阻止默认选区变化。
-    event.preventDefault();
-  }
   if (event.target.closest('[data-action^="sql-"]')) event.preventDefault();
 });
 document.addEventListener('selectionchange', rememberSqlSelection);
@@ -682,14 +655,7 @@ document.addEventListener('keydown', event => {
   ) {
     event.preventDefault();
     rememberSqlSelection();
-    const tab = queryTab();
-    requestSql(
-      event.shiftKey
-        ? 'all'
-        : tab.sql.slice(tab.sqlStart, tab.sqlEnd).trim()
-        ? 'selection'
-        : 'current',
-    );
+    requestSql(event.shiftKey ? 'all' : 'current');
     return;
   }
   if (event.key === 'Escape') {

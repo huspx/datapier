@@ -80,28 +80,25 @@ fn database_diagnostics_are_structured_without_duplicating_rows() {
 }
 
 #[tokio::test]
-async fn roots_sync_failure_stays_unavailable_and_recovers_without_stale_retry() {
-    let new_roots = json!({"roots":["file:///new"],"source":"roots"});
-    let mut state = RootsState {
+async fn roots_discovery_uses_global_mode_until_current_context_is_available() {
+    let gate = tokio::sync::Mutex::new(RootsState {
         applied: 1,
-        pending: Some((2, new_roots.clone())),
-    };
-    assert!(!state.retry_pending(2, |_| async { false }).await);
-    assert_eq!(state.applied, 1);
-    assert_eq!(state.pending.as_ref().unwrap().1, new_roots);
-    assert!(
-        !state
-            .retry_pending(3, |_| async { panic!("不能重放过期 roots") })
-            .await
-    );
-    assert!(
-        state
-            .retry_pending(2, |params| async move {
-                assert_eq!(params, new_roots);
-                true
-            })
-            .await
-    );
-    assert_eq!(state.applied, 2);
-    assert!(state.pending.is_none());
+        available: true,
+        pending: Some((2, json!({"roots":["file:///new"],"source":"roots"}))),
+        ..Default::default()
+    });
+    let mut state = gate.lock().await;
+    assert_eq!(state.discovery_state(1), "available");
+    assert_eq!(state.discovery_state(2), "pending");
+    state.failed = true;
+    assert_eq!(state.discovery_state(2), "unavailable");
+    assert_eq!(state.discovery_state(3), "pending");
+    // Discovery must not wait for an engine update holding the gate.
+    assert!(gate.try_lock().is_err());
+    state.applied = 2;
+    state.available = true;
+    state.pending = None;
+    assert_eq!(state.discovery_state(2), "available");
+    state.available = false;
+    assert_eq!(state.discovery_state(2), "unavailable");
 }

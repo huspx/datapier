@@ -11,6 +11,7 @@ mod catalog;
 mod context;
 mod execution;
 mod results;
+mod scope_task;
 
 #[derive(Default)]
 pub(super) struct McpState {
@@ -179,6 +180,15 @@ impl Engine {
         {
             return Err(AppError::invalid("不接受内部参数"));
         }
+        if let Some(mode) = params.get("context_mode")
+            && (mode.as_str() != Some("global")
+                || !matches!(
+                    method,
+                    "mcp.get_server_info" | "mcp.list_connections" | "mcp.list_databases"
+                ))
+        {
+            return Err(AppError::invalid("无效的发现上下文模式"));
+        }
         let result = match method {
             "mcp.context.update" => self.mcp_context_update(owner, &params).await,
             "mcp.get_server_info" => {
@@ -186,7 +196,7 @@ impl Engine {
                 Ok(
                     json!({"version":env!("CARGO_PKG_VERSION"),"engine_id":self.id,"protocol_version":crate::protocol::VERSION,
                     "capabilities":{"tools":true,"transport":"stdio","transactions":true},
-                    "limits":settings.limits,"fine_grained_access":settings.mcp.fine_grained_access,"project_context":self.mcp_project_context(owner).await?}),
+                    "limits":settings.limits,"fine_grained_access":settings.mcp.fine_grained_access,"project_context":if params.get("context_mode").and_then(Value::as_str) == Some("global") { Value::Null } else { self.mcp_project_context(owner).await? }}),
                 )
             }
             "mcp.list_connections" => self.mcp_connections(owner, &params).await,

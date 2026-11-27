@@ -168,13 +168,11 @@ fn shortcut_help() -> Node<Msg> {
         (
             "SQL 查询",
             &[
-                ("{mod}+Enter", "执行选区或当前语句"),
-                ("{mod}+Shift+Enter", "执行全部 SQL"),
-                ("Ctrl+Space", "SQL 补全"),
                 (
-                    "↑ / ↓ / Tab / Enter / Escape",
-                    "上下选择、Tab / Enter 接受、Escape 关闭",
+                    "{mod}+Enter",
+                    "执行最后同步光标所在的语句；首次点击或拖选可能保留上次位置",
                 ),
+                ("F5", "执行全部 SQL"),
             ],
         ),
         (
@@ -391,7 +389,8 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     {
         content = content.child(button("恢复替换草稿", "replace-restore"));
     }
-    if !app.tabs.is_empty()
+    if app.view != "query"
+        && !app.tabs.is_empty()
         && app.session_id().is_some()
         && !app.is_redis()
         && app.database.is_some()
@@ -436,7 +435,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     }
     if !matches!(
         app.view.as_str(),
-        "transfer-workbench" | "project-workbench"
+        "query" | "transfer-workbench" | "project-workbench"
     ) {
         content = content.child(crate::native_ui::draftbar(app));
     }
@@ -969,11 +968,6 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
         layer.push(notice);
     }
     let view = View::new().main(vec![Node::from(layout)]);
-    if let Some(editor_id) = crate::input::focus_node_id(&view, "query-editor")
-        && let Some(overlay) = crate::completion::overlay(app, &editor_id)
-    {
-        layer.push(overlay);
-    }
     view.layer(layer)
 }
 
