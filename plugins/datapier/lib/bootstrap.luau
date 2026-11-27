@@ -288,10 +288,6 @@ function M.start(cx, started_pane, options)
           end
           return
         end
-        local registered, reason = registration.register(checked, M.executable(), data_dir)
-        if not registered then
-          checked:toast("error", "Datapier MCP 登记失败", tostring(reason))
-        end
         if options.before_launch and not options.before_launch(checked) then
           if started_pane then
             started_pane(nil)
@@ -343,6 +339,34 @@ function M.start(cx, started_pane, options)
   end
 end
 
+function M.command_entry(cx, remove)
+  M.prepare(cx, function(fresh, directory)
+    if not directory then
+      return
+    end
+    updater.run(
+      fresh,
+      M.executable(),
+      if remove then "entry-remove" else "entry-install",
+      false,
+      function(done, value, problem)
+        if not value or not value.ok then
+          done:toast(
+            "error",
+            "Datapier 命令行入口 / Datapier command entry",
+            tostring(problem or (value and value.message) or "操作失败 / Action failed")
+          )
+        elseif remove then
+          done:toast("info", "已移除命令行入口 / Command entry removed", "Datapier")
+        else
+          done:copy(value.command)
+          done:toast("info", "已复制 Datapier MCP 路径 / Datapier MCP path copied", value.command)
+        end
+      end
+    )
+  end)
+end
+
 function M.initialize(cx)
   M.prepare(cx, function(fresh, directory)
     if not directory then
@@ -362,11 +386,26 @@ function M.initialize(cx)
         end
         return
       end
-      local ok, reason = registration.register(checked, M.executable(), data_dir)
-      if not ok then
-        checked:toast("error", "Datapier MCP 登记失败", tostring(reason))
+      local binary = M.executable()
+      local function register(window, command)
+        local ok, reason = registration.register(window, command, data_dir)
+        if not ok then
+          window:toast("error", "Datapier MCP 登记失败", tostring(reason))
+        end
       end
-      updater.schedule(checked, M.executable())
+      if tern.getenv("DATAPIER_BINARY") then
+        register(checked, binary)
+        updater.schedule(checked, binary)
+      else
+        updater.run(checked, binary, "managed-entry", false, function(done, state, failure)
+          if state and state.ok and type(state.command) == "string" then
+            register(done, state.command)
+          else
+            done:toast("error", "Datapier MCP 登记失败", tostring(failure or (state and state.message)))
+          end
+          updater.schedule(done, binary)
+        end, data_dir)
+      end
     end)
   end, true)
 end

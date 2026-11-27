@@ -1,22 +1,4 @@
 use super::*;
-fn pending(app: &App) -> Clipboard {
-    Clipboard {
-        cut: Some(PendingCut {
-            id: Uuid::nil(),
-            tab: app.tabs[app.active].id,
-            range: 8..10,
-            original: app.tabs[app.active].query.text.clone(),
-            started: Instant::now(),
-            anchor: app.tabs[app.active].query.anchor,
-            cursor: app.tabs[app.active].query.cursor,
-        }),
-        copy: None,
-        redis: None,
-        grid: None,
-        cli: None,
-        redis_write: None,
-    }
-}
 fn app() -> App {
     let mut app = App::new("clipboard".into());
     app.tabs[app.active].query = Editor::new("SELECT '😀'; SELECT '😀';");
@@ -265,78 +247,9 @@ fn redis_copy_is_invalidated_when_context_changes_even_if_restored() {
 }
 
 #[test]
-fn denied_write_preserves_sql_and_undo() {
-    let mut app = app();
-    let mut clipboard = pending(&app);
-    assert!(clipboard.reply(
-        &mut app,
-        b"type=write:id=00000000-0000-0000-0000-000000000000:status=EPERM"
-    ));
-    assert_eq!(app.tabs[app.active].query.text, "SELECT '😀'; SELECT '😀';");
-    assert!(!app.tabs[app.active].query.undo());
-}
-#[test]
-fn closed_query_cut_ack_is_consumed_without_recreating_tab() {
-    let mut app = app();
-    let mut clipboard = pending(&app);
-    app.tabs.clear();
-    assert!(clipboard.reply(
-        &mut app,
-        b"type=write:id=00000000-0000-0000-0000-000000000000:status=DONE"
-    ));
-    assert!(clipboard.cut.is_none());
-    assert!(app.tabs.is_empty());
-    assert!(!clipboard.reply(
-        &mut app,
-        b"type=write:id=00000000-0000-0000-0000-000000000000:status=DONE"
-    ));
-}
-
-#[test]
-fn confirmed_write_cuts_exact_unicode_range_in_one_undo_step() {
-    let mut app = app();
-    let mut clipboard = pending(&app);
-    assert!(clipboard.reply(
-        &mut app,
-        b"type=write:id=00000000-0000-0000-0000-000000000000:status=DONE"
-    ));
-    assert_eq!(app.tabs[app.active].query.text, "SELECT ''; SELECT '😀';");
-    assert!(app.tabs[app.active].query.undo());
-    assert_eq!(app.tabs[app.active].query.text, "SELECT '😀'; SELECT '😀';");
-}
-#[test]
-fn changed_context_and_unrelated_ack_cannot_cut() {
-    let mut app = app();
-    let mut clipboard = pending(&app);
-    app.tabs[app.active].query = Editor::new("SELECT '😀'; SELECT 'other';");
-    assert!(!clipboard.reply(&mut app, b"type=write:id=other:status=DONE"));
-    assert!(clipboard.reply(
-        &mut app,
-        b"type=write:id=00000000-0000-0000-0000-000000000000:status=DONE"
-    ));
-    assert_eq!(
-        app.tabs[app.active].query.text,
-        "SELECT '😀'; SELECT 'other';"
-    );
-}
-#[test]
-fn moved_selection_during_cut_preserves_text() {
-    let mut app = app();
-    let mut clipboard = pending(&app);
-    assert!(app.tabs[app.active].query.set_selection(0, 0));
-    assert!(clipboard.reply(
-        &mut app,
-        b"type=write:id=00000000-0000-0000-0000-000000000000:status=DONE"
-    ));
-    assert_eq!(app.tabs[app.active].query.text, "SELECT '😀'; SELECT '😀';");
-    assert!(!app.tabs[app.active].query.undo());
-}
-
-#[test]
 fn copy_reports_host_result_and_timeout() {
     let mut app = app();
     let mut clipboard = Clipboard {
-        cut: None,
         copy: Some((Uuid::nil(), Instant::now())),
         redis: None,
         grid: None,

@@ -445,6 +445,23 @@ local function stop_bridge()
   end
 end
 
+local function local_source_in_tab(cx, pane, tab)
+  local info = cx.session:pane(pane)
+  if not info or info.tab ~= tab or info.exited ~= nil then
+    return false
+  end
+  for _, host in ipairs(cx.hosts:list()) do
+    if host.kind == "local" then
+      for _, id in ipairs(host.panes) do
+        if id == pane then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 local function consume_batch(cx, response, nodes)
   for _, item in ipairs(response.items) do
     local entry = nodes[item.pane_id]
@@ -458,8 +475,11 @@ local function consume_batch(cx, response, nodes)
         if navigation then
           pending_navigation[entry.pane] = nil
           local info = cx.session:pane(entry.pane)
-          if navigation.tab and (not info or info.tab ~= navigation.tab) then
+          local source_valid = not navigation.source or local_source_in_tab(cx, navigation.source, navigation.tab)
+          if navigation.tab and (not info or info.tab ~= navigation.tab or info.exited ~= nil) then
             cx:toast("error", "Datapier", "工作台已离开原标签页 / The workbench has left the original tab")
+          elseif not source_valid then
+            cx:toast("error", "Datapier", "来源 block 不可用 / Source block is unavailable")
           elseif tern.now() <= navigation.until_ms then
             cx.session:event(entry.pane, { ev = "action", id = current.id, act = navigation.action })
           end
@@ -647,15 +667,19 @@ local function clear_tab_navigation(tab)
   end
 end
 
-function M.navigate_when_ready(pane, action, tab)
+function M.cancel_navigation(tab)
+  clear_tab_navigation(tab)
+end
+
+function M.navigate_when_ready(pane, action, tab, source)
   if type(pane) == "number" then
     clear_tab_navigation(tab)
-    pending_navigation[pane] = { action = action, tab = tab, until_ms = tern.now() + 30000 }
+    pending_navigation[pane] = { action = action, tab = tab, source = source, until_ms = tern.now() + 30000 }
     candidates[pane] = true
   end
 end
 
-function M.navigate(cx, action, tab)
+function M.navigate(cx, action, tab, source)
   local eligible = {}
   if tab then
     for _, info in ipairs(cx.session:panes()) do
@@ -678,13 +702,15 @@ function M.navigate(cx, action, tab)
     return false
   end
   local node = bridge_node(cx, pane)
-  cx.layout:focus(pane)
+  if not source or cx.session:focused() == source then
+    cx.layout:focus(pane)
+  end
   clear_tab_navigation(tab)
   if bound_panes[pane] and bound_nonces[pane] == node.nonce then
     pending_navigation[pane] = nil
     cx.session:event(pane, { ev = "action", id = node.id, act = action })
   else
-    M.navigate_when_ready(pane, action, tab)
+    M.navigate_when_ready(pane, action, tab, source)
   end
   return true
 end

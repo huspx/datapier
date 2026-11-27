@@ -707,6 +707,12 @@ impl App {
         }
         if name == "query" {
             self.query_edit_epoch = self.query_edit_epoch.wrapping_add(1);
+            if self.focus == "query"
+                && (self.view == "query" || self.target.is_none())
+                && self.workbench.overlay.is_none()
+            {
+                self.workbench.focus_request = Some("query-editor".into());
+            }
             self.workbench.query_ui.menu_open = false;
             self.workbench.query_ui.executed = false;
         }

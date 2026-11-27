@@ -274,6 +274,7 @@ impl App {
                     && self.archery.reauth_server.is_some()
                 {
                     self.archery.open_continuation = Some(open);
+                    self.archery.auto_open_auth = true;
                 }
                 if response.tag == "change.submit" {
                     self.redis_key_delete_submit_failed();

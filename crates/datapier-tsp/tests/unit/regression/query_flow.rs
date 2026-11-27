@@ -29,6 +29,48 @@ fn sql_text_changes_clear_query_results_without_discarding_table_data() {
 }
 
 #[test]
+fn native_sql_edit_checks_utf16_length_and_preserves_results_for_cursor_moves() {
+    let mut app = App::new("native-query".into());
+    app.focus = "query".into();
+    app.tabs[0].query = Editor::new("中😀文");
+    app.grid = Some(editable_grid());
+    app.dispatch_editor_message(Msg::Edit("query".into(), 0, 0, String::new(), 3, 4));
+    assert_eq!(app.tabs[0].query.cursor, 3);
+    assert!(app.grid.is_some());
+    app.dispatch_editor_message(Msg::Edit("query".into(), 1, 3, "x".into(), 2, 3));
+    assert_eq!(app.tabs[0].query.text, "中😀文");
+    app.dispatch_editor_message(Msg::Edit("query".into(), 1, 3, "好".into(), 2, 4));
+    assert_eq!(app.tabs[0].query.text, "中好文");
+    assert!(app.grid.is_none());
+}
+
+#[test]
+fn sql_node_identity_rejects_same_length_stale_events_and_preserves_focus() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("native-revision".into());
+    app.focus = "query".into();
+    app.tabs[0].query = Editor::new("中😀");
+    let old = app.sql_editor_name(0);
+    let old_key = app.sql_editor_key(0, false);
+    app.dispatch_guarded_editor_message(Msg::Edit(old.clone(), 0, 1, "文".into(), 1, 3), &backend);
+    assert_eq!(app.tabs[0].query.text, "文😀");
+    assert_ne!(old_key, app.sql_editor_key(0, false));
+    assert_eq!(app.take_focus_request(), Some(app.sql_editor_key(0, false)));
+    app.dispatch_guarded_editor_message(Msg::Edit(old.clone(), 0, 1, "错".into(), 1, 3), &backend);
+    assert_eq!(app.tabs[0].query.text, "文😀");
+    assert!(app.resolve_sql_editor(old, true).is_none());
+    let current = app.sql_editor_name(0);
+    app.dispatch_guarded_editor_message(Msg::Edit(current, 0, 0, String::new(), 3, 3), &backend);
+    assert_eq!(app.tabs[0].query.cursor, 3);
+    let before = app.sql_editor_key(0, false);
+    let mut typed = tern_sdk::Key::named("x");
+    typed.text = Some("x".into());
+    app.input_key(&typed);
+    assert_ne!(before, app.sql_editor_key(0, false));
+    assert_eq!(app.take_focus_request(), Some(app.sql_editor_key(0, false)));
+}
+
+#[test]
 fn current_statement_uses_text_and_cursor_at_request_time() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("current".into());

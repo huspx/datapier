@@ -14,6 +14,17 @@ fn archery_open_for_auth_test(backend: &Backend) -> (App, Value, String) {
     (app, params, tag)
 }
 
+fn start_saved_auth(app: &mut App, backend: &Backend, list_tag: String) {
+    let server_id = app.profile.as_ref().unwrap().archery().unwrap().server_id;
+    app.routed_response(
+        Response {
+            tag: list_tag,
+            result: Ok(json!({"servers":[{"id":server_id,"name":"fixture","base_url":"https://example.test/","username":"fixture","http_tls":{},"revision":1,"credential_mode":"keyring","totp_mode":"manual"}]})),
+        },
+        backend,
+    );
+}
+
 fn archery_ready_response(app: &mut App, backend: &Backend, auth_id: &str) -> String {
     let operation = Uuid::new_v4();
     app.archery.pending = Some((operation, "archery.auth.begin".into()));
@@ -44,7 +55,14 @@ fn first_archery_open_resumes_once_and_release_does_not_replace_status() {
         },
         &backend,
     );
-    assert_eq!(requests.try_recv().unwrap().method, "archery.server.list");
+    let list = requests.try_recv().unwrap();
+    assert_eq!(list.method, "archery.server.list");
+    start_saved_auth(&mut app, &backend, list.tag);
+    let login = requests.try_recv().unwrap();
+    assert_eq!(login.method, "archery.auth.begin");
+    assert!(login.params["password"].is_null());
+    assert_eq!(login.params["candidate"], false);
+    assert!(login.params["operation_id"].is_string());
     assert!(app.workbench.connection_error.is_some());
     archery_ready_response(&mut app, &backend, "auth-id");
     let release = requests.try_recv().unwrap();
@@ -94,14 +112,11 @@ fn cancelled_or_changed_target_never_resumes_archery_open() {
             },
             &backend,
         );
-        requests.try_recv().unwrap();
+        let list = requests.try_recv().unwrap();
+        start_saved_auth(&mut app, &backend, list.tag);
+        let login = requests.try_recv().unwrap();
         if cancel {
-            let operation = Uuid::new_v4();
-            app.archery.pending = Some((operation, "archery.auth.begin".into()));
-            let late = format!(
-                "archery-ui/{}/{}/archery.auth.begin",
-                app.archery.epoch, operation
-            );
+            let late = login.tag;
             app.archery_action("archery-auth-back", &backend);
             assert!(app.archery.open_continuation.is_none());
             app.archery_response(
@@ -152,7 +167,10 @@ fn background_direct_open_cannot_steal_archery_continuation() {
         },
         &backend,
     );
-    assert_eq!(requests.try_recv().unwrap().method, "archery.server.list");
+    let list = requests.try_recv().unwrap();
+    assert_eq!(list.method, "archery.server.list");
+    start_saved_auth(&mut app, &backend, list.tag);
+    assert_eq!(requests.try_recv().unwrap().method, "archery.auth.begin");
     archery_ready_response(&mut app, &backend, "auth-id");
     let requests: Vec<_> = std::iter::from_fn(|| requests.try_recv().ok()).collect();
     let opened: Vec<_> = requests
@@ -161,4 +179,104 @@ fn background_direct_open_cannot_steal_archery_continuation() {
         .collect();
     assert_eq!(opened.len(), 1);
     assert_eq!(opened[0].params["profile_id"], json!(archery.id));
+}
+
+#[test]
+fn cold_login_errors_remain_visible_and_manual_login_can_continue() {
+    for code in [
+        "auth_required",
+        "credentials",
+        "credentials_unavailable",
+        "auth_failed",
+        "transport",
+    ] {
+        let (backend, mut requests, _) = Backend::scripted();
+        let (mut app, _, tag) = archery_open_for_auth_test(&backend);
+        requests.try_recv().unwrap();
+        app.routed_response(
+            Response {
+                tag,
+                result: Err(AppError::new("auth_required", "login")),
+            },
+            &backend,
+        );
+        let list = requests.try_recv().unwrap();
+        start_saved_auth(&mut app, &backend, list.tag);
+        let login = requests.try_recv().unwrap();
+        app.routed_response(
+            Response {
+                tag: login.tag,
+                result: Err(AppError::new(code, "specific failure")),
+            },
+            &backend,
+        );
+        assert!(
+            app.archery
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("specific failure")
+        );
+        assert!(app.archery.auth_dialog);
+        assert!(requests.try_recv().is_err());
+        app.field_set("password", "replacement fixture password");
+        app.archery_action("archery-login", &backend);
+        assert_eq!(requests.try_recv().unwrap().method, "archery.auth.begin");
+    }
+}
+
+#[test]
+fn cold_login_challenge_only_shows_otp_and_resumes_after_verify() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let (mut app, params, tag) = archery_open_for_auth_test(&backend);
+    requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag,
+            result: Err(AppError::new("auth_required", "login")),
+        },
+        &backend,
+    );
+    let list = requests.try_recv().unwrap();
+    start_saved_auth(&mut app, &backend, list.tag);
+    let login = requests.try_recv().unwrap();
+    app.routed_response(Response { tag: login.tag, result: Ok(json!({"auth_id":"fixture","state":"challenge_required","controller_token":"token","auth_generation":1})) }, &backend);
+    assert_eq!(app.archery.state, "challenge_required");
+    assert_eq!(
+        app.workbench.focus_request.as_deref(),
+        Some("input-archery_otp")
+    );
+    app.field_set("archery_otp", "123456");
+    app.archery_action("archery-verify", &backend);
+    let verify = requests.try_recv().unwrap();
+    assert_eq!(verify.method, "archery.auth.verify");
+    app.routed_response(
+        Response {
+            tag: verify.tag,
+            result: Ok(json!({"auth_id":"fixture","state":"ready","auth_generation":2})),
+        },
+        &backend,
+    );
+    assert_eq!(requests.try_recv().unwrap().method, "archery.auth.close");
+    let resumed = requests.try_recv().unwrap();
+    assert_eq!(resumed.method, "connection.open");
+    assert_eq!(resumed.params, params);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn background_auth_required_does_not_open_a_dialog() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let (mut app, _, tag) = archery_open_for_auth_test(&backend);
+    requests.try_recv().unwrap();
+    app.create_query_tab();
+    app.routed_response(
+        Response {
+            tag,
+            result: Err(AppError::new("auth_required", "login")),
+        },
+        &backend,
+    );
+    assert!(!app.archery.open);
+    assert!(requests.try_recv().is_err());
 }

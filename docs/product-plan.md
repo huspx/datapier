@@ -4,7 +4,7 @@
 
 Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接、资源浏览、查询和数据编辑体验，同时保留不同数据库的数据模型与操作语义。
 
-当前 0.5.1 候选支持 **MySQL 与 Redis** 直连及 Archery 只读来源，提供 Rust TSP／Tern 工作台、普通终端 TUI 和 MCP stdio。共享 Engine 独立于界面。数据库采用内置 provider 扩展，PostgreSQL、MongoDB 为后续方向。正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准，本版契约见 [0.5.1 技术方案](technical-design-0.5.1.md)。
+当前 0.5.2 候选支持 **MySQL 与 Redis** 直连及 Archery 只读来源，提供 Rust TSP／Tern 工作台、普通终端 TUI 和 MCP stdio。共享 Engine 独立于界面。数据库采用内置 provider 扩展，PostgreSQL、MongoDB 为后续方向。正式发布状态以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准，本版契约见 [0.5.2 技术方案](technical-design-0.5.2.md)。
 
 目标平台为 **macOS、Linux、Windows**，每个平台覆盖 **x86-64 与 arm64**。当前候选原生运行证据来自 macOS arm64；六目标构建、默认测试和打包结果须按对应提交的 CI 核对，其他五目标尚无完整运行验收，历史记录不能代替本候选验证。
 
@@ -31,7 +31,7 @@ Datapier 是面向开发者与 AI agent 的多数据库工作台，统一连接�
 | Redis | redis-rs 1.8.2，启用 Tokio 与 TLS 支持 | 命令、游标扫描、类型化数据操作 |
 | 内部存储 | SQLite，通过 SQLx 访问 | 连接配置、工作区、草稿、查询历史和执行记录；不作为首批外部数据库入口 |
 | 凭据存储 | keyring 4.2，启用 `v1`；macOS Keychain、Windows Credential Manager、Linux Secret Service | 密码等秘密数据，与普通配置分离；凭据服务不可用时仅会话内保存 |
-| SQL 辅助 | sqlparser-rs 0.64.0、sqlformat 0.5.0、数据库元数据 | 语句定位、基础诊断、补全与原生选区格式化；保留 token 语义，实际执行以数据库反馈为准 |
+| SQL 辅助 | sqlparser-rs 0.64.0、数据库元数据、Tern 原生编辑 | 语句定位、基础诊断、候选建议和原生文本操作。实际执行以数据库反馈为准 |
 | Agent 接入 | 官方 Rust MCP SDK rmcp、stdio | 23 个 tools、结构化结果与能力协商后的用户确认；不提供远程 transport |
 
 Rust 最低使用 1.100.0 稳定工具链、edition 2024，CI 固定 Rust 1.100.0；TSP SDK 在 workspace 精确固定为 `0.2.0`，依赖由 `Cargo.lock` 锁定，当前版本说明见[贡献指南](../CONTRIBUTING.md#开发环境)。界面使用 Tern 公开语义控件，表单与主操作保留明确层级；导航行、标签、grid 和状态入口按唯一 HTML 设计使用局部样式，不维护旧 SDK 兼容层。IPC 编解码和会话层共用异步字节流接口，平台实现负责连接建立、端点命名、访问权限、实例锁及进程启动／退出；业务逻辑不按 OS 分叉。
@@ -299,6 +299,12 @@ Archery 是受控数据库访问来源，保留 MySQL／Redis 类型、平台权
 - 分离 Tern pane 与 Engine 的工作目录，保持受管 MCP 和工作台共享 Engine。更新入口拒绝降级并提示版本。
 - 工作台背景、可点击项、输入和拖拽手柄按各自语义显示鼠标形状。验收以 [0.5.1 技术方案](technical-design-0.5.1.md#5-验收矩阵)为准。
 
+### 4.7 0.5.2 SQL 原生编辑与外部 MCP
+
+- 同一 pane 的 SQL 编辑支持宿主点击定位和文本操作，执行使用当前语句、全文或行号指定的语句。
+- 从 Files 定位 MCP 项目时先加载项目列表，再定位目录关联。
+- 插件可为外部 Agent 安装当前用户的固定 MCP 命令，按更新事务切换目标。验收见 [0.5.2 技术方案](technical-design-0.5.2.md#5-实施顺序与验收)。
+
 
 ## 5. 开发环境与质量标准
 
@@ -312,14 +318,14 @@ Luau 由 Tern 内嵌执行，不要求单独安装 Luau runtime。修改启动 p
 
 ### 5.2 验证标准
 
-各版本按交付范围推进。0.5.1 正式发布前须核对对应提交的验收结果和发布产物。
+各版本按交付范围推进。0.5.2 正式发布前须核对对应提交的验收结果和发布产物。
 
 | 验证场景 | 输入与预期结果 |
 |---|---|
 | 基础正确性 | MySQL 含重复行、无主键表、唯一键、NULL、超大整数、精确小数、中文和二进制；只允许可靠定位的行编辑，读写与导出保真 |
 | Redis 语义 | 五种基础类型、空值、二进制 key、无过期／将过期／已不存在的 key；按类型操作，更新值保留 TTL，过期状态不混淆 |
 | 并发与失败 | 两个独立客户端修改同一对象、认证失败、断线、任务取消；冲突不静默覆盖，写入结果未知不自动重试 |
-| TSP 交互与恢复 | 在实际 Tern 中验证分页、列宽设置、隐藏／冻结、键盘／Shift 选择、复制粘贴、编辑和撤销；输入中文／emoji，选择 SQL 执行；重开 UI 后恢复草稿和布局 |
+| TSP 交互与恢复 | 在实际 Tern 中验证分页、列宽设置、隐藏／冻结、键盘与 Shift 选择、复制粘贴、编辑和撤销。输入中文和 emoji，核对当前 SQL 与全文执行目标，重开 UI 后恢复草稿和布局 |
 | 大数据 | 十万行查询、百万 key 扫描、大文件；0.2.0 验证首批展示、按需读取、行数与字节预算、结果内存上限及显式导出范围，不以全量结果缓存解决分页 |
 | Engine 会话 | 多个 UI／MCP 共享实例；主动退出、崩溃、EOF 和租约过期均回收所属资源，不影响其他会话 |
 | Engine 收尾与恢复 | 最后会话退出后取消读任务、回滚未提交事务；写入超时留待确认记录；收尾期接入复用实例；验证 Unix 残留 socket、Windows 管道断连、实例锁及运行描述文件恢复；不自动重放写入 |

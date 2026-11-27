@@ -1,19 +1,8 @@
-//! 剪贴板写入等待宿主确认；SQL 剪切还须确认原编辑上下文未改变。
+//! 剪贴板写入等待宿主确认。
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::ops::Range;
 use tern_sdk::Session;
 
-struct PendingCut {
-    id: Uuid,
-    tab: Uuid,
-    range: Range<usize>,
-    anchor: usize,
-    cursor: usize,
-    // 等待授权时用户仍可编辑。完整快照避免重复 SQL 导致旧范围误删新文本。
-    original: String,
-    started: Instant,
-}
 struct PendingRedisCopy {
     tag: String,
     tab: Uuid,
@@ -169,7 +158,6 @@ impl RedisWrite {
 
 #[derive(Default)]
 pub(super) struct Clipboard {
-    cut: Option<PendingCut>,
     copy: Option<(Uuid, Instant)>,
     redis: Option<PendingRedisCopy>,
     grid: Option<PendingGridCopy>,
@@ -183,7 +171,7 @@ impl Clipboard {
         self.grid = None;
         self.cli = None;
         self.redis_write = None;
-        if self.cut.is_some() || self.copy.is_some() {
+        if self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return;
         }
@@ -236,7 +224,7 @@ impl Clipboard {
         self.redis = None;
         self.redis_write = None;
         self.cli = None;
-        if self.cut.is_some() || self.copy.is_some() {
+        if self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return;
         }
@@ -293,7 +281,7 @@ impl Clipboard {
         self.redis = None;
         self.redis_write = None;
         self.cli = None;
-        if self.cut.is_some() || self.copy.is_some() {
+        if self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return;
         }
@@ -363,7 +351,7 @@ impl Clipboard {
         self.redis = None;
         self.cli = None;
         self.redis_write = None;
-        if self.cut.is_some() || self.copy.is_some() {
+        if self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return;
         }
@@ -569,56 +557,13 @@ impl Clipboard {
         self.redis = None;
         self.redis_write = None;
         self.cli = None;
-        if self.cut.is_some() || self.copy.is_some() {
+        if self.copy.is_some() {
             app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
             return Ok(());
         }
         let id = Uuid::new_v4();
         Self::write(session, id, text)?;
         self.copy = Some((id, Instant::now()));
-        app.status = i18n::UiMessage::key("正在写入剪贴板");
-        Ok(())
-    }
-
-    pub(super) fn cut(
-        &mut self,
-        app: &mut App,
-        session: &mut Session<Msg>,
-        tab: Uuid,
-        range: Range<usize>,
-        expected: &str,
-    ) -> Result<()> {
-        self.grid = None;
-        self.redis = None;
-        self.redis_write = None;
-        self.cli = None;
-        if self.cut.is_some() || self.copy.is_some() {
-            app.status = i18n::UiMessage::key("剪贴板写入尚未完成");
-            return Ok(());
-        }
-        let Some(active) = app.tabs.get(app.active) else {
-            app.status = i18n::UiMessage::key("SQL 选区已变化，请重新选择");
-            return Ok(());
-        };
-        let query = &active.query;
-        let selected = editor::utf16_to_byte(&query.text, range.start)
-            .zip(editor::utf16_to_byte(&query.text, range.end))
-            .and_then(|(start, end)| query.text.get(start..end));
-        if active.id != tab || range.is_empty() || selected != Some(expected) {
-            app.status = i18n::UiMessage::key("SQL 选区已变化，请重新选择");
-            return Ok(());
-        }
-        let id = Uuid::new_v4();
-        self.cut = Some(PendingCut {
-            id,
-            tab,
-            range,
-            anchor: query.anchor,
-            cursor: query.cursor,
-            original: query.text.clone(),
-            started: Instant::now(),
-        });
-        Self::write(session, id, expected)?;
         app.status = i18n::UiMessage::key("正在写入剪贴板");
         Ok(())
     }
@@ -681,43 +626,7 @@ impl Clipboard {
             };
             return true;
         }
-        let Some(pending) = self.cut.as_ref() else {
-            return false;
-        };
-        if field("type=") != Some("write")
-            || field("id=").and_then(|s| Uuid::parse_str(s).ok()) != Some(pending.id)
-        {
-            return false;
-        }
-        let Some(status) = field("status=") else {
-            return false;
-        };
-        let pending = self.cut.take().expect("matched pending clipboard request");
-        if status != "DONE" {
-            app.status = i18n::UiMessage::template(
-                "剪贴板写入失败：{error}",
-                vec![("error", i18n::UiArg::Raw(status.to_owned()))],
-            );
-            return true;
-        }
-        // 来源已关闭时只消费迟到回执；不能创建标签或把剪切应用到其他查询。
-        let Some(active) = app.tabs.get_mut(app.active) else {
-            return true;
-        };
-        let query = &mut active.query;
-        if active.id != pending.tab
-            || query.text != pending.original
-            || query.anchor != pending.anchor
-            || query.cursor != pending.cursor
-        {
-            app.status = i18n::UiMessage::key("SQL 选区已变化，请重新选择");
-            return true;
-        }
-        if query.edit(pending.range, "") {
-            app.changed_field("query");
-            app.status = i18n::UiMessage::key("已剪切");
-        }
-        true
+        false
     }
 
     pub(super) fn expire(&mut self, app: &mut App) -> bool {
@@ -728,15 +637,6 @@ impl Clipboard {
         {
             self.copy = None;
             app.status = i18n::UiMessage::key("剪贴板未确认写入");
-            return true;
-        }
-        if self
-            .cut
-            .as_ref()
-            .is_some_and(|pending| pending.started.elapsed() >= Duration::from_secs(30))
-        {
-            self.cut = None;
-            app.status = i18n::UiMessage::key("剪贴板未确认写入，原文已保留");
             return true;
         }
         false

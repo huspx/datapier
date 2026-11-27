@@ -33,6 +33,27 @@ async fn credential_read_failure_releases_controller_for_another_client() {
 }
 
 #[tokio::test]
+async fn missing_password_releases_controller_for_manual_login() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    assert!(engine.register(owner));
+    let fixture = Fixture::new().await;
+    let error = engine
+        .dispatch(
+            owner,
+            "archery.auth.begin",
+            json!({"server":fixture.server,"expected_revision":0,"operation_id":Uuid::new_v4()}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "auth_required");
+    assert!(error.to_string().contains("未保存"));
+    let auth = login(&engine, owner, &fixture).await;
+    assert_eq!(auth["state"], "ready");
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
 async fn credential_failure_in_candidate_preserves_shared_ready_session() {
     let (engine, root, first, fixture, ready) = setup().await;
     let second = Uuid::new_v4();

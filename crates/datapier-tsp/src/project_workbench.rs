@@ -122,6 +122,9 @@ pub(super) fn is_project_markdown(path: &std::path::Path) -> bool {
 pub(super) struct ProjectWorkbench {
     epoch: u64,
     pending: Option<(Uuid, u64, String)>,
+    // 目录定位必须等待清单回包；失败后保留参数供刷新重试。
+    local_navigation: Option<(String, String)>,
+    pub local_error: Option<i18n::UiMessage>,
     upload: Option<ProjectUpload>,
     pub project: Option<Value>,
     // 恢复只保存本机草稿与磁盘基线；项目句柄必须由用户重新打开。
@@ -186,6 +189,7 @@ impl ProjectWorkbench {
             self.obsolete_preview = Some(preview);
         }
         self.pending = None;
+        self.local_navigation = None;
         // 已失效的异步回复不得覆盖新输入；上传句柄由 Engine 过期清理。
         self.upload = None;
         self.file_loading = false;
@@ -313,7 +317,11 @@ impl App {
                 );
             }
             self.workbench.project.pending = None;
-            self.status = i18n::UiMessage::raw(error.to_string());
+            if matches!(method, "local_project.list" | "local_project.resolve") {
+                self.workbench.project.local_error = Some(i18n::UiMessage::raw(error.to_string()));
+            } else {
+                self.status = i18n::UiMessage::raw(error.to_string());
+            }
         }
     }
     fn project_upload_next(&mut self, backend: &Backend) {
@@ -464,34 +472,61 @@ impl App {
                     );
                     return true;
                 }
-                self.status = i18n::UiMessage::raw(error.to_string());
+                if matches!(
+                    method.as_str(),
+                    "local_project.list" | "local_project.resolve"
+                ) {
+                    self.workbench.project.local_error =
+                        Some(i18n::UiMessage::raw(error.to_string()));
+                } else {
+                    self.status = i18n::UiMessage::raw(error.to_string());
+                }
             }
             Ok(value) => match method.as_str() {
                 "local_project.list" => {
                     self.workbench.project.local_projects =
                         value["projects"].as_array().cloned().unwrap_or_default();
-                    if self.workbench.project.local_project.is_none()
+                    self.workbench.project.local_loaded = true;
+                    self.workbench.project.local_error = None;
+                    if let Some((host, path)) = self.workbench.project.local_navigation.clone() {
+                        self.project_send(
+                            backend,
+                            "local_project.resolve",
+                            json!({"host":host,"path":path}),
+                        );
+                    } else if self.workbench.project.local_project.is_none()
                         && matches!(self.workbench.project.local_form.as_str(), "" | "resource")
                         && let Some(project) =
                             self.workbench.project.local_projects.first().cloned()
                     {
                         self.local_project_select(project);
                     }
-                    self.workbench.project.local_loaded = true;
                 }
                 "local_project.resolve" => {
-                    if value["status"] == "matched" {
-                        self.local_project_select(value["project"].clone());
+                    let state = &mut self.workbench.project;
+                    let message = match value["status"].as_str() {
+                        Some("matched")
+                            if value["project"]["id"].as_str().is_some()
+                                && state
+                                    .local_projects
+                                    .iter()
+                                    .any(|project| project["id"] == value["project"]["id"]) =>
+                        {
+                            None
+                        }
+                        Some("matched") => Some("项目列表已变化，请刷新后重新定位"),
+                        Some("unassociated") => Some("目录未关联项目"),
+                        Some("identity_changed") => Some("项目目录身份已改变"),
+                        Some("unavailable") => Some("目录不可用"),
+                        Some("remote") => Some("目录不在本机"),
+                        _ => Some("项目定位结果无效"),
+                    };
+                    if let Some(message) = message {
+                        state.local_error = Some(i18n::UiMessage::key(message));
                     } else {
-                        self.status = i18n::UiMessage::template(
-                            "仓库无法定位：{status}",
-                            vec![(
-                                "status",
-                                i18n::UiArg::Raw(
-                                    value["status"].as_str().unwrap_or("unknown").to_owned(),
-                                ),
-                            )],
-                        );
+                        state.local_navigation = None;
+                        state.local_error = None;
+                        self.local_project_select(value["project"].clone());
                     }
                 }
                 "local_project.get" | "local_project.save" => {
@@ -844,13 +879,37 @@ impl App {
     }
 
     pub(super) fn project_navigate_path(&mut self, backend: &Backend, host: &str, path: &str) {
-        self.project_action("project-new", backend);
-        self.workbench.project.section = "local".to_owned();
-        self.project_send(
-            backend,
-            "local_project.resolve",
-            json!({"host":host,"path":path}),
-        );
+        let existing = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            let (view, project) = if index == self.active {
+                (&self.view, &self.workbench.project)
+            } else {
+                (&tab.runtime.view, &tab.runtime.workbench.project)
+            };
+            let navigation_pending = project.pending.as_ref().is_none_or(|(_, _, method)| {
+                matches!(
+                    method.as_str(),
+                    "local_project.list" | "local_project.resolve"
+                )
+            });
+            (view == "project-workbench" && project.local_form.is_empty() && navigation_pending)
+                .then_some(index)
+        });
+        if let Some(index) = existing {
+            self.switch_tab(index);
+            // 新目录取代旧定位，但不丢弃同一标签中的项目草稿和预览。
+            self.workbench.project.epoch = self.workbench.project.epoch.wrapping_add(1);
+            self.workbench.project.pending = None;
+            self.workbench.project.local_project = None;
+            self.workbench.project.local_environment = None;
+            self.workbench.project.local_form.clear();
+            self.workbench.project.section = "local".to_owned();
+            self.workbench.project.local_error = None;
+            self.workbench.project.local_navigation = Some((host.to_owned(), path.to_owned()));
+            self.project_send(backend, "local_project.list", json!({}));
+        } else {
+            self.project_action("project-new", backend);
+            self.workbench.project.local_navigation = Some((host.to_owned(), path.to_owned()));
+        }
     }
 
     pub(super) fn project_associate_resource(
@@ -1302,6 +1361,8 @@ impl App {
             .strip_prefix("project-local-select:")
             .and_then(|v| v.parse::<usize>().ok())
         {
+            self.workbench.project.local_navigation = None;
+            self.workbench.project.local_error = None;
             if let Some(id) = self
                 .workbench
                 .project
@@ -1333,6 +1394,7 @@ impl App {
             return true;
         }
         if name == "project-local-refresh" {
+            self.workbench.project.local_error = None;
             self.project_send(backend, "local_project.list", json!({}));
             return true;
         }

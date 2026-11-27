@@ -81,13 +81,10 @@ enum Msg {
     Cell(u64, usize, bool),
     CellOpen(u64, usize),
     Row(u64, usize),
-    CompletionAccept(Uuid, usize),
     CopyText(String),
     CopyRedisValue,
     CopyGrid,
     GridMenu(Cell, menus::GridMenuAction),
-    QueryMenu(Uuid, String, usize, usize, String),
-    QueryCut(Uuid, String, usize, usize),
 }
 #[derive(Clone)]
 struct LargeLoad {

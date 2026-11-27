@@ -1,7 +1,11 @@
 //! 有界的 Release 检查；更新状态由 OS 锁串行化，供多个窗口共享。
 mod apply;
+mod fixed_entry;
+mod managed_entry;
+mod manual;
 use datapier_core::{AppError, Result};
 use fs2::FileExt;
+pub use manual::{Switch, switch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -49,6 +53,7 @@ struct State {
     progress: Option<DownloadProgress>,
     progress_revision: u64,
     download_source: Option<String>,
+    cache_cleanup_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -150,7 +155,8 @@ fn output(state: &State, root: &Path, ok: bool) -> Value {
         "gate_blocked":root.join("update-gate.json").exists(),"data_dir":root,
         "automatic_install_supported":cfg!(target_os = "macos"),
         "apply_after_exit":state.apply_after_exit,"prepared":matches!(state.state.as_str(), "ready" | "waiting") && state.staged_dir.is_some(),
-        "progress":state.progress,"progress_revision":state.progress_revision,"download_source":state.download_source})
+        "progress":state.progress,"progress_revision":state.progress_revision,"download_source":state.download_source,
+        "cache_cleanup_error":state.cache_cleanup_error})
 }
 
 /// 返回单个 JSON；失败也返回结构化状态，不向 stdout 输出诊断文本。
@@ -269,6 +275,44 @@ async fn run_inner(
             return Ok(value);
         }
         return Ok(output(&state, root, true));
+    }
+    if action == "cache-clean" {
+        apply::clean_committed(&state, plugin_dir, dir, root).await?;
+        if state.state == "installed" && state.cache_cleanup_error.is_some() {
+            state.message = "更新已安装，程序缓存已核对".into();
+        }
+        state.cache_cleanup_error = None;
+        save(dir, &mut state)?;
+        return Ok(output(&state, root, true));
+    }
+    if matches!(action, "entry-install" | "entry-remove" | "managed-entry") {
+        if action != "entry-remove" {
+            ensure_installed_plugin(plugin_dir).await?;
+        }
+        let root = datapier_engine::update_data_root(root)?;
+        let _admission = apply::lock_admission(&root)?;
+        if root.join("update-gate.json").try_exists()? {
+            return Err(AppError::new(
+                "update_recovery_required",
+                "请先恢复未完成的更新",
+            ));
+        }
+        let plugin_dir = fs::canonicalize(plugin_dir)?;
+        let entry = if action == "managed-entry" {
+            fixed_entry::Entry::managed(dir, true)?
+        } else {
+            fixed_entry::Entry::lock(action == "entry-install")?
+        };
+        if action == "entry-remove" {
+            if let Some(entry) = entry {
+                entry.remove(&plugin_dir, &root)?;
+            }
+            return Ok(serde_json::json!({"ok": true}));
+        }
+        let entry = entry.ok_or_else(|| AppError::invalid("无法锁定固定入口"))?;
+        let target = target().ok_or_else(|| AppError::invalid("不支持的平台"))?;
+        let command = entry.install(plugin_dir, root, &target)?;
+        return Ok(serde_json::json!({"ok": true, "command": command}));
     }
     // 源码目录没有发布清单；linked 目录以及显式本地程序都不能覆盖。
     let linked = fs::symlink_metadata(plugin_dir)?.file_type().is_symlink();
@@ -389,13 +433,10 @@ async fn run_inner(
             }
             return Ok(output(&state, root, true));
         }
-        return match apply::run(&state, root, plugin_dir, dir, inherited, handoff_id).await {
+        return match apply::run(&state, root, plugin_dir, dir, inherited, handoff_id, None).await {
             Ok(()) => {
-                state.state = "installed".into();
-                state.apply_after_exit = false;
-                state.message = "更新已安装".into();
-                save(dir, &mut state)?;
-                Ok(output(&state, root, true))
+                let committed = serde_json::from_slice::<State>(&fs::read(&path)?)?;
+                Ok(output(&committed, root, true))
             }
             Err(error) if error.code == "update_engine_busy" && handoff_id.is_none() => {
                 let id = uuid::Uuid::new_v4();
@@ -713,8 +754,8 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
     state.apply_after_exit = false;
     state.staged_dir = None;
     state.progress = None;
-    let stage = dir.join(format!("stage-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&stage)?;
+    let stage = managed_entry::stage_path(dir);
+    managed_entry::create_stage(&stage)?;
     let result = async {
         let ver = state
             .target_version
@@ -751,62 +792,7 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
             dir,
         )
         .await?;
-        let mut zip = zip::ZipArchive::new(fs::File::open(&archive_path)?)
-            .map_err(|e| AppError::invalid(e.to_string()))?;
-        let mut names = std::collections::HashSet::new();
-        let mut total = 0u64;
-        for index in 0..zip.len() {
-            let mut entry = zip
-                .by_index(index)
-                .map_err(|e| AppError::invalid(e.to_string()))?;
-            let name = entry
-                .name()
-                .map_err(|e| AppError::invalid(e.to_string()))?
-                .into_owned();
-            if !names.insert(name.clone())
-                || !name.starts_with("datapier/")
-                || name.contains('\\')
-                || entry.is_dir()
-                || entry
-                    .unix_mode()
-                    .is_some_and(|mode| mode & 0o170000 == 0o120000)
-            {
-                return Err(AppError::invalid("plugin 归档成员无效或重复"));
-            }
-            let relative = entry
-                .enclosed_name()
-                .ok_or_else(|| AppError::invalid("plugin 归档路径无效"))?;
-            total = total.saturating_add(entry.size());
-            if total > 128 * 1024 * 1024 {
-                return Err(AppError::invalid("plugin 解包内容过大"));
-            }
-            let destination = stage.join(relative);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(destination)?;
-            std::io::copy(&mut entry, &mut output)?;
-        }
-        drop(zip);
-        let plugin = stage.join("datapier");
-        let manifest = fs::read_to_string(plugin.join("plugin.toml"))?;
-        let versions: Vec<_> = manifest
-            .lines()
-            .filter_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "version").then(|| value.trim().trim_matches('"'))
-            })
-            .collect();
-        if versions != [ver.as_str()]
-            || !manifest
-                .lines()
-                .any(|line| line.trim() == "id = \"datapier\"")
-        {
-            return Err(AppError::invalid("plugin manifest 与 Release 不匹配"));
-        }
+        let plugin = extract_plugin(&stage, &ver)?;
         let expected = format!("{}  {}", binary_hash.to_ascii_lowercase(), binary_name);
         let sums = fs::read_to_string(plugin.join("release-sha256.txt"))?;
         if sums.lines().filter(|line| *line == expected).count() != 1 {
@@ -825,51 +811,7 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
             dir,
         )
         .await?;
-        // 复用发布安装器验证唯一程序成员、程序 SHA-256 和 --version；只写入本轮暂存目录。
-        let mut command = if cfg!(windows) {
-            let mut cmd = tokio::process::Command::new("powershell.exe");
-            cmd.args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(plugin.join("install/windows.ps1"));
-            cmd
-        } else {
-            let mut cmd = tokio::process::Command::new("/bin/sh");
-            cmd.arg(plugin.join("install/unix.sh"));
-            cmd
-        };
-        let cache = stage.join("cache");
-        command
-            .env("DATAPIER_CACHE_DIR", &cache)
-            .env("DATAPIER_RELEASE_URL", &base)
-            .env("DATAPIER_UPDATE_ARCHIVE", &program_archive)
-            .env_remove("DATAPIER_BINARY")
-            .kill_on_drop(true);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(300), command.output())
-            .await
-            .map_err(|_| AppError::new("update", "程序校验超时"))??;
-        if !result.status.success() {
-            return Err(AppError::new(
-                "update",
-                format!("程序准备失败：{}", String::from_utf8_lossy(&result.stderr)),
-            ));
-        }
-        let response: Value = serde_json::from_slice(&result.stdout)?;
-        let cwd = response["cwd"]
-            .as_str()
-            .ok_or_else(|| AppError::invalid("程序准备结果无效"))?;
-        let cache = fs::canonicalize(cache)?;
-        let cwd = fs::canonicalize(cwd)?;
-        if response["ok"].as_bool() != Some(true)
-            || !cwd.starts_with(cache)
-            || !cwd.to_string_lossy().contains(&target)
-        {
-            return Err(AppError::invalid("程序缓存路径与目标不匹配"));
-        }
+        prepare_program(&stage.join("cache"), &plugin, &program_archive, &target).await?;
         fs::remove_file(&program_archive)?;
         Ok(stage.clone())
     }
@@ -878,6 +820,134 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
         let _ = fs::remove_dir_all(&stage);
     }
     result
+}
+
+async fn ensure_installed_plugin(plugin_dir: &Path) -> Result<()> {
+    if fs::symlink_metadata(plugin_dir)?.file_type().is_symlink() {
+        return Err(AppError::invalid("开发安装不发布固定入口"));
+    }
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("tern")
+            .args(["plugin", "dir", "--json"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| AppError::invalid("未能确认 Tern 插件目录"))??;
+    if !output.status.success() {
+        return Err(AppError::invalid("无法读取 Tern 插件目录"));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    let directory: PathBuf = serde_json::from_value(value["dir"].clone())?;
+    if directory.join("datapier.path").try_exists()?
+        || fs::canonicalize(directory.join("datapier"))? != fs::canonicalize(plugin_dir)?
+    {
+        return Err(AppError::invalid("只支持通过 Tern 安装的正式 plugin"));
+    }
+    Ok(())
+}
+
+fn extract_plugin(stage: &Path, version: &str) -> Result<PathBuf> {
+    let mut zip = zip::ZipArchive::new(fs::File::open(stage.join("plugin.zip"))?)
+        .map_err(|e| AppError::invalid(e.to_string()))?;
+    let mut names = std::collections::HashSet::new();
+    let mut total = 0u64;
+    for index in 0..zip.len() {
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|e| AppError::invalid(e.to_string()))?;
+        let name = entry.name().map_err(|e| AppError::invalid(e.to_string()))?;
+        if !name.starts_with("datapier/")
+            || name.contains('\\')
+            || entry.is_dir()
+            || entry
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170000 == 0o120000)
+            || !names.insert(name.into_owned())
+        {
+            return Err(AppError::invalid("plugin 归档成员无效或重复"));
+        }
+        let relative = entry
+            .enclosed_name()
+            .ok_or_else(|| AppError::invalid("plugin 归档路径无效"))?;
+        total = total.saturating_add(entry.size());
+        if total > 128 * 1024 * 1024 {
+            return Err(AppError::invalid("plugin 解包内容过大"));
+        }
+        let destination = stage.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        std::io::copy(&mut entry, &mut output)?;
+    }
+    let plugin = stage.join("datapier");
+    let manifest = fs::read_to_string(plugin.join("plugin.toml"))?;
+    let versions = manifest.lines().filter_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "version").then(|| value.trim().trim_matches('"'))
+    });
+    if !versions.eq([version])
+        || !manifest
+            .lines()
+            .any(|line| line.trim() == "id = \"datapier\"")
+    {
+        return Err(AppError::invalid("plugin manifest 与目标版本不匹配"));
+    }
+    Ok(plugin)
+}
+
+async fn prepare_program(cache: &Path, plugin: &Path, archive: &Path, target: &str) -> Result<()> {
+    // 复用目标版本的发布安装器，使旧版本的单程序归档仍按其原契约验证。
+    let mut command = if cfg!(windows) {
+        let mut cmd = tokio::process::Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(plugin.join("install/windows.ps1"));
+        cmd
+    } else {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg(plugin.join("install/unix.sh"));
+        cmd
+    };
+    command
+        .env("DATAPIER_CACHE_DIR", cache)
+        .env("DATAPIER_UPDATE_ARCHIVE", archive)
+        .env_remove("DATAPIER_BINARY")
+        .kill_on_drop(true);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(300), command.output())
+        .await
+        .map_err(|_| AppError::new("update", "程序校验超时"))??;
+    let response: Value = serde_json::from_slice(&result.stdout)?;
+    if !result.status.success() || response["ok"].as_bool() != Some(true) {
+        return Err(AppError::new(
+            "update",
+            format!(
+                "程序准备失败：{}",
+                response["error"].as_str().unwrap_or_else(
+                    || std::str::from_utf8(&result.stderr).unwrap_or("无法读取诊断")
+                )
+            ),
+        ));
+    }
+    let cwd = response["cwd"]
+        .as_str()
+        .ok_or_else(|| AppError::invalid("程序准备结果无效"))?;
+    let cache = fs::canonicalize(cache)?;
+    let cwd = fs::canonicalize(cwd)?;
+    if !cwd.starts_with(cache) || !cwd.to_string_lossy().contains(target) {
+        return Err(AppError::invalid("程序缓存路径与目标不匹配"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

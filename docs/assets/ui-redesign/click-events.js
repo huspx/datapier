@@ -680,10 +680,6 @@ document.addEventListener('click', event => {
     render();
     return;
   }
-  if (action.startsWith('sql-menu-')) {
-    sqlMenuAction(action);
-    return;
-  }
   if (action === 'profile-create-database:mysql') {
     state.menu = null;
     if (state.connectionStatus.mysql !== 'connected') {
@@ -1056,8 +1052,10 @@ document.addEventListener('click', event => {
     case 'sql-explain':
       requestSql('explain');
       break;
-    case 'sql-selection':
-      requestSql('selection');
+    case 'archery-close-preview':
+      ap.sqlRequest = '';
+      ap.result = false;
+      render();
       break;
     case 'sql-close-results': {
       const tab = queryTab();

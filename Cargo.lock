@@ -932,7 +932,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "datapier"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base16ct",
  "base64 0.23.1",
@@ -949,15 +949,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "tokio",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "datapier-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base16ct",
  "base64 0.23.1",
@@ -994,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "datapier-engine"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base16ct",
  "base64 0.23.1",
@@ -1016,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "datapier-mcp"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "datapier-core",
  "datapier-engine",
@@ -1030,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "datapier-tsp"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.23.1",
  "bigdecimal",
@@ -1041,7 +1043,6 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
- "sqlformat",
  "sqlparser",
  "tern-sdk",
  "tokio",
@@ -1051,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "datapier-tui"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "crossterm",
  "datapier-core",
@@ -3578,16 +3579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlformat"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0705994df478b895f05b8e290e0d46e53187b26f8d889d37b2a0881234922d94"
-dependencies = [
- "unicode_categories",
- "winnow 0.7.15",
-]
-
-[[package]]
 name = "sqlparser"
 version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4135,7 +4126,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
- "winnow 1.0.5",
+ "winnow",
 ]
 
 [[package]]
@@ -4144,7 +4135,7 @@ version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6769c452d71ba30696c6b37770c439a9cc9110f47f7d5cdbeda79840ef5ea31"
 dependencies = [
- "winnow 1.0.5",
+ "winnow",
 ]
 
 [[package]]
@@ -4366,12 +4357,6 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
-
-[[package]]
-name = "unicode_categories"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "untrusted"
@@ -4878,15 +4863,6 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "winnow"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
@@ -4974,7 +4950,7 @@ dependencies = [
  "uds_windows",
  "uuid",
  "windows-sys 0.61.2",
- "winnow 1.0.5",
+ "winnow",
  "zbus_macros",
  "zbus_names",
  "zvariant",
@@ -5013,7 +4989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812a12be4ead7a59e18ea8f047d08add0066b73bc62fc1467066a2472ae088dd"
 dependencies = [
  "serde",
- "winnow 1.0.5",
+ "winnow",
  "zvariant",
 ]
 
@@ -5155,7 +5131,7 @@ dependencies = [
  "endi",
  "enumflags2",
  "serde",
- "winnow 1.0.5",
+ "winnow",
  "zcheapstr",
  "zvariant_derive",
  "zvariant_utils",
@@ -5184,5 +5160,5 @@ dependencies = [
  "quote",
  "serde",
  "syn 3.0.10",
- "winnow 1.0.5",
+ "winnow",
 ]

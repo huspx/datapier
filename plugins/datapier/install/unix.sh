@@ -83,15 +83,17 @@ if [ -n "${DATAPIER_BINARY:-}" ]; then
 else
   MANIFEST=$PLUGIN_DIR/release-sha256.txt
   BINARY_MANIFEST=$PLUGIN_DIR/release-bin-sha256.txt
-  [ -f "$MANIFEST" ] && [ -f "$BINARY_MANIFEST" ] || fail '此插件尚未打包发布校验清单；请设置 DATAPIER_BINARY 使用本地程序'
+  LAUNCHER_MANIFEST=$PLUGIN_DIR/release-launcher-sha256.txt
+  [ -f "$MANIFEST" ] && [ -f "$BINARY_MANIFEST" ] && [ -f "$LAUNCHER_MANIFEST" ] || fail '此插件尚未打包发布校验清单；请设置 DATAPIER_BINARY 使用本地程序'
   FILE=datapier-$VERSION-$TARGET.tar.gz
   DIGEST=$(awk -v name="$FILE" '$2 == name {print $1}' "$MANIFEST")
   BINARY_HASH=$(awk -v name="$TARGET" '$2 == name {print $1}' "$BINARY_MANIFEST")
-  for value in "$DIGEST" "$BINARY_HASH"; do
+  LAUNCHER_HASH=$(awk -v name="$TARGET" '$2 == name {print $1}' "$LAUNCHER_MANIFEST")
+  for value in "$DIGEST" "$BINARY_HASH" "$LAUNCHER_HASH"; do
     [ "${#value}" -eq 64 ] && [ -z "$(printf '%s' "$value" | tr -d '0123456789abcdef')" ] || fail '发布校验清单缺少目标 SHA256'
   done
-  DEST=$CACHE/$VERSION/$TARGET-$DIGEST
-  if [ ! -f "$DEST/datapier" ]; then
+  DEST=$CACHE/$VERSION/$TARGET-$DIGEST-$LAUNCHER_HASH
+  if [ ! -f "$DEST/datapier" ] || [ ! -f "$DEST/datapier-launcher" ]; then
     PACKAGE=$TMP/package.tar.gz
     if [ -n "${DATAPIER_UPDATE_ARCHIVE:-}" ]; then
       PACKAGE=$DATAPIER_UPDATE_ARCHIVE
@@ -102,11 +104,14 @@ else
       command -v curl >/dev/null 2>&1 || fail '需要 curl 下载发布文件'
       curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error "${URL%/}/$FILE" -o "$TMP/package.tar.gz" || fail '下载发布文件失败'
     fi
-    # 归档摘要验证下载内容，程序摘要再次验证解包结果；固定成员名也避免路径穿越。
+    # 固定成员、普通文件类型及两个摘要都必须匹配，才可发布缓存。
     [ "$(hash "$PACKAGE")" = "$DIGEST" ] || fail '发布文件 SHA256 不匹配'
-    [ "$(tar -tzf "$PACKAGE")" = datapier ] || fail '发布压缩包内容无效'
+    [ "$(tar -tzf "$PACKAGE" | LC_ALL=C sort)" = "$(printf 'datapier\ndatapier-launcher')" ] || fail '发布压缩包内容无效'
+    tar -tvzf "$PACKAGE" | awk 'substr($0,1,1) != "-" { bad=1 } END { if (NR != 2 || bad) exit 1 }' || fail '发布压缩包成员不是普通文件'
     tar -xOzf "$PACKAGE" datapier >"$TMP/datapier" || fail '解包失败'
+    tar -xOzf "$PACKAGE" datapier-launcher >"$TMP/datapier-launcher" || fail '解包 launcher 失败'
     [ "$(hash "$TMP/datapier")" = "$BINARY_HASH" ] || fail '发布程序 SHA256 不匹配'
+    [ "$(hash "$TMP/datapier-launcher")" = "$LAUNCHER_HASH" ] || fail '发布 launcher SHA256 不匹配'
   fi
 fi
 if [ -f "$TMP/datapier" ]; then
@@ -115,9 +120,17 @@ if [ -f "$TMP/datapier" ]; then
   mkdir -p "$DEST"
   # 硬链接只发布完整且已校验的文件；并发安装若已有胜出者，下面仍重新校验该缓存。
   ln "$TMP/datapier" "$DEST/datapier" 2>/dev/null || [ -f "$DEST/datapier" ] || fail '无法发布缓存程序'
+  if [ -z "${DATAPIER_BINARY:-}" ]; then
+    chmod 755 "$TMP/datapier-launcher"
+    ln "$TMP/datapier-launcher" "$DEST/datapier-launcher" 2>/dev/null || [ -f "$DEST/datapier-launcher" ] || fail '无法发布缓存 launcher'
+  fi
 fi
 [ -f "$DEST/datapier" ] && [ -x "$DEST/datapier" ] || fail '缓存程序不存在或不可执行'
 [ "$(hash "$DEST/datapier")" = "$BINARY_HASH" ] || fail '缓存程序校验失败，请移除对应缓存目录后重试'
+if [ -z "${DATAPIER_BINARY:-}" ]; then
+  [ -f "$DEST/datapier-launcher" ] && [ -x "$DEST/datapier-launcher" ] || fail '缓存 launcher 不存在或不可执行'
+  [ "$(hash "$DEST/datapier-launcher")" = "$LAUNCHER_HASH" ] || fail '缓存 launcher 校验失败，请移除对应缓存目录后重试'
+fi
 [ "$("$DEST/datapier" --version)" = "datapier $VERSION" ] || fail '缓存程序版本不匹配'
 printf '{"ok":true,"cwd":'
 json_string "$DEST"

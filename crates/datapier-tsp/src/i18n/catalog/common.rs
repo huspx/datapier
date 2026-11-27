@@ -1411,6 +1411,15 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("保存工作区并退出", "Save workspace and exit"),
     ("关闭弹窗或下拉", "Close dialog or dropdown"),
     ("执行选区或当前语句", "Run selection or current statement"),
+    (
+        "执行最后同步光标所在的语句；首次点击或拖选可能保留上次位置",
+        "Run the statement at the last synchronized cursor; the first click or a drag may retain its previous position",
+    ),
+    ("SQL 补全（仅供参考）", "SQL suggestions (reference only)"),
+    (
+        "宿主选区不可见，补全接受已禁用",
+        "Accepting suggestions is disabled because the host selection is unavailable",
+    ),
     ("复制 / 剪切", "Copy / Cut"),
     ("扩展文本选区", "Extend text selection"),
     ("移动单元格焦点", "Move cell focus"),

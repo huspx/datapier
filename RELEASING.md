@@ -12,7 +12,7 @@
 
 ## 版本号与关联文件
 
-根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前候选为 `0.5.1`。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本。修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本。组包支持无前导零的三段数字版本。
+根 `Cargo.toml` 的 `workspace.package.version` 是唯一人工维护的产品版本，当前候选为 `0.5.2`。六个 crate 继承此版本，CLI 和 TSP 编译时使用对应 crate 版本。修改后通过 Cargo 更新 `Cargo.lock` 中本地包版本。组包支持无前导零的三段数字版本。
 
 修改根版本后，先同步源码 plugin，再更新 CHANGELOG 对应版本章节并运行只读发布检查。源码 plugin 保持可直接 `tern plugin link`，Cargo 构建不会修改它。PR 与 main 的 CI 均执行同一检查，草稿准备、上传和汇总入口也会在访问 GitHub 前检查；plugin 版本不一致、CHANGELOG 首个章节不匹配根版本、版本章节重复或当前章节缺少实际变更条目时失败。检查不会修改文件，也不查询或推断线上发布状态。
 
@@ -66,6 +66,10 @@ python3 scripts/version.py --check-release
 
 核对最终提交的六目标 CI 和同次构建的七个附件。在 macOS arm64 使用对应候选包验证路径选择、Files 分屏和目录归属、共享 Engine、鼠标反馈与受管 MCP 升级保护。记录候选身份与实际覆盖范围，发布后从公开 URL 复验校验和安装。[0.5.1 验收矩阵](docs/technical-design-0.5.1.md#5-验收矩阵)
 
+### 0.5.2 发布准备核对
+
+核对六目标双程序归档、三个校验清单及同次构建的七个附件。按 [0.5.2 验收矩阵](docs/technical-design-0.5.2.md#5-实施顺序与验收)检验 SQL 原生编辑、Files 导航、固定入口、更新和回滚。Windows x64 与 arm64 分别记录 launcher 的运行验收。
+
 ## PR 与合并
 
 `main` 必须通过 PR 合并，CODEOWNERS、审批、Merge commit 和仅限 PR 的绕过要求见[贡献指南的分支与 PR](CONTRIBUTING.md#分支与-pr)。将版本同步、CHANGELOG 版本内容、发布说明及所需源码和配置纳入发布准备 PR，检查对应工作流结果；CODEOWNERS 的审批分配以 PR 目标分支已有定义为准。合并不代表发布完成；最终提交可能与候选提交不同，应在最终提交重跑或核对对应 workflow，并使用该提交的六目标产物完成必要的重新验收与组包。记录产物对应的提交和 workflow run，不把不同提交的文件混作一个版本。
@@ -110,9 +114,9 @@ repository='OWNER/REPO'
 python3 scripts/assemble-release.py --artifacts dist --repository "$repository"
 ```
 
-单目标脚本读取 `target/<target>/release/datapier`（Windows 为 `datapier.exe`），运行该程序的 `--version` 并拒绝与根版本不一致的二进制，再仅生成 `datapier-<version>-<target>.tar.gz`（Windows 为 `.zip`），因此应在对应目标的原生机器运行。汇总脚本要求六个仅含固定程序成员的归档，计算归档摘要并流式读取原程序计算摘要，仅生成 `datapier-plugin-<version>.zip`。公开附件摘要使用 GitHub 自动生成的 digest，不生成外部 `SHA256SUMS` 或独立 `.binary-sha256` 附件。核对 plugin zip 的 `datapier/` 目录内含 plugin 源文件、`LICENSE`、`release-url.txt`、`release-sha256.txt` 和 `release-bin-sha256.txt`；下载地址指向实际发布仓库和版本，两个清单分别记录六个归档文件名和六个 target 对应的 SHA-256。
+单目标脚本读取 `target/<target>/release/datapier` 和 `datapier-launcher`，Windows 程序名带 `.exe`。核对主程序 `--version`，将两项固定成员打入对应的 Unix tar.gz 或 Windows zip。汇总生成原有 `release-sha256.txt`、`release-bin-sha256.txt`，以及六目标的 `release-launcher-sha256.txt`。这些清单和 `release-url.txt` 随 plugin zip 发布，归档中的程序及 launcher 摘要均以原始成员流式计算。
 
-发布安装无需 Rust：安装器验证下载归档的 SHA-256 和唯一固定归档成员，解包后先核对程序 SHA-256，再执行版本检查并发布缓存；发布缓存按归档摘要隔离，每次启动前仍先核对程序 SHA-256，再执行 `--version`，摘要不匹配直接拒绝启动。`DATAPIER_BINARY` 本地开发模式按显式配置的源程序内容哈希缓存并校验副本。`DATAPIER_RELEASE_URL` 仅覆盖已打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录；发布核对时应同时确认默认下载地址和缓存行为。
+发布安装无需 Rust。安装器验证归档 SHA-256、两个固定成员及各自的 SHA-256，然后核对主程序版本并发布版本化缓存。`DATAPIER_BINARY` 开发安装沿用单程序内容摘要缓存。`DATAPIER_RELEASE_URL` 覆盖打包的下载地址，`DATAPIER_CACHE_DIR` 指定安装缓存目录。
 
 独立运行无需 plugin：将对应目标归档手工解包，直接运行 `datapier tui` 或作为 MCP stdio 程序使用；Tern 工作台运行 `datapier tsp`。用户示例见 [README](README.md#安装与运行)。候选包与正式线上附件的可用性应分别核实。
 
@@ -132,6 +136,29 @@ tern plugin list --json
 安装替换会触发 plugin 重载，随后首次启动会按该包内的版本、下载地址与摘要准备对应二进制。应核对 plugin 状态、程序版本与实际启动；替换成功不等于数据库或 MCP 已完成运行验收。不能只改下载 URL 或程序文件而保留旧 plugin 的版本及校验清单，也不将缺少发布清单的源码目录当成正式升级包。
 
 `--force` 不替换 linked 开发目录；开发模式通过更新显式链接的源码、构建匹配版本的程序并重载验证。Tern 的 `reload` 只重载本地文件；自动更新的校验、并发及恢复边界见[0.5.0 方案第 5.5 节](docs/technical-design-0.5.0.md#55-plugin-版本检查与自动更新边界)。
+
+### 已安装固定入口时手工更新或回滚
+
+退出所有 Datapier 客户端与 Engine，并停止外部 Agent 的 MCP 会话。保留一个本机 Tern 窗口，用于接收目标插件的加载确认。首次用 0.5.2 回滚前，等待该窗口将旧的受管 MCP 路径迁到固定入口。保留当前版本的真实 `datapier` 可执行文件用于协调。把目标 Release 的 plugin zip 和当前平台归档放到一个目录。将以下命令的 `--data-dir` 填为入口登记的数据目录。`--plugin-dir` 是 `tern plugin dir` 返回目录下的 `datapier`，`--state-dir` 是 Tern 的 `plugin-data/datapier`。保持与 Tern 相同的配置根及缓存设置。 [Tern 插件目录](https://docs.stencil.so/tern/reference/cli.md#tern-plugin-dir) · [Tern 插件状态目录](https://docs.stencil.so/tern/reference/api-shared.md#identity)
+
+```sh
+/absolute/path/to/datapier --data-dir /absolute/path/to/data plugin-switch \
+  --plugin-dir /absolute/path/to/tern/plugins/datapier \
+  --state-dir /absolute/path/to/tern/plugin-data/datapier \
+  --target-version 0.5.1 --package-dir /absolute/path/to/downloads
+```
+
+旧版若无法读取当前配置 schema，命令会在切换前拒绝。确认已导出需要保留的内容后，加 `--restore-data /absolute/path/to/pre-upgrade-backup` 指定一致的数据备份。切换期间保存当前数据和 plugin 的独立备份，并保持准入阻断。若进程中断，使用同一个真实二进制和目录参数，将 `--target-version`、`--package-dir` 及 `--restore-data` 替换为 `--recover`。恢复成功后，重新连接 Tern 和外部 Agent 中使用的 MCP，并核对版本和工具。Tern 已登记受管入口时，目标须为支持受管启动参数的 0.5.1 或更高版本。
+
+macOS 更新器在提交后读回 Tern 受管配置，核对已安装版本、launcher、缓存目标及进程引用，再回收已登记的旧暂存程序。保留当前及最近一次切换所需的程序、用户数据备份、共享安装缓存、早期暂存目录及开发缓存。若提示回收暂停，退出 Datapier 客户端和 Engine，使用真实二进制重试：
+
+```sh
+/absolute/path/to/datapier --data-dir /absolute/path/to/data plugin-update \
+  --action cache-clean --plugin-dir /absolute/path/to/tern/plugins/datapier \
+  --state-dir /absolute/path/to/tern/plugin-data/datapier
+```
+
+主数据、系统凭据及早期结果缓存的处理方式见 [本机数据与自动写入](README.md#本机数据与自动写入)。
 
 
 ## 实际发布与发布后核对

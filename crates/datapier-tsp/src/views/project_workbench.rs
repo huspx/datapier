@@ -460,6 +460,9 @@ fn local_panel(app: &App) -> Node<Msg> {
         content =
             content.child(html::p(crate::i18n::tr("请选择或新建项目").into_owned()).class("muted"));
     }
+    if let Some(error) = &state.local_error {
+        content = content.child(html::p(error.render().into_owned()).class("notice"));
+    }
     let status = app.status.render();
     if !status.is_empty() {
         content = content.child(html::p(status.into_owned()).class("notice"));

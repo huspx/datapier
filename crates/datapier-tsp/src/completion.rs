@@ -1,12 +1,11 @@
 use super::*;
-use std::ops::Range;
 use std::time::{Duration, Instant};
 
 pub(super) mod analysis;
 use analysis::{Analysis, Position};
 
 const MAX_ITEMS: usize = 50;
-// 为候选、替换快照和目录键预留空间，目录副本与这些对象合计不超过 2 MiB。
+// 为候选、分析快照和目录键预留空间，目录副本与这些对象合计不超过 2 MiB。
 const MAX_CACHE: usize = 2 * 1024 * 1024 - 256 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -111,8 +110,6 @@ fn offer_candidate(
 struct Snapshot {
     id: Uuid,
     stamp: Stamp,
-    range: Range<usize>,
-    expected: String,
     analysis: Analysis,
     candidates: Vec<Candidate>,
     selected: usize,
@@ -506,7 +503,6 @@ impl App {
             self.completion_close();
             return true;
         }
-        let expected = query.text[start..end].to_owned();
         let state = &mut self.workbench.query_ui.completion;
         // 续页仅服务当前浏览，重新打开时不能把它当成目录首屏。
         state
@@ -522,8 +518,6 @@ impl App {
         state.current = Some(Snapshot {
             id: Uuid::new_v4(),
             stamp,
-            range: analysis.range.clone(),
-            expected,
             analysis,
             candidates: Vec::new(),
             selected: 0,
@@ -722,158 +716,25 @@ impl App {
             }
         }
     }
-
-    pub(super) fn completion_key(&mut self, key: &tern_sdk::Key) -> bool {
-        if key.is("ctrl+space") {
-            self.completion_update(true);
-            return true;
-        }
-        if self.workbench.query_ui.completion.current.is_none() {
-            return false;
-        }
-        if key.is("escape") {
-            self.completion_close();
-            return true;
-        }
-        let state = &self.workbench.query_ui.completion;
-        if (key.is("up") || key.is("down"))
-            && state
-                .pages
-                .iter()
-                .any(|page| page.loaded.elapsed() >= CACHE_TTL)
-        {
-            let snapshot = state.current.as_ref().unwrap();
-            let current_keys = keys(
-                &snapshot.analysis,
-                self.database.as_deref(),
-                snapshot.stamp.lower_case_table_names,
-                snapshot.stamp.archery,
-            );
-            if state
-                .pages
-                .iter()
-                .any(|page| current_keys.contains(&page.key) && page.loaded.elapsed() >= CACHE_TTL)
-            {
-                // 文本未变化时不会自动重建；继续浏览前先丢弃过期页及其游标。
-                return self.completion_update(true);
-            }
-        }
-        let state = &mut self.workbench.query_ui.completion;
-        let snapshot = state.current.as_mut().unwrap();
-        if key.is("up") && !snapshot.candidates.is_empty() {
-            snapshot.selected = snapshot
-                .selected
-                .checked_sub(1)
-                .unwrap_or(snapshot.candidates.len() - 1);
-            return true;
-        }
-        if key.is("down") {
-            if snapshot.selected + 1 < snapshot.candidates.len() {
-                snapshot.selected += 1;
-            } else if snapshot.more_items {
-                snapshot.after = snapshot
-                    .candidates
-                    .last()
-                    .cloned()
-                    .zip(snapshot.ordinals.last().copied());
-                snapshot.selected = 0;
-                rebuild(state, self.database.as_deref());
-            } else if state.pending.is_none() {
-                let current_keys = keys(
-                    &snapshot.analysis,
-                    self.database.as_deref(),
-                    snapshot.stamp.lower_case_table_names,
-                    snapshot.stamp.archery,
-                );
-                if let Some((key, cursor)) = state.pages.iter().find_map(|page| {
-                    (current_keys.contains(&page.key) && page.loaded.elapsed() < CACHE_TTL)
-                        .then(|| {
-                            page.next_cursor
-                                .as_ref()
-                                .map(|cursor| (page.key.clone(), cursor.clone()))
-                        })
-                        .flatten()
-                }) {
-                    state.continuation = Some((key, cursor));
-                    state.deadline = Some(Instant::now());
-                } else {
-                    snapshot.selected = 0;
-                }
-            }
-            return true;
-        }
-        if (key.is("tab") || key.is("enter")) && !snapshot.candidates.is_empty() {
-            let id = snapshot.id;
-            let index = snapshot.selected;
-            self.completion_accept(id, index);
-            return true;
-        }
-        false
-    }
-
-    pub(super) fn completion_accept(&mut self, id: Uuid, index: usize) {
-        let current_stamp = self.completion_stamp();
-        let state = &mut self.workbench.query_ui.completion;
-        if !state
-            .current
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.id == id)
-        {
-            return;
-        }
-        let Some(snapshot) = state.current.take() else {
-            return;
-        };
-        if let Some((id, stamp, _, _)) = state.pending.take() {
-            state.cancel = Some((stamp.session, stamp.tab, id));
-        }
-        state.deadline = None;
-        state.continuation = None;
-        state.dismissed = true;
-        if current_stamp.as_ref() != Some(&snapshot.stamp) {
-            return;
-        }
-        let Some(candidate) = snapshot.candidates.get(index) else {
-            return;
-        };
-        let query = &mut self.tabs[self.active].query;
-        let Some(start) = editor::utf16_to_byte(&query.text, snapshot.range.start) else {
-            return;
-        };
-        let Some(end) = editor::utf16_to_byte(&query.text, snapshot.range.end) else {
-            return;
-        };
-        if query.text.get(start..end) != Some(snapshot.expected.as_str()) {
-            return;
-        }
-        if query.edit(snapshot.range, &candidate.insert) {
-            self.changed_field("query");
-            self.focus = "query".into();
-            self.workbench.focus_request = Some("query-editor".into());
-            self.workbench.query_ui.completion.observed = self.completion_stamp();
-        }
-    }
 }
 
-pub(super) fn overlay(app: &App, editor_id: &str) -> Option<Node<Msg>> {
+pub(super) fn suggestions(app: &App) -> Option<Node<Msg>> {
     let state = &app.workbench.query_ui.completion;
     let snapshot = state.current.as_ref()?;
     if app.completion_stamp().as_ref() != Some(&snapshot.stamp) {
         return None;
     }
-    let snapshot_id = snapshot.id;
-    // 原生表格按行 ID 保持选中项可见，编辑器继续持有输入焦点。
     let mut rows = ui::table()
         .key(format!("completion-candidates-{}", snapshot.id))
-        .selectable(true)
-        .selected(snapshot.selected.to_string())
-        .col(ui::Column::new("candidate", crate::i18n::tr("SQL 补全").into_owned()).grow(1.0))
-        .on_select(move |id| Msg::CompletionAccept(snapshot_id, id.parse().unwrap_or(usize::MAX)))
-        .on_activate(move |id| {
-            Msg::CompletionAccept(snapshot_id, id.parse().unwrap_or(usize::MAX))
-        });
+        .col(
+            ui::Column::new(
+                "candidate",
+                crate::i18n::tr("SQL 补全（仅供参考）").into_owned(),
+            )
+            .grow(1.0),
+        );
     for (index, item) in snapshot.candidates.iter().enumerate() {
-        let label = format!("{} · {}", item.name, crate::i18n::tr(&item.kind));
+        let label = format!("{} · {}", item.insert, crate::i18n::tr(&item.kind));
         rows = rows.row(ui::TableRow::new(index.to_string()).cell("candidate", label));
     }
     let mut content = html::div()
@@ -886,22 +747,9 @@ pub(super) fn overlay(app: &App, editor_id: &str) -> Option<Node<Msg>> {
     {
         content = content.child(html::div().child(html::span(item.detail.clone())));
     }
-    if snapshot.more_items
-        || state.pages.iter().any(|page| {
-            page.next_cursor.is_some()
-                && keys(
-                    &snapshot.analysis,
-                    app.database.as_deref(),
-                    snapshot.stamp.lower_case_table_names,
-                    snapshot.stamp.archery,
-                )
-                .contains(&page.key)
-        })
-    {
-        content = content.child(html::span(
-            crate::i18n::tr("在末项按下方向键查看更多").into_owned(),
-        ));
-    }
+    content = content.child(html::span(
+        crate::i18n::tr("宿主选区不可见，补全接受已禁用").into_owned(),
+    ));
     if state.pending.is_some() {
         content = content.child(html::span(crate::i18n::tr("正在加载补全目录").into_owned()));
     }
@@ -924,13 +772,7 @@ pub(super) fn overlay(app: &App, editor_id: &str) -> Option<Node<Msg>> {
             content = content.child(html::span(crate::i18n::tr(text).into_owned()));
         }
     }
-    Some(
-        ui::overlay()
-            .anchor(ui::Anchor::Caret(editor_id.to_owned()))
-            .modal(false)
-            .child(content)
-            .into(),
-    )
+    Some(content.into())
 }
 
 #[cfg(test)]

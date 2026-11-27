@@ -2,9 +2,9 @@
 
 面向开发者与 AI agent 的多数据库工作台。统一连接、资源浏览、查询和数据编辑体验，保留不同数据库的数据模型与操作语义。
 
-当前本地候选版本 **0.5.1** 完善 Tern Files 项目入口、查询文件路径、路径选择与鼠标反馈，并延续 SQL 上下文补全、Tern 受管 MCP、本机项目与环境及 plugin 更新。正式发布状态与下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
+当前本地候选版本 **0.5.2** 支持 Tern 原生 SQL 编辑，修复 Files 的 MCP 项目列表，并提供外部 Agent 可复用的固定 MCP 命令。正式发布状态与下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
 
-> 0.5.1 候选的验收标准和运行范围见 [0.5.1 技术方案](docs/technical-design-0.5.1.md#5-验收矩阵)。历史 Archery 运行范围见 [0.1.1 运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
+> 0.5.2 候选的验收标准和运行范围见 [0.5.2 技术方案](docs/technical-design-0.5.2.md#5-实施顺序与验收)。历史 Archery 运行范围见 [0.1.1 运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
 
 ## 当前开发功能
 
@@ -16,7 +16,7 @@
 - **Redis**：单节点 DB 选择，SCAN 增量浏览与 pattern／type 过滤；key 列表和分段树通过“加载更多”累积已加载项，明确扫描完成、失败或预算受限，不使用 key 页码。String、Hash、List、Set、ZSet 的查看与编辑；内容及身份替换冻结共同 WATCH 基线，拒绝碰撞，保留 TTL／field 期限与 ZSet score，首错停止并报告已生效及未确认项。
 - **批量查找替换**：MySQL 支持选中行、当前页和当前筛选范围，Redis 支持已选 key 的内容与 key／field／member 身份。文本和正则预览可逐项排除；提交只处理准备时冻结的目标，收集失败不能提交前缀。
 - **高级值与文件**：Text／Hex／JSON／XML 编辑、校验与受控格式化，PNG／JPEG／GIF／WebP 首帧和 SVG 静态预览；单值按真实字节导入导出。GUI／终端外部编辑器使用 argv 启动，显式读取修改后回填草稿，数据库提交仍须另行确认。遗留编辑文件可在设置中发现、导出和清理。
-- **查询与命令**：执行全文、选区或当前 SQL，SQL 高亮、行号和逐语句执行，普通 `EXPLAIN FORMAT=JSON`、纯 Rust 选区格式化及撤销。MySQL 查询提供关键词、函数和真实目录的光标旁候选，支持键盘、点击与一次撤销；CTE／派生表不推导字段，Archery 目录受平台权限和完整性限制。首次执行前隐藏结果面板，保留执行状态、取消／停止等待、结果、错误、历史和查询文件。
+- **查询与命令**：执行全文或当前 SQL，支持 SQL 高亮、行号和逐语句执行，以及当前语句的普通 `EXPLAIN FORMAT=JSON`。原生编辑支持宿主的点击定位、拖选、复制、剪切、粘贴和撤销。MySQL 关键词、函数和目录补全显示为建议。首次执行前隐藏结果区，保留执行状态、取消、结果、错误、历史和查询文件。
 - **数据 grid**：MySQL 列宽按当前页内容与可用空间自适应，自动列宽上限 480px，原位编辑期间保持列宽；支持手动列宽、隐藏／冻结列、单格与 Shift 矩形选择、行号单选和 Shift 连选，以及按 UI 系统使用 Command／Ctrl 增选。支持单元格／矩形选区和选中行复制、MySQL 基表 INSERT 复制、原位文本编辑和长值／JSON／NULL 编辑，直接预览真实变更 SQL／Redis 命令、有序参数、撤销、丢弃及冲突反馈。
 - **数据交换与迁移**：多文件 CSV／类型化 JSON 导入导出，映射、转换与准备预览；MySQL 多表直接迁移支持库表列映射、条件及结构比较，Redis 迁移支持五种基础类型、前缀映射与绝对到期时间。任务按批流式处理，报告完成、失败和未发送等状态；不承诺跨 key 回滚或重启后自动续传。
 - **SQL 备份与恢复**：MySQL 逻辑导出／恢复支持表、数据、视图、触发器、存储过程、函数和事件，恢复前预览并确认；SQL 文件兼容范围及权限取决于对象与目标数据库，DDL 不承诺整批回滚。
@@ -39,20 +39,24 @@ TLS 启用后校验证书链和主机身份。部分旧 MySQL 5.7／OpenSSL 构�
 
 从 [最新正式 Release](https://github.com/huspx/datapier/releases/latest) 下载该版本的 `datapier-plugin-<版本>.zip`，解压后在解压目录执行 `tern plugin install ./datapier`，然后在 Tern 命令面板选择 `New Datapier block`。该 plugin 自动下载并校验对应版本的程序；尚未公开的候选版本按[贡献指南](CONTRIBUTING.md#开发环境)构建和运行。
 
-plugin 默认检查正式版本并提示；自动下载和退出后自动安装默认关闭。macOS 实现了满足退出、锁和备份条件后的安装切换；非 macOS 拒绝自动切换，须手工安装。linked 或 `DATAPIER_BINARY` 开发安装不会自动覆盖。首次从 0.4 升级须先退出旧客户端和 Engine、手工备份数据目录，再安装目标 plugin；细节见[插件更新](RELEASING.md#插件更新)。
+plugin 默认检查正式版本并提示。自动下载和退出后自动安装默认关闭，macOS 支持自动切换。使用固定 MCP 入口时，通过 `datapier plugin-switch` 手工更新或回滚。开发安装由用户自行维护。从 0.4 首次升级应先退出旧客户端和 Engine，备份数据目录。 [插件更新](RELEASING.md#插件更新)
 
 更新设置分别显示插件包和程序归档的实际下载进度，校验通过后显示已准备。待办 Widget 可直接进入待审批或待认证；项目文档支持只读并排预览和标题定位，文本变更可用原生 Diff 查看。
 
-需要独立运行时，取得与操作系统和架构匹配的二进制归档后手工解包。以下以 0.5.1 Unix tar.gz 归档为例；Windows 使用对应 zip 与 `datapier.exe`：
+需要独立运行时，取得与系统和架构匹配的二进制归档后解包。以下以 0.5.2 的 Unix 归档为例。Windows 使用对应 zip 中的 `datapier.exe`。
 
 ```sh
-tar -xzf /absolute/path/to/datapier-0.5.1-TARGET.tar.gz -C /absolute/path/to/install-directory
+tar -xzf /absolute/path/to/datapier-0.5.2-TARGET.tar.gz -C /absolute/path/to/install-directory
 /absolute/path/to/install-directory/datapier tui
 ```
 
 在 TUI 中配置连接和认证；需要 Tern 工作台时，可运行 `tern -e /absolute/path/to/install-directory/datapier tsp`。开发构建和 plugin 启动见[贡献指南](CONTRIBUTING.md#开发环境)。
 
-支持 stdio 的 MCP 客户端可按其配置格式加入下例，将路径和连接 UUID 替换为实际值；省略 `--allow-connection` 时使用保存的可见范围，指定时只能进一步收窄范围：
+### 外部 Agent 的 MCP 配置
+
+已安装正式 Tern plugin 时，在命令面板选择 **安装 Datapier 命令行入口**。命令会复制当前用户的固定可执行路径。macOS／Linux 使用 `~/.local/bin/datapier`，Windows 使用 `%LOCALAPPDATA%\Datapier\bin\datapier.exe`。把展开后的绝对路径填入客户端的 `command`。固定入口使用创建时登记的数据目录，无需配置 `PATH`。独立安装也可以使用自行维护的固定绝对路径，若要共享工作台配置，在客户端 `env` 中设置同一个 `DATAPIER_DATA_DIR`。
+
+将下例的路径和可选连接 UUID 替换为实际值。省略 `--allow-connection` 时使用已保存的可见范围，指定时只能进一步收窄范围。
 
 ```json
 {
@@ -65,7 +69,23 @@ tar -xzf /absolute/path/to/datapier-0.5.1-TARGET.tar.gz -C /absolute/path/to/ins
 }
 ```
 
-连接 ID 可通过 MCP 的连接发现工具获取；秘密通过 TUI／TSP 配置，不写入客户端配置。MCP stdout 专用于协议通信。
+连接 ID 可通过 MCP 的连接发现工具获取。数据库凭据通过 TUI／TSP 配置，MCP stdout 专用于协议通信。
+
+- **直接运行 omp**。在会话执行 `/mcp add`，选择 User 作用域。默认 profile 使用 `~/.omp/agent/mcp.json`，命名 profile 使用 `~/.omp/profiles/<name>/agent/mcp.json`。手工编辑配置后执行 `/mcp reload`。用 `/mcp list` 核对条目来源和状态，再用 `/mcp test datapier` 验证连接与工具。 [omp MCP](https://omp.sh/docs/mcp)
+- **由 Tern 托管 omp ACP**。Tern 在本机 Host 的 `agents.mcp` 设置登记 Datapier，可限制适用 Agent。注册自定义 Agent，例如 `omp-acp`，命令填 omp 的绝对路径，参数填 `acp`。在项目目录运行 `tern acp omp-acp` 开启新会话。Tern 登记与独立 stdio 握手已有运行证据，Datapier 经 ACP 转发给 omp 仍待端到端验证。 [Tern 受管配置](docs/technical-design-0.5.0.md#5-功能2tern-mcp-自动注册) · [omp ACP](https://omp.sh/docs/acp#mcp-and-editor-capabilities)
+
+已有外部客户端直接引用 `${DATAPIER_CACHE_DIR}` 下的版本化程序时，先安装固定入口，再将 `command` 换成该入口的绝对路径。保持 `mcp` 参数和所需的连接范围，重载客户端后重新验证连接。
+
+### 本机数据与自动写入
+
+| 位置 | 默认路径与写入时机 |
+|---|---|
+| 主数据目录 | macOS `~/Library/Application Support/datapier/`，Linux `${XDG_DATA_HOME:-$HOME/.local/share}/datapier/`，Windows `%LOCALAPPDATA%\datapier\data\`。直接启动时可用 `--data-dir` 或 `DATAPIER_DATA_DIR` 覆盖，固定 MCP 入口使用登记的数据目录。Engine 启动后写入 SQLite、锁和运行信息，并自动保存工作区、草稿及执行记录。项目暂存、表编辑文件和传输索引按操作产生。 |
+| 程序缓存 | macOS／Linux `${XDG_CACHE_HOME:-$HOME/.cache}/datapier/`，Windows `%LOCALAPPDATA%\Datapier\cache\`，可用 `DATAPIER_CACHE_DIR` 覆盖。Tern 插件在准备对应版本时写入校验后的程序，开发安装写入 `dev-*`。 |
+| Tern 配置与插件状态 | `TERN_CONFIG_DIR` 可覆盖 Tern 配置根，macOS 默认 `~/Library/Application Support/Tern/`。插件在 `plugin-data/datapier/` 保存状态及受管 launcher，并登记 `settings.json` 中的受管 MCP 条目。受管更新还会写入暂存与备份，并替换 `plugins/datapier/`。 |
+| 凭据、IPC 与固定命令 | 已保存的密码和 TOTP 使用系统凭据库。Unix IPC 使用 `/tmp/datapier-<uid>/` 下的 socket，Windows 使用 Named Pipe。显式安装固定命令时写入 launcher 和安装登记。 |
+
+早期版本留在主数据目录的 `cache.sqlite3` 和 `values/` 可在 TUI 中预览和清理。查询文件、项目保存及导出写到操作中指定的路径。更新回收范围和回滚材料见[发布指南](RELEASING.md#插件更新)。
 
 ## 操作演示
 
@@ -86,8 +106,8 @@ tar -xzf /absolute/path/to/datapier-0.5.1-TARGET.tar.gz -C /absolute/path/to/ins
   直连批次可跨 DB：记录保留批次开始的 DB，每项结果与复制日志标记对应命令执行时的 DB；失败时显示最后确认的命令 DB，连接失效时当前输入目标显示未知。
 - **退出**：点击侧栏底部退出入口或按 `Ctrl+Q`，保存工作区后返回 shell；待提交变更保留为草稿，保存失败时留在工作台。设置、快捷键帮助和退出在展开导航中显示左对齐的图标与文字，窄轨中图标居中。
 - **连接失败**：错误条提供“重试连接”和“连接设置”。MySQL 5.7 等实例启用 `require_secure_transport` 后，3159 错误另提供“启用 TLS”：打开并勾选连接表单，按证书配置填写 CA，保存后重新打开连接。表单测试失败保留输入，CA／身份校验失败保留原始原因。
-- **认证与写入**：首次打开 Archery 连接需要登录时，登录成功自动续接原连接请求一次；已失败的 SQL／Redis 命令需手动重试。MySQL 启用 TLS 时校验证书链和主机身份；结构化写入使用严格模式并检查字符列长度，避免静默截断。CALL 未消费终态时若结果处理或解码失败，结果标为待确认并保留诊断。
-- **SQL 选区与执行计划**：通过 Shift＋方向键／Home／End、全选维护应用自己的 UTF-16 选区；Command／Ctrl＋Enter 执行选区或当前语句，追加 Shift 执行全文。工具栏“查看执行计划”优先使用选区，否则使用当前语句，只发送普通 `EXPLAIN FORMAT=JSON`。宿主协议不报告可用于执行的鼠标拖选范围，查询高级操作使用键盘选区；表单和数据编辑保留 native editing。剪切等待宿主确认剪贴板写入后才删除文本。
+- **认证与写入**：Engine 冷启动后首次打开已有 Archery 连接时，工作台先尝试使用已保存的密码，登录成功后续接原连接请求一次。需要人工补充时显示密码或验证码步骤。已失败的 SQL／Redis 命令需手动重试。MySQL 启用 TLS 时校验证书链和主机身份。结构化写入使用严格模式并检查字符列长度，避免静默截断。CALL 未消费终态时若结果处理或解码失败，结果标为待确认并保留诊断。
+- **SQL 编辑和执行计划**：首次点击可能只聚焦。聚焦后点击移动光标，拖选由宿主管理。Command／Ctrl＋Enter 执行最后同步光标所在语句，`F5` 执行全文。可用行号按钮直接执行指定语句。「查看执行计划」对最后同步光标所在语句发送普通 `EXPLAIN FORMAT=JSON`。Archery 检查使用全文。选区执行、选区格式化和写入补全暂不可用。
 - **品牌入口**：应用侧栏显示自绘 Datapier SVG；Tern plugin 和命令面板使用内置 `database` 图标。
 - **快捷键**：点击设置与退出之间的键盘图标打开帮助，键位随 UI 平台显示 Command／Ctrl。完整绑定和系统辅助键适配边界见[设计说明](docs/ui-redesign.md#快捷键与系统适配)。macOS 标签关闭按钮在名称左侧，Windows／Linux 在右侧；网格撤销支持 Command／Ctrl+Z。
 - **批量关闭标签**：右击标签可关闭其左侧、右侧或全部标签；以右击目标的位置为准，整批检查草稿和任务。关闭全部后保留零标签空态，可新建查询或选择连接，重开工作区保持该状态。
@@ -123,7 +143,7 @@ flowchart LR
 
 六个 crate 分别承担 CLI 分派（`datapier`）、数据库语义（`datapier-core`）、共享进程与 IPC（`datapier-engine`）、Tern 工作台（`datapier-tsp`）、普通终端配置（`datapier-tui`）和 MCP 适配（`datapier-mcp`）。macOS／Linux 使用 Unix domain socket，Windows 使用 Named Pipe；Tern 原生渲染 TSP 界面。
 
-主要技术栈为 Rust 1.100.0／edition 2024、Tokio、Serde、官方 `tern-sdk`、SQLx、redis-rs、SQLite、keyring、sqlparser-rs 和 sqlformat；当前依赖版本与工具要求见[贡献指南](CONTRIBUTING.md#开发环境)。原生格式化直接链接 Rust 库，不启动 Node、JavaScript runtime 或 WebView；数据库 provider 首期随 Engine 编译发布，PostgreSQL、MongoDB 属于后续扩展方向。
+主要技术栈为 Rust 1.100.0／edition 2024、Tokio、Serde、官方 `tern-sdk`、SQLx、redis-rs、SQLite、keyring 和 sqlparser-rs。数据库 provider 随 Engine 编译发布，PostgreSQL、MongoDB 属于后续扩展方向。 [开发环境](CONTRIBUTING.md#开发环境)
 
 数据处理遵循类型保真、增量读取和显式提交：大整数与精确小数保持精度，二进制可逆传输，Redis 修改默认保留 TTL；写入结果无法确认时记录待确认状态，不自动重放。
 
@@ -144,6 +164,7 @@ flowchart LR
 | 0.4.0 | 数据交换、结构与数据迁移、SQL 备份恢复及 Git 项目 |
 | 0.5.0 | SQL 上下文补全、Tern MCP 自动登记、本机项目／环境与 MCP 资源推荐、plugin 更新及 O1—O23 Tern 集成优化 |
 | 0.5.1 | Tern Files 项目入口、查询路径隔离、原生路径选择与鼠标反馈 |
+| 0.5.2 | SQL 原生编辑、Files 项目列表修复、外部 MCP 固定入口 |
 
 后续版本尚未承诺发布日期；PostgreSQL／MongoDB 暂未绑定交付版本。
 
@@ -166,7 +187,7 @@ flowchart LR
 
 本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。
 
-当前候选的验收标准及运行范围见 [0.5.1 技术方案](docs/technical-design-0.5.1.md#5-验收矩阵)。发布门禁见 [发布指南](RELEASING.md#发布前检查)。
+当前候选的验收标准及运行范围见 [0.5.2 技术方案](docs/technical-design-0.5.2.md#5-实施顺序与验收)。发布门禁见 [发布指南](RELEASING.md#发布前检查)。
 
 ## 许可证
 

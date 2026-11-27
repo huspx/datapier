@@ -441,12 +441,7 @@ impl App {
                 self.status = i18n::UiMessage::key("该 tab 已有正在执行的任务");
                 return true;
             }
-            let query = &self.tabs[self.active].query;
-            let text = query
-                .selected_text()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(&query.text)
-                .to_owned();
+            let text = self.tabs[self.active].query.text.clone();
             if text.trim().is_empty() {
                 self.status = i18n::UiMessage::key("没有可执行的文本");
                 return true;

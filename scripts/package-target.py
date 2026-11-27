@@ -33,6 +33,10 @@ def main():
   binary = ROOT / "target" / args.target / "release" / name
   if not binary.is_file():
     raise FileNotFoundError(f"Missing built binary: {binary}")
+  launcher_name = "datapier-launcher.exe" if windows else "datapier-launcher"
+  launcher = binary.with_name(launcher_name)
+  if not launcher.is_file():
+    raise FileNotFoundError(f"Missing built launcher: {launcher}")
   result = subprocess.run(
     [str(binary), "--version"], capture_output=True, text=True, check=False
   )
@@ -48,11 +52,13 @@ def main():
         output / f"{stem}.zip", "w", compression=zipfile.ZIP_DEFLATED
       ) as archive:
         archive.write(packaged, name)
+        archive.write(launcher, "datapier-launcher.exe")
     else:
       with tarfile.open(
         output / f"{stem}.tar.gz", "w:gz", format=tarfile.PAX_FORMAT
       ) as archive:
         archive.add(packaged, arcname=name, recursive=False)
+        archive.add(launcher, arcname=launcher_name, recursive=False)
 
 
 if __name__ == "__main__":

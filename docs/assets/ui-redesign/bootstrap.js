@@ -16,9 +16,11 @@ function captureLanguageInputs() {
   const input = $('#sql-query'), tab = queryTab();
   if (input && tab) {
     tab.sql = input.value;
-    tab.sqlStart = input.selectionStart;
-    tab.sqlEnd = input.selectionEnd;
-    tab.sqlDirection = input.selectionDirection;
+    if (input.selectionStart === input.selectionEnd) {
+      tab.sqlStart = input.selectionStart;
+      tab.sqlEnd = input.selectionEnd;
+      tab.sqlDirection = input.selectionDirection;
+    }
   }
   if (state.connectionForm) {
     document.querySelectorAll('[data-connection-field]').forEach(field => {
@@ -31,9 +33,11 @@ function captureLanguageInputs() {
         state.connectionForm.selectedDatabases.add(
           choice.dataset.databaseChoice,
         );
-      } else {state.connectionForm.selectedDatabases.delete(
+      } else {
+        state.connectionForm.selectedDatabases.delete(
           choice.dataset.databaseChoice,
-        );}
+        );
+      }
     });
   }
   for (

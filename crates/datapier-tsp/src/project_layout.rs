@@ -633,9 +633,9 @@ mod tests;
 
 impl App {
     pub(super) fn project_split_editor_key(&self) -> Option<String> {
-        let id = self.tabs.get(self.active)?.id;
+        self.tabs.get(self.active)?;
         if self.view == "query" && !self.browse_result && active_group(self).is_some() {
-            Some(format!("project-query-{id}"))
+            Some(self.sql_editor_key(self.active, true))
         } else {
             None
         }

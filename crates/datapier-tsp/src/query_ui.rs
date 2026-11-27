@@ -144,18 +144,10 @@ fn plan_text(
     query: &editor::Editor,
     context: editor::SqlContext,
 ) -> std::result::Result<&str, String> {
-    let selected = query.selected_text();
-    if query.anchor != query.cursor && selected.is_none() {
-        return Err("光标不在有效的 UTF-16 字符边界".into());
-    }
-    let target = if let Some(text) = selected.filter(|text| !text.trim().is_empty()) {
-        text
-    } else {
-        let range = editor::current_statement_in(&query.text, query.cursor, context)?;
-        let start = editor::utf16_to_byte(&query.text, range.start).ok_or("无效的语句范围")?;
-        let end = editor::utf16_to_byte(&query.text, range.end).ok_or("无效的语句范围")?;
-        &query.text[start..end]
-    };
+    let range = editor::current_statement_in(&query.text, query.cursor, context)?;
+    let start = editor::utf16_to_byte(&query.text, range.start).ok_or("无效的语句范围")?;
+    let end = editor::utf16_to_byte(&query.text, range.end).ok_or("无效的语句范围")?;
+    let target = &query.text[start..end];
     editor::validate_explain_selection_in(target, context)?;
     Ok(target)
 }
@@ -190,17 +182,9 @@ impl App {
     }
 }
 pub(super) fn toolbar(app: &App) -> Node<Msg> {
-    let selected = app.tabs[app.active]
-        .query
-        .selected_text()
-        .is_some_and(|text| !text.trim().is_empty());
-    let mut selection =
-        ui::button(tr("执行选区").into_owned()).on_click(Msg::Action("selection".into()));
-    if !selected {
-        selection = selection.disabled(tr("没有有效的 SQL 选区").into_owned());
-    }
-    let mut plan =
-        ui::button(tr("查看执行计划").into_owned()).on_click(Msg::Action("query-plan".into()));
+    let mut plan = ui::button(tr("查看执行计划").into_owned())
+        .title(tr("使用最后同步的光标；首次点击可能只聚焦，拖选可能保留上次位置").into_owned())
+        .on_click(Msg::Action("query-plan".into()));
     if let Err(reason) = plan_request(app) {
         plan = plan.disabled(tr(&reason).into_owned());
     }
@@ -227,9 +211,6 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
     let enabled = (app.session_id().is_some() || app.project_layout_can_execute())
         && !app.operation_pending
         && app.task.is_none();
-    if !enabled {
-        selection = selection.disabled(true);
-    }
     let mut toolbar = html::div()
         .class("toolbar query-toolbar")
         .child(
@@ -239,15 +220,13 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
                 .disabled(!enabled)
                 .on_click(Msg::Action("run".into())),
         )
-        .child(selection)
         .child(
             ui::button(tr("当前语句").into_owned())
+                .title(
+                    tr("使用最后同步的光标；首次点击可能只聚焦，拖选可能保留上次位置").into_owned(),
+                )
                 .disabled(!enabled)
                 .on_click(Msg::Action("current".into())),
-        )
-        .child(
-            ui::button(tr("SQL 补全").into_owned())
-                .on_click(Msg::Action("query-completion".into())),
         )
         .child(plan);
     if archery
@@ -256,7 +235,7 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
             .as_ref()
             .is_some_and(|profile| profile.capabilities().sql_check.is_supported())
     {
-        let label = tr("检查上线 SQL（不执行）").into_owned();
+        let label = tr("检查全文（不执行）").into_owned();
         toolbar = toolbar.child(
             html::button("")
                 .class("query-check-icon")
@@ -298,7 +277,6 @@ pub(super) fn toolbar(app: &App) -> Node<Msg> {
 /// 原生编辑器和行号共用外层滚动容器；编辑器本身不设置行数上限。
 pub(super) fn panel(app: &App) -> Node<Msg> {
     let query = &app.tabs[app.active].query;
-    let selected = query.selected_text().filter(|text| !text.trim().is_empty());
     let statements = if query.text.trim().is_empty() {
         Ok(Vec::new())
     } else {
@@ -338,99 +316,20 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         }
         gutter = gutter.child(row);
     }
-    let mut input = ui::editor()
+    let name = app.sql_editor_name(app.active);
+    let focus_name = name.clone();
+    let undo_name = name.clone();
+    let input = ui::editor()
         .aria(tr("SQL 查询").into_owned())
-        .key("query-editor")
+        .key(app.sql_editor_key(app.active, false))
         .text(query.text.clone())
         .cursor(query.cursor)
-        .anchor(query.anchor)
+        .anchor(query.cursor)
         .lang("sql")
-        .mode("insert")
         .prop("nowrap", true)
-        .on_focus(Msg::Focus("query".into()))
-        .on_undo(Msg::Undo("query".into()))
-        .on_edit(|e| {
-            Msg::Edit(
-                "query".into(),
-                e.from,
-                e.to,
-                e.text.clone(),
-                e.cursor,
-                e.len,
-            )
-        });
-    if let Some(text) = selected {
-        let tab = app.tabs[app.active].id;
-        let anchor = query.anchor;
-        let cursor = query.cursor;
-        let expected = text.to_owned();
-        let mut actions = ui::Actions::new().menu(
-            ui::MenuItem::new("query-selection", tr("执行选中 SQL").into_owned()).icon("play"),
-        );
-        if let Ok(context) = app.sql_context() {
-            if editor::validate_explain_selection_in(text, context).is_ok() {
-                actions = actions.menu(
-                    ui::MenuItem::new("query-explain", tr("查看执行计划").into_owned())
-                        .icon("chart"),
-                );
-            }
-            actions = actions.menu(
-                ui::MenuItem::new("query-format", tr("格式化选区").into_owned()).icon("wand"),
-            );
-        }
-        actions = actions
-            .menu(ui::MenuEntry::Separator)
-            .menu(ui::MenuItem::new("query-copy", tr("复制").into_owned()).icon("copy"))
-            .menu(ui::MenuItem::new("query-cut", tr("剪切").into_owned()).icon("scissors"))
-            .menu(ui::MenuItem::new("query-select-all", tr("全选").into_owned()).icon("selection"));
-        input = input
-            .actions(actions)
-            .on_action(
-                "query-selection",
-                Msg::QueryMenu(
-                    tab,
-                    "query-selection".into(),
-                    anchor,
-                    cursor,
-                    expected.clone(),
-                ),
-            )
-            .on_action(
-                "query-explain",
-                Msg::QueryMenu(
-                    tab,
-                    "query-explain".into(),
-                    anchor,
-                    cursor,
-                    expected.clone(),
-                ),
-            )
-            .on_action(
-                "query-format",
-                Msg::QueryMenu(tab, "query-format".into(), anchor, cursor, expected.clone()),
-            )
-            .on_action("query-copy", Msg::CopyText(expected.clone()))
-            .on_action(
-                "query-cut",
-                Msg::QueryCut(
-                    tab,
-                    expected.clone(),
-                    query.selection().start,
-                    query.selection().end,
-                ),
-            )
-            .on_action(
-                "query-select-all",
-                Msg::QueryMenu(tab, "query-select-all".into(), anchor, cursor, expected),
-            );
-    } else {
-        input = input
-            .actions(ui::Actions::new().menu(ui::MenuItem::new(
-                "query-completion",
-                tr("SQL 补全").into_owned(),
-            )))
-            .on_action("query-completion", Msg::Action("query-completion".into()));
-    }
+        .on_focus(Msg::Focus(focus_name))
+        .on_undo(Msg::Undo(undo_name))
+        .on_edit(move |e| Msg::Edit(name.clone(), e.from, e.to, e.text.clone(), e.cursor, e.len));
     let mut panel = html::div().class("sql-editor");
     if let Err(reason) = statements {
         panel = panel.child(
@@ -440,43 +339,13 @@ pub(super) fn panel(app: &App) -> Node<Msg> {
         );
     }
     panel = panel.child(html::div().class("query-scroll").child(gutter).child(input));
+    if let Some(suggestions) = crate::completion::suggestions(app) {
+        panel = panel.child(suggestions);
+    }
     panel.into()
 }
 
-fn restore_menu_selection(
-    query: &mut editor::Editor,
-    anchor: usize,
-    cursor: usize,
-    expected: &str,
-) -> bool {
-    let actual = editor::utf16_to_byte(&query.text, anchor.min(cursor))
-        .zip(editor::utf16_to_byte(&query.text, anchor.max(cursor)))
-        .and_then(|(a, b)| query.text.get(a..b));
-    actual == Some(expected) && query.set_selection(anchor, cursor)
-}
-
 impl App {
-    /// 右键菜单使用打开前的 UTF-16 选区，若文本已变化则拒绝过期操作。
-    pub(super) fn query_menu(
-        &mut self,
-        tab: Uuid,
-        name: &str,
-        start: usize,
-        end: usize,
-        expected: &str,
-        backend: &Backend,
-    ) {
-        if self.tabs[self.active].id != tab {
-            return;
-        }
-        let query = &mut self.tabs[self.active].query;
-        if !restore_menu_selection(query, start, end, expected) {
-            self.status = UiMessage::key("SQL 选区已变化，请重新选择");
-            return;
-        }
-        self.query_action(name, backend);
-    }
-
     /// 处理 SQL 编辑器专属操作；执行统一经过应用已有数据库路径。
     pub(super) fn query_action(&mut self, name: &str, backend: &Backend) -> bool {
         if let Some(index) = name
@@ -512,48 +381,6 @@ impl App {
                     Ok(text) => self.execute_query_text(text, backend),
                     Err(reason) => self.status = UiMessage::local(reason),
                 }
-                true
-            }
-            "query-selection" | "query-explain" | "query-format" => {
-                let query = &self.tabs[self.active].query;
-                let Some(text) = query
-                    .selected_text()
-                    .filter(|text| !text.trim().is_empty())
-                    .map(str::to_owned)
-                else {
-                    self.status = UiMessage::key("没有有效的 SQL 选区");
-                    return true;
-                };
-                if name == "query-selection" {
-                    self.execute_query_text(text, backend);
-                    return true;
-                }
-                let result = self.sql_context().and_then(|context| {
-                    if name == "query-explain" {
-                        editor::explain_selection_in(&text, context)
-                    } else {
-                        editor::format_range_in(&query.text, query.selection(), context)
-                    }
-                });
-                match result {
-                    Ok(text) if name == "query-explain" => self.execute_query_text(text, backend),
-                    Ok(text) => {
-                        let query = &mut self.tabs[self.active].query;
-                        let range = query.selection();
-                        if query.edit(range, &text) {
-                            self.changed_field("query");
-                        }
-                    }
-                    Err(reason) => self.status = UiMessage::local(reason),
-                }
-                true
-            }
-            "query-select-all" => {
-                self.tabs[self.active]
-                    .query
-                    .key(editor::Key::SelectAll, false);
-                self.focus = "query".into();
-                self.workbench.focus_request = Some("query-editor".into());
                 true
             }
             _ => false,

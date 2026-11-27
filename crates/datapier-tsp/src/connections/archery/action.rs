@@ -119,6 +119,7 @@ impl App {
         }
         if action == "archery-cancel-auth" {
             self.archery.open_continuation = None;
+            self.archery.auto_open_auth = false;
             if self.archery.pending.as_ref().is_some_and(|(_, method)| {
                 matches!(
                     method.as_str(),
@@ -126,6 +127,7 @@ impl App {
                         | "archery.auth.verify"
                         | "archery.instances"
                         | "archery.databases"
+                        | "archery.server.list"
                 )
             }) {
                 self.archery_release(backend);
@@ -152,7 +154,9 @@ impl App {
                             | "archery.auth.verify"
                             | "archery.instances"
                             | "archery.databases"
-                    )
+                    ) || (action == "archery-auth-back"
+                        && method == "archery.server.list"
+                        && self.archery.auto_open_auth)
                 })
             {
                 let password = self.field("password").to_owned();
@@ -227,6 +231,7 @@ impl App {
             }
             "archery-auth-back" => {
                 self.archery.open_continuation = None;
+                self.archery.auto_open_auth = false;
                 let password = self.field("password").to_owned();
                 let otp = self.field("archery_otp").to_owned();
                 self.archery.save_after_auth = false;

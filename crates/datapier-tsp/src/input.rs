@@ -2,6 +2,53 @@
 use super::*;
 
 impl App {
+    pub(super) fn sql_editor_key(&self, index: usize, split: bool) -> String {
+        let tab = &self.tabs[index];
+        let (identity, revision) = tab.query.identity();
+        let prefix = if split {
+            "project-query"
+        } else {
+            "query-editor"
+        };
+        format!("{prefix}-{}-{identity}-{revision}", tab.id)
+    }
+
+    pub(super) fn sql_editor_name(&self, index: usize) -> String {
+        let tab = &self.tabs[index];
+        let (identity, revision) = tab.query.identity();
+        format!("sql-query:{}:{identity}:{revision}", tab.id)
+    }
+
+    pub(super) fn resolve_sql_editor(&mut self, name: String, focus: bool) -> Option<String> {
+        let Some(value) = name.strip_prefix("sql-query:") else {
+            return self.resolve_project_editor(name);
+        };
+        let mut parts = value.split(':');
+        let id = Uuid::parse_str(parts.next()?).ok()?;
+        let identity = Uuid::parse_str(parts.next()?).ok()?;
+        let revision = parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some()
+            || self.browse_result
+            || (self.view != "query" && self.target.is_some())
+        {
+            return None;
+        }
+        let index = self.tabs.iter().position(|tab| tab.id == id)?;
+        if self.tabs[index].query.identity() != (identity, revision) {
+            return None;
+        }
+        if !focus && (index != self.active || self.focus != "query") {
+            return None;
+        }
+        if self.project_split_editor_key().is_some() {
+            self.resolve_project_editor(format!("project-query:{id}"))
+        } else if index == self.active {
+            Some("query".into())
+        } else {
+            None
+        }
+    }
+
     pub(super) fn redis_operation(&self) -> std::result::Result<Value, i18n::UiMessage> {
         use base64::Engine as _;
         let value = |name: &str| -> std::result::Result<Value, i18n::UiMessage> {
@@ -117,13 +164,13 @@ impl App {
     pub(super) fn dispatch_guarded_editor_message(&mut self, message: Msg, backend: &Backend) {
         let message = match message {
             Msg::Edit(name, from, to, text, cursor, len) => {
-                let Some(name) = self.resolve_project_editor(name) else {
+                let Some(name) = self.resolve_sql_editor(name, false) else {
                     return;
                 };
                 Msg::Edit(name, from, to, text, cursor, len)
             }
             Msg::Undo(name) => {
-                let Some(name) = self.resolve_project_editor(name) else {
+                let Some(name) = self.resolve_sql_editor(name, false) else {
                     return;
                 };
                 Msg::Undo(name)
@@ -167,9 +214,8 @@ impl App {
             Msg::Edit(name, from, to, text, cursor, len) if self.modal_allows_field(&name) => {
                 if let Some(ed) = self.editor(&name)
                     && ed.text.encode_utf16().count() == len
-                    && ed.edit(from..to, &text)
+                    && ed.native_edit(from..to, &text, cursor)
                 {
-                    ed.set_selection(cursor, cursor);
                     if from != to || !text.is_empty() {
                         self.changed_field(&name);
                     } else {
@@ -254,7 +300,10 @@ impl App {
             self.focus = field.into();
         } else if key == "query-editor" {
             self.focus = "query".into();
-            return Some(self.project_split_editor_key().unwrap_or(key));
+            return Some(
+                self.project_split_editor_key()
+                    .unwrap_or_else(|| self.sql_editor_key(self.active, false)),
+            );
         } else if key == "cell-editor" {
             self.focus = "cell".into();
         } else if key == "grid" {

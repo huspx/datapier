@@ -51,6 +51,7 @@ pub(crate) struct Wizard {
     pub return_overlay: Option<String>,
     pub(crate) open_capture: Option<OpenContinuation>,
     pub(crate) open_continuation: Option<OpenContinuation>,
+    pub(crate) auto_open_auth: bool,
     pub(crate) connection_auth_error: Option<(Uuid, u64, Uuid)>,
     pub deferred_delete: bool,
 }

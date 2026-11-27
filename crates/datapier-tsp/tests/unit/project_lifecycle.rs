@@ -832,3 +832,144 @@ fn project_dialog_close_requires_confirmation_after_edit() {
     assert!(app.workbench.overlay.is_none());
     assert!(app.workbench.project.local_form.is_empty());
 }
+
+#[test]
+fn files_navigation_lists_before_resolving_and_retries_failed_list() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("files-navigation".into());
+    app.project_navigate_path(&backend, "localhost", "/repo");
+    let list = requests.try_recv().unwrap();
+    assert_eq!(list.method, "local_project.list");
+    assert!(requests.try_recv().is_err());
+    app.project_response(
+        list.tag.split(':').next_back().unwrap(),
+        &Err(AppError::new("io", "list failed")),
+        &backend,
+    );
+    assert!(app.workbench.project.local_error.is_some());
+    app.project_action("project-local-refresh", &backend);
+    let retry = requests.try_recv().unwrap();
+    assert_ne!(list.tag, retry.tag);
+    app.project_response(
+        retry.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"projects":[{"id":"one","name":"one"}]})),
+        &backend,
+    );
+    assert!(app.workbench.project.local_project.is_none());
+    let resolve = requests.try_recv().unwrap();
+    assert_eq!(resolve.method, "local_project.resolve");
+    assert_eq!(resolve.params, json!({"host":"localhost","path":"/repo"}));
+    app.project_response(
+        resolve.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"status":"matched","project":{"id":"one","name":"one","environments":[]}})),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench.project.local_project.as_ref().unwrap()["id"],
+        "one"
+    );
+}
+
+#[test]
+fn files_navigation_replaces_stale_requests_and_rejects_missing_match() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("files-navigation-race".into());
+    app.project_navigate_path(&backend, "localhost", "/old");
+    let old = requests.try_recv().unwrap();
+    let tab = app.tabs[app.active].id;
+    app.project_navigate_path(&backend, "localhost", "/new");
+    let current = requests.try_recv().unwrap();
+    assert_eq!(app.tabs[app.active].id, tab);
+    app.project_response(
+        old.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"projects":[{"id":"old"}]})),
+        &backend,
+    );
+    assert!(requests.try_recv().is_err());
+    app.project_response(
+        current.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"projects":[]})),
+        &backend,
+    );
+    let resolve = requests.try_recv().unwrap();
+    assert_eq!(resolve.params["path"], "/new");
+    app.project_response(
+        resolve.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"status":"matched","project":{"id":"new"}})),
+        &backend,
+    );
+    assert!(app.workbench.project.local_project.is_none());
+    assert!(app.workbench.project.local_error.is_some());
+    app.project_action("project-local-refresh", &backend);
+    let refresh = requests.try_recv().unwrap();
+    app.project_response(
+        refresh.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"projects":[{"id":"new"}]})),
+        &backend,
+    );
+    assert_eq!(requests.try_recv().unwrap().params["path"], "/new");
+}
+
+#[test]
+fn files_unassociated_keeps_list_available_for_manual_selection() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("files-unassociated".into());
+    app.project_navigate_path(&backend, "localhost", "/repo");
+    let list = requests.try_recv().unwrap();
+    app.project_response(
+        list.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"projects":[{"id":"one","name":"one"}]})),
+        &backend,
+    );
+    let resolve = requests.try_recv().unwrap();
+    app.project_response(
+        resolve.tag.split(':').next_back().unwrap(),
+        &Ok(json!({"status":"unassociated"})),
+        &backend,
+    );
+    assert!(app.workbench.project.local_project.is_none());
+    assert_eq!(app.workbench.project.local_projects.len(), 1);
+    assert!(app.workbench.project.local_error.is_some());
+    app.project_action("project-local-select:0", &backend);
+    assert_eq!(requests.try_recv().unwrap().method, "local_project.get");
+    assert!(app.workbench.project.local_navigation.is_none());
+}
+
+#[test]
+fn files_background_responses_keep_visible_tab_and_its_status() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("files-background".into());
+    app.project_navigate_path(&backend, "localhost", "/repo");
+    let project_tab = app.tabs[app.active].id;
+    let list = requests.try_recv().unwrap();
+    app.create_query_tab();
+    let visible = app.tabs[app.active].id;
+    app.status = i18n::UiMessage::raw("visible status");
+    app.routed_response(
+        Response {
+            tag: list.tag,
+            result: Ok(json!({"projects":[{"id":"one"}]})),
+        },
+        &backend,
+    );
+    assert_eq!(app.tabs[app.active].id, visible);
+    assert_eq!(app.status.render(), "visible status");
+    let resolve = requests.try_recv().unwrap();
+    app.routed_response(
+        Response {
+            tag: resolve.tag,
+            result: Ok(json!({"status":"unavailable"})),
+        },
+        &backend,
+    );
+    assert_eq!(app.tabs[app.active].id, visible);
+    assert_eq!(app.status.render(), "visible status");
+    let index = app
+        .tabs
+        .iter()
+        .position(|tab| tab.id == project_tab)
+        .unwrap();
+    app.switch_tab(index);
+    assert_eq!(app.workbench.project.local_projects.len(), 1);
+    assert!(app.workbench.project.local_error.is_some());
+}

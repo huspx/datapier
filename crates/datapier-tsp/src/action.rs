@@ -381,7 +381,6 @@ impl App {
                 | "new-tab"
                 | "new-profile"
                 | "run"
-                | "selection"
                 | "current"
                 | "submit"
                 | "redis-submit"
@@ -555,13 +554,8 @@ impl App {
                     self.request(backend, method, method, json!({"session_id":s,"target":target,"filters":filters,"sort":sort,"workspace_id":self.workspace_id}));
                 }
             }
-            "run" | "selection" => {
-                let query = &self.tabs[self.active].query;
-                let text = if name == "selection" {
-                    query.selected_text().unwrap_or("").to_owned()
-                } else {
-                    query.text.clone()
-                };
+            "run" => {
+                let text = self.tabs[self.active].query.text.clone();
                 self.execute_query_text(text, backend);
             }
             "current" => {

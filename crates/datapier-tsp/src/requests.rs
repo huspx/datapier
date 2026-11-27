@@ -307,8 +307,23 @@ impl App {
             }
             let old = self.active;
             let old_status = (index != old).then(|| self.status.clone());
+            if index != old
+                && tag == "connection.open"
+                && response
+                    .result
+                    .as_ref()
+                    .is_err_and(|error| error.code == "auth_required")
+            {
+                self.switch_tab(index);
+                self.workbench.connecting = false;
+                self.workbench.connection_error =
+                    response.result.as_ref().err().map(ToString::to_string);
+                self.switch_tab(old);
+                return;
+            }
             self.switch_tab(index);
-            if self.project_response(&tag, &response.result, backend)
+            if (generation == self.generation
+                && self.project_response(&tag, &response.result, backend))
                 || self.transfer_response(&tag, &response.result, backend)
             {
             } else if generation == self.generation {

@@ -104,6 +104,8 @@ const ap = {
   db: 'commerce',
   view: 'query',
   sql: 'SELECT id, status, total FROM orders;',
+  sqlCursor: 0,
+  sqlRequest: '',
   command: 'GET example:key',
   cliEntries: [],
   result: true,
@@ -253,6 +255,8 @@ function saveArcheryTab() {
   if (tab) {
     Object.assign(tab, {
       sql: ap.sql,
+      sqlCursor: ap.sqlCursor,
+      sqlRequest: ap.sqlRequest,
       command: ap.command,
       cliEntries: ap.cliEntries,
       cliSelected: ap.cliSelected,
@@ -271,6 +275,8 @@ function activateArcheryTab(tab) {
   ap.active = tab?.id ?? null;
   if (tab?.database) ap.db = tab.database;
   ap.sql = tab?.sql ?? '';
+  ap.sqlCursor = tab?.sqlCursor ?? 0;
+  ap.sqlRequest = tab?.sqlRequest ?? '';
   ap.command = tab?.command ?? '';
   ap.cliEntries = tab?.cliEntries ?? [];
   ap.cliSelected = tab?.cliSelected;

@@ -15,17 +15,42 @@ impl App {
         {
             return;
         }
+        if self.archery.auto_open_auth
+            && self
+                .archery
+                .open_continuation
+                .as_ref()
+                .is_none_or(|open| !self.archery_open_context_matches(open))
+        {
+            self.archery_release(backend);
+            self.archery.open_continuation = None;
+            self.archery.auto_open_auth = false;
+            self.archery.open = false;
+            self.workbench.overlay = self.archery.return_overlay.take();
+            return;
+        }
         let method = parts[3];
         self.archery.pending = None;
         let value = match response.result {
             Ok(value) => value,
             Err(error) => {
                 let message = error.to_string();
-                if (method == "archery.auth.begin" && error.code == "auth_failed")
+                if (method == "archery.auth.begin"
+                    && matches!(
+                        error.code.as_str(),
+                        "auth_failed" | "credentials" | "credentials_unavailable"
+                    ))
                     || (matches!(method, "archery.auth.begin" | "archery.auth.verify")
                         && error.code == "auth_required")
                 {
-                    self.archery.state = error.code.clone();
+                    self.archery.state = if matches!(
+                        error.code.as_str(),
+                        "credentials" | "credentials_unavailable"
+                    ) {
+                        "auth_required".into()
+                    } else {
+                        error.code.clone()
+                    };
                     self.archery.auth_dialog = true;
                     self.workbench.overlay = Some("archery-auth".into());
                     self.workbench.focus_request = Some("input-password".into());
@@ -160,6 +185,9 @@ impl App {
                         s["id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) == Some(target)
                     }) {
                         self.archery_action(&format!("archery-server:{index}"), backend);
+                        if self.archery.auto_open_auth {
+                            self.archery_action("archery-login", backend);
+                        }
                     } else {
                         self.archery.error = Some(i18n::tr("找不到 Archery 服务").into_owned());
                     }
@@ -220,6 +248,7 @@ impl App {
                 if self.archery.state == "ready" {
                     if self.archery.reauth_server.take().is_some() {
                         let continuation = self.archery.open_continuation.take();
+                        self.archery.auto_open_auth = false;
                         self.archery_release(backend);
                         self.archery.open = false;
                         self.workbench.overlay = self.archery.return_overlay.take();
