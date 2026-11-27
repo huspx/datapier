@@ -157,6 +157,7 @@ flowchart LR
 - [0.4.0 技术方案](docs/technical-design-0.4.0.md)：数据交换、迁移、SQL 备份恢复及项目的设计与契约；实际验收按当前候选证据报告。
 - [0.5.0 技术方案](docs/technical-design-0.5.0.md)：四项核心功能、Tern 优化、升级契约及实际验收范围。
 - [0.5.1 技术方案](docs/technical-design-0.5.1.md)：Tern Files 导航、查询 SQL 路径、Engine 启动、路径选择器与鼠标反馈的设计及验收要求。
+- [0.5.2 技术方案](docs/technical-design-0.5.2.md)：SQL 原生编辑、Files 的 MCP 项目列表修复、跨平台 MCP 固定入口及 Tern／omp 配置。
 - [UI 设计规范](docs/ui-guidelines.md)、[交互设计稿](docs/ui-redesign.html)及[设计说明](docs/ui-redesign.md)：通用视觉与组件约定、界面交互、文字约束和视觉对照要求。
 - [贡献指南](CONTRIBUTING.md)：文档职责、开发环境、编码与模块边界、隔离验证及 PR 说明。
 - [发布指南](RELEASING.md)：产品版本来源与派生、发布前检查、原生组包及人工发布核对。
