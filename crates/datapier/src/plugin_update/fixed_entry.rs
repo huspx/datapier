@@ -93,6 +93,23 @@ pub(super) fn sync_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn copy_synced(source: &Path, destination: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::copy(source, destination)?;
+        File::open(destination)?.sync_all()?;
+    }
+    #[cfg(windows)]
+    {
+        let mut source = File::open(source)?;
+        let mut destination = File::create_new(destination)?;
+        io::copy(&mut source, &mut destination)?;
+        destination.sync_all()?;
+        destination.set_permissions(source.metadata()?.permissions())?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_record(path: &Path, value: &impl Serialize) -> Result<()> {
     let temp = path.with_file_name(format!(".datapier-{}", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -321,11 +338,10 @@ impl Entry {
             .command
             .with_file_name(format!(".datapier-{}", uuid::Uuid::new_v4()));
         let result = (|| {
-            fs::copy(launcher, &temporary)?;
+            copy_synced(launcher, &temporary)?;
             if regular_digest(&temporary)? != expected {
                 return Err(AppError::invalid("复制期间 launcher 摘要发生变化"));
             }
-            File::open(&temporary)?.sync_all()?;
             fs::hard_link(&temporary, &self.command)?;
             sync_parent(&self.command)
         })();

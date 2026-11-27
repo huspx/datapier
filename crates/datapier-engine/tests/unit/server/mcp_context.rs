@@ -163,6 +163,37 @@ async fn mcp_roots_and_environments_are_isolated_without_provider_probes() {
         info["project_context"]["roots"][0]["environments"][0]["name"],
         "dev"
     );
+    let global_info = request(
+        &engine,
+        client_a,
+        "mcp.get_server_info",
+        json!({"context_mode":"global"}),
+    )
+    .await
+    .unwrap();
+    assert!(global_info["project_context"].is_null());
+    let global = request(
+        &engine,
+        client_a,
+        "mcp.list_connections",
+        json!({"context_mode":"global"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        global["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["recommendation"].as_array().unwrap().is_empty())
+    );
+    let still_scoped = request(&engine, client_a, "mcp.get_server_info", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        still_scoped["project_context"]["roots"][0]["project_id"],
+        project_a.to_string()
+    );
 
     request(
         &engine,

@@ -80,6 +80,8 @@ pub(super) struct ArcheryHistory {
     pub limit: u64,
     pub total: u64,
     pub visible: bool,
+    pub draft: Editor,
+    pub reload_page: bool,
     pub applied_search: String,
     pub tab: Option<Uuid>,
     pub profile: Option<Uuid>,
@@ -448,6 +450,8 @@ impl App {
             }
             self.generation = self.generation.wrapping_add(1);
             self.workbench.query_ui.executed = true;
+            self.workbench.query_ui.result_epoch = Some(self.query_edit_epoch);
+            self.workbench.query_ui.released_results.clear();
             self.workbench.query_ui.results_hidden = false;
             self.browse_result = false;
             self.grid = None;
@@ -464,7 +468,7 @@ impl App {
         if matches!(name, "history-search" | "history-prev" | "history-next")
             || history_size.is_some()
         {
-            let draft = self.field("history_filter").to_owned();
+            let draft = self.workbench.archery_history.draft.text.clone();
             let history = &mut self.workbench.archery_history;
             match name {
                 "history-search" => {
@@ -1132,6 +1136,12 @@ impl App {
         self.workbench.lower_case_table_names = None;
         self.completion_invalidate();
         self.workbench.query_ui.executed = true;
+        self.workbench.query_ui.result_epoch = Some(self.query_edit_epoch);
+        self.workbench.query_ui.released_results.clear();
+        self.workbench.writable_mysql_sql_task = self.profile.as_ref().is_some_and(|profile| {
+            profile.provider == datapier_core::model::ProviderKind::Mysql
+                && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
+        });
         self.workbench.query_ui.results_hidden = false;
         self.workbench.query_ui.menu_open = false;
         self.browse_result = false;
@@ -1162,10 +1172,10 @@ impl App {
             && history.visible == visible
             && history.tab == self.tabs.get(self.active).map(|tab| tab.id)
             && history.profile == self.profile.as_ref().map(|profile| profile.id)
-            && history.database == self.database;
+            && history.database == self.database
+            && (!visible || history.session == self.session_id());
         if !same_target {
             self.invalidate_history(backend);
-            self.field_set("history_filter", "");
             self.workbench.archery_history = ArcheryHistory {
                 limit: self.settings.paging.history_rows as u64,
                 visible,
@@ -1174,13 +1184,18 @@ impl App {
         }
         self.workbench.overlay = Some("history".into());
         self.workbench.focus_request = Some("input-history_filter".into());
-        if !same_target {
+        if !same_target || self.workbench.archery_history.reload_page {
             self.request_history(backend);
+        } else if self.workbench.archery_history.selected.is_some()
+            && self.workbench.archery_history.full_text.is_none()
+        {
+            self.load_history_text(backend);
         }
     }
 
     pub(super) fn invalidate_history(&mut self, backend: &Backend) {
         let history = &mut self.workbench.archery_history;
+        history.reload_page |= history.pending.is_some();
         history.text_pending = None;
         history.full_text = None;
         history.text_error = None;
@@ -1200,6 +1215,7 @@ impl App {
         let operation = Uuid::new_v4();
         let session = self.session_id();
         let history = &mut self.workbench.archery_history;
+        history.reload_page = false;
         history.items.clear();
         history.selected = None;
         history.total = 0;

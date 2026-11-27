@@ -79,6 +79,51 @@ async fn redis_test_command(
 
 #[tokio::test]
 #[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
+async fn close_unregisters_session_after_storage_failure() {
+    let (engine, root) = engine().await;
+    let owner = Uuid::new_v4();
+    engine.register(owner);
+    let session = redis_test_session(&engine, owner, AccessMode::ReadWrite).await;
+    let task = engine
+        .store
+        .create_task(owner, "redis-test", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    engine.store.mark_sent(task.id, true).await.unwrap();
+    let cancel = CancellationToken::new();
+    {
+        let mut state = engine.state.lock().unwrap();
+        state.result_sessions.insert(task.id, session);
+        state.tasks.insert(
+            task.id,
+            Running {
+                owner,
+                session_id: session,
+                cancel: cancel.clone(),
+                transition: Arc::new(AsyncMutex::new(())),
+                abort: None,
+                started: None,
+            },
+        );
+    }
+    engine.store.pool.close().await;
+    assert!(
+        engine
+            .dispatch(owner, "connection.close", json!({"session_id":session}))
+            .await
+            .is_err()
+    );
+    {
+        let state = engine.state.lock().unwrap();
+        assert!(!state.databases.contains_key(&session));
+        assert!(!state.result_sessions.contains_key(&task.id));
+    }
+    assert!(!cancel.is_cancelled());
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
 async fn stale_profile_rejects_new_requests_and_close_releases_only_its_results() {
     let (engine, root) = engine().await;
     let owner = Uuid::new_v4();
@@ -224,6 +269,93 @@ async fn mcp_rollback_uses_current_authorized_profile_revision() {
         )
         .await
         .unwrap();
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATAPIER_TEST_REDIS_PORT and an isolated Redis instance"]
+async fn mcp_unknown_redis_queue_rejects_commit_but_allows_discard() {
+    let (engine, root) = engine().await;
+    let controller = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    engine.register(controller);
+    engine.register_with(
+        owner,
+        ClientContext {
+            kind: model::ClientKind::Mcp,
+            workspace: "default".into(),
+            allow_connections: vec![],
+        },
+    );
+    let initial = redis_test_session(&engine, controller, AccessMode::ReadWrite).await;
+    let profile_id = engine.state.lock().unwrap().databases[&initial].profile.id;
+    let opened = Box::pin(engine.dispatch(
+        owner,
+        "mcp.open_session",
+        json!({"connection_id":profile_id}),
+    ))
+    .await
+    .unwrap();
+    let session: Uuid = serde_json::from_value(opened["session_id"].clone()).unwrap();
+    let db = engine
+        .database(owner, &json!({"session_id":session}))
+        .unwrap();
+    let task = engine
+        .store
+        .create_task(owner, "default", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let sink = ExecutionSink::new(engine.store.clone(), task.id);
+    {
+        let mut provider = db.session.lock().await;
+        Box::pin(provider.call(
+            "execution.run",
+            json!({"text":"MULTI\nGET datapier-proof-test"}),
+            &sink,
+            &CancellationToken::new(),
+        ))
+        .await
+        .unwrap();
+    }
+    let error = Box::pin(engine.dispatch(
+        owner,
+        "mcp.commit_transaction",
+        json!({"session_id":session}),
+    ))
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "permission_denied");
+    let rollback = Box::pin(engine.dispatch(
+        owner,
+        "mcp.rollback_transaction",
+        json!({"session_id":session}),
+    ))
+    .await
+    .unwrap();
+    let id: Uuid = serde_json::from_value(rollback["execution_id"].clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let task = engine.store.task(id).await.unwrap();
+            if !matches!(task.state.as_str(), "queued" | "running" | "cancelling") {
+                assert_eq!(task.state, "succeeded", "{:?}", task.error);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    Box::pin(engine.dispatch(owner, "mcp.close_session", json!({"session_id":session})))
+        .await
+        .unwrap();
+    Box::pin(engine.dispatch(
+        controller,
+        "connection.close",
+        json!({"session_id":initial}),
+    ))
+    .await
+    .unwrap();
+    drop(sink);
     crate::server::tests::cleanup(engine, root).await;
 }
 
@@ -512,6 +644,35 @@ async fn redis_transaction_select_tracks_only_successful_exec() {
             .await
             .state,
         "failed"
+    );
+    redis_assert_get(&engine, owner, session, &key, 0, "ZGIw").await;
+
+    // A rejected EXEC with invalid arguments leaves MULTI active; DISCARD must
+    // still roll back the queued SELECT rather than treating it as committed.
+    let invalid_exec =
+        redis_test_command(&engine, owner, session, "MULTI\nSELECT 1\nEXEC extra").await;
+    assert_eq!(invalid_exec.state, "failed");
+    let db = engine
+        .database(owner, &json!({"session_id":session}))
+        .unwrap();
+    let mut provider = db.session.lock().await;
+    let sink = ExecutionSink::new(engine.store.clone(), Uuid::nil());
+    let info = provider
+        .call(
+            "connection.info",
+            json!({}),
+            &sink,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info["transaction"], true);
+    drop(provider);
+    assert_eq!(
+        redis_test_command(&engine, owner, session, "DISCARD")
+            .await
+            .state,
+        "succeeded"
     );
     redis_assert_get(&engine, owner, session, &key, 0, "ZGIw").await;
 

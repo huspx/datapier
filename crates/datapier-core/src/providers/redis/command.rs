@@ -105,7 +105,7 @@ impl RedisSession {
             let response = tokio::select! { result=redis::aio::ConnectionLike::req_packed_command(&mut conn,&command)=>result, _=cancel.cancelled()=>{self.command_dead=true; return Err(if may_write {AppError::unknown("已发送命令，停止等待后写入结果未知")} else {AppError::cancelled()});} };
             let value = match response {
                 Ok(redis::Value::ServerError(e)) => {
-                    if a[0].eq_ignore_ascii_case(b"EXEC") {
+                    if a[0].eq_ignore_ascii_case(b"EXEC") && e.code() == "EXECABORT" {
                         self.command_transaction = None;
                     }
                     self.command_conn = Some(conn);
@@ -114,7 +114,7 @@ impl RedisSession {
                 Ok(v) => v,
                 Err(e) => {
                     if !e.is_io_error() {
-                        if a[0].eq_ignore_ascii_case(b"EXEC") {
+                        if a[0].eq_ignore_ascii_case(b"EXEC") && e.code() == Some("EXECABORT") {
                             self.command_transaction = None;
                         }
                         self.command_conn = Some(conn);

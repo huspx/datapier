@@ -409,6 +409,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
         "Temporary result release was not confirmed",
     ),
     (
+        "已请求取消，正在等待数据库确认；写入可能仍在执行",
+        "Cancellation requested. Waiting for database confirmation; writes may still be running.",
+    ),
+    (
         "大值草稿缺少受控文件登记",
         "The large value draft has no registered file",
     ),

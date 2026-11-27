@@ -8,6 +8,8 @@ local waiting = nil
 local active = true
 local generation = 0
 local gate_timer = nil
+local registered = nil
+local registering = false
 
 local function absolute(path)
   if type(path) ~= "string" or path:find("\0", 1, true) or not utf8.len(path) then
@@ -268,6 +270,49 @@ local function shell_directory(cx, source, callback)
   end
 end
 
+local function register_mcp(cx, binary, data_dir, finished)
+  local function finish(window)
+    if finished then
+      finished(window, binary)
+    end
+  end
+  if registering or (registered and registered.binary == binary and registered.data_dir == data_dir) then
+    finish(cx)
+    return
+  end
+  if not registration.local_scope(cx) then
+    finish(cx)
+    return
+  end
+  registering = true
+  local function register(window, command, problem)
+    registering = false
+    if command then
+      local ok, reason = registration.register(window, command, data_dir)
+      if ok then
+        registered = { binary = binary, data_dir = data_dir }
+      else
+        problem = reason
+      end
+    end
+    if problem then
+      window:toast("error", "Datapier MCP 登记失败", tostring(problem))
+    end
+    finish(window)
+  end
+  if tern.getenv("DATAPIER_BINARY") then
+    register(cx, binary)
+  else
+    updater.run(cx, binary, "managed-entry", false, function(done, state, failure)
+      if state and state.ok and type(state.command) == "string" then
+        register(done, state.command)
+      else
+        register(done, nil, failure or (state and state.message) or "受管入口准备失败")
+      end
+    end, data_dir)
+  end
+end
+
 function M.start(cx, started_pane, options)
   options = options or {}
   local source = M.source(cx)
@@ -310,8 +355,11 @@ function M.start(cx, started_pane, options)
           if started_pane then
             started_pane(nil)
           end
-        elseif started_pane then
-          started_pane(pane)
+        else
+          if started_pane then
+            started_pane(pane)
+          end
+          register_mcp(checked, M.executable(), data_dir)
         end
       end)
     end)
@@ -386,26 +434,7 @@ function M.initialize(cx)
         end
         return
       end
-      local binary = M.executable()
-      local function register(window, command)
-        local ok, reason = registration.register(window, command, data_dir)
-        if not ok then
-          window:toast("error", "Datapier MCP 登记失败", tostring(reason))
-        end
-      end
-      if tern.getenv("DATAPIER_BINARY") then
-        register(checked, binary)
-        updater.schedule(checked, binary)
-      else
-        updater.run(checked, binary, "managed-entry", false, function(done, state, failure)
-          if state and state.ok and type(state.command) == "string" then
-            register(done, state.command)
-          else
-            done:toast("error", "Datapier MCP 登记失败", tostring(failure or (state and state.message)))
-          end
-          updater.schedule(done, binary)
-        end, data_dir)
-      end
+      register_mcp(checked, M.executable(), data_dir, updater.schedule)
     end)
   end, true)
 end

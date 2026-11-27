@@ -98,7 +98,7 @@ async fn terminal_states_keep_real_start_and_monotonic_elapsed() {
 async fn cancelled_sent_batch_requires_complete_confirmed_rollback() {
     let (engine, root) = engine().await;
     let owner = Uuid::new_v4();
-    let rolled_back = json!({"items":[
+    let rolled_back = json!({"rollback_confirmed":true,"items":[
         {"index":0,"status":"rolled_back"},
         {"index":1,"status":"rolled_back"}
     ]});
@@ -108,6 +108,30 @@ async fn cancelled_sent_batch_requires_complete_confirmed_rollback() {
             "cancelled",
             rolled_back.clone(),
             "cancelled",
+        ),
+        (
+            "change.submit",
+            "cancelled",
+            json!({"rollback_confirmed":true,"items":[{"index":0,"status":"rolled_back"},{"index":1,"status":"not_executed"}]}),
+            "cancelled",
+        ),
+        (
+            "change.submit",
+            "cancelled",
+            json!({"rollback_confirmed":true,"items":[{"index":0,"status":"unchanged"},{"index":1,"status":"rolled_back"}]}),
+            "cancelled",
+        ),
+        (
+            "change.submit",
+            "cancelled",
+            json!({"items":[{"index":0,"status":"rolled_back"}]}),
+            "outcome_unknown",
+        ),
+        (
+            "change.submit",
+            "cancelled",
+            json!({"rollback_confirmed":true,"items":[{"index":0,"status":"rolled_back"},{"index":1,"status":"applied"}]}),
+            "outcome_unknown",
         ),
         (
             "change.submit",

@@ -109,7 +109,6 @@ impl App {
                 | "sql-row-add"
                 | "delete-rows-confirm"
                 | "paste-confirm"
-                | "restore-pending"
                 | "submit"
                 | "advanced-value-patch"
                 | "advanced-value-stage"
@@ -589,12 +588,20 @@ impl App {
             }
             "cancel" => {
                 if let Some(task) = self.task.clone() {
-                    self.request(
-                        backend,
-                        "execution.cancel",
-                        "execution.cancel",
-                        json!({"task_id":task}),
+                    let tag = format!(
+                        "{}:{}:execution.cancel",
+                        self.tabs[self.active].id, self.generation
                     );
+                    match backend.request(tag, "execution.cancel", json!({"task_id":task})) {
+                        Ok(()) if self.workbench.writable_mysql_sql_task => {
+                            self.workbench.mysql_cancel_requested = true;
+                            self.status = i18n::UiMessage::key(
+                                "已请求取消，正在等待数据库确认；写入可能仍在执行",
+                            );
+                        }
+                        Ok(()) => {}
+                        Err(error) => self.status = i18n::UiMessage::raw(error.to_string()),
+                    }
                 }
             }
             "next" | "previous" => {
@@ -812,15 +819,24 @@ impl App {
                 }
             }
             "restore-pending" => {
-                let pending = self.tabs[self.active].pending.clone();
+                let pending = &self.tabs[self.active].pending;
                 if pending.is_null() {
                     self.status = "没有已恢复的编辑意图".into();
                     return;
                 }
-                if self.edit_token.is_none() || pending.get("target") != Some(&json!(self.target)) {
+                if self.session_id().is_none()
+                    || self.edit_token.is_none()
+                    || pending.get("target") != Some(&json!(self.target))
+                {
                     self.status = "请先选择原目标并重新打开编辑基线".into();
                     return;
                 }
+                if !self
+                    .guard_draft_scope(backend, workbench::DraftScopeAction::Action(name.into()))
+                {
+                    return;
+                }
+                let pending = self.tabs[self.active].pending.clone();
                 let redis = pending
                     .get("redis")
                     .and_then(Value::as_array)

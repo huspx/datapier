@@ -79,7 +79,7 @@ pub(super) fn tabs(app: &App) -> Node<Msg> {
         let title = html::button("")
             .class("tab-title")
             .child(ui::icon(icon))
-            .child(html::span(t.title.clone()))
+            .child(html::span(t.display_title()))
             .actions(
                 ui::Actions::new()
                     .menu(ui::MenuEntry::header(

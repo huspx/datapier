@@ -179,6 +179,7 @@ impl App {
         } else {
             target.name.clone()
         };
+        self.tabs[self.active].default_query_ordinal = None;
         self.database = target.database.clone();
         self.target = Some(target.clone());
         self.view = "advanced-schema".into();
@@ -416,6 +417,7 @@ impl App {
                 self.database = target.database.clone();
                 self.tabs[self.active].browse.database = target.database.clone();
                 self.tabs[self.active].title = format!("SQL · {}", target.name);
+                self.tabs[self.active].default_query_ordinal = None;
                 self.tabs[self.active].query = crate::Editor::new(sql);
                 self.view = "query".into();
                 self.action("open", backend);

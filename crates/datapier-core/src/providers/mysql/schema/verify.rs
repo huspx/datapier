@@ -1,7 +1,7 @@
 //! 结构读回比较；仅规范化可证明不改变含义的服务端变换。
 use crate::model::schema::{
     ConstraintDefinition, IndexDefinition, IndexKind, TableDefinition, TriggerDefinition,
-    ViewDefinition,
+    TriggerOrder, ViewDefinition,
 };
 use sqlparser::{
     ast::{
@@ -327,7 +327,6 @@ pub(super) fn triggers_equal(expected: &TriggerDefinition, actual: &TriggerDefin
         && expected.event.eq_ignore_ascii_case(&actual.event)
         && expected.body.trim() == actual.body.trim()
         && expected.sql_mode == actual.sql_mode
-        && expected.order == actual.order
         && expected
             .definer
             .as_ref()
@@ -340,6 +339,29 @@ pub(super) fn triggers_equal(expected: &TriggerDefinition, actual: &TriggerDefin
             .collation_connection
             .as_ref()
             .is_none_or(|v| actual.collation_connection.as_ref() == Some(v))
+}
+
+pub(super) fn trigger_order_matches(
+    names: &[String],
+    name: &str,
+    order: Option<&TriggerOrder>,
+) -> bool {
+    let Some(position) = names.iter().position(|value| value == name) else {
+        return false;
+    };
+    match order {
+        Some(order) => names
+            .iter()
+            .position(|value| value == &order.trigger)
+            .is_some_and(|other| {
+                if order.follows {
+                    position > other
+                } else {
+                    position < other
+                }
+            }),
+        None => position + 1 == names.len(),
+    }
 }
 
 #[cfg(test)]

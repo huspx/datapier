@@ -185,7 +185,10 @@ impl App {
                         s["id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) == Some(target)
                     }) {
                         self.archery_action(&format!("archery-server:{index}"), backend);
-                        if self.archery.auto_open_auth {
+                        let auto_reauth = std::mem::take(&mut self.archery.auto_reauth);
+                        if self.archery.auto_open_auth
+                            || (auto_reauth && self.archery.connection_auth_error.is_none())
+                        {
                             self.archery_action("archery-login", backend);
                         }
                     } else {

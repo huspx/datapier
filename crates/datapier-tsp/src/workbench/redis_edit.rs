@@ -111,6 +111,7 @@ impl App {
                     self.field_set(name, value);
                 }
                 self.workbench.redis_identity = identity.map(|(name, value)| (name.into(), value));
+                self.workbench.modal_return_focus = Some("grid".into());
                 self.workbench.overlay = Some("redis".into());
                 let field = if operation == "hash_set" {
                     "redis_field"
@@ -285,6 +286,9 @@ impl App {
         self.dirty = true;
         self.workbench.redis_identity = None;
         self.workbench.overlay = None;
+        self.workbench.modal_return_focus = None;
+        self.focus = "grid".into();
+        self.workbench.focus_request = Some("grid".into());
         true
     }
 }

@@ -22,6 +22,31 @@ fn existing_project_directory_is_reported_at_path_field() {
 }
 
 #[test]
+fn create_receipt_survives_concurrent_form_edits() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("project-create-edit".into());
+    app.project_set("path", "/created");
+    app.project_set("name", "original");
+    app.project_action("project-ui-create", &backend);
+    let request = requests.try_recv().unwrap();
+    app.project_set("path", "/next");
+    app.project_set("name", "next");
+    app.workbench.project.invalidate();
+    let id = Uuid::new_v4();
+    app.project_response(
+        request.tag.splitn(3, ':').nth(2).unwrap(),
+        &Ok(json!({"project_id":id,"root":"/created","manifest":{"name":"original"},"digests":{}})),
+        &backend,
+    );
+    assert_eq!(
+        app.workbench.project.project.as_ref().unwrap()["project_id"],
+        json!(id)
+    );
+    assert_eq!(app.project_value("path"), "/next");
+    assert_eq!(app.project_value("name"), "next");
+}
+
+#[test]
 fn failed_commit_releases_consumed_preview_and_preserves_draft() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("project-commit".into());
@@ -160,6 +185,8 @@ fn workspace_restores_project_and_transfer_intent_without_handles() {
         json!({"project_id":Uuid::new_v4(),"root":"/project","manifest":{"name":"draft","queries":[]},"digests":{"a":"old"}}),
     );
     app.workbench.project.unsaved = true;
+    app.workbench.project.section = "queries".into();
+    app.workbench.project.git_query_edit = true;
     app.workbench
         .project
         .transfer_files
@@ -180,6 +207,7 @@ fn workspace_restores_project_and_transfer_intent_without_handles() {
         "draft"
     );
     assert_eq!(restored.project_value("query-text"), "local query");
+    assert!(restored.workbench.project.git_query_edit);
     assert_eq!(
         restored.field(&restored.transfer_key("source-alias")),
         "local-source"

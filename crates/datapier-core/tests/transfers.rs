@@ -260,6 +260,72 @@ async fn mysql_migration_cancel_on_last_row_rolls_back_batch() {
     result.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "需要隔离 MySQL，验证非事务表触发器错误后的导入报告"]
+async fn mysql_nontransactional_import_keeps_applied_error_out_of_retry() {
+    use datapier_core::{
+        execution::migration,
+        model::transfer::{TransferSpec, TransferStepState},
+    };
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+
+    let (store, profile, secret) = context(ProviderKind::Mysql).await;
+    let direct = profile.direct().unwrap();
+    let pool = MySqlPoolOptions::new()
+        .connect_with(
+            MySqlConnectOptions::new()
+                .host(&direct.host)
+                .port(direct.port)
+                .username(&direct.username)
+                .password(secret.as_deref().unwrap())
+                .database("datapier_fixture"),
+        )
+        .await
+        .unwrap();
+    store.save_profile(&profile, secret, false).await.unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let target = format!("dp_myisam_{suffix}");
+    let trigger = format!("dp_after_{suffix}");
+    let input = store.root.join("partial.csv");
+    std::fs::write(&input, "id\n1\n").unwrap();
+    let result = AssertUnwindSafe(async {
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TABLE `{target}` (id INT PRIMARY KEY) ENGINE=MyISAM")))
+            .execute(&pool).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TRIGGER `{trigger}` AFTER INSERT ON `{target}` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture trigger error'")))
+            .execute(&pool).await.unwrap();
+        let spec: TransferSpec = serde_json::from_value(json!({
+            "mode":"import", "provider":"mysql",
+            "destination":{"profile_id":profile.id,"database":"datapier_fixture"},
+            "inputs":[{"path":input,"format":"csv","target":mysql_target(&target)}],
+            "options":{"include_schema":false,"include_data":true}
+        })).unwrap();
+        let cancel = CancellationToken::new();
+        let prepared = migration::prepare(&sink(&store, "transfer.prepare", &profile).await, spec, &cancel).await.unwrap();
+        let owner = Uuid::new_v4();
+        let task = store.create_task(owner, "partial-fixture", "transfer.submit", json!({}), true).await.unwrap();
+        let sink = ExecutionSink::new(store.clone(), task.id).with_owner(owner);
+        let error = migration::execute(&prepared, &sink, task.id, "partial-fixture", None, &[], &cancel).await.unwrap_err();
+        assert_eq!(error.code, "outcome_unknown");
+        assert!(error.message.contains("fixture trigger error"));
+        let ids: Vec<i32> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT id FROM `{target}`")))
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(ids, [1]);
+        let items = store.transfer_items(task.id, None, 100).await.unwrap();
+        let data = items.iter().find(|item| item.phase == "data").unwrap();
+        assert_eq!(data.state, TransferStepState::OutcomeUnknown);
+        assert_eq!(data.item_states, [TransferStepState::OutcomeUnknown]);
+    }).catch_unwind().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS `{target}`"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    clean(store).await;
+    result.unwrap();
+}
+
 fn mysql_target(name: &str) -> ResourceTarget {
     ResourceTarget {
         database: Some("datapier_fixture".into()),

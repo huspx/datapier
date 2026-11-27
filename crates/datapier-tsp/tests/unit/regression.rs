@@ -18,6 +18,7 @@ mod workspace_restore;
 fn second_tab(app: &mut App) {
     app.tabs.push(Tab {
         title: "second".into(),
+        default_query_ordinal: None,
         query: Editor::new(""),
         cli_query: Editor::default(),
         profile_id: None,

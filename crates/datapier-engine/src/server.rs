@@ -458,7 +458,8 @@ impl Engine {
             created_gate = true;
             serde_json::to_writer(
                 &mut gate,
-                &json!({"phase":"handoff","id":id.to_string(),"state_digest":state_digest}),
+                &json!({"phase":"handoff","id":id,"state_digest":state_digest,
+                    "plugin_dir":plugin_dir,"state_dir":state_dir}),
             )?;
             gate.sync_all()?;
             std::fs::File::open(&self.root)?.sync_all()?;

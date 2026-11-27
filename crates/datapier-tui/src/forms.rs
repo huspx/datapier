@@ -126,11 +126,7 @@ pub fn direct(profile: Option<&Value>, default_policy: &Value) -> Form {
     let timezone = mysql.get("timezone").cloned().unwrap_or(Value::Null);
     let visible = match &c["visible_databases"] {
         Value::Null => "*".into(),
-        Value::Array(a) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(","),
+        Value::Array(_) => c["visible_databases"].to_string(),
         _ => String::new(),
     };
     Form {
@@ -176,8 +172,8 @@ pub fn direct(profile: Option<&Value>, default_policy: &Value) -> Form {
             ),
             Field::new(
                 "visible",
-                "可见 MySQL 库（* 全部，空为无，逗号分隔）",
-                "Visible MySQL DBs (* all, empty none, comma separated)",
+                "可见 MySQL 库（* 全部，JSON 字符串数组）",
+                "Visible MySQL DBs (* all, JSON string array)",
                 visible,
             ),
             field(
@@ -233,14 +229,12 @@ pub fn direct_value(f: &Form) -> Result<Value, String> {
     };
     let visible = if f.get("visible") == "*" {
         Value::Null
+    } else if f.get("visible").is_empty() {
+        json!([])
     } else {
-        json!(
-            f.get("visible")
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        )
+        let names: Vec<String> = serde_json::from_str(f.get("visible"))
+            .map_err(|_| "visible: expected a JSON array of database names".to_string())?;
+        json!(names)
     };
     let override_count = if f.get("redis_override").is_empty() {
         Value::Null

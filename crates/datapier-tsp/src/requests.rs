@@ -307,6 +307,7 @@ impl App {
             }
             let old = self.active;
             let old_status = (index != old).then(|| self.status.clone());
+            let old_focus = (index != old).then(|| self.focus.clone());
             if index != old
                 && tag == "connection.open"
                 && response
@@ -479,6 +480,9 @@ impl App {
             self.switch_tab(old);
             if let Some(status) = old_status {
                 self.status = status;
+            }
+            if let Some(focus) = old_focus {
+                self.focus = focus;
             }
         } else {
             self.response(response, backend);

@@ -81,9 +81,7 @@ pub async fn switch(plan: Switch, plugin: &Path, state: &Path, root: &Path) -> R
         let staged_plugin = extract_plugin(&stage, &requested)?;
         let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
         let program = package.join(format!("datapier-{requested}-{target}.{extension}"));
-        prepare_program(&stage.join("cache"), &staged_plugin, &program, &target).await?;
-        // Tern 重载时使用正式缓存。先用同一份本机归档填充，离线也能完成首次准备。
-        prepare_program(&cache_directory()?, &staged_plugin, &program, &target).await?;
+        prepare_switch_program(&stage, &staged_plugin, &program, &target).await?;
         let next = State {
             plugin_digest: Some(apply::digest(&plugin_archive)?),
             target_version: Some(requested),
@@ -108,26 +106,6 @@ pub async fn switch(plan: Switch, plugin: &Path, state: &Path, root: &Path) -> R
         let _ = fs::remove_dir_all(&stage);
     }
     result
-}
-
-fn cache_directory() -> Result<PathBuf> {
-    let directory = if let Some(path) = std::env::var_os("DATAPIER_CACHE_DIR") {
-        PathBuf::from(path)
-    } else if cfg!(windows) {
-        PathBuf::from(
-            std::env::var_os("LOCALAPPDATA")
-                .ok_or_else(|| AppError::invalid("无法确定 LOCALAPPDATA"))?,
-        )
-        .join("Datapier/cache")
-    } else if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
-        PathBuf::from(path).join("datapier")
-    } else {
-        PathBuf::from(
-            std::env::var_os("HOME").ok_or_else(|| AppError::invalid("无法确定用户目录"))?,
-        )
-        .join(".cache/datapier")
-    };
-    Ok(std::path::absolute(directory)?)
 }
 
 pub(super) async fn check_schema(root: &Path, target: &str) -> Result<()> {

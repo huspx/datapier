@@ -890,6 +890,7 @@ pub(super) async fn execute_batch(
         if index < items.len() {
             items[index] = json!({"index":index,"status":if unknown {"unknown"} else if error.code == "cancelled" {"not_executed"} else if error.code == "conflict" {"conflict"} else {"failed"},"error":error});
         }
+        let mut rollback_confirmed = false;
         // 事务回滚成功仍可能留下非事务表的修改，须在同一连接读取回滚诊断。
         if transactional {
             let rolled_back = if sqlx::raw_sql("ROLLBACK").execute(&mut conn).await.is_ok() {
@@ -906,6 +907,7 @@ pub(super) async fn execute_batch(
             } else {
                 false
             };
+            rollback_confirmed = rolled_back;
             for item in &mut items[..index] {
                 if item["status"] == "unchanged" {
                     continue;
@@ -928,6 +930,10 @@ pub(super) async fn execute_batch(
             _ => serde_json::Map::new(),
         };
         details.insert("items".into(), json!(items));
+        details.remove("rollback_confirmed");
+        if rollback_confirmed {
+            details.insert("rollback_confirmed".into(), json!(true));
+        }
         return Err(error.with_details(Json::Object(details)));
     }
     // COMMIT 失败无法区分提交未发生和响应丢失，不自动重放。

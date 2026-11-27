@@ -72,6 +72,38 @@ impl App {
             self.action("list", backend);
             return true;
         }
+        if let Some(target) = name.strip_prefix("navigation-schema-create:") {
+            if let Some((kind, rest)) = target.split_once(':')
+                && matches!(kind, "table" | "view")
+                && let Some((profile_id, database)) = rest.split_once(':')
+                && let Ok(profile_id) = Uuid::parse_str(profile_id)
+                && self.profile.as_ref().is_some_and(|profile| {
+                    profile.id == profile_id
+                        && profile.provider == datapier_core::model::ProviderKind::Mysql
+                        && !profile.is_archery()
+                        && profile.access_mode == datapier_core::model::AccessMode::ReadWrite
+                })
+                && self
+                    .navigation
+                    .databases
+                    .get(&profile_id)
+                    .is_some_and(|tree| tree.databases.iter().any(|item| item.name == database))
+                && self.finish_inline(true)
+            {
+                self.advanced_schema_open(
+                    backend,
+                    ResourceTarget {
+                        database: Some(database.to_owned()),
+                        name: String::new(),
+                        key_b64: None,
+                        kind: kind.to_owned(),
+                    },
+                    true,
+                    None,
+                );
+            }
+            return true;
+        }
         if let Some(open) = name
             .strip_prefix("redis-db-menu-open:")
             .and_then(|value| value.parse::<bool>().ok())

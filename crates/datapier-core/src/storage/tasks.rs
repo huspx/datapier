@@ -171,15 +171,34 @@ impl Store {
         summary: Json,
         error: Option<AppError>,
     ) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         sqlx::query("UPDATE executions SET state=?,summary=?,error=?,updated_at=unixepoch('subsec') WHERE id=?")
             .bind(state).bind(summary.to_string()).bind(error.map(|e| serde_json::to_string(&e)).transpose()?)
-            .bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
+            .bind(id.to_string()).execute(&mut *tx).await?;
+        if !matches!(
+            state,
+            "queued" | "running" | "cancelling" | "approval_required"
+        ) {
+            sqlx::query("UPDATE approvals SET state='invalidated' WHERE execution_id=? AND state='dispatching' AND EXISTS (SELECT 1 FROM executions WHERE id=? AND sent=0)")
+                .bind(id.to_string()).bind(id.to_string()).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
     /// 持久化发送阶段；`may_write` 只会从假变真。
     pub async fn mark_sent(&self, id: Uuid, may_write: bool) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin().await?;
         sqlx::query("UPDATE executions SET sent=1,may_write=MAX(may_write,?),summary=CASE WHEN json_extract(params,'$._task_context.source')='archery' OR json_type(summary,'$.remote_completion') IS NOT NULL THEN json_set(CASE WHEN json_type(summary)='object' THEN summary ELSE '{}' END,'$.remote_completion','unknown') ELSE summary END,updated_at=unixepoch('subsec') WHERE id=?")
-            .bind(i64::from(may_write)).bind(id.to_string()).execute(&mut *self.pool.acquire().await?).await?;
+            .bind(i64::from(may_write)).bind(id.to_string()).execute(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE approvals SET state='dispatched' WHERE execution_id=? AND state='dispatching'",
+        )
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
     /// 已验证完整平台响应；后续取消或本地落盘失败不能丢失该事实。

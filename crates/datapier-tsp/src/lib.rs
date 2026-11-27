@@ -130,6 +130,8 @@ impl Default for BrowseSettings {
 #[derive(Clone, Serialize, Deserialize)]
 struct Tab {
     title: String,
+    #[serde(default)]
+    default_query_ordinal: Option<usize>,
     query: Editor,
     #[serde(default)]
     cli_query: Editor,
@@ -156,6 +158,17 @@ struct Tab {
     pending_live: bool,
     #[serde(skip)]
     runtime: TabRuntime,
+}
+
+impl Tab {
+    fn display_title(&self) -> String {
+        self.default_query_ordinal.map_or_else(
+            || self.title.clone(),
+            |number| {
+                crate::i18n::format_message("查询 {number}", &[("number", &number.to_string())])
+            },
+        )
+    }
 }
 #[derive(Clone)]
 struct DetailContext {

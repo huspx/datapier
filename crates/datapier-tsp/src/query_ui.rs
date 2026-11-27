@@ -7,6 +7,8 @@ pub struct QueryUiState {
     pub menu_open: bool,
     pub results_hidden: bool,
     pub executed: bool,
+    pub(super) result_epoch: Option<u64>,
+    pub(super) released_results: std::collections::HashSet<String>,
     pub request_limit: u64,
     pub result_info: Option<String>,
     pub pagination: std::collections::HashMap<String, ResultPaginationState>,
@@ -36,6 +38,21 @@ impl Default for ResultPaginationState {
 }
 
 impl App {
+    pub(super) fn release_stale_query_results(&mut self, backend: &Backend, ids: Vec<String>) {
+        for id in ids {
+            if self.workbench.query_ui.released_results.insert(id.clone())
+                && let Err(error) = backend.request(
+                    "query-result-release",
+                    "result.release",
+                    json!({"result_id": id}),
+                )
+            {
+                self.workbench.query_ui.released_results.remove(&id);
+                self.status = i18n::UiMessage::raw(error.to_string());
+            }
+        }
+    }
+
     pub(super) fn archery_request_limit(&self) -> u64 {
         match self.workbench.query_ui.request_limit {
             0 => self.settings.archery.request_rows as u64,

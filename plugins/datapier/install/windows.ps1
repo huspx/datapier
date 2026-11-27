@@ -14,34 +14,30 @@ try {
     $values = [regex]::Matches($top, '(?m)^[ \t]*version[ \t]*=[ \t]*"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"[ \t]*(?:#.*)?\r?$')
     if ($keys.Count -ne 1 -or $values.Count -ne 1) { throw '插件版本缺失、重复或无效' }
     $version = $values[0].Groups[1].Value
-    # GetNativeSystemInfo 取得硬件架构，避免在 ARM Windows 的兼容进程中误选 x86 包。
+    # 模拟进程也使用系统返回的 nativeMachine 选择目标架构。
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class DatapierNative
 {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SYSTEM_INFO
-    {
-        public ushort architecture, reserved;
-        public uint pageSize;
-        public IntPtr minimum, maximum, mask;
-        public uint processors, type, granularity;
-        public ushort level, revision;
-    }
-
     [DllImport("kernel32.dll")]
-    public static extern void GetNativeSystemInfo(out SYSTEM_INFO info);
+    public static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
 }
 '@
-    $info = New-Object DatapierNative+SYSTEM_INFO
-    [DatapierNative]::GetNativeSystemInfo([ref]$info)
-    # Win32 PROCESSOR_ARCHITECTURE_AMD64=9、ARM64=12，不根据当前 PowerShell 位数猜测。
-    $arch = switch ($info.architecture) {
-        9 {
+    [uint16]$processMachine = 0
+    [uint16]$nativeMachine = 0
+    if (![DatapierNative]::IsWow64Process2([DatapierNative]::GetCurrentProcess(), [ref]$processMachine, [ref]$nativeMachine)) {
+        throw [System.ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    # IMAGE_FILE_MACHINE_AMD64=0x8664、ARM64=0xaa64。
+    $arch = switch ($nativeMachine) {
+        0x8664 {
             'x86_64'
         }
-        12 {
+        0xaa64 {
             'aarch64'
         }
         default {

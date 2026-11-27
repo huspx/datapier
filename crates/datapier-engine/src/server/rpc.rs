@@ -315,6 +315,7 @@ impl Engine {
             "settings.get" => serialize(self.store.settings().await?),
             "settings.set" => {
                 let settings: model::AppSettings = model::param(&params, "settings")?;
+                let _policy_guard = self.send_gate.lock().await;
                 self.store.set_settings(&settings).await?;
                 self.emit_settings_changed();
                 serialize(self.store.settings().await?)
@@ -642,16 +643,22 @@ impl Engine {
                     executions
                 };
                 let mut results = HashSet::new();
+                let mut failure = None;
                 for &execution in &executions {
                     let task = match self.store.task(execution).await {
                         Ok(task) => task,
                         Err(error) if error.code == "not_found" => continue,
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            continue;
+                        }
                     };
                     if task.owner == owner {
                         for result_id in task.results {
-                            self.store.release_result(result_id).await?;
                             results.insert(result_id);
+                            if let Err(error) = self.store.release_result(result_id).await {
+                                failure.get_or_insert(error);
+                            }
                         }
                     }
                 }
@@ -660,12 +667,17 @@ impl Engine {
                     let task = match self.store.task(execution).await {
                         Ok(task) => task,
                         Err(error) if error.code == "not_found" => continue,
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            continue;
+                        }
                     };
                     if task.owner == owner {
                         for result_id in task.results {
-                            if results.insert(result_id) {
-                                self.store.release_result(result_id).await?;
+                            if results.insert(result_id)
+                                && let Err(error) = self.store.release_result(result_id).await
+                            {
+                                failure.get_or_insert(error);
                             }
                         }
                     }
@@ -680,7 +692,12 @@ impl Engine {
                     state.databases.remove(&id);
                     state.result_sessions.retain(|_, session| *session != id);
                 }
-                result?;
+                if let Err(error) = result {
+                    failure.get_or_insert(error);
+                }
+                if let Some(error) = failure {
+                    return Err(error);
+                }
                 Ok(json!({"closed":true}))
             }
             "resource.scan.discard" => {

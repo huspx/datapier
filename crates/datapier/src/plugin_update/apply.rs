@@ -151,8 +151,7 @@ fn restore_data(source: &Path, root: &Path) -> Result<()> {
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &destination, false)?;
         } else {
-            fs::copy(entry.path(), &destination)?;
-            File::open(destination)?.sync_all()?;
+            fixed_entry::copy_synced(&entry.path(), &destination)?;
         }
     }
     fixed_entry::sync_parent(&root.join("update-gate.json"))
@@ -175,8 +174,7 @@ fn copy_tree(source: &Path, destination: &Path, data_root: bool) -> Result<()> {
         if metadata.is_dir() {
             copy_tree(&entry.path(), &target, false)?;
         } else if metadata.is_file() {
-            fs::copy(entry.path(), &target)?;
-            File::open(&target)?.sync_all()?;
+            fixed_entry::copy_synced(&entry.path(), &target)?;
         } else {
             return Err(AppError::invalid("备份目录包含不支持的文件类型"));
         }
@@ -383,7 +381,7 @@ impl Entries {
     }
 
     fn confirm_managed(&self, state_dir: &Path, plugin: &Path, root: &Path) -> Result<Value> {
-        let settings = managed_entry::readback(state_dir, root, self.managed.as_ref())?
+        let settings = managed_entry::readback(state_dir, plugin, root, self.managed.as_ref())?
             .ok_or_else(|| {
                 AppError::new("update_mcp_readback", "没有可确认的 Tern 受管 MCP 配置")
             })?;
@@ -845,7 +843,7 @@ pub(super) async fn run(
     {
         return Err(AppError::invalid("目标版本不支持已登记的 MCP 启动参数"));
     }
-    match managed_entry::readback(&state_dir, &root, entries.managed.as_ref()) {
+    match managed_entry::readback(&state_dir, &plugin_dir, &root, entries.managed.as_ref()) {
         Ok(Some(_)) if managed.is_none() => {
             return Err(AppError::invalid("Tern 受管 MCP 的入口登记已丢失"));
         }
@@ -1063,10 +1061,22 @@ pub(super) async fn recover(root: &Path, plugin: &Path, state_dir: &Path) -> Res
         .ok_or_else(|| AppError::invalid("更新门禁身份无效"))?;
     let phase = gate["phase"].as_str().unwrap_or_default();
     if phase == "handoff" {
-        return Err(AppError::new(
-            "update_recovery_required",
-            "交接中断，请先核对原实例和更新所有者",
-        ));
+        // 取得安装、更新状态、准入与 Engine 锁后，确认没有存活的交接所有者。
+        let _owner = try_exclusive(&root.join("update-owner.lock"), "update_busy")?;
+        for (key, expected) in [("plugin_dir", plugin.as_path()), ("state_dir", state_dir)] {
+            if let Some(path) = gate.get(key)
+                && serde_json::from_value::<PathBuf>(path.clone())? != expected
+            {
+                return Err(AppError::invalid("交接目录与更新门禁不匹配"));
+            }
+        }
+        // handoff 在任何数据、插件或入口变更之前。残留的未完成备份不用于恢复。
+        for suffix in ["ready", "done"] {
+            remove_receipt(&state_dir.join(format!("handoff-{id}.{suffix}")))?;
+        }
+        remove_receipt(&root.join(format!("update-gate-{id}.prepared")))?;
+        fs::remove_file(&gate_path)?;
+        return fixed_entry::sync_parent(&gate_path);
     }
     if serde_json::from_value::<PathBuf>(gate["plugin_dir"].clone())? != plugin {
         return Err(AppError::invalid("plugin 安装不属于本次更新"));

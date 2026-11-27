@@ -389,7 +389,8 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     {
         content = content.child(button("恢复替换草稿", "replace-restore"));
     }
-    if !app.tabs.is_empty()
+    if app.view != "query"
+        && !app.tabs.is_empty()
         && app.session_id().is_some()
         && !app.is_redis()
         && app.database.is_some()
@@ -434,7 +435,7 @@ pub(super) fn render_window(app: &App, nonce: Option<Uuid>) -> View<Msg> {
     }
     if !matches!(
         app.view.as_str(),
-        "transfer-workbench" | "project-workbench"
+        "query" | "transfer-workbench" | "project-workbench"
     ) {
         content = content.child(crate::native_ui::draftbar(app));
     }

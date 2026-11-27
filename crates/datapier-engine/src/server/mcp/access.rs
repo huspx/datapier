@@ -458,6 +458,9 @@ impl Engine {
                         .sessions
                         .get(&session_id)
                         .and_then(|entry| entry.queued.clone());
+                    if info["transaction"] == true && queued.is_none() {
+                        return Err(denied("无法证明 Redis 事务队列，请先执行 DISCARD"));
+                    }
                     if let Some(queued) = queued {
                         proof.read_databases.extend(queued.read_databases);
                         proof.write_databases.extend(queued.write_databases);
@@ -552,39 +555,19 @@ impl Engine {
         params: Value,
         cancel: &CancellationToken,
     ) -> Result<Value> {
-        // 平台元数据同样记录实际发送与完整响应，不能使用不存在的 execution ID。
-        let workspace = self.mcp_context(owner)?.workspace;
-        let record = self
-            .store
-            .create_task(
-                owner,
-                &workspace,
-                "mcp.scope.inspect",
-                params.clone(),
-                false,
-            )
-            .await?;
-        self.store
-            .update_task(record.id, "running", Value::Null, None)
-            .await?;
-        let sink = ExecutionSink::new(self.store.clone(), record.id);
+        // 平台元数据请求在取消或丢弃时也必须完成任务终态记录。
+        let task = super::scope_task::ScopeTask::start(
+            self.store.clone(),
+            owner,
+            self.mcp_context(owner)?.workspace,
+            params.clone(),
+        )
+        .await?;
+        let sink = ExecutionSink::new(self.store.clone(), task.id);
         let result = session
             .call("resource.describe", params, &sink, cancel)
             .await;
-        let summary = self.store.task(record.id).await?.summary;
-        self.store
-            .update_task(
-                record.id,
-                if result.is_ok() {
-                    "succeeded"
-                } else {
-                    "failed"
-                },
-                summary,
-                result.as_ref().err().cloned(),
-            )
-            .await?;
-        result
+        task.finish(result).await
     }
 
     async fn mcp_dependencies(
@@ -854,30 +837,18 @@ impl Engine {
             if db.profile.provider == ProviderKind::Redis
                 && matches!(method, "execution.start" | "execution.run")
             {
-                let analyzed = datapier_core::providers::redis::analyze_command(
-                    params["text"]
-                        .as_str()
-                        .ok_or_else(|| AppError::invalid("缺少命令"))?,
-                )?;
-                for command in analyzed["commands"]
-                    .as_array()
-                    .ok_or_else(|| denied("无法证明命令队列"))?
-                {
-                    match command["name"].as_str().unwrap_or("") {
-                        "MULTI" => entry.queued = Some(fresh.clone()),
-                        "EXEC" | "DISCARD" => entry.queued = None,
-                        _ => {
-                            if let Some(queued) = &mut entry.queued {
-                                queued
-                                    .read_databases
-                                    .extend(fresh.read_databases.iter().cloned());
-                                queued
-                                    .write_databases
-                                    .extend(fresh.write_databases.iter().cloned());
-                                queued.dangerous |= fresh.dangerous;
-                            }
-                        }
-                    }
+                // 发送后的批次可能只执行一部分。保留此前证明并合并整个批次，
+                // 直到 provider 在下次复核时确认物理事务已经结束。
+                if let Some(queued) = &mut entry.queued {
+                    queued
+                        .read_databases
+                        .extend(fresh.read_databases.iter().cloned());
+                    queued
+                        .write_databases
+                        .extend(fresh.write_databases.iter().cloned());
+                    queued.dangerous |= fresh.dangerous;
+                } else {
+                    entry.queued = Some(fresh.clone());
                 }
             } else if db.profile.provider == ProviderKind::Mysql
                 && matches!(method, "execution.start" | "execution.run")

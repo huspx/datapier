@@ -305,6 +305,10 @@ async fn recovery_terminates_orphaned_approvals_without_retrying_sent_writes() {
         }
         if sent {
             store.mark_sent(task.id, true).await.unwrap();
+            assert_eq!(
+                store.approval(approval.id).await.unwrap().state,
+                "dispatched"
+            );
         }
         cases.push((task.id, approval.id, sent));
     }
@@ -318,6 +322,62 @@ async fn recovery_terminates_orphaned_approvals_without_retrying_sent_writes() {
             store.approval(approval).await.unwrap().state,
             if sent { "dispatched" } else { "invalidated" }
         );
+    }
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn approval_tracks_unsent_terminal_outcomes_and_preserves_sent_ownership() {
+    let store = fixture().await;
+    let owner = Uuid::new_v4();
+    for (sent, terminal, expected) in [
+        (false, "failed", "invalidated"),
+        (false, "cancelled", "invalidated"),
+        (true, "outcome_unknown", "dispatched"),
+        (true, "succeeded", "dispatched"),
+    ] {
+        let task = store
+            .create_task(owner, "w", "execution.start", json!({}), false)
+            .await
+            .unwrap();
+        let approval = crate::model::ApprovalRecord {
+            id: Uuid::new_v4(),
+            execution_id: task.id,
+            owner,
+            session_id: Uuid::new_v4(),
+            profile_id: Uuid::new_v4(),
+            request: json!({}),
+            digest: "digest".into(),
+            profile_revision: 1,
+            policy_revision: 1,
+            created_at: 1,
+            expires_at: i64::MAX,
+            state: "pending".into(),
+            decided_at: None,
+            decision_source: None,
+        };
+        store.create_approval(&approval).await.unwrap();
+        store
+            .decide_approval(approval.id, owner, "approve", "test")
+            .await
+            .unwrap();
+        store
+            .update_task(task.id, "running", json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.approval(approval.id).await.unwrap().state,
+            "dispatching"
+        );
+        if sent {
+            store.mark_sent(task.id, true).await.unwrap();
+        }
+        store
+            .update_task(task.id, terminal, json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(store.approval(approval.id).await.unwrap().state, expected);
+        assert_eq!(store.task(task.id).await.unwrap().state, terminal);
     }
     cleanup(store).await;
 }
@@ -371,6 +431,27 @@ async fn revoked_send_gate_rejects_waiting_write() {
     active.store(false, Ordering::Release);
     drop(guard);
     assert_eq!(operation.await.unwrap().unwrap_err().code, "disconnected");
+    assert!(!store.task(task.id).await.unwrap().sent);
+    cleanup(store).await;
+}
+
+#[tokio::test]
+async fn policy_change_while_waiting_for_send_gate_invalidates_first_dispatch() {
+    let store = fixture().await;
+    let task = store
+        .create_task(Uuid::new_v4(), "w", "execution.start", json!({}), false)
+        .await
+        .unwrap();
+    let settings = store.settings().await.unwrap();
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let sink = ExecutionSink::new(store.clone(), task.id)
+        .with_send_gate(gate.clone(), Arc::new(|| Ok(())))
+        .with_policy_revision(settings.revision);
+    let guard = gate.lock().await;
+    let operation = tokio::spawn(async move { sink.mark_sent(true).await });
+    store.set_settings(&settings).await.unwrap();
+    drop(guard);
+    assert_eq!(operation.await.unwrap().unwrap_err().code, "invalidated");
     assert!(!store.task(task.id).await.unwrap().sent);
     cleanup(store).await;
 }

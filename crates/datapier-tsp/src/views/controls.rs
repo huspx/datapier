@@ -111,7 +111,9 @@ fn field_control(
     hint: Option<&str>,
     browse: &[(&str, &str, &str)],
 ) -> Node<Msg> {
-    let ed = if name == "cli_text" {
+    let ed = if name == "history_filter" {
+        &app.workbench.archery_history.draft
+    } else if name == "cli_text" {
         &app.tabs[app.active].cli_query
     } else if name == "cell" {
         &app.workbench.cell_editor

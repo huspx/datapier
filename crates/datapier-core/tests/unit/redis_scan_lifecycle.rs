@@ -1,4 +1,9 @@
 use super::*;
+use crate::model::{
+    AccessMode, ApprovalPolicy, ConnectionConfig, DirectConnection, Profile, ProviderKind,
+    TlsConfig,
+};
+use redis::Client;
 
 #[tokio::test]
 #[ignore = "requires DATAPIER_TEST_REDIS_PORT isolated Redis"]
@@ -15,6 +20,8 @@ async fn idle_scan_releases_budget_and_preserves_active_scan() {
         .await
         .unwrap();
     let sink = ExecutionSink::new(store.clone(), task.id);
+    let user = format!("datapier-scan-{}", Uuid::new_v4());
+    let password = Uuid::new_v4().to_string();
     let profile = Profile {
         id: Uuid::new_v4(),
         name: "redis-scan".into(),
@@ -25,7 +32,7 @@ async fn idle_scan_releases_budget_and_preserves_active_scan() {
         connection: ConnectionConfig::Direct(DirectConnection {
             host: "127.0.0.1".into(),
             port,
-            username: String::new(),
+            username: user.clone(),
             database: None,
             redis_db: 15,
             redis_databases_override: None,
@@ -34,13 +41,25 @@ async fn idle_scan_releases_budget_and_preserves_active_scan() {
             mysql: Default::default(),
         }),
     };
-    let mut session = RedisSession::connect(profile, None).await.unwrap();
     let mut conn = Client::open(format!("redis://127.0.0.1:{port}/15"))
         .unwrap()
         .get_multiplexed_async_connection()
         .await
         .unwrap();
     let prefix = format!("datapier-idle-{}-", Uuid::new_v4());
+    let _: () = redis::cmd("ACL")
+        .arg("SETUSER")
+        .arg(&user)
+        .arg("on")
+        .arg(format!(">{password}"))
+        .arg(format!("~{prefix}*"))
+        .arg("+@all")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let mut session = RedisSession::connect(profile, Some(password))
+        .await
+        .unwrap();
     let keys: Vec<_> = (0..300).map(|i| format!("{prefix}{i}")).collect();
     let mut pipe = redis::pipe();
     for key in &keys {
@@ -86,31 +105,83 @@ async fn idle_scan_releases_budget_and_preserves_active_scan() {
         .unwrap_err();
     assert_eq!(error.code, "handle_expired");
     let previous = session.scans[&active].last_used;
-    session
+    let params = json!({"cursor":active.to_string(),"limit":1});
+    let _: () = redis::cmd("ACL")
+        .arg("SETUSER")
+        .arg(&user)
+        .arg("-pttl")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let error = session
+        .call("resource.list", params, &sink, &cancel)
+        .await
+        .unwrap_err();
+    let _: () = redis::cmd("ACL")
+        .arg("SETUSER")
+        .arg(&user)
+        .arg("+pttl")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(error.code, "database");
+    assert!(
+        error.message.contains("NoPerm") && error.message.contains("pttl"),
+        "{error}"
+    );
+    assert!(session.scans[&active].last_used >= previous);
+    let mut seen = HashSet::from([second["resources"][0]["name"].as_str().unwrap().to_owned()]);
+    let mut cursor = Some(active.to_string());
+    while let Some(token) = cursor {
+        let page: ResourcePage = serde_json::from_value(
+            session
+                .call(
+                    "resource.list",
+                    json!({"cursor":token,"limit":1000}),
+                    &sink,
+                    &cancel,
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        seen.extend(page.resources.into_iter().map(|resource| resource.name));
+        assert_eq!(page.complete, page.cursor.is_none());
+        cursor = page.cursor;
+    }
+    assert_eq!(seen, keys.iter().cloned().collect());
+    let discarded = session
         .call(
             "resource.list",
-            json!({"cursor":active.to_string(),"limit":1}),
+            json!({"pattern":format!("{prefix}*"),"limit":1}),
             &sink,
             &cancel,
         )
         .await
         .unwrap();
-    assert!(session.scans[&active].last_used >= previous);
+    let discarded = Uuid::parse_str(discarded["cursor"].as_str().unwrap()).unwrap();
     session
         .call(
             "resource.scan.discard",
-            json!({"cursor":active.to_string()}),
+            json!({"cursor":discarded}),
             &sink,
             &cancel,
         )
         .await
         .unwrap();
+    assert!(!session.scans.contains_key(&discarded));
     let _: i64 = redis::cmd("DEL")
         .arg(&keys)
         .query_async(&mut conn)
         .await
         .unwrap();
     session.close().await.unwrap();
+    let _: i64 = redis::cmd("ACL")
+        .arg("DELUSER")
+        .arg(user)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
     drop(sink);
     store.pool.close().await;
     drop(store);

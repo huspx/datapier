@@ -523,6 +523,7 @@ impl App {
                 };
                 self.tabs.push(Tab {
                     title: query.name.clone(),
+                    default_query_ordinal: None,
                     query: Editor::new(
                         load.texts
                             .remove(&query.id)
@@ -547,6 +548,7 @@ impl App {
             let tab = &mut self.tabs[index];
             tab.project_query = Some(identity);
             tab.title = query.name.clone();
+            tab.default_query_ordinal = None;
             tab.project_columns = load.layout.columns.get(&query.id).cloned();
             tab.layout.clear();
             mapping.insert(query.id, tab.id);

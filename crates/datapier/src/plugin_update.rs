@@ -811,7 +811,11 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
             dir,
         )
         .await?;
-        prepare_program(&stage.join("cache"), &plugin, &program_archive, &target).await?;
+        if cfg!(target_os = "macos") {
+            prepare_switch_program(&stage, &plugin, &program_archive, &target).await?;
+        } else {
+            prepare_program(&stage.join("cache"), &plugin, &program_archive, &target).await?;
+        }
         fs::remove_file(&program_archive)?;
         Ok(stage.clone())
     }
@@ -899,6 +903,42 @@ fn extract_plugin(stage: &Path, version: &str) -> Result<PathBuf> {
         return Err(AppError::invalid("plugin manifest 与目标版本不匹配"));
     }
     Ok(plugin)
+}
+
+fn cache_directory() -> Result<PathBuf> {
+    let directory = if let Some(path) = std::env::var_os("DATAPIER_CACHE_DIR") {
+        PathBuf::from(path)
+    } else if cfg!(windows) {
+        PathBuf::from(
+            std::env::var_os("LOCALAPPDATA")
+                .ok_or_else(|| AppError::invalid("无法确定 LOCALAPPDATA"))?,
+        )
+        .join("Datapier/cache")
+    } else if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+        PathBuf::from(path).join("datapier")
+    } else {
+        PathBuf::from(
+            std::env::var_os("HOME").ok_or_else(|| AppError::invalid("无法确定用户目录"))?,
+        )
+        .join(".cache/datapier")
+    };
+    Ok(std::path::absolute(directory)?)
+}
+
+async fn prepare_switch_program(
+    stage: &Path,
+    plugin: &Path,
+    archive: &Path,
+    target: &str,
+) -> Result<()> {
+    // Tern 重载只使用正式缓存，两份缓存都由同一份已校验归档准备。
+    let staged = stage.join("cache");
+    let installed = cache_directory()?;
+    tokio::try_join!(
+        prepare_program(&staged, plugin, archive, target),
+        prepare_program(&installed, plugin, archive, target),
+    )?;
+    Ok(())
 }
 
 async fn prepare_program(cache: &Path, plugin: &Path, archive: &Path, target: &str) -> Result<()> {

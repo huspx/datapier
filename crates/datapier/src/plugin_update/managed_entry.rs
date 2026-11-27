@@ -10,10 +10,10 @@ fn read_optional(path: &Path) -> Result<Option<Value>> {
     }
 }
 
-fn settings(state_dir: &Path) -> Result<Option<Value>> {
-    let config = state_dir
+fn settings(plugin_dir: &Path) -> Result<Option<Value>> {
+    let config = plugin_dir
         .parent()
-        .filter(|path| path.ends_with("plugin-data"))
+        .filter(|path| path.ends_with("plugins"))
         .and_then(Path::parent)
         .ok_or_else(|| AppError::invalid("无法确认 Tern 配置目录"))?;
     read_optional(&config.join("settings.json"))
@@ -30,6 +30,7 @@ fn matches_launch(entry: &Value, startup: &Value) -> bool {
 /// 返回确实由 Datapier 管理的持久设置。用户同名条目由用户维护。
 pub(super) fn readback(
     state_dir: &Path,
+    plugin_dir: &Path,
     root: &Path,
     entry: Option<&fixed_entry::Entry>,
 ) -> Result<Option<Value>> {
@@ -48,7 +49,7 @@ pub(super) fn readback(
         return Ok(None);
     }
     let unconfirmed = || AppError::new("update_mcp_readback", "无法读回本机 Tern 受管 MCP 配置");
-    let settings = settings(state_dir)?.ok_or_else(unconfirmed)?;
+    let settings = settings(plugin_dir)?.ok_or_else(unconfirmed)?;
     let entries = settings["agents"]["mcp"]
         .as_array()
         .ok_or_else(unconfirmed)?;

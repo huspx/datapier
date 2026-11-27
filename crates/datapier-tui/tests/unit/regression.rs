@@ -41,6 +41,23 @@ fn direct_mysql_options_roundtrip_and_validate() {
 }
 
 #[test]
+fn visible_databases_roundtrip_arbitrary_names() {
+    let mut profile = forms::direct_value(&forms::direct(None, &json!("dangerous"))).unwrap();
+    for names in [
+        json!(null),
+        json!([]),
+        json!(["*", "a,b", " leading ", "quote\"", "数据库"]),
+    ] {
+        profile["connection"]["visible_databases"] = names.clone();
+        let form = forms::direct(Some(&profile), &json!("dangerous"));
+        assert_eq!(
+            forms::direct_value(&form).unwrap()["connection"]["visible_databases"],
+            names
+        );
+    }
+}
+
+#[test]
 fn credential_updates_follow_current_form_and_require_matching_login() {
     let mut form = forms::server(None);
     set(&mut form, "password", "first");

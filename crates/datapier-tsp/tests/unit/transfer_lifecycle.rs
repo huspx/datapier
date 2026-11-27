@@ -192,9 +192,62 @@ fn explicit_empty_redis_key_does_not_become_pattern_scan() {
     app.transfer_set("source-profile", Uuid::new_v4().to_string());
     app.transfer_set("redis-selection", "keys");
     app.transfer_set("redis-keys", "");
+    app.workbench.transfer.redis_keys = Some([String::new()].into_iter().collect());
     let spec = app.transfer_spec().unwrap();
     assert_eq!(spec["redis"]["keys_b64"], json!([""]));
     assert!(spec["redis"]["pattern"].is_null());
+}
+
+#[test]
+fn redis_selection_round_trips_and_legacy_empty_is_unselected() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = restore_app(&backend);
+    app.transfer_set("mode", "copy");
+    app.transfer_set("provider", "redis");
+    app.transfer_set("source-profile", Uuid::new_v4().to_string());
+    app.transfer_set("redis-selection", "keys");
+    app.transfer_action("transfer-redis-key:", &backend);
+    app.transfer_action("transfer-redis-key:YQ==", &backend);
+    let snapshot = serde_json::to_value(app.workspace_snapshot()).unwrap();
+    let mut restored = App::new("transfer-lifecycle".into());
+    restored
+        .restore_workspace_state(1, snapshot.clone())
+        .unwrap();
+    assert_eq!(
+        restored.transfer_spec().unwrap()["redis"]["keys_b64"],
+        json!(["", "YQ=="])
+    );
+    restored.transfer_action("transfer-redis-key:", &backend);
+    restored.transfer_action("transfer-redis-key:YQ==", &backend);
+    assert_eq!(restored.transfer_spec().unwrap_err().0, "redis-keys");
+    let empty = serde_json::to_value(restored.workspace_snapshot()).unwrap();
+    let mut reopened = App::new("transfer-lifecycle".into());
+    reopened.restore_workspace_state(1, empty).unwrap();
+    assert_eq!(reopened.transfer_spec().unwrap_err().0, "redis-keys");
+
+    let mut legacy = snapshot;
+    let active = legacy["active"].as_u64().unwrap() as usize;
+    legacy["tabs"][active]["workbench_draft"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transfer_redis_keys");
+    let mut reopened = App::new("transfer-lifecycle".into());
+    reopened.restore_workspace_state(1, legacy).unwrap();
+    assert_eq!(reopened.transfer_spec().unwrap_err().0, "redis-keys");
+
+    let mut legacy = serde_json::to_value(app.workspace_snapshot()).unwrap();
+    let active = legacy["active"].as_u64().unwrap() as usize;
+    let draft = &mut legacy["tabs"][active]["workbench_draft"];
+    draft.as_object_mut().unwrap().remove("transfer_redis_keys");
+    draft["fields"][app.transfer_key("redis-keys")] = json!("YQ==");
+    let mut reopened = App::new("transfer-lifecycle".into());
+    reopened.restore_workspace_state(1, legacy).unwrap();
+    assert_eq!(
+        reopened.transfer_spec().unwrap()["redis"]["keys_b64"],
+        json!(["YQ=="])
+    );
+    reopened.transfer_action("transfer-redis-key:YQ==", &backend);
+    assert_eq!(reopened.transfer_spec().unwrap_err().0, "redis-keys");
 }
 
 #[test]

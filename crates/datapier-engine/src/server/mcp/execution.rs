@@ -416,14 +416,16 @@ impl Engine {
             .await?;
         self.mcp_emit_approval(&decided);
         if decided.state == "dispatching" {
-            let method = approval.request["method"]
-                .as_str()
-                .ok_or_else(|| AppError::invalid("冻结请求缺少方法"))?;
-            let request = approval.request["params"].clone();
-            if let Err(error) = self
-                .start_reserved(approval.owner, method, request, true, approval.execution_id)
-                .await
-            {
+            let result = async {
+                let method = approval.request["method"]
+                    .as_str()
+                    .ok_or_else(|| AppError::invalid("冻结请求缺少方法"))?;
+                let request = approval.request["params"].clone();
+                self.start_reserved(approval.owner, method, request, true, approval.execution_id)
+                    .await
+            }
+            .await;
+            if let Err(error) = result {
                 self.store
                     .update_task(
                         approval.execution_id,
@@ -553,20 +555,22 @@ impl Engine {
             let approval = self.store.approval(approval_id).await?;
             let gate = self.mcp_gate(approval.session_id);
             let _guard = gate.lock().await;
-            let cancelled = self
-                .store
-                .decide_approval(approval_id, owner, "cancel", "mcp")
-                .await?;
-            if matches!(cancelled.state.as_str(), "cancelled" | "expired") {
-                self.store
-                    .update_task(
-                        id,
-                        &cancelled.state,
-                        json!({"approval_id":approval_id}),
-                        None,
-                    )
+            let approval = self.store.approval(approval_id).await?;
+            if approval.state == "pending" {
+                let cancelled = self
+                    .store
+                    .decide_approval(approval_id, owner, "cancel", "mcp")
                     .await?;
-                self.mcp_emit_approval(&cancelled);
+                if matches!(cancelled.state.as_str(), "cancelled" | "expired") {
+                    self.mcp_emit_approval(&cancelled);
+                }
+            } else if matches!(approval.state.as_str(), "dispatching" | "dispatched") {
+                // 批准已经取得派发权；任务终态由执行路径独占。
+                drop(_guard);
+                if !task_terminal(&self.task(id).await?.state) {
+                    self.dispatch_internal(owner, "execution.cancel", json!({"task_id":id}))
+                        .await?;
+                }
             }
         } else if !task_terminal(&task.state) {
             self.dispatch_internal(owner, "execution.cancel", json!({"task_id":id}))

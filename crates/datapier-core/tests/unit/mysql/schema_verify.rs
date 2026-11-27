@@ -103,3 +103,21 @@ fn readback_normalizes_mysql_type_aliases_without_erasing_differences() {
     assert_ne!(normalized_type("enum('A')"), normalized_type("enum('a')"));
     assert_ne!(normalized_type("int unsigned"), normalized_type("int"));
 }
+
+#[test]
+fn trigger_order_checks_relative_position_and_default_append() {
+    let names = vec!["first".into(), "middle".into(), "last".into()];
+    let follows = TriggerOrder {
+        follows: true,
+        trigger: "first".into(),
+    };
+    let precedes = TriggerOrder {
+        follows: false,
+        trigger: "last".into(),
+    };
+    assert!(trigger_order_matches(&names, "last", Some(&follows)));
+    assert!(trigger_order_matches(&names, "first", Some(&precedes)));
+    assert!(!trigger_order_matches(&names, "first", Some(&follows)));
+    assert!(trigger_order_matches(&names, "last", None));
+    assert!(!trigger_order_matches(&names, "middle", None));
+}

@@ -189,10 +189,26 @@ impl App {
         } else {
             None
         };
+        let epoch = self.query_edit_epoch;
+        let old_results = if matches!(&message, Msg::Edit(name, ..) | Msg::Undo(name) if name == "query")
+            && !self.browse_result
+        {
+            let mut ids = self.results.clone();
+            if let Some(pending) = &self.tabs[self.active].runtime.pending_result {
+                ids.extend(pending.results.iter().cloned());
+            }
+            ids
+        } else {
+            Vec::new()
+        };
         if !editing || self.draft_scope_ready() {
             self.dispatch_editor_message(message);
         } else {
             self.guard_draft_scope(backend, workbench::DraftScopeAction::Edit(message));
+        }
+        if self.query_edit_epoch != epoch && !self.browse_result {
+            self.release_stale_query_results(backend, old_results);
+            self.tabs[self.active].runtime.pending_result = None;
         }
         if self.workbench.scan_dirty
             && self.cursor.is_none()
@@ -205,6 +221,11 @@ impl App {
     pub(super) fn dispatch_editor_message(&mut self, message: Msg) {
         self.track_modal_draft();
         if self.advanced_schema_edit(&message) || self.advanced_value_edit(&message) {
+            return;
+        }
+        if matches!(&message, Msg::Edit(name, ..) | Msg::Undo(name) if name == "row_search")
+            && !self.finish_inline(true)
+        {
             return;
         }
         if self.workbench.overlay.as_deref() == Some("profile") && self.connection_form_busy() {
@@ -243,6 +264,9 @@ impl App {
             return;
         }
         let name = self.focus.clone();
+        if name == "row_search" && !self.finish_inline(true) {
+            return;
+        }
         let edit = match key.name.as_str() {
             "backspace" => Some(EditKey::Backspace),
             "delete" => Some(EditKey::Delete),

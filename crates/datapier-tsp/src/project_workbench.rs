@@ -188,7 +188,13 @@ impl ProjectWorkbench {
         if let Some(preview) = self.preview.take() {
             self.obsolete_preview = Some(preview);
         }
-        self.pending = None;
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|(_, _, method)| method == "project.create")
+        {
+            self.pending = None;
+        }
         self.local_navigation = None;
         // 已失效的异步回复不得覆盖新输入；上传句柄由 Engine 过期清理。
         self.upload = None;
@@ -436,7 +442,9 @@ impl App {
         let Some((expected, epoch, method)) = self.workbench.project.pending.take() else {
             return true;
         };
-        if token != expected || epoch != self.workbench.project.epoch {
+        if token != expected
+            || (epoch != self.workbench.project.epoch && method != "project.create")
+        {
             self.workbench.project.pending = Some((expected, epoch, method));
             return true;
         }
@@ -649,7 +657,9 @@ impl App {
                     self.workbench.project.preview = None;
                     self.workbench.project.obsolete_preview = None;
                     self.workbench.project.external = None;
-                    self.project_set("path", value["root"].as_str().unwrap_or(""));
+                    if method != "project.create" || epoch == self.workbench.project.epoch {
+                        self.project_set("path", value["root"].as_str().unwrap_or(""));
+                    }
                     if restored {
                         self.workbench.project.needs_baseline_check = true;
                         self.project_send(
@@ -1655,6 +1665,9 @@ impl App {
             return true;
         }
         if name == "project-new" {
+            if !self.finish_inline(true) {
+                return true;
+            }
             self.workbench.project.document_root = None;
             self.workbench.project.document_files.clear();
             self.workbench.project.local_project = None;
@@ -1671,6 +1684,7 @@ impl App {
             self.workbench.project.artifact_next = None;
             self.create_query_tab();
             self.tabs[self.active].title = i18n::tr("项目").into_owned();
+            self.tabs[self.active].default_query_ordinal = None;
             self.view = "project-workbench".into();
             for (key, value) in [
                 ("path", ""),

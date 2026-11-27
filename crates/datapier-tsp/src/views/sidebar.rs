@@ -281,11 +281,12 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                 .class("resource-tree")
                 .attr("role", "tree")
                 .attr("aria-label", crate::i18n::tr("数据库资源").into_owned());
-            if let Some(tree) = app
-                .profile
-                .as_ref()
-                .and_then(|p| app.navigation.databases.get(&p.id))
-            {
+            if let Some((profile, tree)) = app.profile.as_ref().and_then(|profile| {
+                app.navigation
+                    .databases
+                    .get(&profile.id)
+                    .map(|tree| (profile, tree))
+            }) {
                 if tree.loading {
                     panel = panel.child(
                         html::span(crate::i18n::tr("加载中…").into_owned()).class("empty-note"),
@@ -358,6 +359,22 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                         .as_ref()
                         .is_some_and(|profile| profile.is_archery())
                     {
+                        database_menu = database_menu
+                            .menu(ui::MenuEntry::Separator)
+                            .menu(
+                                ui::MenuItem::new(
+                                    "create-table",
+                                    crate::i18n::tr("新建表").into_owned(),
+                                )
+                                .disabled(!can_drop),
+                            )
+                            .menu(
+                                ui::MenuItem::new(
+                                    "create-view",
+                                    crate::i18n::tr("新建视图").into_owned(),
+                                )
+                                .disabled(!can_drop),
+                            );
                         for (action, label, needs_write) in [
                             ("transfer-import", "导入数据", true),
                             ("transfer-export", "导出数据", false),
@@ -411,6 +428,20 @@ pub(super) fn resource_panel(app: &App) -> Node<Msg> {
                                 Msg::Action(format!("navigation-db-refresh:{}", database.name)),
                             )
                             .on_action("database-copy-name", Msg::CopyText(database.name.clone()))
+                            .on_action(
+                                "create-table",
+                                Msg::Action(format!(
+                                    "navigation-schema-create:table:{}:{}",
+                                    profile.id, database.name
+                                )),
+                            )
+                            .on_action(
+                                "create-view",
+                                Msg::Action(format!(
+                                    "navigation-schema-create:view:{}:{}",
+                                    profile.id, database.name
+                                )),
+                            )
                             .on_action(
                                 "transfer-import",
                                 Msg::Action(format!(

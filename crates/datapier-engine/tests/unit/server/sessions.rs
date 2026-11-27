@@ -50,6 +50,59 @@ async fn duplex_sessions_forward_only_owner_events_and_close() {
 }
 
 #[tokio::test]
+async fn request_admission_is_bounded_without_blocking_control_frames() {
+    let (engine, root) = engine().await;
+    let settings = engine.store.settings().await.unwrap();
+    let owner = Uuid::new_v4();
+    let (mut peer, stream) = tokio::io::duplex(4096);
+    let handler = tokio::spawn(client_with_lease(
+        engine.clone(),
+        owner,
+        Box::new(stream),
+        Duration::from_secs(5),
+        1,
+    ));
+    protocol::write(&mut peer, &json!({"id":"open","method":"session.open","params":{"protocol_version":crate::protocol::VERSION,"client_kind":"tsp","workspace":"default","allow_connections":[]}})).await.unwrap();
+    protocol::read(&mut peer).await.unwrap();
+    let gate = engine.send_gate.lock().await;
+    protocol::write(
+        &mut peer,
+        &json!({"id":"blocked","method":"settings.set","params":{"settings":settings}}),
+    )
+    .await
+    .unwrap();
+    protocol::write(&mut peer, &json!({"id":"excess","method":"settings.get"}))
+        .await
+        .unwrap();
+    let rejected = protocol::read(&mut peer).await.unwrap();
+    assert_eq!(rejected["id"], "excess");
+    assert_eq!(rejected["error"]["code"], "busy");
+    protocol::write(&mut peer, &json!({"id":"connection-close","method":"connection.close","params":{"session_id":Uuid::new_v4()}})).await.unwrap();
+    let connection_close = protocol::read(&mut peer).await.unwrap();
+    assert_eq!(connection_close["id"], "connection-close");
+    assert_eq!(connection_close["error"]["code"], "not_found");
+    protocol::write(
+        &mut peer,
+        &json!({"id":"heartbeat","method":"session.heartbeat"}),
+    )
+    .await
+    .unwrap();
+    let heartbeat = protocol::read(&mut peer).await.unwrap();
+    assert_eq!(heartbeat["id"], "heartbeat");
+    assert_eq!(heartbeat["result"]["ok"], true);
+    protocol::write(&mut peer, &json!({"id":"close","method":"session.close"}))
+        .await
+        .unwrap();
+    let closed = protocol::read(&mut peer).await.unwrap();
+    assert_eq!(closed["id"], "close");
+    assert_eq!(closed["result"]["closed"], true);
+    drop(gate);
+    handler.await.unwrap();
+    drop(peer);
+    crate::server::tests::cleanup(engine, root).await;
+}
+
+#[tokio::test]
 async fn saturated_duplex_releases_lease_and_preserves_dispatch_gate() {
     let (engine, root) = engine().await;
     let other = Uuid::new_v4();

@@ -717,6 +717,9 @@ impl App {
         let active = self.active;
         for index in std::iter::once(active).chain((0..self.tabs.len()).filter(|&i| i != active)) {
             self.switch_tab(index);
+            if !self.finish_inline(true) {
+                return false;
+            }
             if self.workbench.project.is_pending() || self.workbench.transfer.busy() {
                 self.status = i18n::UiMessage::key("请等待或取消该 tab 的任务后再关闭");
                 return false;
@@ -740,9 +743,7 @@ impl App {
             self.status = i18n::UiMessage::raw(error.to_string());
             return false;
         }
-        if !self.finish_inline(true) {
-            return false;
-        }
+        // 每个标签的原位输入已在退出预检中暂存。
         if let Err(error) = self.workspace_draft_check() {
             self.status = i18n::UiMessage::raw(error.to_string());
             return false;
@@ -1032,6 +1033,7 @@ impl App {
                     };
                     Tab {
                         title: tab.title.clone(),
+                        default_query_ordinal: tab.default_query_ordinal,
                         query: saved_editor(&tab.query),
                         cli_query: saved_editor(&tab.cli_query),
                         profile_id: tab.profile_id,
@@ -1091,10 +1093,12 @@ impl App {
                                 .collect();
                             json!({"view":view,"fields":fields,"project":saved_project,
                                 "project_unsaved":project.unsaved,"transfer_files":project.transfer_files,
-                                "project_section":project.section,"transfer_files_count":workbench.transfer.files,
+                                "project_section":project.section,"project_git_query_edit":project.git_query_edit,
+                                "transfer_files_count":workbench.transfer.files,
                                 "transfer_objects_count":workbench.transfer.objects,
                                 "transfer_stage":workbench.transfer.stage,
                                 "transfer_object_filters":workbench.transfer.object_filters,
+                                "transfer_redis_keys":workbench.transfer.redis_keys,
                                 "transfer_project_mode":workbench.transfer.project_mode})
                         },
                         pending_live: tab.pending_live,

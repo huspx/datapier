@@ -11,7 +11,11 @@ pub(super) fn editors(app: &App, group: &[Uuid]) -> Node<Msg> {
         let undo_name = name.clone();
         let edit_name = name;
         let editor = ui::editor()
-            .aria(format!("{} · {}", crate::i18n::tr("SQL 查询"), tab.title))
+            .aria(format!(
+                "{} · {}",
+                crate::i18n::tr("SQL 查询"),
+                tab.display_title()
+            ))
             .prop("class", "query-code")
             .key(app.sql_editor_key(index, true))
             .text(tab.query.text.clone())
@@ -39,7 +43,7 @@ pub(super) fn editors(app: &App, group: &[Uuid]) -> Node<Msg> {
             })
             .key(format!("project-pane-{}", tab.id))
             .child(
-                html::button(tab.title.clone())
+                html::button(tab.display_title())
                     .class("project-layout-title")
                     .on_click(Msg::Tab(index)),
             )

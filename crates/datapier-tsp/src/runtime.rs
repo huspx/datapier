@@ -607,8 +607,16 @@ pub fn run(
                         }
                     }
                     Msg::CellOpen(row, column) => {
-                        if let Some(grid) = &mut app.grid {
-                            let _ = grid.select(Cell { row, column }, false);
+                        if !app.finish_inline(true) {
+                            changed = true;
+                            continue;
+                        }
+                        if let Some(grid) = &mut app.grid
+                            && let Err(error) = grid.select(Cell { row, column }, false)
+                        {
+                            app.status = workbench::grid_error(error);
+                            changed = true;
+                            continue;
                         }
                         if app.is_redis() {
                             app.workbench_redis_edit(&backend);
@@ -787,6 +795,16 @@ pub fn run(
                                 key.name.as_str(),
                                 "backspace" | "delete" | "paste" | "enter"
                             ));
+                    let epoch = app.query_edit_epoch;
+                    let old_results = if app.focus == "query" && !app.browse_result {
+                        let mut ids = app.results.clone();
+                        if let Some(pending) = &app.tabs[app.active].runtime.pending_result {
+                            ids.extend(pending.results.iter().cloned());
+                        }
+                        ids
+                    } else {
+                        Vec::new()
+                    };
                     if !editing || app.draft_scope_ready() {
                         app.input_key(&key);
                     } else {
@@ -794,6 +812,10 @@ pub fn run(
                             &backend,
                             workbench::DraftScopeAction::Key(app.focus.clone(), key.clone()),
                         );
+                    }
+                    if app.query_edit_epoch != epoch && !app.browse_result {
+                        app.release_stale_query_results(&backend, old_results);
+                        app.tabs[app.active].runtime.pending_result = None;
                     }
                     if app.workbench.scan_dirty
                         && app.cursor.is_none()

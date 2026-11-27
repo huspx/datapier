@@ -39,6 +39,115 @@ fn detail_and_frozen_source_follow_their_tab() {
 }
 
 #[test]
+fn edited_query_rejects_and_releases_late_results() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("stale-query".into());
+    let task = Uuid::new_v4().to_string();
+    let result = Uuid::new_v4().to_string();
+    app.task = Some(task.clone());
+    app.workbench.query_ui.result_epoch = Some(app.query_edit_epoch);
+    app.changed_field("query");
+    app.response(
+        Response {
+            tag: "execution.get".into(),
+            result: Ok(
+                json!({"id":task,"state":"running","method":"execution.start","results":[result]}),
+            ),
+        },
+        &backend,
+    );
+    let release = requests.try_recv().unwrap();
+    assert_eq!(release.method, "result.release");
+    assert_eq!(release.params["result_id"], result);
+    assert!(app.grid.is_none());
+    assert!(app.results.is_empty());
+    assert!(app.task.is_some());
+}
+
+#[test]
+fn cancelled_query_terminal_survives_passive_metadata_failure() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("cancel-query".into());
+    let task = Uuid::new_v4().to_string();
+    app.task = Some(task.clone());
+    app.workbench.mysql_cancel_requested = true;
+    let message = |state| Response {
+        tag: "execution.get".into(),
+        result: Ok(json!({"id":task,"state":state,"method":"execution.start","results":[]})),
+    };
+    app.response(message("cancelling"), &backend);
+    assert_eq!(
+        app.status.render(),
+        i18n::tr("已请求取消，正在等待数据库确认；写入可能仍在执行")
+    );
+    app.response(message("outcome_unknown"), &backend);
+    let terminal = app.status.render().into_owned();
+    assert_eq!(
+        terminal,
+        i18n::format_message(
+            "任务 {state}",
+            &[("state", i18n::tr("结果待确认").as_ref())]
+        )
+    );
+    app.response(
+        Response {
+            tag: "query.info".into(),
+            result: Err(AppError::new(
+                "connection_closed",
+                "fixture connection closed",
+            )),
+        },
+        &backend,
+    );
+    assert_eq!(app.status.render(), terminal);
+    assert!(app.task.is_none());
+}
+
+#[test]
+fn background_archery_redis_connection_preserves_foreground_focus() {
+    let (backend, _, _) = Backend::scripted();
+    let mut app = App::new("background-focus".into());
+    let profile: Profile = serde_json::from_value(json!({
+        "id":Uuid::new_v4(), "name":"redis", "provider":"redis", "access_mode":"read_only",
+        "connection":{"kind":"archery","server_id":Uuid::new_v4(),"instance_id":42,"instance_name":"instance","databases":["0"],"default_database":"0"}
+    })).unwrap();
+    second_tab(&mut app);
+    app.switch_tab(1);
+    app.focus = "query".into();
+    app.routed_response(
+        Response {
+            tag: format!("{}:0:connection.open", app.tabs[0].id),
+            result: Ok(json!({"session_id":Uuid::new_v4(),"profile":profile})),
+        },
+        &backend,
+    );
+    assert_eq!(app.focus, "query");
+}
+
+#[test]
+fn history_drafts_follow_tabs_and_interrupted_page_is_requested_again() {
+    let (backend, mut requests, _) = Backend::scripted();
+    let mut app = App::new("history-tabs".into());
+    app.open_history(&backend);
+    let first = requests.try_recv().unwrap();
+    assert_eq!(first.method, "history.list");
+    app.field_set("history_filter", "first draft");
+    app.invalidate_history(&backend);
+    second_tab(&mut app);
+    app.switch_tab(1);
+    app.open_history(&backend);
+    assert_eq!(requests.try_recv().unwrap().method, "history.list");
+    app.field_set("history_filter", "second draft");
+    app.invalidate_history(&backend);
+    app.switch_tab(0);
+    app.open_history(&backend);
+    assert_eq!(app.field("history_filter"), "first draft");
+    assert_eq!(requests.try_recv().unwrap().method, "history.list");
+    app.switch_tab(1);
+    assert_eq!(app.field("history_filter"), "second draft");
+}
+
+#[test]
 fn opening_another_redis_key_keeps_browser_filters_and_tree_mode() {
     let (backend, mut requests, _) = Backend::scripted();
     let mut app = App::new("redis-browser".into());

@@ -27,9 +27,18 @@ impl Store {
     pub async fn local_project_get(&self, id: Uuid) -> Result<LocalProject> {
         let mut conn = self.pool.acquire().await?;
         let mut tx = conn.begin().await?;
+        let project = Self::read_local_project(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(project)
+    }
+
+    async fn read_local_project(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: Uuid,
+    ) -> Result<LocalProject> {
         let row = sqlx::query("SELECT * FROM local_projects WHERE id=?")
             .bind(id.to_string())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .ok_or_else(|| AppError::new("not_found", "本机项目不存在"))?;
         let default_id: Option<String> = row.try_get("default_environment_id")?;
@@ -46,7 +55,7 @@ impl Store {
             "SELECT path,identity FROM local_project_roots WHERE project_id=? ORDER BY path",
         )
         .bind(id.to_string())
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
         {
             project.roots.push(LocalProjectRoot {
@@ -58,7 +67,7 @@ impl Store {
             "SELECT * FROM local_project_environments WHERE project_id=? ORDER BY name,id",
         )
         .bind(id.to_string())
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
         {
             let env_id = parse_id(row.try_get("id")?)?;
@@ -69,18 +78,17 @@ impl Store {
                 description: row.try_get("description")?,
                 resources: Vec::new(),
             };
-            for binding in sqlx::query("SELECT profile_id,profile_identity,database_json,description FROM project_bindings WHERE project_id=? AND binding_group=? ORDER BY profile_id,database_json").bind(id.to_string()).bind(env_id.to_string()).fetch_all(&mut *tx).await? {
+            for binding in sqlx::query("SELECT profile_id,profile_identity,database_json,description FROM project_bindings WHERE project_id=? AND binding_group=? ORDER BY profile_id,database_json").bind(id.to_string()).bind(env_id.to_string()).fetch_all(&mut **tx).await? {
                 let overrides: BindingOverrides = serde_json::from_str(binding.try_get("database_json")?)?;
                 let profile_id = parse_id(binding.try_get("profile_id")?)?;
                 let baseline: Option<String> = binding.try_get("profile_identity")?;
-                let payload: Option<String> = sqlx::query_scalar("SELECT payload FROM profiles WHERE id=?").bind(profile_id.to_string()).fetch_optional(&mut *tx).await?;
+                let payload: Option<String> = sqlx::query_scalar("SELECT payload FROM profiles WHERE id=?").bind(profile_id.to_string()).fetch_optional(&mut **tx).await?;
                 let current = payload.map(|value| serde_json::from_str::<Profile>(&value)).transpose()?.map(|p| profile_identity(&p)).transpose()?;
                 let status = if baseline.is_some() && baseline == current { "valid" } else { "invalid" };
                 env.resources.push(LocalResource { profile_id, database: overrides.database, redis_db: overrides.redis_db, description: binding.try_get("description")?, binding_status: status.into() });
             }
             project.environments.push(env);
         }
-        tx.commit().await?;
         Ok(project)
     }
     pub async fn local_project_list(&self) -> Result<Vec<LocalProject>> {
@@ -254,8 +262,9 @@ impl Store {
             }
             sqlx::query("INSERT INTO local_project_environments(id,project_id,name,environment_type,description) VALUES(?,?,?,?,?)").bind(env.id.to_string()).bind(project.id.to_string()).bind(&env.name).bind(&env.environment_type).bind(&env.description).execute(&mut *tx).await?;
         }
+        let saved = Self::read_local_project(&mut tx, project.id).await?;
         tx.commit().await?;
-        self.local_project_get(project.id).await
+        Ok(saved)
     }
     pub async fn local_project_delete(&self, id: Uuid, expected: u64) -> Result<()> {
         let mut conn = self.pool.acquire().await?;

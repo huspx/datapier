@@ -1,7 +1,7 @@
 -- 只管理自己登记的启动字段；用户对同名项的修改始终优先。
 local M = {}
 
-local function scope(cx)
+function M.local_scope(cx)
   local ok, host = pcall(function()
     return cx.hosts:current()
   end)
@@ -59,7 +59,7 @@ local function newer(a, b)
 end
 
 function M.register(cx, binary, data_dir)
-  local host, reason = scope(cx)
+  local host, reason = M.local_scope(cx)
   if not host then
     return false, reason
   end
@@ -107,7 +107,12 @@ function M.register(cx, binary, data_dir)
     desired.args = { "mcp", "--plugin-cache-engine" }
     local next_startup = startup(desired)
     if same(current, next_startup) then
-      if not same(record.startup, current) or record.pending ~= nil or record.version ~= current_version then
+      local old = record.version
+      local same_version = type(old) == "table"
+        and old[1] == current_version[1]
+        and old[2] == current_version[2]
+        and old[3] == current_version[3]
+      if not same(record.startup, current) or record.pending ~= nil or not same_version then
         tern.kv.set("mcp_managed", { host = host, data_dir = data_dir, startup = current, version = current_version })
       end
       return found
