@@ -2,9 +2,9 @@
 
 面向开发者与 AI agent 的多数据库工作台。统一连接、资源浏览、查询和数据编辑体验，保留不同数据库的数据模型与操作语义。
 
-当前本地候选版本 **0.5.2** 支持 Tern 原生 SQL 编辑，修复 Files 的 MCP 项目列表，并提供外部 Agent 可复用的固定 MCP 命令。正式发布状态与下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
+当前本地版本 **0.5.2** 支持 Tern 原生 SQL 编辑、Files 的 MCP 项目列表和外部 Agent 固定命令。工作区包含 macOS 桌面启动 Tern 时的 MCP 自动登记和固定命令安装修复。正式发布状态与下载资源以 [GitHub Releases](https://github.com/huspx/datapier/releases) 为准。
 
-> 0.5.2 候选的验收标准和运行范围见 [0.5.2 技术方案](docs/technical-design-0.5.2.md#5-实施顺序与验收)。历史 Archery 运行范围见 [0.1.1 运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
+> 0.5.2 的验收标准和运行范围见 [0.5.2 技术方案](docs/technical-design-0.5.2.md#5-实施顺序与验收)。历史 Archery 运行范围见 [0.1.1 运行记录](docs/technical-design-0.1.1.md#12-实现与验证记录)。
 
 ## 当前开发功能
 
@@ -187,7 +187,7 @@ flowchart LR
 
 本地开发与发布脚本使用 Python 3.15 标准库，格式化沿用 dprint 的 Ruff Wasm 插件；安装和运行 Datapier 无需 Python。构建、Tern 启动及 plugin 开发方式见[贡献指南](CONTRIBUTING.md#开发环境)，常规检查与真实数据库回归见[测试与验证](CONTRIBUTING.md#测试与验证)。PR 仅在 runner 内打包验证，合并到 main 后直接上传版本草稿 Release，全程不保留 Actions artifact；草稿须经维护者验收和发布，具体见[发布指南](RELEASING.md)。
 
-当前候选的验收标准及运行范围见 [0.5.2 技术方案](docs/technical-design-0.5.2.md#5-实施顺序与验收)。发布门禁见 [发布指南](RELEASING.md#发布前检查)。
+验收标准及运行范围见 [0.5.2 技术方案](docs/technical-design-0.5.2.md#5-实施顺序与验收)。发布门禁见 [发布指南](RELEASING.md#发布前检查)。
 
 ## 许可证
 
