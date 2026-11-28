@@ -12,6 +12,10 @@ on:
         default: ""
         type: string
 # 权限由调用方传入：PR 为只读，仅 main 的草稿上传任务具有 contents: write。
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
 defaults:
   run:
     shell: bash

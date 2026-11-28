@@ -292,8 +292,11 @@ class ReleaseScriptsTest(unittest.TestCase):
                 member.external_attr = 0o120777 << 16
               archive.writestr(member, b"binary")
               if case == "duplicate":
-                archive.writestr("datapier.exe", b"binary")
-              if case not in ("duplicate", "missing-launcher"):
+                with self.assertWarnsRegex(
+                  UserWarning, r"Duplicate name: 'datapier\.exe'"
+                ):
+                  archive.writestr("datapier.exe", b"binary")
+              if case != "missing-launcher":
                 archive.writestr("datapier-launcher.exe", b"launcher")
           else:
             with tarfile.open(path, "w:gz") as archive:
@@ -308,7 +311,7 @@ class ReleaseScriptsTest(unittest.TestCase):
               if case == "duplicate":
                 member = tarfile.TarInfo("datapier")
                 archive.addfile(member, io.BytesIO())
-              if case not in ("duplicate", "missing-launcher"):
+              if case != "missing-launcher":
                 member = tarfile.TarInfo("datapier-launcher")
                 member.size = 8
                 archive.addfile(member, io.BytesIO(b"launcher"))

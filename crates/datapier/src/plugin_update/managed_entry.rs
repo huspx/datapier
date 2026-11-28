@@ -83,13 +83,13 @@ pub(super) fn stage_path(state_dir: &Path) -> PathBuf {
 }
 
 pub(super) fn create_stage(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        fs::DirBuilder::new().mode(0o700).create(path)?;
     }
-    builder.create(path)?;
+    #[cfg(not(unix))]
+    fs::create_dir(path)?;
     Ok(())
 }
 
