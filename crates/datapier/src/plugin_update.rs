@@ -826,19 +826,55 @@ async fn download(state: &mut State, dir: &Path) -> Result<PathBuf> {
     result
 }
 
+#[cfg(target_os = "macos")]
+fn tern_parent_executable() -> Option<PathBuf> {
+    use std::{
+        ffi::{CStr, OsStr},
+        os::unix::ffi::OsStrExt,
+    };
+
+    // Tern 从桌面启动时，窗口子进程的 PATH 可能没有安装 Tern CLI 的目录。
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: 缓冲区可写，传入的长度与其容量一致。
+    let size = unsafe {
+        libc::proc_pidpath(
+            libc::getppid(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    if size <= 0 {
+        return None;
+    }
+    let bytes = CStr::from_bytes_until_nul(&buffer).ok()?.to_bytes();
+    let path = Path::new(OsStr::from_bytes(bytes));
+    (path.is_absolute() && path.file_name()? == "tern").then(|| path.to_owned())
+}
+
 async fn ensure_installed_plugin(plugin_dir: &Path) -> Result<()> {
     if fs::symlink_metadata(plugin_dir)?.file_type().is_symlink() {
         return Err(AppError::invalid("开发安装不发布固定入口"));
     }
+    #[cfg(target_os = "macos")]
+    let parent = tern_parent_executable();
+    #[cfg(not(target_os = "macos"))]
+    let parent: Option<PathBuf> = None;
+    let tern = parent.as_deref().unwrap_or_else(|| Path::new("tern"));
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new("tern")
+        tokio::process::Command::new(tern)
             .args(["plugin", "dir", "--json"])
             .kill_on_drop(true)
             .output(),
     )
     .await
-    .map_err(|_| AppError::invalid("未能确认 Tern 插件目录"))??;
+    .map_err(|_| AppError::invalid("未能确认 Tern 插件目录"))?
+    .map_err(|error| {
+        AppError::new(
+            "tern_cli_unavailable",
+            format!("无法执行 Tern CLI（{}）：{error}", tern.display()),
+        )
+    })?;
     if !output.status.success() {
         return Err(AppError::invalid("无法读取 Tern 插件目录"));
     }
